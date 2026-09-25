@@ -68,8 +68,9 @@ bin/autotrade simulate --session 2026-09-25 --underlying NIFTY --strike 23100 --
     --stop-pct 15 --target-pct 30 --exit-by 15:20                   # base and stressed fills, after costs
 bin/autotrade instruments --file .local/instruments/NSE-2026-09-25.json.gz --date 2026-09-25
 bin/autotrade features --session 2026-09-25 --save                 # also into feat.snapshot
-bin/autotrade lifecycle --split TUNING --save                      # strategy replay, report in .local/reports
-bin/autotrade lifecycle --split HELD_OUT --held-out --save         # once per strategy family
+bin/autotrade lifecycle --save                                     # sessions from the strategy's evaluation window
+bin/autotrade lifecycle --session 2026-09-28 --save                # one session
+# sessions marked HELD_OUT additionally need --held-out (consumed once per strategy family)
 ```
 
 Register a hypothesis in `docs/EXPERIMENT-LEDGER.md` before running it.
@@ -85,7 +86,7 @@ bin/autotrade config-hash config/*/*.yaml
 
 | File | Holds |
 | --- | --- |
-| `config/strategy/early-confirm-runner.v2.yaml` | ChatGPT-suggested thresholds plus lifecycle/exit placeholders, `UNCALIBRATED` (v1: thresholds only) |
+| `config/strategy/early-confirm-runner.v3.yaml` | ChatGPT thresholds (untuned) plus lifecycle/exit placeholders; evaluated from 21 Sep 2026 onward (v2: same thresholds; v1: thresholds only) |
 | `config/features/features.v2.yaml` | Feature definitions (v2: SENSEX RVOL slot, straddle expected move) |
 | `config/exchange/nse-bse-sessions.v2.yaml` | Session and CAS timings, 2026 holidays |
 | `config/costs/india-index-options-costs.v1.yaml` | Dated cost rates and fill models |

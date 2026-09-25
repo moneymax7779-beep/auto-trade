@@ -276,3 +276,9 @@ Built (modules `strategy-api`, `strategy-ecr`, `research`; CLI `lifecycle`):
   (`research.lifecycle_frame`, `research.episode`) with a markdown report per run.
 - **Held-out discipline**: held-out sessions need `--held-out --save` and are consumed per
   strategy family (`research.held_out_use`); the experiment ledger is `docs/EXPERIMENT-LEDGER.md`.
+
+**Tuning result and decision (2026-09-25).** A-001 (ecr-v2) closed at G1: 6 episodes on the
+tuning sessions, stressed average −0.05 R; the early probe never fired (breadth ≥ +50 rarely holds)
+and no PE trade occurred. By user decision the ChatGPT thresholds are kept without tuning; ecr-v3
+has identical thresholds and adds `evaluation.sessions_from: 2026-09-21`, so strategies are now
+evaluated on this week's market data onward (new sessions as they are captured), not older data.

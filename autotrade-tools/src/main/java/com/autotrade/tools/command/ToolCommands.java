@@ -128,8 +128,9 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                            [--target-pct 30] [--exit-by 15:20] [--lots 1]   one long option trade, base and stressed fills
                   instruments --file NSE.json.gz[,BSE.json.gz] [--date D] [--underlying NIFTY,BANKNIFTY,SENSEX]
                                                              load an Upstox contract-master file into ref.instrument
-                  lifecycle --split TUNING|HELD_OUT | --session D[,D] [--underlying ...] [--strategy FILE] [--save]
+                  lifecycle [--split TUNING|HELD_OUT | --session D[,D]] [--underlying ...] [--strategy FILE] [--save]
                             [--held-out] [--force]           replay the early-confirm-runner lifecycle and report
+                                                             (no --split/--session: the strategy's evaluation window)
                   config-hash <file.yaml> [...]              hash and validate threshold files (no database)""");
         return 2;
     }
@@ -416,13 +417,10 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
         } else {
             sessions = args.dates("session");
         }
-        if (sessions.isEmpty()) {
-            return usage("lifecycle needs --split or --session");
-        }
         return LifecycleCommand.run(target, source.dataSource(), new ZtSessionSource(source.dataSource(), false),
                 new ZtSessionHistory(source.dataSource()), new LifecycleCommand.Request(sessions,
                         args.upperList("underlying", DEFAULT_UNDERLYINGS),
-                        Path.of(args.get("strategy", "config/strategy/early-confirm-runner.v2.yaml")),
+                        Path.of(args.get("strategy", "config/strategy/early-confirm-runner.v3.yaml")),
                         Path.of(args.get("features-file", FEATURES_FILE)), Path.of(args.get("exchange-file", EXCHANGE_FILE)),
                         Path.of(args.get("costs-file", "config/costs/india-index-options-costs.v1.yaml")),
                         args.flag("save"), args.flag("held-out"), CodeVersion.current()));

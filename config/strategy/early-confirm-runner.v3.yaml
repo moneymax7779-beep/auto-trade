@@ -1,0 +1,160 @@
+# Early → Confirm → Runner strategy thresholds.
+#
+# Starting defaults taken from the ChatGPT design conversation (2026-09-25). NOT calibrated.
+# v2 keeps every v1 value and adds what the design left unspecified: how a signal moves between
+# lifecycle stages, which level it trades (ORH/ORL), option choice, and exits (section "rules").
+# v3 (2026-09-25): NO threshold changes from v2 (user decision: stay with the ChatGPT values, no
+# tuning). The only addition is `evaluation`: replays use market data from the week of
+# 21 Sep 2026 onward, including new sessions as they are captured, and no older sessions.
+# Values marked "placeholder" were not given there and were chosen to make the file complete.
+# Any change is a new file version (v2, v3 ...); the content hash is stamped on every signal
+# and replay run. Comments are not part of the hash.
+version: ecr-v3
+strategy: early-confirm-runner
+status: UNCALIBRATED
+source: chatgpt-design-2026-09-25
+
+lifecycle: [WATCH, ARMED, EARLY_ENTRY, CONFIRMED, RUNNER, EXIT]
+
+sizing:
+  profile: standard                  # standard | conservative
+  standard:     { early: 0.30, confirm: 0.40, runner: 0.30 }
+  conservative: { early: 0.25, confirm: 0.50, runner: 0.25 }
+  expiry_early_fraction: 0.25        # ChatGPT: 20–30%
+  min_lots_for_scaling: 4            # placeholder; below this, single entry at CONFIRMED
+
+early_entry:                         # CE shown; PE is mirrored
+  distance_to_orh_atr_max: { normal: 0.15, expiry: 0.10 }
+  price_above_vwap: true
+  ema_fast: 9
+  ema_slow: 20
+  ema9_above_ema20: true
+  ema9_slope_positive: true
+  higher_lows: true
+  last_swing_low_intact: true
+  fut_momentum_positive: true
+  fut_acceleration_positive: true
+  rvol_slope_positive: true
+  weighted_breadth_min: 50           # scale −100..+100
+
+confirmation:
+  orh_break_required: true
+  tod_rvol_min: 1.25                 # "meaningful"
+  breakout_candle:
+    body_to_range_min: 0.60
+    close_location_top_pct: 0.25
+    upper_wick_max_pct: 0.20         # placeholder ("small upper wick")
+    range_vs_avg_min: 1.2
+  required_confirm_score_by_window:
+    "09:15-09:25": 75                # placeholder ("very selective")
+    "09:25-11:15": 62
+    "11:15-13:15": 70
+    "13:15-14:30": 62                # "normal"
+    "14:30-15:15": 66                # placeholder ("faster management")
+
+level_acceptance:
+  closes_above_min: 2
+  retest_required: true
+  ladder: [ORH, ORL, PDH, PDL, PREV_CLOSE, DAY_OPEN, VWAP, EMA20, SESSION_MEAN, SWING]
+
+runner:
+  score_min: 70
+  weights: { structure: 25, futures: 25, volume: 20, option_oi: 15, breadth: 10, premium: 5 }
+  futures_state_score: { FRESH_LONG: 2, SHORT_COVERING: 1, NEUTRAL: 0, LONG_UNWIND: -1, FRESH_SHORT: -2 }
+  premium_response_ratio_min: 0.6    # placeholder (IV-crush detector)
+
+rvol:
+  method: TIME_OF_DAY_MEDIAN         # same 3-minute slot over previous sessions
+  lookback_sessions: 20              # placeholder
+  bands: { normal: 1.0, meaningful: 1.25, strong: 1.5, expansion: 2.0 }
+
+futures:
+  momentum_windows_sec: [30, 60, 180]
+  normalise_by: ATR_1M
+  basis_tracking: true               # Δbasis = Δ(futures − spot)
+
+options_chain:
+  near_atm_strikes: 3                # ATM ± 3
+  heavy_weight_strikes: 2            # ATM ± 2 weighted most
+  oi_delta_windows_min: [1, 3, 5, 10]
+  wall_weakening_lookback_min: [10, 5, 3, 1]
+  order_book_imbalance_persistence_sec: [10, 20]   # confirmation only
+
+regime:
+  dte_buckets: { NORMAL: ">=3", NEAR: "1-2", EXPIRY: "0" }
+  weights:
+    NORMAL: { structure: 25, futures: 20, volume: 15, oi: 15, breadth: 10, iv_options: 15 }
+    EXPIRY: { structure: 25, momentum: 25, fut_volume: 20, breadth: 10, oi: 8, iv_greeks: 12 }
+  vix_percentile_windows_days: [60, 252]
+  vix_buckets: { LOW: "<20", NORMAL: "20-70", HIGH: "70-90", EXTREME: ">90" }
+  vix_change_windows: [5m, 15m, day]
+  iv_change_windows_min: [1, 3, 5]
+  expected_move:
+    daily: "S*IV/sqrt(252)"
+    remaining: "S*IV*sqrt(min_left/(252*375))"
+
+cas:
+  timings:
+    cas_start: "15:15"
+    reference_calc_end: "15:20"
+    market_and_limit_end: "15:25"
+    random_close_window_min: 2
+    cas_end: "15:35"
+    derivatives_close: "15:40"
+  reference_price: VWAP_15_00_15_15
+  price_band_pct: 3.0
+  iep_windows_sec: [20, 60, 180]
+  weights:
+    iep_direction: 15
+    iep_velocity: 10
+    weighted_buy_imbalance: 15
+    cas_breadth: 15
+    low_concentration: 5
+    fut_direction: 10
+    fut_acceleration: 10
+    fut_cas_alignment: 10
+    option_response: 5
+    iv_response: 5
+  # Components that need per-constituent auction data; disabled until a feed provides it.
+  # The score renormalises over the enabled components.
+  requires_constituent_auction_feed: [iep_direction, iep_velocity, weighted_buy_imbalance, cas_breadth, low_concentration]
+  bands: { NO_TRADE: "<55", WATCH: "55-65", EARLY_SMALL: "65-75", CONFIRMED: "75-85", HIGH_CONVICTION: ">85" }
+  exclude_from_normal_stats: true
+
+# ---------------------------------------------------------------------------------------------
+# v2 additions. Everything below is a placeholder chosen so the lifecycle can run end to end.
+rules:
+  level: OPENING_RANGE                 # CE trades the ORH break, PE the ORL break
+  earliest_entry: "09:30"              # after the opening range completes
+  last_new_entry: "14:45"
+  flat_by: "15:15"                     # close everything before the closing auction
+  watch_distance_atr: 1.0              # WATCH when spot is within 1 ATR3m of the level
+  early_max_beyond_level_atr: 0.15     # EARLY is anticipation: at most this far through the level
+  higher_lows_swings: 3                # "higher lows" = last 3 confirmed swing lows rising
+  intended_lots: 4                     # research sizing; tranches follow `sizing`
+  option: { strike: ATM, expiry: NEAREST }
+  max_entries_per_level_per_day: 1     # one campaign per direction per session
+
+scores:
+  # Sub-scores are 0..1; a score is 100 × Σ weight × sub-score using the regime's weights.
+  early_min: 100                       # EARLY needs every early_entry condition (the design's AND list)
+  confirm_score_weights_by_regime: true
+  futures_state_map: { FRESH_LONG: 1.0, SHORT_COVERING: 0.75, NEUTRAL: 0.5, LONG_UNWIND: 0.25, FRESH_SHORT: 0.0 }
+  volume_full_at_rvol: 1.5             # the design's "strong" band
+  premium_response_good: 0.8
+  premium_response_poor: 0.6
+  max_spread_pct: 1.0
+
+exits:
+  premium_stop_pct: 25                 # resting stop on the option, % below average entry premium
+  early_probe_max_minutes: 9           # an EARLY probe not CONFIRMED within this is closed...
+  early_probe_fail_atr: 0.25           # ...or at once if spot falls this far back through the level
+  invalidation_close_atr: 0.10         # CONFIRMED: a 3-minute close this far back through the level exits
+  runner_trail: EMA9_CLOSE             # RUNNER: exit on a 3-minute close through EMA9
+  runner_exit_futures_states: { CE: [FRESH_SHORT, LONG_UNWIND], PE: [FRESH_LONG, SHORT_COVERING] }
+  expiry_runner_stall_minutes: 6       # DTE 0: exit a runner if no new extreme for this long
+
+# ---------------------------------------------------------------------------------------------
+# v3 addition: which market data this version is evaluated on.
+evaluation:
+  sessions_from: "2026-09-21"          # this week onward; older sessions are not used

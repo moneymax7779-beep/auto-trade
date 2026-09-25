@@ -53,9 +53,20 @@ final class LifecycleCommand {
         ThresholdConfig exchangeConfig = ThresholdConfig.load(request.exchangeFile());
         ThresholdConfig costConfig = ThresholdConfig.load(request.costsFile());
         EarlyConfirmRunnerFactory strategies = new EarlyConfirmRunnerFactory(strategyConfig);
+        List<LocalDate> requested = request.sessions();
+        if (requested.isEmpty()) {
+            if (!strategyConfig.has("evaluation.sessions_from")) {
+                System.err.println("no --split/--session and " + request.strategyFile()
+                        + " has no evaluation.sessions_from");
+                return 2;
+            }
+            LocalDate from = LocalDate.parse(strategyConfig.getString("evaluation.sessions_from"));
+            requested = sessionsFrom(sourceDb, request.underlyings().getFirst(), from);
+            System.out.printf("evaluation window from %s (strategy file): %s%n", from, requested);
+        }
 
         Map<LocalDate, String> splits = LifecycleStore.splits(target);
-        List<LocalDate> heldOut = request.sessions().stream().filter(d -> "HELD_OUT".equals(splits.get(d))).toList();
+        List<LocalDate> heldOut = requested.stream().filter(d -> "HELD_OUT".equals(splits.get(d))).toList();
         if (!heldOut.isEmpty()) {
             if (!request.heldOutAllowed() || !request.save()) {
                 System.err.println("sessions " + heldOut + " are HELD_OUT; pass --held-out --save to use them "
@@ -70,7 +81,7 @@ final class LifecycleCommand {
             }
         }
         List<LocalDate> sessions = new ArrayList<>();
-        for (LocalDate session : request.sessions()) {
+        for (LocalDate session : requested) {
             if (hasTicks(sourceDb, session, request.underlyings())) {
                 sessions.add(session);
             } else {
@@ -132,7 +143,8 @@ final class LifecycleCommand {
         header.put("Code", request.codeVersion());
         header.put("Strategy", strategies.version() + " " + strategies.configHash().substring(0, 19));
         header.put("Configs", configs.toString());
-        header.put("Sessions", sessions + " (" + (heldOut.isEmpty() ? "tuning" : "includes HELD-OUT " + heldOut) + ")");
+        header.put("Sessions", sessions + (heldOut.isEmpty() ? "" : " (includes held-out " + heldOut + ", now consumed for "
+                + strategies.id() + ")"));
         header.put("Underlyings", request.underlyings().toString());
         header.put("Sizing", "research default from the strategy file (rules.intended_lots)");
         header.put("Elapsed", Duration.between(started, Instant.now()).toSeconds() + " s");
@@ -143,6 +155,25 @@ final class LifecycleCommand {
         System.out.println(report);
         System.out.println("report: " + file);
         return 0;
+    }
+
+    /** Sessions zt-tiger-v2 holds index ticks for, on or after {@code from}. */
+    private static List<LocalDate> sessionsFrom(DataSource source, String underlying, LocalDate from)
+            throws SQLException {
+        List<LocalDate> sessions = new ArrayList<>();
+        try (Connection connection = source.getConnection();
+             PreparedStatement statement = connection.prepareStatement("select distinct session_date "
+                     + "from market_tick_records where underlying_key = ? and tick_type = 'CASH' and session_date >= ? "
+                     + "order by session_date")) {
+            statement.setString(1, ZtSourceKeys.underlyingKey(underlying));
+            statement.setObject(2, from);
+            try (ResultSet rs = statement.executeQuery()) {
+                while (rs.next()) {
+                    sessions.add(rs.getObject(1, LocalDate.class));
+                }
+            }
+        }
+        return sessions;
     }
 
     /** True when zt-tiger-v2 still has index ticks for the session (archived sessions keep only IV rows). */
