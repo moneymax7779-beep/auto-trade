@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.autotrade</groupId>
+        <artifactId>autotrade-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+    <artifactId>broker-upstox</artifactId>
+    <description>Upstox: browser login and token store, Market Data Feed V3 (SDK 1.29, with CAS fields and VIX). No order placement in PAPER.</description>
+    <dependencies>
+        <dependency><groupId>com.autotrade</groupId><artifactId>marketdata-live</artifactId></dependency>
+        <dependency><groupId>com.autotrade</groupId><artifactId>instrument-master</artifactId></dependency>
+        <dependency><groupId>tools.jackson.core</groupId><artifactId>jackson-databind</artifactId></dependency>
+        <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId></dependency>
+        <dependency>
+            <groupId>com.upstox.api</groupId>
+            <artifactId>upstox-java-sdk</artifactId>
+            <version>1.29</version>
+            <exclusions>
+                <!-- The SDK pins logback 1.2.3; Spring Boot's logging wins. -->
+                <exclusion><groupId>ch.qos.logback</groupId><artifactId>logback-classic</artifactId></exclusion>
+                <exclusion><groupId>ch.qos.logback</groupId><artifactId>logback-core</artifactId></exclusion>
+            </exclusions>
+        </dependency>
+    </dependencies>
+</project>

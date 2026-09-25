@@ -1,10 +1,15 @@
 package com.autotrade.trading;
 
+import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZonedDateTime;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -29,6 +34,7 @@ import com.autotrade.features.config.FeatureConfig;
 import com.autotrade.features.time.SessionClock;
 import com.autotrade.instruments.InstrumentMaster;
 import com.autotrade.instruments.InstrumentStore;
+import com.autotrade.instruments.UpstoxInstrumentFile;
 import com.autotrade.md.live.LiveFeed;
 import com.autotrade.md.live.ReplayAsLiveFeed;
 import com.autotrade.md.live.ZtTailFeed;
@@ -39,6 +45,10 @@ import com.autotrade.risk.RiskLimits;
 import com.autotrade.sim.CostModel;
 import com.autotrade.sim.FillModel;
 import com.autotrade.strategy.ecr.EarlyConfirmRunnerFactory;
+import com.autotrade.upstox.UpstoxFeed;
+import com.autotrade.upstox.UpstoxToken;
+import com.autotrade.upstox.UpstoxTokenStore;
+import com.autotrade.upstox.UpstoxUniverse;
 import com.zaxxer.hikari.HikariDataSource;
 
 /** Builds and runs the trading session selected on the command line. */
@@ -93,10 +103,15 @@ class SessionRunner implements ApplicationRunner {
             log.warn("no contract master loaded for {}; using quote facts and default tick/freeze limits", session);
         }
         boolean replay = mode.equals("replay");
-        LiveFeed feed = replay
-                ? new ReplayAsLiveFeed(new ZtSessionSource(source, false), session, t.underlyings())
-                : new ZtTailFeed(source, session, t.underlyings(), Duration.ofMillis(t.pollIntervalMs()),
-                        Duration.ofMillis(t.recheckWindowMs()));
+        LiveFeed feed;
+        if (replay) {
+            feed = new ReplayAsLiveFeed(new ZtSessionSource(source, false), session, t.underlyings());
+        } else if ("upstox".equals(t.feed())) {
+            feed = upstoxFeed(session, t.underlyings(), instruments, new ZtSessionHistory(source));
+        } else {
+            feed = new ZtTailFeed(source, session, t.underlyings(), Duration.ofMillis(t.pollIntervalMs()),
+                    Duration.ofMillis(t.recheckWindowMs()));
+        }
         TradingSession.Settings settings = new TradingSession.Settings(
                 replay ? TradingSession.Mode.PAPER_REPLAY : TradingSession.Mode.PAPER_LIVE, t.account(), session,
                 t.underlyings(), features, new ZtSessionHistory(source), strategies, strategies.premiumStopPct(),
@@ -125,6 +140,38 @@ class SessionRunner implements ApplicationRunner {
         });
         if (replay) {
             worker.join();
+        }
+    }
+
+    /** Upstox V3 feed: needs today's token (bin/autotrade upstox-login) and the contract files. */
+    private LiveFeed upstoxFeed(LocalDate session, List<String> underlyings, InstrumentMaster instruments,
+                                ZtSessionHistory history) throws Exception {
+        TradingProperties.Upstox upstox = properties.upstox();
+        UpstoxToken token = new UpstoxTokenStore(Path.of(upstox.tokenFile())).valid(Instant.now())
+                .orElseThrow(() -> new IllegalStateException("no valid Upstox token; run: bin/autotrade upstox-login"));
+        if (instruments.size() == 0) {
+            throw new IllegalStateException("the Upstox feed needs a contract master: bin/autotrade instruments --file ...");
+        }
+        Map<String, List<UpstoxUniverse.Constituent>> constituents = new LinkedHashMap<>();
+        for (String underlying : underlyings) {
+            String segment = underlying.equals("SENSEX") ? "BSE_EQ" : "NSE_EQ";
+            Path file = newest(Path.of(upstox.instrumentDir()), underlying.equals("SENSEX") ? "BSE-" : "NSE-");
+            Map<String, Double> weights = history.constituentWeights(underlying, session);
+            List<UpstoxUniverse.Constituent> list = new ArrayList<>();
+            for (UpstoxInstrumentFile.Listing listing : UpstoxInstrumentFile.readEquities(file, segment, weights.keySet())) {
+                list.add(new UpstoxUniverse.Constituent(listing, weights.get(listing.tradingSymbol())));
+            }
+            log.info("{}: {} of {} constituents found in {}", underlying, list.size(), weights.size(), file.getFileName());
+            constituents.put(underlying, list);
+        }
+        UpstoxUniverse universe = new UpstoxUniverse(instruments, session, underlyings, constituents);
+        return new UpstoxFeed(token, universe, underlyings, upstox.strikesEachSide(), upstox.recenterStrikes());
+    }
+
+    private static Path newest(Path directory, String prefix) throws IOException {
+        try (var files = Files.list(directory)) {
+            return files.filter(f -> f.getFileName().toString().startsWith(prefix)).max(Comparator.naturalOrder())
+                    .orElseThrow(() -> new IllegalStateException("no " + prefix + "*.json.gz in " + directory));
         }
     }
 

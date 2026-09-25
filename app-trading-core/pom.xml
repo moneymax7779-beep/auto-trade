@@ -16,6 +16,7 @@
         <dependency><groupId>com.autotrade</groupId><artifactId>oms</artifactId></dependency>
         <dependency><groupId>com.autotrade</groupId><artifactId>broker-paper</artifactId></dependency>
         <dependency><groupId>com.autotrade</groupId><artifactId>marketdata-live</artifactId></dependency>
+        <dependency><groupId>com.autotrade</groupId><artifactId>broker-upstox</artifactId></dependency>
         <dependency><groupId>com.autotrade</groupId><artifactId>marketdata-store</artifactId></dependency>
         <dependency><groupId>com.autotrade</groupId><artifactId>instrument-master</artifactId></dependency>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-webmvc</artifactId></dependency>

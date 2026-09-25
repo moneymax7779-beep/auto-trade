@@ -21,6 +21,7 @@ Multi-user, multi-broker, Upstox first. PAPER only until the gates in
 | `broker-api`, `broker-paper` | Broker SPI; paper broker filling on live/replayed quotes |
 | `risk`, `oms` | Kill switches and pre-trade limits; order management with broker-side stop and reconciliation |
 | `marketdata-live` | Live feed tailing zt-tiger-v2 (read-only); replay-as-live |
+| `broker-upstox` | Upstox browser login and token store; Market Data Feed V3 (SDK 1.29: depth, Greeks, VIX, per-stock CAS). No orders |
 | `app-trading-core` | PAPER trading service (`bin/trading-core`), operator API on 127.0.0.1:8095 |
 | `autotrade-tools` | Operator CLI: `sessions`, `zt-sessions`, `replay`, `features`, `simulate`, `instruments`, `clone`, `verify`, `manifests`, `config-hash` |
 
@@ -94,6 +95,17 @@ curl -s -X POST http://127.0.0.1:8095/api/stop           # close everything and 
 ```
 
 Everything is PAPER: no code path sends an order to a real broker. Records are in `trade.*`.
+
+### Upstox feed (instead of tailing zt-tiger-v2)
+
+1. Put `UPSTOX_API_KEY` and `UPSTOX_API_SECRET` of the auto-trade Upstox app in `.env`; the app's
+   redirect URL must be `http://127.0.0.1:5055/upstox/callback`.
+2. Each morning: `bin/autotrade upstox-login`, open the printed link and sign in to Upstox yourself.
+   The day's token goes to `.local/upstox/token.json` (owner-only) and expires at 03:30 IST.
+3. `bin/autotrade upstox-status` checks it; then
+   `bin/trading-core --mode=live --autotrade.trading.feed=upstox`.
+
+Upstox allows two feed connections per user; auto-trade uses one, and zt-tiger-v2 runs on the same user.
 
 ## Config files
 

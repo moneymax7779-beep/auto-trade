@@ -7,7 +7,7 @@ import java.time.Instant;
  * same event types, ordered by {@link #receivedAt()} and then {@link #sourceSequence()}.
  */
 public sealed interface MarketEvent
-        permits IndexTick, FutureTick, OptionTick, ConstituentTick, SessionPhaseEvent {
+        permits IndexTick, FutureTick, OptionTick, ConstituentTick, SessionPhaseEvent, AuctionTick {
 
     /** When the platform received the observation; the only time features may act on. */
     Instant receivedAt();

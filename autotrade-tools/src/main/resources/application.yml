@@ -24,6 +24,11 @@ autotrade:
     password-file: ${ZT_SOURCE_PASSWORD_FILE:../zt-tiger-v2/.local/v2/runtime.env}
     password-key: V2_DB_PASSWORD
   spool-dir: ${AUTOTRADE_SPOOL_DIR:.local/spool}
+  upstox:
+    api-key: ${UPSTOX_API_KEY:}
+    api-secret: ${UPSTOX_API_SECRET:}
+    redirect-uri: ${UPSTOX_REDIRECT_URI:http://127.0.0.1:5055/upstox/callback}
+    token-file: ${UPSTOX_TOKEN_FILE:.local/upstox/token.json}
 
 logging:
   level:

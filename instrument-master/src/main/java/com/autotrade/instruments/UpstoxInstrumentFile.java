@@ -68,6 +68,35 @@ public final class UpstoxInstrumentFile {
         return instruments;
     }
 
+    /** A listed stock or index: its broker key and exchange token (for constituents, indices, VIX). */
+    public record Listing(String instrumentKey, String exchangeToken, String segment, String tradingSymbol,
+                          double tickSize) {
+    }
+
+    /**
+     * Equities in {@code segment} (NSE_EQ or BSE_EQ) whose trading symbol is in {@code symbols}.
+     * NSE equities have instrument type EQ; BSE lists them by group (A, B, ...), so any type is taken.
+     */
+    public static List<Listing> readEquities(Path file, String segment, Set<String> symbols) throws IOException {
+        JsonNode root;
+        try (InputStream in = open(file)) {
+            root = JSON.readTree(in);
+        }
+        List<Listing> listings = new ArrayList<>();
+        for (JsonNode node : root) {
+            String symbol = text(node, "trading_symbol");
+            if (!segment.equals(text(node, "segment")) || !symbols.contains(symbol)) {
+                continue;
+            }
+            if (segment.equals("NSE_EQ") && !"EQ".equals(text(node, "instrument_type"))) {
+                continue;
+            }
+            listings.add(new Listing(text(node, "instrument_key"), text(node, "exchange_token"), segment, symbol,
+                    number(node, "tick_size") / 100.0));
+        }
+        return listings;
+    }
+
     private static InputStream open(Path file) throws IOException {
         InputStream in = new BufferedInputStream(Files.newInputStream(file));
         return file.getFileName().toString().endsWith(".gz") ? new GZIPInputStream(in) : in;

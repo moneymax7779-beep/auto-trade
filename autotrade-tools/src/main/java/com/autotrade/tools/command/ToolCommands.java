@@ -6,6 +6,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
+import java.net.http.HttpClient;
 import java.nio.file.Path;
 import java.time.LocalDate;
 import java.time.LocalTime;
@@ -40,6 +41,11 @@ import com.autotrade.md.store.SequenceDigest;
 import com.autotrade.md.store.StoredSessionSource;
 import com.autotrade.md.store.TableChecks;
 import com.autotrade.tools.MarketHoursGuard;
+import com.autotrade.tools.ToolProperties;
+import com.autotrade.upstox.UpstoxCredentials;
+import com.autotrade.upstox.UpstoxLogin;
+import com.autotrade.upstox.UpstoxToken;
+import com.autotrade.upstox.UpstoxTokenStore;
 import com.autotrade.core.build.CodeVersion;
 import com.autotrade.tools.SourceDatabase;
 import com.autotrade.tools.ToolArgs;
@@ -68,10 +74,12 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
     private final SourceDatabase source;
     private final SessionCloner cloner;
     private final LoadManifests manifests;
+    private final ToolProperties properties;
     private int exitCode;
 
-    public ToolCommands(DataSource target, SourceDatabase source, SessionCloner cloner) {
+    public ToolCommands(DataSource target, SourceDatabase source, SessionCloner cloner, ToolProperties properties) {
         this.target = target;
+        this.properties = properties;
         this.source = source;
         this.cloner = cloner;
         this.manifests = new LoadManifests(target);
@@ -93,6 +101,8 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                 case "simulate" -> simulate(parsed);
                 case "instruments" -> instruments(parsed);
                 case "lifecycle" -> lifecycle(parsed);
+                case "upstox-login" -> upstoxLogin(parsed);
+                case "upstox-status" -> upstoxStatus(parsed);
                 default -> usage("unknown command: " + parsed.command());
             };
         } catch (IllegalArgumentException e) {
@@ -131,6 +141,9 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                   lifecycle [--split TUNING|HELD_OUT | --session D[,D]] [--underlying ...] [--strategy FILE] [--save]
                             [--held-out] [--force]           replay the early-confirm-runner lifecycle and report
                                                              (no --split/--session: the strategy's evaluation window)
+                  upstox-login                               print the Upstox login link, wait for your browser sign-in,
+                                                             save the day's token (.local/upstox/token.json)
+                  upstox-status                              check the saved Upstox token against the profile API
                   config-hash <file.yaml> [...]              hash and validate threshold files (no database)""");
         return 2;
     }
@@ -424,6 +437,38 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                         Path.of(args.get("features-file", FEATURES_FILE)), Path.of(args.get("exchange-file", EXCHANGE_FILE)),
                         Path.of(args.get("costs-file", "config/costs/india-index-options-costs.v1.yaml")),
                         args.flag("save"), args.flag("held-out"), CodeVersion.current()));
+    }
+
+    private int upstoxLogin(ToolArgs args) throws Exception {
+        args.allowOnly(Set.of());
+        ToolProperties.Upstox upstox = properties.upstox();
+        UpstoxLogin login = new UpstoxLogin(new UpstoxCredentials(upstox.apiKey(), upstox.apiSecret(),
+                upstox.redirectUri()));
+        System.out.println("Open this link in your browser and sign in to Upstox (auto-trade never sees your password):");
+        System.out.println();
+        System.out.println("  " + login.authorizationUrl());
+        System.out.println();
+        System.out.println("Waiting up to 5 minutes for the redirect to " + upstox.redirectUri() + " ...");
+        UpstoxToken token = login.awaitCallback(Duration.ofMinutes(5));
+        String user = UpstoxLogin.verify(token, HttpClient.newHttpClient());
+        new UpstoxTokenStore(Path.of(upstox.tokenFile())).save(token);
+        System.out.printf("Logged in as %s; token saved to %s (owner-only), valid until %s IST%n", user,
+                upstox.tokenFile(), token.expiresAt().atZone(MarketTime.IST).toLocalDateTime());
+        return 0;
+    }
+
+    private int upstoxStatus(ToolArgs args) throws Exception {
+        args.allowOnly(Set.of());
+        UpstoxTokenStore store = new UpstoxTokenStore(Path.of(properties.upstox().tokenFile()));
+        Optional<UpstoxToken> token = store.valid(Instant.now());
+        if (token.isEmpty()) {
+            System.out.println("No valid Upstox token; run: bin/autotrade upstox-login");
+            return 1;
+        }
+        String user = UpstoxLogin.verify(token.get(), HttpClient.newHttpClient());
+        System.out.printf("Upstox token OK for %s, valid until %s IST%n", user,
+                token.get().expiresAt().atZone(MarketTime.IST).toLocalDateTime());
+        return 0;
     }
 
     private int ztSessions(ToolArgs args) throws SQLException {

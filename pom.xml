@@ -33,6 +33,7 @@
         <module>risk</module>
         <module>oms</module>
         <module>marketdata-live</module>
+        <module>broker-upstox</module>
         <module>app-trading-core</module>
         <module>autotrade-tools</module>
     </modules>
@@ -123,6 +124,11 @@
             <dependency>
                 <groupId>com.autotrade</groupId>
                 <artifactId>app-trading-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.autotrade</groupId>
+                <artifactId>broker-upstox</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>

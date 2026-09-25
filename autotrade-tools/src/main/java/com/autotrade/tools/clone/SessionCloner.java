@@ -27,6 +27,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
+import com.autotrade.core.event.AuctionTick;
 import com.autotrade.core.event.ConstituentTick;
 import com.autotrade.core.event.FutureTick;
 import com.autotrade.core.event.IndexTick;
@@ -246,6 +247,7 @@ public class SessionCloner {
             case OptionTick tick -> encoder.option(tick, meta);
             case ConstituentTick tick -> encoder.constituent(tick, meta);
             case SessionPhaseEvent phase -> throw new IllegalArgumentException("not a tick: " + phase);
+            case AuctionTick auction -> throw new IllegalArgumentException("zt-tiger-v2 has no auction ticks: " + auction);
         };
     }
 

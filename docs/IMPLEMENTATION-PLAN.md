@@ -313,6 +313,13 @@ Built (modules `broker-api`, `broker-paper`, `risk`, `oms`, `marketdata-live`, `
 - **Checked**: replay-as-live of 24 Sep matches the research replay to the rupee (−₹1,356);
   25 Sep −₹1,623 vs −₹1,519 (the extra cancel-then-sell step on exit).
 
-Still to do in Phase 3: the Upstox adapter (OAuth login, SDK ≥ 1.29 feed with VIX and per-stock
-CAS fields, order API mapping with orders hard-disabled in PAPER); measuring the zt tail's lag on a
-live session; ten clean PAPER sessions (the phase's exit criterion) from 28 Sep.
+Part 2 (2026-09-26): **Upstox adapter** (`broker-upstox`): browser OAuth with a local callback
+(`bin/autotrade upstox-login`; the account holder signs in, the token is stored owner-only until
+03:30 IST), Market Data Feed V3 on SDK 1.29 in full mode: index, India VIX, nearest future, all
+NIFTY 50 / SENSEX 30 constituents (weights from zt-tiger-v2's last session) and a re-centring band
+of ATM ± 12 nearest-expiry options; per-stock closing-auction data arrives as `AuctionTick`. Select
+it with `--autotrade.trading.feed=upstox`. No order API is wired: PAPER only.
+
+Still to do in Phase 3: capture the Upstox feed into the own `md.*` tables (so PAPER sessions on
+the Upstox feed can be replayed without zt-tiger-v2); first connection test once the app's key is
+in `.env`; measuring feed lag live; ten clean PAPER sessions (the exit criterion) from 28 Sep.

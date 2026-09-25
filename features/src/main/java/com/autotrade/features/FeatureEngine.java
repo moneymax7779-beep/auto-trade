@@ -6,6 +6,7 @@ import java.time.LocalDate;
 import java.time.temporal.ChronoUnit;
 import java.util.function.Consumer;
 
+import com.autotrade.core.event.AuctionTick;
 import com.autotrade.core.event.ConstituentTick;
 import com.autotrade.core.event.FutureTick;
 import com.autotrade.core.event.IndexTick;
@@ -94,6 +95,10 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
                 if (phase.sessionPhase().startsWith("CAS")) {
                     casIndicative = phase.price();
                 }
+            }
+            case AuctionTick auction -> {
+                // Per-stock auction data (Upstox SDK >= 1.29) is captured; CAS features using it are
+                // built once enough auction sessions exist to define them.
             }
         }
     }

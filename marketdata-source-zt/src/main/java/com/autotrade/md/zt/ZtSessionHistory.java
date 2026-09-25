@@ -108,6 +108,50 @@ public final class ZtSessionHistory implements SessionHistory {
         return result;
     }
 
+    /**
+     * Index weights (percent) per constituent symbol as zt-tiger-v2 last recorded them before
+     * {@code session}: the latest weight of each symbol in the most recent session with constituent ticks.
+     */
+    public Map<String, Double> constituentWeights(String underlying, LocalDate session) {
+        String key = ZtSourceKeys.underlyingKey(underlying);
+        Map<String, Double> weights = new TreeMap<>();
+        try (Connection connection = source.getConnection()) {
+            LocalDate latest = null;
+            try (PreparedStatement statement = connection.prepareStatement("select session_date from market_tick_records "
+                    + "where underlying_key = ? and session_date < ? and tick_type = 'COMPONENT' "
+                    + "order by session_date desc limit 1")) {
+                statement.setString(1, key);
+                statement.setObject(2, session);
+                try (ResultSet rs = statement.executeQuery()) {
+                    if (rs.next()) {
+                        latest = rs.getObject(1, LocalDate.class);
+                    }
+                }
+            }
+            if (latest == null) {
+                return weights;
+            }
+            try (PreparedStatement statement = connection.prepareStatement("select distinct on (symbol) symbol, "
+                    + "(payload_json::json ->> 'weight')::double precision from market_tick_records "
+                    + "where underlying_key = ? and session_date = ? and tick_type = 'COMPONENT' "
+                    + "order by symbol, sequence_number desc")) {
+                statement.setString(1, key);
+                statement.setObject(2, latest);
+                try (ResultSet rs = statement.executeQuery()) {
+                    while (rs.next()) {
+                        double weight = rs.getDouble(2);
+                        if (!rs.wasNull()) {
+                            weights.put(rs.getString(1), weight);
+                        }
+                    }
+                }
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("constituent weight lookup failed", e);
+        }
+        return weights;
+    }
+
     private static LocalDate previousDate(Connection connection, String key, String source, LocalDate session)
             throws SQLException {
         List<LocalDate> dates = previousDates(connection, key, source, session, 1);

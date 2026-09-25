@@ -36,6 +36,12 @@ autotrade:
     poll-interval-ms: 250
     recheck-window-ms: 3000
     stop-after: "15:45"
+    feed: zt-tail                  # zt-tail (default) or upstox
+  upstox:
+    token-file: ${UPSTOX_TOKEN_FILE:.local/upstox/token.json}
+    instrument-dir: .local/instruments   # NSE-*.json.gz / BSE-*.json.gz contract files (newest used)
+    strikes-each-side: 12
+    recenter-strikes: 8
   source:
     url: ${ZT_SOURCE_URL:jdbc:postgresql://127.0.0.1:5490/trading}
     username: ${ZT_SOURCE_USER:zerotrade}

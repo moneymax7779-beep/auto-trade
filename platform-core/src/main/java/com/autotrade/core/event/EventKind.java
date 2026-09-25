@@ -6,5 +6,6 @@ public enum EventKind {
     FUTURE,
     OPTION,
     CONSTITUENT,
-    SESSION_PHASE
+    SESSION_PHASE,
+    AUCTION
 }
