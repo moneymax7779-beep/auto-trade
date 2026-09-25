@@ -1,0 +1,23 @@
+# Dated transaction-cost model for buying and selling index options (NSE and BSE), per order leg.
+# A trade uses the newest rate set whose effective_from is on or before the trade date.
+# Rates match zt-tiger-v2's option cost model. Verify against the current Upstox tariff and exchange
+# circulars before relying on them for LIVE decisions; add a new rate set (never edit an old one).
+version: india-index-options-costs-v1
+name: india-index-options-costs
+status: UNCALIBRATED
+
+rate_sets:
+  - effective_from: "2024-10-01"         # STT on option sales raised to 0.1% of premium
+    source: "Upstox tariff (flat ₹20/order), NSE/BSE circulars effective Oct 2024"
+    brokerage_per_order: 20.0            # rupees, each order leg
+    stt_sell_fraction: 0.001             # of premium turnover, sell side only
+    exchange_fraction: { NSE: 0.0003503, BSE: 0.000325 }   # of premium turnover, both sides
+    sebi_fraction: 0.000001              # ₹10 per crore of turnover
+    stamp_buy_fraction: 0.00003          # of premium turnover, buy side only
+    gst_fraction: 0.18                   # on brokerage + exchange + SEBI charges
+
+fills:
+  base:     { latency_ms: 250,  adverse_bps: 0 }
+  stressed: { latency_ms: 1000, adverse_bps: 25 }    # same stress model as zt-tiger-v2's ledger
+  depth_exhausted_extra_ticks: 2          # placeholder: beyond the visible 5 levels, fill this many ticks worse
+  tick_size: 0.05

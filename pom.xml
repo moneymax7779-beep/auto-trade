@@ -22,6 +22,9 @@
         <module>strategy-config</module>
         <module>marketdata-store</module>
         <module>marketdata-source-zt</module>
+        <module>features</module>
+        <module>execution-sim</module>
+        <module>instrument-master</module>
         <module>autotrade-tools</module>
     </modules>
 
@@ -51,6 +54,21 @@
             <dependency>
                 <groupId>com.autotrade</groupId>
                 <artifactId>marketdata-source-zt</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.autotrade</groupId>
+                <artifactId>features</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.autotrade</groupId>
+                <artifactId>execution-sim</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.autotrade</groupId>
+                <artifactId>instrument-master</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>

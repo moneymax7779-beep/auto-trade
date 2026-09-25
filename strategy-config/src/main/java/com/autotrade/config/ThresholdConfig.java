@@ -6,6 +6,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.time.LocalTime;
+import java.time.format.DateTimeParseException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HexFormat;
@@ -21,7 +23,7 @@ import tools.jackson.databind.json.JsonMapper;
 import tools.jackson.dataformat.yaml.YAMLMapper;
 
 /**
- * A versioned strategy threshold file. The content hash is computed over a canonical JSON form
+ * A versioned config file (strategy thresholds, feature definitions, exchange sessions). The content hash is computed over a canonical JSON form
  * (keys sorted, comments and formatting ignored), so two files with the same values have the same
  * hash and any value change produces a new one.
  */
@@ -88,6 +90,20 @@ public final class ThresholdConfig {
 
     public String strategy() {
         return getString("strategy");
+    }
+
+    /** The file's identity: {@code strategy} for strategy files, {@code name} for other config. */
+    public String id() {
+        return has("strategy") ? getString("strategy") : getString("name");
+    }
+
+    /** A {@code "HH:mm"} value. */
+    public LocalTime getTime(String dottedPath) {
+        try {
+            return LocalTime.parse(getString(dottedPath));
+        } catch (DateTimeParseException e) {
+            throw new ThresholdConfigException(sourceName, List.of(dottedPath + " is not a HH:mm time"));
+        }
     }
 
     public ThresholdStatus status() {

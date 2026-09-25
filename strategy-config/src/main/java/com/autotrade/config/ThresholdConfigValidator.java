@@ -14,10 +14,13 @@ final class ThresholdConfigValidator {
 
     static List<String> validate(ThresholdConfig config, String fileName) {
         List<String> problems = new ArrayList<>();
-        for (String key : List.of("version", "strategy", "status")) {
+        for (String key : List.of("version", "status")) {
             if (!config.has(key)) {
                 problems.add("missing key: " + key);
             }
+        }
+        if (!config.has("strategy") && !config.has("name")) {
+            problems.add("missing key: strategy (or name)");
         }
         if (!problems.isEmpty()) {
             return problems;
@@ -32,8 +35,8 @@ final class ThresholdConfigValidator {
         if (!fileName.endsWith("." + versionSuffix + ".yaml") && !fileName.endsWith("." + versionSuffix + ".yml")) {
             problems.add("file name " + fileName + " does not end with the version suffix ." + versionSuffix + ".yaml");
         }
-        if (!fileName.startsWith(config.strategy() + ".")) {
-            problems.add("file name " + fileName + " does not start with the strategy name " + config.strategy());
+        if (!fileName.startsWith(config.id() + ".")) {
+            problems.add("file name " + fileName + " does not start with " + config.id());
         }
 
         checkFractionsSumToOne(config, "sizing.standard", problems);

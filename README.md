@@ -12,7 +12,10 @@ Multi-user, multi-broker, Upstox first. PAPER only until the gates in
 | `strategy-config` | Versioned threshold files (`config/strategy/*.yaml`) with a canonical content hash and sanity checks |
 | `marketdata-store` | Flyway schema for the own database, COPY encoder/loader, load manifests, ordered replay (`ReplayReader`, `EventStreams`, `ReorderingCursor`) |
 | `marketdata-source-zt` | Read-only access to zt-tiger-v2 captures: payload parser and `ZtSessionSource` (direct replay) |
-| `autotrade-tools` | Operator CLI: `sessions`, `clone`, `manifests`, `verify`, `replay`, `config-hash` |
+| `features` | Point-in-time feature engine: structure, futures, options chain, breadth, regime, CAS |
+| `execution-sim` | Dated cost model and option-path fill simulator (base and stressed) |
+| `instrument-master` | Upstox contract master → `ref.instrument`: expiries, lots, freeze quantity, ticks |
+| `autotrade-tools` | Operator CLI: `sessions`, `zt-sessions`, `replay`, `features`, `simulate`, `instruments`, `clone`, `verify`, `manifests`, `config-hash` |
 
 ## Run locally
 
@@ -54,11 +57,30 @@ bin/autotrade manifests
   source and stored rows before the load commits. A reload supersedes the previous one atomically.
 - Chunks of a cloned session are compressed right after loading.
 
-## Threshold files
+## Features, simulation, instruments
 
 ```bash
-bin/autotrade config-hash config/strategy/early-confirm-runner.v1.yaml
+bin/autotrade features --session 2026-09-25 --at 10:00,14:52      # CSV per index in .local/features
+bin/autotrade simulate --session 2026-09-25 --underlying NIFTY --strike 23100 --type CE --at 14:52 \
+    --stop-pct 15 --target-pct 30 --exit-by 15:20                   # base and stressed fills, after costs
+bin/autotrade instruments --file .local/instruments/NSE-2026-09-25.json.gz --date 2026-09-25
 ```
 
-`early-confirm-runner.v1.yaml` holds the ChatGPT-suggested starting values, `status: UNCALIBRATED`.
-Change a value by adding a new version file; never edit a version that a run has used.
+After changing any module, rebuild the CLI jar: `mvn -q -DskipTests -pl autotrade-tools -am clean install`
+(`bin/autotrade` warns when it is stale).
+
+## Config files
+
+```bash
+bin/autotrade config-hash config/*/*.yaml
+```
+
+| File | Holds |
+| --- | --- |
+| `config/strategy/early-confirm-runner.v1.yaml` | ChatGPT-suggested trading thresholds, `UNCALIBRATED` |
+| `config/features/features.v1.yaml` | Feature definitions (windows, periods, weights) |
+| `config/exchange/nse-bse-sessions.v1.yaml` | Session and CAS timings, holidays |
+| `config/costs/india-index-options-costs.v1.yaml` | Dated cost rates and fill models |
+
+Every file carries a content hash that is stamped on outputs. Change a value by adding a new
+version file; never edit a version that a run has used.

@@ -1,6 +1,6 @@
 # auto-trade — implementation plan
 
-Status: agreed 2026-09-25. Phase 0 in progress.
+Status: agreed 2026-09-25. Phase 0 done (commit 736a423). Phase 1 in progress; see section 10.
 
 **Database decision (2026-09-25, for testing and implementation):** market data is read directly
 from zt-tiger-v2's database, read-only, with no copying (`bin/autotrade replay --from zt`, the
@@ -208,3 +208,46 @@ defaults are a starting point, not a calibration. zt-tiger-v2's ledger found mos
 negative on the option path after costs (only the expiry gamma pair with a +30% target was
 positive, 4 of 4 expiries). Scaling 25/40/35 needs at least four lots. Some assumed data is not
 in the capture (per-stock CAS, VIX, BANKNIFTY).
+
+## 10. Phase 1 status (2026-09-25)
+
+Built (modules `features`, `execution-sim`, `instrument-master`; CLI `features`, `simulate`,
+`instruments`):
+
+- **Feature engine**: one snapshot per minute per underlying, 129 columns, strictly point in time
+  (a snapshot at T never sees an event received at or after T; a test pins this).
+  - Structure: day open, ORH/ORL (15 min), previous close, PDH/PDL (continuous trading only),
+    session mean, VWAP proxy, EMA9/20 and slope on 3-minute bars, ATR 1m/3m, confirmed swings,
+    higher lows / lower highs, level ladder with nearest level above/below in ATR, level
+    acceptance (closes beyond, retest held), breakout-bar shape, spot change 30s/1m/3m.
+  - Futures: momentum 30s/1m/3m, ATR-normalised momentum, acceleration, basis and its change,
+    OI change 3m and day, price/OI state, time-of-day RVOL (3-minute slot vs median of up to
+    20 prior sessions) and its slope.
+  - Options (nearest expiry): weighted near-ATM OI change 1/3/5/10 min, OI flow
+    (accelerating/fading build or unwind), call barrier and put support scores, wall weakening,
+    straddle and its change, ATM IV and change, skew, Greeks (feed, or own Black–Scholes),
+    premium response ratio, spreads.
+  - Breadth: weighted momentum breadth and day breadth (−100..+100), coverage, top-3 concentration.
+  - Regime: DTE (trading and calendar days), minutes to expiry, expected daily and remaining move.
+  - CAS: feed phase, indicative index, its gap to the last continuous value and to futures.
+  - Checked against the 25 Sep 14:52 screenshot from the design conversation: ORH, ORL, EMA20,
+    session mean, previous close, PDL and open agree within about a point.
+- **Cost model**: dated rate sets (`config/costs/india-index-options-costs.v1.yaml`), same rates
+  as zt-tiger-v2.
+- **Fill simulator**: latency, first quote after it, walks five-level depth, adverse slippage;
+  base (250 ms, 0 bp) and stressed (1 s, 25 bp) models; stop/target/time exits on the bid.
+- **Instrument master**: Upstox contract file → `ref.instrument` snapshots; expiries, lot size,
+  freeze quantity (max lots per order), tick size, strike step.
+
+Known limitations, to address in Phase 2 or when the data exists:
+
+1. SENSEX futures volume is thin, so its RVOL jumps (e.g. 16× in single minutes); consider a
+   longer slot or option volume for SENSEX.
+2. Expected move uses same-expiry ATM IV; on expiry day that IV is inflated by the short time
+   left and overstates the move. Needs next-expiry IV (not captured) or India VIX (Phase 3).
+3. Spot VWAP is a proxy (futures session VWAP minus current basis); the index has no volume.
+4. OI is in raw quantity (not lakhs, not lots).
+5. Snapshots are written to CSV only; the `feat` schema is filled when Phase 2 records runs.
+6. The exchange holiday list is empty until filled from the NSE/BSE circulars.
+7. Contract files are loaded by hand (`bin/autotrade instruments --file ...`); a daily download job
+   comes with the Upstox adapter in Phase 3. Loaded 25 Sep: NSE (NIFTY, BANKNIFTY) and BSE (SENSEX).

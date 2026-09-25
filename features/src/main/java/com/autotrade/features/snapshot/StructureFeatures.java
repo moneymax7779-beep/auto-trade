@@ -1,0 +1,52 @@
+package com.autotrade.features.snapshot;
+
+/**
+ * Price structure of the spot index over continuous trading. Distances are signed
+ * (price − level) in units of {@code atr3m}; NaN means not yet available.
+ */
+public record StructureFeatures(
+        double dayOpen,
+        double orHigh,
+        double orLow,
+        boolean orComplete,
+        double prevClose,
+        double pdh,
+        double pdl,
+        double sessionMean,
+        double vwapSpotProxy,
+        double ema9,
+        double ema20,
+        double ema9Slope,
+        double atr1m,
+        double atr3m,
+        double lastSwingHigh,
+        double lastSwingLow,
+        boolean higherLows,
+        boolean lowerHighs,
+        double distOrhAtr,
+        double distOrlAtr,
+        double distPdhAtr,
+        double distPdlAtr,
+        double distVwapAtr,
+        double distEma20Atr,
+        String nearestAbove,
+        double nearestAboveAtr,
+        String nearestBelow,
+        double nearestBelowAtr,
+        int orhClosesAbove,
+        boolean orhRetestHeld,
+        int orlClosesBelow,
+        boolean orlRetestHeld,
+        int pdhClosesAbove,
+        int pdlClosesBelow,
+        double lastBarBodyRatio,
+        double lastBarCloseLocation,
+        double lastBarUpperWickRatio,
+        double lastBarLowerWickRatio,
+        double lastBarRangeVsAvg,
+        double spotChange30s,
+        double spotChange1m,
+        double spotChange3m,
+        double dayHigh,
+        double dayLow) {
+}

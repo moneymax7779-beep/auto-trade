@@ -1,0 +1,25 @@
+# Exchange session timings used by auto-trade. Exchange rules, not strategy choices; update from
+# NSE/BSE circulars by adding a new version. Effective from the CAS rollout on 3 Aug 2026.
+version: nse-bse-sessions-v1
+name: nse-bse-sessions
+status: UNCALIBRATED
+effective_from: "2026-08-03"
+
+normal:
+  pre_open_start: "09:00"
+  open: "09:15"
+  continuous_close: "15:15"          # cash market (CAS-eligible stocks) continuous trading ends
+  derivatives_close: "15:40"
+
+cas:
+  start: "15:15"
+  reference_calc_end: "15:20"        # reference price = 15:00–15:15 VWAP
+  market_and_limit_end: "15:25"
+  limit_only_end: "15:30"            # random close within the last 2 minutes of this window
+  random_close_window_min: 2
+  end: "15:35"
+  price_band_pct: 3.0
+
+# Trading holidays. Fill from the NSE/BSE holiday circulars; until then DTE in trading days counts
+# weekdays only.
+holidays: []

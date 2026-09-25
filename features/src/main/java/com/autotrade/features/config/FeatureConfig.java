@@ -1,0 +1,135 @@
+package com.autotrade.features.config;
+
+import java.time.LocalDate;
+import java.time.LocalTime;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
+
+import com.autotrade.config.ThresholdConfig;
+
+/**
+ * Typed view of {@code config/features/features.vN.yaml} plus the exchange session file. The two
+ * content hashes identify exactly which definitions produced a feature snapshot.
+ */
+public record FeatureConfig(
+        String featuresHash,
+        String exchangeHash,
+        Map<String, LocalTime[]> sessionWindows,
+        int openingRangeMinutes,
+        int atrPeriod,
+        int emaFast,
+        int emaSlow,
+        int emaSlopeBars,
+        int swingStrength,
+        double retestBandAtr,
+        LocalTime pdhPdlUntil,
+        List<Integer> momentumWindowsSec,
+        int accelerationWindowSec,
+        List<Integer> basisChangeWindowsMin,
+        int oiStateWindowMin,
+        double oiStateMinPriceAtr,
+        double oiStateMinOiFraction,
+        int rvolSlotMinutes,
+        int rvolLookbackSessions,
+        int rvolMinHistorySessions,
+        int rvolSlopePoints,
+        int nearAtmStrikes,
+        int heavyWeightStrikes,
+        double outerStrikeWeight,
+        List<Integer> oiDeltaWindowsMin,
+        double oiFlowFlatFraction,
+        List<Integer> wallWeakeningLookbackMin,
+        double barrierOiWeight,
+        double barrierFreshOiWeight,
+        double barrierVolumeWeight,
+        double proximityDecayStrikes,
+        int straddleChangeWindowMin,
+        List<Integer> ivChangeWindowsMin,
+        double premiumResponseMinMoveAtr,
+        int breadthReturnWindowMin,
+        double breadthReturnScalePct,
+        int concentrationTopN,
+        double riskFreeRate,
+        LocalTime expiryClose,
+        int snapshotIntervalSec,
+        LocalTime marketOpen,
+        LocalTime continuousClose,
+        LocalTime derivativesClose,
+        LocalTime casStart,
+        LocalTime casReferenceEnd,
+        LocalTime casMarketAndLimitEnd,
+        LocalTime casLimitOnlyEnd,
+        LocalTime casEnd,
+        Set<LocalDate> holidays) {
+
+    public static FeatureConfig from(ThresholdConfig features, ThresholdConfig exchange) {
+        Map<String, LocalTime[]> windows = new LinkedHashMap<>();
+        for (Map.Entry<String, Object> entry : features.getMap("session_windows").entrySet()) {
+            String[] parts = String.valueOf(entry.getValue()).split("-");
+            windows.put(entry.getKey(), new LocalTime[] {LocalTime.parse(parts[0]), LocalTime.parse(parts[1])});
+        }
+        Set<LocalDate> holidays = new TreeSet<>();
+        if (exchange.get("holidays") instanceof List<?> list) {
+            for (Object day : list) {
+                holidays.add(LocalDate.parse(String.valueOf(day)));
+            }
+        }
+        return new FeatureConfig(
+                features.contentHash(),
+                exchange.contentHash(),
+                Map.copyOf(windows),
+                features.getInt("structure.opening_range_minutes"),
+                features.getInt("structure.atr_period"),
+                features.getInt("structure.ema_fast"),
+                features.getInt("structure.ema_slow"),
+                features.getInt("structure.ema_slope_bars"),
+                features.getInt("structure.swing_strength"),
+                features.getDouble("structure.retest_band_atr"),
+                features.getTime("structure.pdh_pdl_until"),
+                ints(features, "futures.momentum_windows_sec"),
+                features.getInt("futures.acceleration_window_sec"),
+                ints(features, "futures.basis_change_windows_min"),
+                features.getInt("futures.oi_state_window_min"),
+                features.getDouble("futures.oi_state_min_price_atr"),
+                features.getDouble("futures.oi_state_min_oi_fraction"),
+                features.getInt("rvol.slot_minutes"),
+                features.getInt("rvol.lookback_sessions"),
+                features.getInt("rvol.min_history_sessions"),
+                features.getInt("rvol.slope_points"),
+                features.getInt("options_chain.near_atm_strikes"),
+                features.getInt("options_chain.heavy_weight_strikes"),
+                features.getDouble("options_chain.outer_strike_weight"),
+                ints(features, "options_chain.oi_delta_windows_min"),
+                features.getDouble("options_chain.oi_flow_flat_fraction"),
+                ints(features, "options_chain.wall_weakening_lookback_min"),
+                features.getDouble("options_chain.barrier_weights.oi"),
+                features.getDouble("options_chain.barrier_weights.fresh_oi"),
+                features.getDouble("options_chain.barrier_weights.volume"),
+                features.getDouble("options_chain.proximity_decay_strikes"),
+                features.getInt("options_chain.straddle_change_window_min"),
+                ints(features, "options_chain.iv_change_windows_min"),
+                features.getDouble("options_chain.premium_response_min_move_atr"),
+                features.getInt("breadth.return_window_min"),
+                features.getDouble("breadth.return_scale_pct"),
+                features.getInt("breadth.concentration_top_n"),
+                features.getDouble("greeks.risk_free_rate"),
+                features.getTime("greeks.expiry_close"),
+                features.getInt("snapshot.interval_sec"),
+                exchange.getTime("normal.open"),
+                exchange.getTime("normal.continuous_close"),
+                exchange.getTime("normal.derivatives_close"),
+                exchange.getTime("cas.start"),
+                exchange.getTime("cas.reference_calc_end"),
+                exchange.getTime("cas.market_and_limit_end"),
+                exchange.getTime("cas.limit_only_end"),
+                exchange.getTime("cas.end"),
+                Set.copyOf(holidays));
+    }
+
+    private static List<Integer> ints(ThresholdConfig config, String path) {
+        return config.getDoubleList(path).stream().map(Double::intValue).toList();
+    }
+}

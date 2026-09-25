@@ -4,4 +4,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 JAR="$(ls autotrade-tools/target/autotrade-tools-*.jar | grep -v original | head -1)"
+# The Spring Boot jar embeds the other modules; it is not rebuilt when only they change.
+for module_jar in */target/*-SNAPSHOT.jar; do
+  if [[ "$module_jar" != autotrade-tools/* && "$module_jar" -nt "$JAR" ]]; then
+    echo "warning: $module_jar is newer than the CLI jar; run: mvn -q -DskipTests -pl autotrade-tools -am clean install" >&2
+    break
+  fi
+done
 exec java ${AUTOTRADE_JAVA_OPTS:--Xmx2g} -jar "$JAR" "$@"

@@ -6,7 +6,9 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Duration;
 import java.time.Instant;
+import java.nio.file.Path;
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.ZonedDateTime;
 import java.util.ArrayList;
 import java.util.EnumMap;
@@ -14,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
 
 import javax.sql.DataSource;
 
@@ -22,8 +25,14 @@ import org.springframework.boot.ApplicationRunner;
 import org.springframework.boot.ExitCodeGenerator;
 import org.springframework.stereotype.Component;
 
+import com.autotrade.core.event.OptionTick;
 import com.autotrade.core.event.SessionEventSource;
 import com.autotrade.core.time.MarketTime;
+import com.autotrade.instruments.Instrument;
+import com.autotrade.instruments.InstrumentMaster;
+import com.autotrade.instruments.InstrumentStore;
+import com.autotrade.instruments.UpstoxInstrumentFile;
+import com.autotrade.features.snapshot.SnapshotFlattener;
 import com.autotrade.md.store.LoadManifest;
 import com.autotrade.md.store.LoadManifests;
 import com.autotrade.md.store.MdTable;
@@ -37,6 +46,7 @@ import com.autotrade.tools.clone.CloneResult;
 import com.autotrade.tools.clone.Dataset;
 import com.autotrade.tools.clone.SessionCloner;
 import com.autotrade.md.zt.ZtQueries;
+import com.autotrade.md.zt.ZtSessionHistory;
 import com.autotrade.md.zt.ZtSessionSource;
 import com.autotrade.md.zt.ZtSourceKeys;
 
@@ -75,6 +85,9 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                 case "verify" -> verify(parsed);
                 case "replay" -> replay(parsed);
                 case "zt-sessions" -> ztSessions(parsed);
+                case "features" -> features(parsed);
+                case "simulate" -> simulate(parsed);
+                case "instruments" -> instruments(parsed);
                 default -> usage("unknown command: " + parsed.command());
             };
         } catch (IllegalArgumentException e) {
@@ -104,6 +117,12 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                                                              stream a session in replay order and check it
                                                              (zt = read zt-tiger-v2 directly, the default)
                   zt-sessions [--force]                      sessions and tick counts available in zt-tiger-v2
+                  features --session D [--underlying ...] [--at 10:00,14:52] [--out DIR] [--from zt|own] [--force]
+                                                             feature snapshots per minute to CSV (default .local/features)
+                  simulate --session D --underlying U --strike K --type CE|PE --at HH:mm [--stop-pct 15]
+                           [--target-pct 30] [--exit-by 15:20] [--lots 1]   one long option trade, base and stressed fills
+                  instruments --file NSE.json.gz[,BSE.json.gz] [--date D] [--underlying NIFTY,BANKNIFTY,SENSEX]
+                                                             load an Upstox contract-master file into ref.instrument
                   config-hash <file.yaml> [...]              hash and validate threshold files (no database)""");
         return 2;
     }
@@ -295,6 +314,83 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
             System.out.println("  unrecognised payload keys: " + zt.unknownPayloadKeys());
         }
         return stats.orderViolations() == 0 && result.delivered() > 0 ? 0 : 1;
+    }
+
+    private int features(ToolArgs args) throws Exception {
+        args.allowOnly(Set.of("session", "underlying", "at", "out", "from", "force", "features-file", "exchange-file"));
+        List<LocalDate> sessions = args.dates("session");
+        if (sessions.size() != 1) {
+            return usage("features needs exactly one --session");
+        }
+        if (!args.flag("force") && MarketHoursGuard.isBlocked(ZonedDateTime.now(MarketTime.IST))) {
+            System.err.println("refusing to read zt-tiger-v2 during market hours (09:00-15:50 IST); use --force");
+            return 3;
+        }
+        SessionEventSource eventSource = args.get("from", "zt").equals("own")
+                ? new StoredSessionSource(target) : new ZtSessionSource(source.dataSource(), false);
+        List<LocalTime> printAt = args.list("at", "").stream().map(LocalTime::parse).toList();
+        return FeaturesCommand.run(eventSource, new ZtSessionHistory(source.dataSource()), sessions.getFirst(),
+                args.upperList("underlying", DEFAULT_UNDERLYINGS),
+                Path.of(args.get("features-file", "config/features/features.v1.yaml")),
+                Path.of(args.get("exchange-file", "config/exchange/nse-bse-sessions.v1.yaml")),
+                Path.of(args.get("out", ".local/features")), printAt);
+    }
+
+    private int simulate(ToolArgs args) throws Exception {
+        args.allowOnly(Set.of("session", "underlying", "strike", "type", "at", "stop-pct", "target-pct", "exit-by",
+                "lots", "from", "force", "costs-file"));
+        if (!args.flag("force") && MarketHoursGuard.isBlocked(ZonedDateTime.now(MarketTime.IST))) {
+            System.err.println("refusing to read zt-tiger-v2 during market hours (09:00-15:50 IST); use --force");
+            return 3;
+        }
+        for (String required : List.of("session", "underlying", "strike", "type", "at")) {
+            if (!args.has(required)) {
+                return usage("simulate needs --" + required);
+            }
+        }
+        SessionEventSource eventSource = args.get("from", "zt").equals("own")
+                ? new StoredSessionSource(target) : new ZtSessionSource(source.dataSource(), false);
+        return SimulateCommand.run(eventSource, new SimulateCommand.Request(
+                LocalDate.parse(args.get("session", "")), args.get("underlying", "").toUpperCase(),
+                Double.parseDouble(args.get("strike", "")), OptionTick.OptionType.valueOf(args.get("type", "").toUpperCase()),
+                LocalTime.parse(args.get("at", "")), Double.parseDouble(args.get("stop-pct", "15")),
+                Double.parseDouble(args.get("target-pct", "30")), LocalTime.parse(args.get("exit-by", "15:20")),
+                Integer.parseInt(args.get("lots", "1")),
+                Path.of(args.get("costs-file", "config/costs/india-index-options-costs.v1.yaml"))));
+    }
+
+    private int instruments(ToolArgs args) throws Exception {
+        args.allowOnly(Set.of("file", "date", "underlying"));
+        List<String> files = args.list("file", "");
+        if (files.isEmpty()) {
+            return usage("instruments needs --file");
+        }
+        LocalDate date = LocalDate.parse(args.get("date", LocalDate.now(MarketTime.IST).toString()));
+        Set<String> underlyings = Set.copyOf(args.upperList("underlying", "NIFTY,BANKNIFTY,SENSEX"));
+        InstrumentStore store = new InstrumentStore(target);
+        for (String file : files) {
+            Path path = Path.of(file);
+            List<Instrument> loaded = UpstoxInstrumentFile.read(path, underlyings);
+            long id = store.save(date, "UPSTOX:" + path.getFileName(), path, loaded);
+            System.out.printf("snapshot %d: %,d index derivatives from %s (date %s)%n", id, loaded.size(), path, date);
+        }
+        InstrumentMaster master = store.latest(date);
+        for (String underlying : new TreeSet<>(underlyings)) {
+            List<Instrument> contracts = master.instruments(underlying);
+            if (contracts.isEmpty()) {
+                System.out.printf("  %-9s no contracts in the loaded files%n", underlying);
+                continue;
+            }
+            Instrument sample = contracts.stream().filter(Instrument::isOption).findFirst().orElse(contracts.getFirst());
+            List<LocalDate> expiries = master.optionExpiries(underlying, date);
+            LocalDate nearest = expiries.isEmpty() ? null : expiries.getFirst();
+            System.out.printf("  %-9s lot %d, freeze %d (max %d lots/order), option tick %.2f, strike step %s, "
+                            + "next expiries %s%n", underlying, sample.lotSize(), sample.freezeQuantity(),
+                    sample.maxLotsPerOrder(), sample.tickSize(),
+                    nearest == null ? "-" : SnapshotFlattener.cell(master.strikeStep(underlying, nearest)),
+                    expiries.stream().limit(5).toList());
+        }
+        return 0;
     }
 
     private int ztSessions(ToolArgs args) throws SQLException {
