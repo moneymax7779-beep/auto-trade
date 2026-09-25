@@ -28,6 +28,12 @@
         <module>strategy-api</module>
         <module>strategy-ecr</module>
         <module>research</module>
+        <module>broker-api</module>
+        <module>broker-paper</module>
+        <module>risk</module>
+        <module>oms</module>
+        <module>marketdata-live</module>
+        <module>app-trading-core</module>
         <module>autotrade-tools</module>
     </modules>
 
@@ -87,6 +93,36 @@
             <dependency>
                 <groupId>com.autotrade</groupId>
                 <artifactId>research</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.autotrade</groupId>
+                <artifactId>broker-api</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.autotrade</groupId>
+                <artifactId>broker-paper</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.autotrade</groupId>
+                <artifactId>risk</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.autotrade</groupId>
+                <artifactId>oms</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.autotrade</groupId>
+                <artifactId>marketdata-live</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.autotrade</groupId>
+                <artifactId>app-trading-core</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>

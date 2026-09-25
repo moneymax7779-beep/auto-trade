@@ -1,4 +1,4 @@
-package com.autotrade.tools;
+package com.autotrade.core.build;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;

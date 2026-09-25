@@ -40,7 +40,7 @@ import com.autotrade.md.store.SequenceDigest;
 import com.autotrade.md.store.StoredSessionSource;
 import com.autotrade.md.store.TableChecks;
 import com.autotrade.tools.MarketHoursGuard;
-import com.autotrade.tools.CodeVersion;
+import com.autotrade.core.build.CodeVersion;
 import com.autotrade.tools.SourceDatabase;
 import com.autotrade.tools.ToolArgs;
 import com.autotrade.tools.clone.CloneResult;

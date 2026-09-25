@@ -8,20 +8,12 @@
         <artifactId>autotrade-parent</artifactId>
         <version>0.1.0-SNAPSHOT</version>
     </parent>
-    <artifactId>marketdata-source-zt</artifactId>
-    <description>Read-only access to sessions captured by zt-tiger-v2: payload parsing and direct replay.</description>
+    <artifactId>marketdata-live</artifactId>
+    <description>Live market-data feeds: zt-tiger-v2 capture tail; replay-as-live for testing.</description>
     <dependencies>
         <dependency>
             <groupId>com.autotrade</groupId>
-            <artifactId>platform-core</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>com.autotrade</groupId>
-            <artifactId>marketdata-store</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>tools.jackson.core</groupId>
-            <artifactId>jackson-databind</artifactId>
+            <artifactId>marketdata-source-zt</artifactId>
         </dependency>
         <dependency>
             <groupId>org.postgresql</groupId>
@@ -30,6 +22,16 @@
         <dependency>
             <groupId>com.zaxxer</groupId>
             <artifactId>HikariCP</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-postgresql</artifactId>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.testcontainers</groupId>
+            <artifactId>testcontainers-junit-jupiter</artifactId>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 </project>

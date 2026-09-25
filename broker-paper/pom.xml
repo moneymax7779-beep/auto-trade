@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.autotrade</groupId>
+        <artifactId>autotrade-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+    <artifactId>broker-paper</artifactId>
+    <description>Paper broker: fills orders against live or replayed quotes; never contacts a real broker.</description>
+    <dependencies>
+        <dependency>
+            <groupId>com.autotrade</groupId>
+            <artifactId>broker-api</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.autotrade</groupId>
+            <artifactId>platform-core</artifactId>
+        </dependency>
+    </dependencies>
+</project>

@@ -18,6 +18,10 @@ Multi-user, multi-broker, Upstox first. PAPER only until the gates in
 | `strategy-api` | Strategy SPI: stages, scores, conditions, order intents |
 | `strategy-ecr` | The early-confirm-runner strategy |
 | `research` | Lifecycle replay (features → strategy → simulated fills), episodes, reports, held-out guard |
+| `broker-api`, `broker-paper` | Broker SPI; paper broker filling on live/replayed quotes |
+| `risk`, `oms` | Kill switches and pre-trade limits; order management with broker-side stop and reconciliation |
+| `marketdata-live` | Live feed tailing zt-tiger-v2 (read-only); replay-as-live |
+| `app-trading-core` | PAPER trading service (`bin/trading-core`), operator API on 127.0.0.1:8095 |
 | `autotrade-tools` | Operator CLI: `sessions`, `zt-sessions`, `replay`, `features`, `simulate`, `instruments`, `clone`, `verify`, `manifests`, `config-hash` |
 
 ## Run locally
@@ -78,6 +82,19 @@ Register a hypothesis in `docs/EXPERIMENT-LEDGER.md` before running it.
 After changing any module, rebuild the CLI jar: `mvn -q -DskipTests -pl autotrade-tools -am clean install`
 (`bin/autotrade` warns when it is stale).
 
+## PAPER trading (Phase 3)
+
+```bash
+bin/trading-core --mode=replay --session=2026-09-25     # a recorded day through the live path, then exit
+bin/trading-core --mode=live                            # today: tails zt-tiger-v2's capture until 15:45
+curl -s http://127.0.0.1:8095/api/status                 # positions, P&L, stages, feed lag, kill switches
+curl -s -X POST 'http://127.0.0.1:8095/api/kill?scope=GLOBAL&reason=manual'   # block new entries
+curl -s -X POST http://127.0.0.1:8095/api/exit-all       # close everything
+curl -s -X POST http://127.0.0.1:8095/api/stop           # close everything and end the session
+```
+
+Everything is PAPER: no code path sends an order to a real broker. Records are in `trade.*`.
+
 ## Config files
 
 ```bash
@@ -90,6 +107,7 @@ bin/autotrade config-hash config/*/*.yaml
 | `config/features/features.v2.yaml` | Feature definitions (v2: SENSEX RVOL slot, straddle expected move) |
 | `config/exchange/nse-bse-sessions.v2.yaml` | Session and CAS timings, 2026 holidays |
 | `config/costs/india-index-options-costs.v1.yaml` | Dated cost rates and fill models |
+| `config/risk/paper-risk.v2.yaml` | PAPER risk limits and order-handling parameters |
 
 Every file carries a content hash that is stamped on outputs. Change a value by adding a new
 version file; never edit a version that a run has used.

@@ -8,28 +8,33 @@
         <artifactId>autotrade-parent</artifactId>
         <version>0.1.0-SNAPSHOT</version>
     </parent>
-    <artifactId>marketdata-source-zt</artifactId>
-    <description>Read-only access to sessions captured by zt-tiger-v2: payload parsing and direct replay.</description>
+    <artifactId>oms</artifactId>
+    <description>Order management: marketable limits, slicing, broker-side stop, exits, reconciliation.</description>
     <dependencies>
         <dependency>
             <groupId>com.autotrade</groupId>
-            <artifactId>platform-core</artifactId>
+            <artifactId>broker-api</artifactId>
         </dependency>
         <dependency>
             <groupId>com.autotrade</groupId>
-            <artifactId>marketdata-store</artifactId>
+            <artifactId>risk</artifactId>
         </dependency>
         <dependency>
-            <groupId>tools.jackson.core</groupId>
-            <artifactId>jackson-databind</artifactId>
+            <groupId>com.autotrade</groupId>
+            <artifactId>instrument-master</artifactId>
         </dependency>
         <dependency>
-            <groupId>org.postgresql</groupId>
-            <artifactId>postgresql</artifactId>
+            <groupId>com.autotrade</groupId>
+            <artifactId>strategy-api</artifactId>
         </dependency>
         <dependency>
-            <groupId>com.zaxxer</groupId>
-            <artifactId>HikariCP</artifactId>
+            <groupId>com.autotrade</groupId>
+            <artifactId>execution-sim</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.autotrade</groupId>
+            <artifactId>broker-paper</artifactId>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 </project>

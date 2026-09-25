@@ -1,0 +1,29 @@
+# Pre-trade risk limits for PAPER trading. Exits are never blocked by risk; these limits stop new
+# entries and adds, and force a square-off. Values are placeholders chosen for one research account.
+version: paper-risk-v1
+name: paper-risk
+status: UNCALIBRATED
+
+account:
+  capital: 500000                      # notional PAPER capital, rupees
+  daily_loss_limit: 10000              # realised + marked-to-bid loss that engages the account kill switch
+  max_open_positions: 2                # across underlyings
+  max_lots_per_underlying: 4
+  max_orders_per_minute: 20
+
+time:
+  no_new_entries_after: "14:45"
+  square_off_at: "15:20"               # hard exit of everything, before the broker's own auto square-off
+
+data:
+  max_feed_age_sec: 5                  # a stale index or option feed blocks new entries
+  max_spread_pct: 1.5                  # entries refused when the option's spread is wider
+
+orders:
+  entry_buffer_ticks: 4                # marketable limit: ask + 4 ticks for a buy
+  exit_buffer_ticks: 4                 # bid − 4 ticks for a sell
+  entry_timeout_sec: 10                # an unfilled entry is cancelled after this
+  exit_chase_sec: 5                    # an unfilled exit is re-priced at the new touch after this
+  exit_chase_max: 6                    # re-pricings before the exit crosses 5% through the touch
+  stop_limit_offset_pct: 5             # stop-limit's limit is this far below its trigger
+  reconcile_every_sec: 30

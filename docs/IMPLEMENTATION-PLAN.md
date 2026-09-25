@@ -1,6 +1,6 @@
 # auto-trade — implementation plan
 
-Status: agreed 2026-09-25. Phase 0 done (736a423), Phase 1 done (8067b4c), Phase 2 in progress; see sections 10–11.
+Status: agreed 2026-09-25. Phase 0 done (736a423), Phase 1 done (8067b4c), Phase 2 done (616a018, d340a30), Phase 3 in progress; see sections 10–12.
 
 **Database decision (2026-09-25, for testing and implementation):** market data is read directly
 from zt-tiger-v2's database, read-only, with no copying (`bin/autotrade replay --from zt`, the
@@ -282,3 +282,37 @@ tuning sessions, stressed average −0.05 R; the early probe never fired (breadt
 and no PE trade occurred. By user decision the ChatGPT thresholds are kept without tuning; ecr-v3
 has identical thresholds and adds `evaluation.sessions_from: 2026-09-21`, so strategies are now
 evaluated on this week's market data onward (new sessions as they are captured), not older data.
+
+## 12. Phase 3 status (2026-09-25)
+
+Decisions (user, 2026-09-25): the first live PAPER feed tails zt-tiger-v2's capture (read-only, no
+new broker connection); auto-trade's own Upstox connection follows, on a separate Upstox developer
+app under the same Upstox user (it shares that user's two WebSocket connections with zt-tiger-v2).
+
+Built (modules `broker-api`, `broker-paper`, `risk`, `oms`, `marketdata-live`, `app-trading-core`):
+
+- **Broker SPI** and a **paper broker**: latency on orders, cancels and modifies; limits fill on
+  visible depth at the limit or better (partial fills); stop-limits trigger on the last traded
+  price; adverse slippage never crosses the limit; idempotent client order ids.
+- **Risk** (`config/risk/paper-risk.v2.yaml`): global/account/strategy kill switches, daily loss
+  limit (engages the account switch), max positions and lots, order rate, entry cutoff 14:45,
+  square-off 15:20, stale-feed and spread guards. Exits are never blocked.
+- **OMS**: marketable limits (ask + 4 ticks), freeze-quantity slicing, a resting stop-limit that
+  always covers the held quantity (resized in place after adds), exits that cancel the stop and
+  working entries and sell only after the cancels are confirmed (no oversell), exit re-pricing
+  every 2 s, entry timeout, reconciliation with the broker (a mismatch engages the global switch).
+  Client order ids carry the trading-session id and a role letter (B, S, X).
+- **Live feed**: `ZtTailFeed` follows zt-tiger-v2's capture by row id (catch-up from the open, then
+  new rows, with a trailing recheck window for late commits); `ReplayAsLiveFeed` runs a recorded
+  session through the same path.
+- **trading-core** (`bin/trading-core`): one session per day; persists sessions, orders, order
+  events, positions, per-minute decisions, rejections and kill-switch events (`trade.*`,
+  `ops.kill_switch_event`); operator API on 127.0.0.1:8095 (`/api/status`, `/api/orders`,
+  `/api/kill`, `/api/kill/release`, `/api/exit-all`, `/api/stop`). Live, it never opens or adds
+  from a snapshot older than 60 s.
+- **Checked**: replay-as-live of 24 Sep matches the research replay to the rupee (−₹1,356);
+  25 Sep −₹1,623 vs −₹1,519 (the extra cancel-then-sell step on exit).
+
+Still to do in Phase 3: the Upstox adapter (OAuth login, SDK ≥ 1.29 feed with VIX and per-stock
+CAS fields, order API mapping with orders hard-disabled in PAPER); measuring the zt tail's lag on a
+live session; ten clean PAPER sessions (the phase's exit criterion) from 28 Sep.

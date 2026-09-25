@@ -1,0 +1,51 @@
+spring:
+  config:
+    import: optional:file:.env[.properties]
+  main:
+    banner-mode: off
+  datasource:
+    url: ${AUTOTRADE_DB_URL:jdbc:postgresql://127.0.0.1:5500/autotrade}
+    username: ${AUTOTRADE_DB_USER:autotrade}
+    password: ${AUTOTRADE_DB_PASSWORD:autotrade}
+    hikari:
+      maximum-pool-size: 6
+      pool-name: autotrade
+  flyway:
+    locations: classpath:db/migration
+
+server:
+  address: 127.0.0.1             # loopback only until Phase 5 adds authentication
+  port: ${AUTOTRADE_TRADING_PORT:8095}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+autotrade:
+  trading:
+    account: PAPER-1
+    underlyings: [NIFTY, SENSEX]
+    fill-model: base
+    strategy-file: config/strategy/early-confirm-runner.v3.yaml
+    features-file: config/features/features.v2.yaml
+    exchange-file: config/exchange/nse-bse-sessions.v2.yaml
+    costs-file: config/costs/india-index-options-costs.v1.yaml
+    risk-file: config/risk/paper-risk.v2.yaml
+    poll-interval-ms: 250
+    recheck-window-ms: 3000
+    stop-after: "15:45"
+  source:
+    url: ${ZT_SOURCE_URL:jdbc:postgresql://127.0.0.1:5490/trading}
+    username: ${ZT_SOURCE_USER:zerotrade}
+    password: ${ZT_SOURCE_PASSWORD:}
+    password-file: ${ZT_SOURCE_PASSWORD_FILE:../zt-tiger-v2/.local/v2/runtime.env}
+    password-key: V2_DB_PASSWORD
+
+logging:
+  level:
+    root: WARN
+    com.autotrade: INFO
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level %msg%n"

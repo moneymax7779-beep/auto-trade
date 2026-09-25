@@ -8,8 +8,8 @@
         <artifactId>autotrade-parent</artifactId>
         <version>0.1.0-SNAPSHOT</version>
     </parent>
-    <artifactId>marketdata-source-zt</artifactId>
-    <description>Read-only access to sessions captured by zt-tiger-v2: payload parsing and direct replay.</description>
+    <artifactId>risk</artifactId>
+    <description>Pre-trade risk: kill switches, loss limits, stale-data and time-window guards.</description>
     <dependencies>
         <dependency>
             <groupId>com.autotrade</groupId>
@@ -17,19 +17,7 @@
         </dependency>
         <dependency>
             <groupId>com.autotrade</groupId>
-            <artifactId>marketdata-store</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>tools.jackson.core</groupId>
-            <artifactId>jackson-databind</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>org.postgresql</groupId>
-            <artifactId>postgresql</artifactId>
-        </dependency>
-        <dependency>
-            <groupId>com.zaxxer</groupId>
-            <artifactId>HikariCP</artifactId>
+            <artifactId>strategy-config</artifactId>
         </dependency>
     </dependencies>
 </project>
