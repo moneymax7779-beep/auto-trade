@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Runs the operator CLI from the built jar. Build first: mvn -q -DskipTests install
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$ROOT"
+JAR="$(ls autotrade-tools/target/autotrade-tools-*.jar | grep -v original | head -1)"
+exec java ${AUTOTRADE_JAVA_OPTS:--Xmx2g} -jar "$JAR" "$@"

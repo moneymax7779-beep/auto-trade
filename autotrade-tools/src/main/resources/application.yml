@@ -1,0 +1,33 @@
+spring:
+  config:
+    import: optional:file:.env[.properties]
+  main:
+    web-application-type: none
+    banner-mode: off
+  datasource:
+    url: ${AUTOTRADE_DB_URL:jdbc:postgresql://127.0.0.1:5500/autotrade}
+    username: ${AUTOTRADE_DB_USER:autotrade}
+    password: ${AUTOTRADE_DB_PASSWORD:autotrade}
+    hikari:
+      maximum-pool-size: 8
+      pool-name: autotrade
+  flyway:
+    locations: classpath:db/migration
+
+autotrade:
+  source:
+    name: zt-tiger-v2
+    url: ${ZT_SOURCE_URL:jdbc:postgresql://127.0.0.1:5490/trading}
+    username: ${ZT_SOURCE_USER:zerotrade}
+    password: ${ZT_SOURCE_PASSWORD:}
+    # zt-tiger-v2 generates its DB password into this file; it wins over ZT_SOURCE_PASSWORD when present.
+    password-file: ${ZT_SOURCE_PASSWORD_FILE:../zt-tiger-v2/.local/v2/runtime.env}
+    password-key: V2_DB_PASSWORD
+  spool-dir: ${AUTOTRADE_SPOOL_DIR:.local/spool}
+
+logging:
+  level:
+    root: WARN
+    com.autotrade: INFO
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level %msg%n"
