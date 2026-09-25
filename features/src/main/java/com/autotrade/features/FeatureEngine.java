@@ -39,8 +39,6 @@ import com.autotrade.features.time.SessionPhase;
  */
 public final class FeatureEngine implements Consumer<MarketEvent> {
 
-    private static final double TRADING_MINUTES_PER_DAY = 375.0;
-
     private final String underlying;
     private final LocalDate session;
     private final FeatureConfig config;
@@ -70,7 +68,7 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
         Instant open = clock.sessionOpen(session);
         this.structure = new StructureState(config, open, history.previousSession(underlying, session,
                 config.pdhPdlUntil()));
-        this.futures = new FuturesState(config, session, open, new VolumeProfile(
+        this.futures = new FuturesState(config, underlying, session, open, new VolumeProfile(
                 history.futuresMinuteVolumes(underlying, session, config.rvolLookbackSessions())));
         this.options = new OptionChainState(config, clock, session);
         this.breadth = new BreadthState(config);
@@ -143,7 +141,7 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
                 secondsSince(time, spotTime), secondsSince(time, futures.lastTime()),
                 secondsSince(time, options.lastTime()),
                 structureFeatures, futuresFeatures, optionsFeatures, breadthFeatures,
-                regime(time, reference, optionsFeatures.atmIv()),
+                regime(time, reference, optionsFeatures),
                 new CasFeatures(casFeedPhase, phase.isCas() || phase == SessionPhase.DERIVATIVES_ONLY
                         ? casIndicative : Double.NaN,
                         phase.isCas() ? casIndicative - lastContinuousSpot : Double.NaN,
@@ -151,18 +149,56 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
                 config.featuresHash(), config.exchangeHash());
     }
 
-    private RegimeFeatures regime(Instant time, double reference, double atmIv) {
+    private RegimeFeatures regime(Instant time, double reference, OptionsFeatures chain) {
         LocalDate expiry = options.expiry();
         if (expiry == null) {
-            return new RegimeFeatures(null, -1, -1, -1, Double.NaN, Double.NaN, Double.NaN);
+            return new RegimeFeatures(null, -1, -1, -1, Double.NaN, Double.NaN, Double.NaN, "NONE", Double.NaN);
         }
-        double daily = reference * atmIv / Math.sqrt(252);
-        double remaining = reference * atmIv
-                * Math.sqrt(clock.continuousMinutesLeft(time) / (252 * TRADING_MINUTES_PER_DAY));
+        int dte = clock.tradingDaysToExpiry(session, expiry);
         double dayRange = structure.dayRange();
-        return new RegimeFeatures(expiry.toString(), clock.tradingDaysToExpiry(session, expiry),
-                (int) ChronoUnit.DAYS.between(session, expiry), clock.minutesToExpiryClose(time, expiry),
-                daily, remaining, daily > 0 ? dayRange / daily : Double.NaN);
+        ExpectedMove move = expectedMove(time, reference, chain, expiry, dte);
+        return new RegimeFeatures(expiry.toString(), dte, (int) ChronoUnit.DAYS.between(session, expiry),
+                clock.minutesToExpiryClose(time, expiry), move.toExpiry, move.daily, move.remaining, move.method,
+                move.daily > 0 ? dayRange / move.daily : Double.NaN);
+    }
+
+    private record ExpectedMove(double toExpiry, double daily, double remaining, String method) {
+    }
+
+    /**
+     * STRADDLE: the ATM straddle's time value prices the expected absolute move to expiry, which is
+     * sqrt(2/pi) of one standard deviation; that move is spread over the trading minutes left to
+     * the expiry close (today's remaining minutes plus a full day per trading day in between).
+     * IV_TRADING_MINUTES reproduces features v1 (calendar-year IV applied per trading minute).
+     */
+    private ExpectedMove expectedMove(Instant time, double reference, OptionsFeatures chain, LocalDate expiry,
+                                      int dte) {
+        double perDay = config.tradingMinutesPerDay();
+        if ("IV_TRADING_MINUTES".equals(config.expectedMoveMethod())) {
+            double daily = reference * chain.atmIv() / Math.sqrt(252);
+            double remaining = reference * chain.atmIv()
+                    * Math.sqrt(clock.continuousMinutesLeft(time) / (252 * perDay));
+            return new ExpectedMove(Double.NaN, daily, remaining, "IV_TRADING_MINUTES");
+        }
+        double todayLeft = Math.min(perDay, Math.max(0, clock.minutesToExpiryClose(time, session)));
+        double totalMinutes = todayLeft + perDay * dte;
+        if (totalMinutes <= 0) {
+            return new ExpectedMove(Double.NaN, Double.NaN, 0, "NONE");
+        }
+        double timeValue = chain.straddle() - Math.abs(reference - chain.atmStrike());
+        double toExpiry;
+        String method;
+        if (timeValue > 0) {
+            toExpiry = timeValue * Math.sqrt(Math.PI / 2);
+            method = "STRADDLE";
+        } else if (chain.atmIv() > 0) {
+            toExpiry = reference * chain.atmIv() * Math.sqrt(clock.yearsToExpiry(time, expiry));
+            method = "IV";
+        } else {
+            return new ExpectedMove(Double.NaN, Double.NaN, Double.NaN, "NONE");
+        }
+        return new ExpectedMove(toExpiry, toExpiry * Math.sqrt(Math.min(perDay, totalMinutes) / totalMinutes),
+                toExpiry * Math.sqrt(todayLeft / totalMinutes), method);
     }
 
     private static double secondsSince(Instant now, Instant then) {

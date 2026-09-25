@@ -42,6 +42,13 @@ class SessionClockTest {
     }
 
     @Test
+    void tradingDaysToExpirySkipExchangeHolidays() {
+        // Dussehra, Tue 20 Oct 2026: Fri 16 Oct -> Thu 22 Oct counts Mon 19, Wed 21, Thu 22
+        assertThat(clock.tradingDaysToExpiry(LocalDate.of(2026, 10, 16), LocalDate.of(2026, 10, 22))).isEqualTo(3);
+        assertThat(clock.isTradingDay(LocalDate.of(2026, 9, 14))).isFalse(); // Ganesh Chaturthi
+    }
+
+    @Test
     void continuousMinutesLeftStopsAtTheCasStart() {
         assertThat(clock.continuousMinutesLeft(at("14:52"))).isEqualTo(23);
         assertThat(clock.continuousMinutesLeft(at("15:20"))).isZero();

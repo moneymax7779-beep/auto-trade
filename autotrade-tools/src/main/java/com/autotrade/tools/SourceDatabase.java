@@ -50,7 +50,7 @@ public class SourceDatabase implements AutoCloseable {
             // Direct replay holds two cursors (ticks, session phases) per underlying.
             config.setMaximumPoolSize(8);
             config.setPoolName("zt-source");
-            config.addDataSourceProperty("ApplicationName", "autotrade-session-cloner");
+            config.addDataSourceProperty("ApplicationName", "autotrade-readonly");
             dataSource = new HikariDataSource(config);
             assertReadOnly(dataSource);
         }

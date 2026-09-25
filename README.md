@@ -15,6 +15,9 @@ Multi-user, multi-broker, Upstox first. PAPER only until the gates in
 | `features` | Point-in-time feature engine: structure, futures, options chain, breadth, regime, CAS |
 | `execution-sim` | Dated cost model and option-path fill simulator (base and stressed) |
 | `instrument-master` | Upstox contract master → `ref.instrument`: expiries, lots, freeze quantity, ticks |
+| `strategy-api` | Strategy SPI: stages, scores, conditions, order intents |
+| `strategy-ecr` | The early-confirm-runner strategy |
+| `research` | Lifecycle replay (features → strategy → simulated fills), episodes, reports, held-out guard |
 | `autotrade-tools` | Operator CLI: `sessions`, `zt-sessions`, `replay`, `features`, `simulate`, `instruments`, `clone`, `verify`, `manifests`, `config-hash` |
 
 ## Run locally
@@ -64,7 +67,12 @@ bin/autotrade features --session 2026-09-25 --at 10:00,14:52      # CSV per inde
 bin/autotrade simulate --session 2026-09-25 --underlying NIFTY --strike 23100 --type CE --at 14:52 \
     --stop-pct 15 --target-pct 30 --exit-by 15:20                   # base and stressed fills, after costs
 bin/autotrade instruments --file .local/instruments/NSE-2026-09-25.json.gz --date 2026-09-25
+bin/autotrade features --session 2026-09-25 --save                 # also into feat.snapshot
+bin/autotrade lifecycle --split TUNING --save                      # strategy replay, report in .local/reports
+bin/autotrade lifecycle --split HELD_OUT --held-out --save         # once per strategy family
 ```
+
+Register a hypothesis in `docs/EXPERIMENT-LEDGER.md` before running it.
 
 After changing any module, rebuild the CLI jar: `mvn -q -DskipTests -pl autotrade-tools -am clean install`
 (`bin/autotrade` warns when it is stale).
@@ -77,9 +85,9 @@ bin/autotrade config-hash config/*/*.yaml
 
 | File | Holds |
 | --- | --- |
-| `config/strategy/early-confirm-runner.v1.yaml` | ChatGPT-suggested trading thresholds, `UNCALIBRATED` |
-| `config/features/features.v1.yaml` | Feature definitions (windows, periods, weights) |
-| `config/exchange/nse-bse-sessions.v1.yaml` | Session and CAS timings, holidays |
+| `config/strategy/early-confirm-runner.v2.yaml` | ChatGPT-suggested thresholds plus lifecycle/exit placeholders, `UNCALIBRATED` (v1: thresholds only) |
+| `config/features/features.v2.yaml` | Feature definitions (v2: SENSEX RVOL slot, straddle expected move) |
+| `config/exchange/nse-bse-sessions.v2.yaml` | Session and CAS timings, 2026 holidays |
 | `config/costs/india-index-options-costs.v1.yaml` | Dated cost rates and fill models |
 
 Every file carries a content hash that is stamped on outputs. Change a value by adding a new

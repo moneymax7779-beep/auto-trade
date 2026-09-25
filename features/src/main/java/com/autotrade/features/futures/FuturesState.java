@@ -4,6 +4,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -23,10 +24,13 @@ public final class FuturesState {
     private static final Duration RETENTION = Duration.ofMinutes(15);
 
     private final FeatureConfig config;
+    private final int slotMinutes;
     private final LocalDate session;
     private final Instant sessionOpen;
     private final VolumeProfile profile;
     private final List<double[]> rvolHistory = new ArrayList<>();
+    private final List<Long> sessionSlots = new ArrayList<>();
+    private static final int MIN_SESSION_SLOTS = 10;
 
     private long token = -1;
     private LocalDate expiry;
@@ -42,8 +46,10 @@ public final class FuturesState {
     private double firstOi = Double.NaN;
     private Instant lastTime;
 
-    public FuturesState(FeatureConfig config, LocalDate session, Instant sessionOpen, VolumeProfile profile) {
+    public FuturesState(FeatureConfig config, String underlying, LocalDate session, Instant sessionOpen,
+                        VolumeProfile profile) {
         this.config = config;
+        this.slotMinutes = config.rvolSlotMinutes(underlying);
         this.session = session;
         this.sessionOpen = sessionOpen;
         this.profile = profile;
@@ -123,7 +129,7 @@ public final class FuturesState {
         if (price == null) {
             return new FuturesFeatures(null, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN,
                     Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, OiState.NEUTRAL.name(), 0,
-                    Double.NaN, Double.NaN, profile.sessionCount(), Double.NaN);
+                    Double.NaN, Double.NaN, profile.sessionCount(), Double.NaN, -1, Double.NaN);
         }
         oneMinute.advanceTo(time);
         List<Integer> windows = config.momentumWindowsSec();
@@ -145,6 +151,7 @@ public final class FuturesState {
         LocalTime minute = minuteOf(time);
         long lastMinuteVolume = minuteVolumes.getOrDefault(minute.minusMinutes(1), 0L);
         double[] rvol = rvol(time);
+        int daysToExpiry = expiry == null ? -1 : (int) ChronoUnit.DAYS.between(session, expiry);
         return new FuturesFeatures(
                 symbol, price.latest(), vwap, m30, m60, m180,
                 futuresAtr > 0 ? m60 / futuresAtr : Double.NaN,
@@ -152,27 +159,50 @@ public final class FuturesState {
                 basis.latest(),
                 basis.change(time, Duration.ofMinutes(config.basisChangeWindowsMin().get(0))),
                 basis.change(time, Duration.ofMinutes(config.basisChangeWindowsMin().get(1))),
-                oi.latest(), oiChange, oi.latest() - firstOi, state.name(), lastMinuteVolume, rvol[0], rvol[1], (int) rvol[2], futuresAtr);
+                oi.latest(), oiChange, oi.latest() - firstOi, state.name(), lastMinuteVolume, rvol[0], rvol[1],
+                (int) rvol[2], rvol[3], daysToExpiry, futuresAtr);
     }
 
-    /** [rvol, slope per minute, sessions used] for the slot of completed minutes ending at {@code time}. */
+    /**
+     * [rvol, slope per minute, sessions used] for the slot of completed minutes ending at
+     * {@code time}; NaN when history is short or the historical slot volume is too thin to compare.
+     */
     private double[] rvol(Instant time) {
         LocalTime end = minuteOf(time);
         List<LocalTime> minutes = new ArrayList<>();
         long current = 0;
-        for (int i = config.rvolSlotMinutes(); i >= 1; i--) {
+        for (int i = slotMinutes; i >= 1; i--) {
             LocalTime minute = end.minusMinutes(i);
             minutes.add(minute);
             current += minuteVolumes.getOrDefault(minute, 0L);
         }
         VolumeProfile.SlotMedian median = profile.slotMedian(minutes);
-        double rvol = median.sessions() >= config.rvolMinHistorySessions() && median.median() > 0
-                ? current / median.median() : Double.NaN;
+        boolean enoughHistory = median.sessions() >= config.rvolMinHistorySessions();
+        boolean enoughVolume = median.median() > 0 && median.median() >= config.rvolMinSlotMedianVolume();
+        double rvol = enoughHistory && enoughVolume ? current / median.median() : Double.NaN;
         if (!rvolHistory.isEmpty() && rvolHistory.getLast()[0] == time.getEpochSecond()) {
             rvolHistory.removeLast();
         }
         rvolHistory.add(new double[] {time.getEpochSecond(), rvol});
-        return new double[] {rvol, slope(), median.sessions()};
+        double sessionRvol = sessionRelative(current);
+        return new double[] {rvol, slope(), median.sessions(), sessionRvol};
+    }
+
+    /**
+     * Current slot volume over the median of this session's earlier slot volumes (one per snapshot,
+     * so overlapping); NaN until {@value #MIN_SESSION_SLOTS} earlier slots exist.
+     */
+    private double sessionRelative(long current) {
+        double result = Double.NaN;
+        if (sessionSlots.size() >= MIN_SESSION_SLOTS) {
+            List<Long> sorted = new ArrayList<>(sessionSlots);
+            sorted.sort(Long::compare);
+            int n = sorted.size();
+            double median = n % 2 == 1 ? sorted.get(n / 2) : (sorted.get(n / 2 - 1) + sorted.get(n / 2)) / 2.0;
+            result = median > 0 ? current / median : Double.NaN;
+        }
+        sessionSlots.add(current);
+        return result;
     }
 
     /** Least-squares slope per minute of the last few RVOL values; NaN if any is missing. */

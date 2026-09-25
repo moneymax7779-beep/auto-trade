@@ -25,6 +25,9 @@
         <module>features</module>
         <module>execution-sim</module>
         <module>instrument-master</module>
+        <module>strategy-api</module>
+        <module>strategy-ecr</module>
+        <module>research</module>
         <module>autotrade-tools</module>
     </modules>
 
@@ -69,6 +72,21 @@
             <dependency>
                 <groupId>com.autotrade</groupId>
                 <artifactId>instrument-master</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.autotrade</groupId>
+                <artifactId>strategy-api</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.autotrade</groupId>
+                <artifactId>strategy-ecr</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.autotrade</groupId>
+                <artifactId>research</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>

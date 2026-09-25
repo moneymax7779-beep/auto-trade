@@ -13,7 +13,7 @@ public final class TestConfig {
 
     public static FeatureConfig load() {
         return FeatureConfig.from(
-                ThresholdConfig.load(Path.of("..", "config", "features", "features.v1.yaml")),
-                ThresholdConfig.load(Path.of("..", "config", "exchange", "nse-bse-sessions.v1.yaml")));
+                ThresholdConfig.load(Path.of("..", "config", "features", "features.v2.yaml")),
+                ThresholdConfig.load(Path.of("..", "config", "exchange", "nse-bse-sessions.v2.yaml")));
     }
 }

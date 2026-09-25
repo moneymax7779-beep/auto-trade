@@ -16,6 +16,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.function.Consumer;
 
+import javax.sql.DataSource;
+
 import com.autotrade.config.ThresholdConfig;
 import com.autotrade.core.event.SessionEventSource;
 import com.autotrade.core.history.SessionHistory;
@@ -24,6 +26,10 @@ import com.autotrade.features.FeatureEngine;
 import com.autotrade.features.config.FeatureConfig;
 import com.autotrade.features.snapshot.FeatureSnapshot;
 import com.autotrade.features.snapshot.SnapshotFlattener;
+import com.autotrade.md.store.Runs;
+import com.autotrade.md.store.SnapshotWriter;
+
+import tools.jackson.databind.json.JsonMapper;
 
 /** Replays a session through the feature engine and writes one CSV row per snapshot and underlying. */
 final class FeaturesCommand {
@@ -35,20 +41,40 @@ final class FeaturesCommand {
             "futures.basis", "futures.oiState", "futures.rvolTod", "futures.rvolSlope", "options.atmStrike",
             "options.ceOiChange3m", "options.peOiChange3m", "options.ceOiFlow", "options.peOiFlow",
             "options.callBarrierStrike", "options.putSupportStrike", "options.atmIv", "options.premiumResponseCe",
-            "breadth.momentumBreadth", "breadth.dayBreadth", "regime.dteTradingDays", "regime.expectedMoveRemaining");
+            "breadth.momentumBreadth", "breadth.dayBreadth", "regime.dteTradingDays", "regime.expectedMoveToExpiry",
+            "regime.expectedMoveDaily", "regime.expectedMoveRemaining", "regime.expectedMoveMethod");
+
+    private static final JsonMapper JSON = JsonMapper.builder().build();
 
     private FeaturesCommand() {
     }
 
+    /** Optional database target: snapshots go to feat.snapshot under a research.run. */
+    record Persistence(DataSource dataSource, String codeVersion) {
+    }
+
     static int run(SessionEventSource source, SessionHistory history, LocalDate session, List<String> underlyings,
-                   Path featuresFile, Path exchangeFile, Path outputDirectory, List<LocalTime> printAt)
-            throws Exception {
-        FeatureConfig config = FeatureConfig.from(ThresholdConfig.load(featuresFile), ThresholdConfig.load(exchangeFile));
+                   Path featuresFile, Path exchangeFile, Path outputDirectory, List<LocalTime> printAt,
+                   Persistence persistence) throws Exception {
+        ThresholdConfig featuresConfig = ThresholdConfig.load(featuresFile);
+        ThresholdConfig exchangeConfig = ThresholdConfig.load(exchangeFile);
+        FeatureConfig config = FeatureConfig.from(featuresConfig, exchangeConfig);
         Files.createDirectories(outputDirectory);
+        Runs runs = persistence == null ? null : new Runs(persistence.dataSource());
+        Long runId = null;
+        SnapshotWriter writer = null;
+        if (runs != null) {
+            Map<String, String> hashes = new LinkedHashMap<>();
+            hashes.put(featuresFile.getFileName().toString(), featuresConfig.contentHash());
+            hashes.put(exchangeFile.getFileName().toString(), exchangeConfig.contentHash());
+            runId = runs.start("FEATURES", persistence.codeVersion(), source.name(), List.of(session), underlyings,
+                    JSON.writeValueAsString(hashes));
+            writer = new SnapshotWriter(persistence.dataSource(), runId);
+        }
         Map<String, CsvSink> sinks = new LinkedHashMap<>();
         List<FeatureEngine> engines = new ArrayList<>();
         for (String underlying : underlyings) {
-            CsvSink sink = new CsvSink(outputDirectory.resolve(session + "-" + underlying + ".csv"), printAt);
+            CsvSink sink = new CsvSink(outputDirectory.resolve(session + "-" + underlying + ".csv"), printAt, writer);
             sinks.put(underlying, sink);
             engines.add(new FeatureEngine(underlying, session, config, history, sink));
         }
@@ -60,10 +86,20 @@ final class FeaturesCommand {
                 }
             });
             engines.forEach(FeatureEngine::finish);
+            if (writer != null) {
+                writer.close();
+                runs.finish(runId, JSON.writeValueAsString(Map.of("snapshots", writer.written())));
+                System.out.printf("saved %,d snapshots to feat.snapshot as run %d%n", writer.written(), runId);
+            }
             System.out.printf("features %s %s from %s: %,d events, %.1fs; features %s, exchange %s%n", session,
                     underlyings, source.name(), result.delivered(),
                     Duration.between(started, Instant.now()).toMillis() / 1000.0,
                     config.featuresHash().substring(0, 19), config.exchangeHash().substring(0, 19));
+        } catch (Exception e) {
+            if (runId != null) {
+                runs.fail(runId, String.valueOf(e.getMessage()));
+            }
+            throw e;
         } finally {
             for (CsvSink sink : sinks.values()) {
                 sink.close();
@@ -77,6 +113,21 @@ final class FeaturesCommand {
             }
         }
         return 0;
+    }
+
+    /** JSON-safe copy: NaN/infinite numbers become null, times and dates become ISO strings. */
+    static Map<String, Object> jsonValues(Map<String, Object> row) {
+        Map<String, Object> values = new LinkedHashMap<>();
+        row.forEach((key, value) -> {
+            if (value instanceof Double d && !Double.isFinite(d)) {
+                values.put(key, null);
+            } else if (value instanceof Instant || value instanceof LocalDate) {
+                values.put(key, value.toString());
+            } else {
+                values.put(key, value);
+            }
+        });
+        return values;
     }
 
     private static String summary(Map<String, Object> row) {
@@ -94,13 +145,15 @@ final class FeaturesCommand {
 
         private final Path path;
         private final BufferedWriter writer;
+        private final SnapshotWriter database;
         private final Map<LocalTime, Boolean> printAt = new HashMap<>();
         private final List<Map<String, Object>> printed = new ArrayList<>();
         private boolean header;
         private int rows;
 
-        CsvSink(Path path, List<LocalTime> printAt) throws IOException {
+        CsvSink(Path path, List<LocalTime> printAt, SnapshotWriter database) throws IOException {
             this.path = path;
+            this.database = database;
             this.writer = Files.newBufferedWriter(path);
             printAt.forEach(time -> this.printAt.put(time, true));
         }
@@ -124,6 +177,10 @@ final class FeaturesCommand {
                 throw new UncheckedIOException(e);
             }
             rows++;
+            if (database != null) {
+                database.add(snapshot.session(), snapshot.underlying(), snapshot.time(), snapshot.phase(),
+                        snapshot.spot(), JSON.writeValueAsString(jsonValues(row)));
+            }
             LocalTime time = snapshot.time().atZone(MarketTime.IST).toLocalTime();
             if (printAt.containsKey(time)) {
                 printed.add(row);

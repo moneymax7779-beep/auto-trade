@@ -39,6 +39,7 @@ public record StructureFeatures(
         boolean orlRetestHeld,
         int pdhClosesAbove,
         int pdlClosesBelow,
+        double lastBarClose,
         double lastBarBodyRatio,
         double lastBarCloseLocation,
         double lastBarUpperWickRatio,

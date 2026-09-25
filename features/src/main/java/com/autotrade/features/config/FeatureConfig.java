@@ -33,6 +33,8 @@ public record FeatureConfig(
         double oiStateMinPriceAtr,
         double oiStateMinOiFraction,
         int rvolSlotMinutes,
+        Map<String, Integer> rvolSlotMinutesByUnderlying,
+        double rvolMinSlotMedianVolume,
         int rvolLookbackSessions,
         int rvolMinHistorySessions,
         int rvolSlopePoints,
@@ -55,6 +57,8 @@ public record FeatureConfig(
         double riskFreeRate,
         LocalTime expiryClose,
         int snapshotIntervalSec,
+        String expectedMoveMethod,
+        int tradingMinutesPerDay,
         LocalTime marketOpen,
         LocalTime continuousClose,
         LocalTime derivativesClose,
@@ -96,6 +100,8 @@ public record FeatureConfig(
                 features.getDouble("futures.oi_state_min_price_atr"),
                 features.getDouble("futures.oi_state_min_oi_fraction"),
                 features.getInt("rvol.slot_minutes"),
+                intMap(features, "rvol.slot_minutes_by_underlying"),
+                features.has("rvol.min_slot_median_volume") ? features.getDouble("rvol.min_slot_median_volume") : 0,
                 features.getInt("rvol.lookback_sessions"),
                 features.getInt("rvol.min_history_sessions"),
                 features.getInt("rvol.slope_points"),
@@ -118,6 +124,9 @@ public record FeatureConfig(
                 features.getDouble("greeks.risk_free_rate"),
                 features.getTime("greeks.expiry_close"),
                 features.getInt("snapshot.interval_sec"),
+                features.has("expected_move.method") ? features.getString("expected_move.method") : "IV_TRADING_MINUTES",
+                features.has("expected_move.trading_minutes_per_day")
+                        ? features.getInt("expected_move.trading_minutes_per_day") : 375,
                 exchange.getTime("normal.open"),
                 exchange.getTime("normal.continuous_close"),
                 exchange.getTime("normal.derivatives_close"),
@@ -127,6 +136,20 @@ public record FeatureConfig(
                 exchange.getTime("cas.limit_only_end"),
                 exchange.getTime("cas.end"),
                 Set.copyOf(holidays));
+    }
+
+    /** RVOL slot length for an underlying (a per-underlying override, else the default). */
+    public int rvolSlotMinutes(String underlying) {
+        return rvolSlotMinutesByUnderlying.getOrDefault(underlying, rvolSlotMinutes);
+    }
+
+    private static Map<String, Integer> intMap(ThresholdConfig config, String path) {
+        if (!config.has(path)) {
+            return Map.of();
+        }
+        Map<String, Integer> values = new LinkedHashMap<>();
+        config.getNumberMap(path).forEach((key, value) -> values.put(key, value.intValue()));
+        return Map.copyOf(values);
     }
 
     private static List<Integer> ints(ThresholdConfig config, String path) {

@@ -40,12 +40,14 @@ import com.autotrade.md.store.SequenceDigest;
 import com.autotrade.md.store.StoredSessionSource;
 import com.autotrade.md.store.TableChecks;
 import com.autotrade.tools.MarketHoursGuard;
+import com.autotrade.tools.CodeVersion;
 import com.autotrade.tools.SourceDatabase;
 import com.autotrade.tools.ToolArgs;
 import com.autotrade.tools.clone.CloneResult;
 import com.autotrade.tools.clone.Dataset;
 import com.autotrade.tools.clone.SessionCloner;
 import com.autotrade.md.zt.ZtQueries;
+import com.autotrade.research.LifecycleStore;
 import com.autotrade.md.zt.ZtSessionHistory;
 import com.autotrade.md.zt.ZtSessionSource;
 import com.autotrade.md.zt.ZtSourceKeys;
@@ -59,6 +61,8 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
 
     private static final JsonMapper JSON = JsonMapper.builder().build();
     private static final String DEFAULT_UNDERLYINGS = "NIFTY,SENSEX";
+    static final String FEATURES_FILE = "config/features/features.v2.yaml";
+    static final String EXCHANGE_FILE = "config/exchange/nse-bse-sessions.v2.yaml";
 
     private final DataSource target;
     private final SourceDatabase source;
@@ -77,7 +81,7 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
     public void run(ApplicationArguments arguments) {
         String[] args = arguments.getSourceArgs();
         try {
-            ToolArgs parsed = ToolArgs.parse(args, Set.of("force", "all", "source", "verify-hashes"));
+            ToolArgs parsed = ToolArgs.parse(args, Set.of("force", "all", "source", "verify-hashes", "save", "held-out"));
             exitCode = switch (parsed.command()) {
                 case "sessions" -> sessions(parsed);
                 case "clone" -> cloneSessions(parsed);
@@ -88,6 +92,7 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                 case "features" -> features(parsed);
                 case "simulate" -> simulate(parsed);
                 case "instruments" -> instruments(parsed);
+                case "lifecycle" -> lifecycle(parsed);
                 default -> usage("unknown command: " + parsed.command());
             };
         } catch (IllegalArgumentException e) {
@@ -117,12 +122,14 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                                                              stream a session in replay order and check it
                                                              (zt = read zt-tiger-v2 directly, the default)
                   zt-sessions [--force]                      sessions and tick counts available in zt-tiger-v2
-                  features --session D [--underlying ...] [--at 10:00,14:52] [--out DIR] [--from zt|own] [--force]
+                  features --session D [--underlying ...] [--at 10:00,14:52] [--out DIR] [--from zt|own] [--save] [--force]
                                                              feature snapshots per minute to CSV (default .local/features)
                   simulate --session D --underlying U --strike K --type CE|PE --at HH:mm [--stop-pct 15]
                            [--target-pct 30] [--exit-by 15:20] [--lots 1]   one long option trade, base and stressed fills
                   instruments --file NSE.json.gz[,BSE.json.gz] [--date D] [--underlying NIFTY,BANKNIFTY,SENSEX]
                                                              load an Upstox contract-master file into ref.instrument
+                  lifecycle --split TUNING|HELD_OUT | --session D[,D] [--underlying ...] [--strategy FILE] [--save]
+                            [--held-out] [--force]           replay the early-confirm-runner lifecycle and report
                   config-hash <file.yaml> [...]              hash and validate threshold files (no database)""");
         return 2;
     }
@@ -317,7 +324,8 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
     }
 
     private int features(ToolArgs args) throws Exception {
-        args.allowOnly(Set.of("session", "underlying", "at", "out", "from", "force", "features-file", "exchange-file"));
+        args.allowOnly(Set.of("session", "underlying", "at", "out", "from", "force", "features-file", "exchange-file",
+                "save"));
         List<LocalDate> sessions = args.dates("session");
         if (sessions.size() != 1) {
             return usage("features needs exactly one --session");
@@ -331,9 +339,9 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
         List<LocalTime> printAt = args.list("at", "").stream().map(LocalTime::parse).toList();
         return FeaturesCommand.run(eventSource, new ZtSessionHistory(source.dataSource()), sessions.getFirst(),
                 args.upperList("underlying", DEFAULT_UNDERLYINGS),
-                Path.of(args.get("features-file", "config/features/features.v1.yaml")),
-                Path.of(args.get("exchange-file", "config/exchange/nse-bse-sessions.v1.yaml")),
-                Path.of(args.get("out", ".local/features")), printAt);
+                Path.of(args.get("features-file", FEATURES_FILE)), Path.of(args.get("exchange-file", EXCHANGE_FILE)),
+                Path.of(args.get("out", ".local/features")), printAt,
+                args.flag("save") ? new FeaturesCommand.Persistence(target, CodeVersion.current()) : null);
     }
 
     private int simulate(ToolArgs args) throws Exception {
@@ -391,6 +399,33 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                     expiries.stream().limit(5).toList());
         }
         return 0;
+    }
+
+    private int lifecycle(ToolArgs args) throws Exception {
+        args.allowOnly(Set.of("split", "session", "underlying", "strategy", "save", "held-out", "force",
+                "features-file", "exchange-file", "costs-file"));
+        if (!args.flag("force") && MarketHoursGuard.isBlocked(ZonedDateTime.now(MarketTime.IST))) {
+            System.err.println("refusing to read zt-tiger-v2 during market hours (09:00-15:50 IST); use --force");
+            return 3;
+        }
+        List<LocalDate> sessions;
+        if (args.has("split")) {
+            String split = args.get("split", "").toUpperCase();
+            sessions = LifecycleStore.splits(target).entrySet().stream().filter(e -> e.getValue().equals(split))
+                    .map(Map.Entry::getKey).toList();
+        } else {
+            sessions = args.dates("session");
+        }
+        if (sessions.isEmpty()) {
+            return usage("lifecycle needs --split or --session");
+        }
+        return LifecycleCommand.run(target, source.dataSource(), new ZtSessionSource(source.dataSource(), false),
+                new ZtSessionHistory(source.dataSource()), new LifecycleCommand.Request(sessions,
+                        args.upperList("underlying", DEFAULT_UNDERLYINGS),
+                        Path.of(args.get("strategy", "config/strategy/early-confirm-runner.v2.yaml")),
+                        Path.of(args.get("features-file", FEATURES_FILE)), Path.of(args.get("exchange-file", EXCHANGE_FILE)),
+                        Path.of(args.get("costs-file", "config/costs/india-index-options-costs.v1.yaml")),
+                        args.flag("save"), args.flag("held-out"), CodeVersion.current()));
     }
 
     private int ztSessions(ToolArgs args) throws SQLException {

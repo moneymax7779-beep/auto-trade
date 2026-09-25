@@ -1,6 +1,6 @@
 # auto-trade — implementation plan
 
-Status: agreed 2026-09-25. Phase 0 done (commit 736a423). Phase 1 in progress; see section 10.
+Status: agreed 2026-09-25. Phase 0 done (736a423), Phase 1 done (8067b4c), Phase 2 in progress; see sections 10–11.
 
 **Database decision (2026-09-25, for testing and implementation):** market data is read directly
 from zt-tiger-v2's database, read-only, with no copying (`bin/autotrade replay --from zt`, the
@@ -239,15 +239,40 @@ Built (modules `features`, `execution-sim`, `instrument-master`; CLI `features`,
 - **Instrument master**: Upstox contract file → `ref.instrument` snapshots; expiries, lot size,
   freeze quantity (max lots per order), tick size, strike step.
 
-Known limitations, to address in Phase 2 or when the data exists:
+Known limitations (items resolved on 25 Sep in features v2 / exchange v2 are marked):
 
-1. SENSEX futures volume is thin, so its RVOL jumps (e.g. 16× in single minutes); consider a
-   longer slot or option volume for SENSEX.
-2. Expected move uses same-expiry ATM IV; on expiry day that IV is inflated by the short time
-   left and overstates the move. Needs next-expiry IV (not captured) or India VIX (Phase 3).
+1. *Resolved (features v2):* SENSEX futures trade ~20 contracts a minute with 45% empty minutes,
+   so its RVOL uses a 10-minute slot and a minimum historical slot volume. RVOL also runs about 2×
+   all through a futures expiry week (rollover); `futures.daysToExpiry` and a session-relative
+   `futures.rvolSession` are now given alongside so strategies can tell the two apart.
+2. *Resolved (features v2):* the expected move is now taken from the ATM straddle's time value
+   (× √(π/2)), spread over the trading minutes to expiry. v1 applied a calendar-time IV per trading
+   minute and overstated the move (2.4× on SENSEX expiry day).
 3. Spot VWAP is a proxy (futures session VWAP minus current basis); the index has no volume.
 4. OI is in raw quantity (not lakhs, not lots).
-5. Snapshots are written to CSV only; the `feat` schema is filled when Phase 2 records runs.
-6. The exchange holiday list is empty until filled from the NSE/BSE circulars.
+5. *Resolved:* `bin/autotrade features --save` writes snapshots to `feat.snapshot` under a
+   `research.run` recording code version and config hashes.
+6. *Resolved (exchange v2):* 2026 NSE/BSE holidays loaded, cross-checked against the capture
+   (14 Sep) and the contract file (19 Oct NIFTY expiry before the 20 Oct holiday).
 7. Contract files are loaded by hand (`bin/autotrade instruments --file ...`); a daily download job
    comes with the Upstox adapter in Phase 3. Loaded 25 Sep: NSE (NIFTY, BANKNIFTY) and BSE (SENSEX).
+
+## 11. Phase 2 status (2026-09-25)
+
+Built (modules `strategy-api`, `strategy-ecr`, `research`; CLI `lifecycle`):
+
+- **Strategy SPI**: strategies see only a feature snapshot and their own position and return
+  stages, scores, named conditions and order intents (never broker orders).
+- **early-confirm-runner** (`config/strategy/early-confirm-runner.v2.yaml`): WATCH → ARMED →
+  EARLY_ENTRY → CONFIRMED → RUNNER → EXITED on the opening range (CE at ORH, PE at ORL), the
+  design's early-entry AND list, confirmation (3-minute close through the level, TOD RVOL, breakout
+  bar, regime-weighted confirm score vs the time-window minimum), runner score, 30/40/30 tranches
+  of 4 lots, exits (resting 25% premium stop, probe timeout/failure, invalidation, EMA9 trail,
+  futures reversal, expiry stall, flat by 15:15). Regime from DTE (NORMAL / NEAR / EXPIRY) selects
+  the weights. The four market states (direction, participation, structure, continuation) are
+  reported every minute.
+- **Replay harness**: features → strategy → multi-tranche option positions on the replayed quotes,
+  one lane per fill model (base, stressed). Frames and episodes are stored separately
+  (`research.lifecycle_frame`, `research.episode`) with a markdown report per run.
+- **Held-out discipline**: held-out sessions need `--held-out --save` and are consumed per
+  strategy family (`research.held_out_use`); the experiment ledger is `docs/EXPERIMENT-LEDGER.md`.

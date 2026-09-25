@@ -213,6 +213,7 @@ public final class StructureState {
                 orlAcceptance != null && orlAcceptance.retestHeldBelow(),
                 pdhAcceptance == null ? 0 : pdhAcceptance.closesAbove(),
                 pdlAcceptance == null ? 0 : pdlAcceptance.closesBelow(),
+                last == null ? Double.NaN : last.close(),
                 last == null || last.range() == 0 ? Double.NaN : last.body() / last.range(),
                 last == null ? Double.NaN : last.closeLocation(),
                 last == null || last.range() == 0 ? Double.NaN : last.upperWick() / last.range(),
