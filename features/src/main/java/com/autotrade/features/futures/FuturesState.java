@@ -40,6 +40,8 @@ public final class FuturesState implements StructureState.FuturesVolume {
     private TimedSeries basis;
     private TimedSeries oi;
     private TimedSeries imbalance;
+    private TimedSeries bidQuantity;
+    private TimedSeries askQuantity;
     private BarSeries oneMinute;
     private WilderAtr atr;
     private Map<LocalTime, Long> minuteVolumes;
@@ -96,6 +98,8 @@ public final class FuturesState implements StructureState.FuturesVolume {
                 && tick.totalBuyQuantity() + tick.totalSellQuantity() > 0) {
             imbalance.add(time, (tick.totalBuyQuantity() - tick.totalSellQuantity())
                     / (tick.totalBuyQuantity() + tick.totalSellQuantity()));
+            bidQuantity.add(time, tick.totalBuyQuantity());
+            askQuantity.add(time, tick.totalSellQuantity());
         }
         lastTime = time;
     }
@@ -108,6 +112,8 @@ public final class FuturesState implements StructureState.FuturesVolume {
         basis = new TimedSeries(RETENTION);
         oi = new TimedSeries(RETENTION);
         imbalance = new TimedSeries(RETENTION);
+        bidQuantity = new TimedSeries(RETENTION);
+        askQuantity = new TimedSeries(RETENTION);
         oneMinute = new BarSeries(Duration.ofMinutes(1), sessionOpen, 400);
         atr = new WilderAtr(config.atrPeriod());
         oneMinute.onClose(atr::update);
@@ -141,6 +147,20 @@ public final class FuturesState implements StructureState.FuturesVolume {
     /** Book imbalance of the selected future (empty series when the feed has no book totals). */
     public TimedSeries imbalance() {
         return imbalance == null ? new TimedSeries(RETENTION) : imbalance;
+    }
+
+    /** Percent change of the book's total bid and ask quantity over {@code window}: [bid, ask]. */
+    public double[] bookChangePct(Instant time, Duration window) {
+        if (bidQuantity == null) {
+            return new double[] {Double.NaN, Double.NaN};
+        }
+        return new double[] {percentChange(bidQuantity, time, window), percentChange(askQuantity, time, window)};
+    }
+
+    static double percentChange(TimedSeries series, Instant time, Duration window) {
+        double before = series.valueAt(time.minus(window));
+        double now = series.valueAt(time);
+        return before > 0 && !Double.isNaN(now) ? 100 * (now / before - 1) : Double.NaN;
     }
 
     @Override

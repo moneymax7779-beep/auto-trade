@@ -15,6 +15,7 @@ import java.util.function.Consumer;
 
 import javax.sql.DataSource;
 
+import com.autotrade.core.event.AuctionTick;
 import com.autotrade.core.event.ConstituentTick;
 import com.autotrade.core.event.DepthLevels;
 import com.autotrade.core.event.FutureTick;
@@ -76,7 +77,9 @@ public final class ReplayReader {
         CONSTITUENT("select underlying, recv_ts, exch_ts, src_seq, instrument_token, symbol, price, prev_close, "
                 + "cum_volume, session_vwap, weight_pct from md.constituent_tick"),
         SESSION_PHASE("select underlying, recv_ts, event_ts, 0::bigint as src_seq, session_phase, price_semantics, "
-                + "price, official_final from md.session_phase_event");
+                + "price, official_final from md.session_phase_event"),
+        AUCTION("select underlying, recv_ts, exch_ts, 0::bigint as src_seq, instrument_token, symbol, iep, ref_price, "
+                + "eq_qty, imbalance_total, imbalance_market, cas_eligible from md.auction_tick");
 
         private final String select;
 
@@ -163,6 +166,10 @@ public final class ReplayReader {
                 case SESSION_PHASE -> new SessionPhaseEvent(received, instant("event_ts"), underlying,
                         rows.getString("session_phase"), rows.getString("price_semantics"), rows.getDouble("price"),
                         rows.getBoolean("official_final"));
+                case AUCTION -> new AuctionTick(received, instant("exch_ts"), underlying, rows.getLong("instrument_token"),
+                        rows.getString("symbol"), rows.getDouble("iep"), rows.getDouble("ref_price"),
+                        rows.getLong("eq_qty"), rows.getLong("imbalance_total"), rows.getLong("imbalance_market"),
+                        rows.getBoolean("cas_eligible"));
             };
         }
 

@@ -62,6 +62,8 @@ public final class BreadthState {
         double covered = 0;
         double total = 0;
         List<Double> contributions = new ArrayList<>();
+        double movers = 0;
+        double neutral = config.extended() ? config.extensions().moverNeutralPct() / 100.0 : Double.NaN;
         for (Stock stock : stocks.values()) {
             if (Double.isNaN(stock.weight)) {
                 continue;
@@ -76,6 +78,9 @@ public final class BreadthState {
             covered += stock.weight;
             momentum += stock.weight * Math.tanh(change / scale);
             contributions.add(stock.weight * change);
+            if (!Double.isNaN(neutral)) {
+                movers += Math.abs(change) <= neutral ? 0 : stock.weight * Math.signum(change);
+            }
             if (!Double.isNaN(stock.previousClose)) {
                 day += stock.weight * Math.signum(now - stock.previousClose);
             }
@@ -86,7 +91,8 @@ public final class BreadthState {
                 covered > 0 ? 100 * day / covered : Double.NaN,
                 coverage,
                 concentration(contributions),
-                stocks.size());
+                stocks.size(),
+                !Double.isNaN(neutral) && covered > 0 ? 100 * movers / covered : Double.NaN);
     }
 
     /** Share of the dominant side's summed contribution that comes from its top N stocks. */

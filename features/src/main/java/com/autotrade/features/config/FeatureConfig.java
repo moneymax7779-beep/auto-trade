@@ -68,7 +68,10 @@ public record FeatureConfig(
         LocalTime casLimitOnlyEnd,
         LocalTime casEnd,
         Set<LocalDate> holidays,
-        FeatureExtensions extensions) {
+        FeatureExtensions extensions,
+        Map<LocalDate, String> marketEvents,
+        String casSettlementMethod,
+        Boolean indexIepAvailable) {
 
     public static FeatureConfig from(ThresholdConfig features, ThresholdConfig exchange) {
         Map<String, LocalTime[]> windows = new LinkedHashMap<>();
@@ -137,7 +140,10 @@ public record FeatureConfig(
                 exchange.getTime("cas.limit_only_end"),
                 exchange.getTime("cas.end"),
                 Set.copyOf(holidays),
-                FeatureExtensions.from(features));
+                FeatureExtensions.from(features),
+                events(exchange),
+                exchange.has("cas.settlement_method") ? exchange.getString("cas.settlement_method") : null,
+                exchange.has("cas.index_iep_available") ? exchange.getBoolean("cas.index_iep_available") : null);
     }
 
     /** True when the file defines the v3 feature sections. */
@@ -148,6 +154,20 @@ public record FeatureConfig(
     /** RVOL slot length for an underlying (a per-underlying override, else the default). */
     public int rvolSlotMinutes(String underlying) {
         return rvolSlotMinutesByUnderlying.getOrDefault(underlying, rvolSlotMinutes);
+    }
+
+    /** Scheduled market events (exchange file v3 {@code events}: date → name), empty before. */
+    private static Map<LocalDate, String> events(ThresholdConfig exchange) {
+        Map<LocalDate, String> events = new java.util.TreeMap<>();
+        if (exchange.has("events") && exchange.get("events") instanceof List<?> list) {
+            for (Object item : list) {
+                if (item instanceof Map<?, ?> event) {
+                    events.merge(LocalDate.parse(String.valueOf(event.get("date"))), String.valueOf(event.get("name")),
+                            (a, b) -> a + "; " + b);
+                }
+            }
+        }
+        return Map.copyOf(events);
     }
 
     private static Map<String, Integer> intMap(ThresholdConfig config, String path) {

@@ -19,6 +19,21 @@ public final class SnapshotFlattener {
         return values;
     }
 
+    /** JSON-safe copy of a flattened snapshot: NaN/infinite become null, times and dates ISO strings. */
+    public static Map<String, Object> jsonSafe(Map<String, Object> row) {
+        Map<String, Object> values = new LinkedHashMap<>();
+        row.forEach((key, value) -> {
+            if (value instanceof Double d && !Double.isFinite(d)) {
+                values.put(key, null);
+            } else if (value instanceof Instant || value instanceof java.time.LocalDate) {
+                values.put(key, value.toString());
+            } else {
+                values.put(key, value);
+            }
+        });
+        return values;
+    }
+
     /** CSV cell text: empty for NaN/null, IST wall-clock time for instants. */
     public static String cell(Object value) {
         if (value == null) {

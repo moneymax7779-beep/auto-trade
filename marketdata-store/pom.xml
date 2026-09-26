@@ -11,6 +11,7 @@
     <artifactId>marketdata-store</artifactId>
     <description>Flyway schema, md.* bulk writers and the ordered replay reader.</description>
     <dependencies>
+        <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId></dependency>
         <dependency>
             <groupId>com.autotrade</groupId>
             <artifactId>platform-core</artifactId>

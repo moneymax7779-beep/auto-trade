@@ -32,11 +32,11 @@ management:
 autotrade:
   trading:
     account: PAPER-1
-    underlyings: [NIFTY, SENSEX]
+    underlyings: [NIFTY, BANKNIFTY, SENSEX]
     fill-model: base
-    strategy-file: config/strategy/early-confirm-runner.v5.yaml
-    features-file: config/features/features.v4.yaml
-    exchange-file: config/exchange/nse-bse-sessions.v2.yaml
+    strategy-file: config/strategy/early-confirm-runner.v6.yaml
+    features-file: config/features/features.v5.yaml
+    exchange-file: config/exchange/nse-bse-sessions.v3.yaml
     costs-file: config/costs/india-index-options-costs.v1.yaml
     risk-file: config/risk/paper-risk.v3.yaml
     poll-interval-ms: 250

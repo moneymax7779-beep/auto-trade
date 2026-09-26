@@ -38,7 +38,8 @@ live polling.
 | Basis and Δbasis | `FuturesFeatures.basis*` | replay |
 | Price/OI state; state score +2 … −2 | `OiState`; v4 `runner.futures_state_score` drives the sub-score | replay |
 | Time-of-day RVOL, bands 1.0/1.25/1.5/2.0, RVOL slope | `FuturesState.rvol*` | replay |
-| Weighted constituent breadth −100…+100, concentration | `BreadthState` | replay |
+| Weighted constituent breadth −100…+100, concentration | `BreadthState`; features v5 `moverBreadth` = the design's weighted bullish minus bearish stocks (neutral band 0.03%), used by strategy v6 for early entry | replay |
+| Order-book "bid changes / ask changes", "liquidity suddenly disappears" | features v5 `BookFeatures.*BidChangePct/*AskChangePct/*DepthChangePct`; v6 flow confirmation and liquidity-drop entry block | replay (options), live (futures) |
 | Order-book imbalance (bid − ask)/(bid + ask), persistence 10–20 s, small confirmation only | `BookFeatures` (v3): futures book (**live**: Upstox book totals), ATM call/put books (replay: total quantities); v4 ±3 confirm points when held over 20 s ≥ 0.15. Options compared call-minus-put because NSE option books are bid-biased | replay + live |
 
 ## Options
@@ -51,7 +52,7 @@ live polling.
 | ATM straddle; "straddle stops falling" | `straddleChangeLookback/Recent`, `straddleCompressionEnded` (v3) | replay |
 | ATM CE/PE IV, 1 ITM / 1 OTM IV, ΔIV 1/3/5 m, skew | `OptionsFeatures`, `PremiumFeatures.itm*/otm*` | replay |
 | IV percentile | `VolatilityFeatures.atmIvPercentile`: same minute of earlier sessions from zt `option_tick_snapshots`, expiry days compared only with expiry days | replay |
-| Premium response ratio (IV-crush detector); runner requires ≥ 0.6 | `premiumResponse*`; v4 runner gate `premium_response_ok` | replay |
+| Premium response ratio (IV-crush detector); runner requires ≥ 0.6 | `premiumResponse*`; v4 runner gate `premium_response_ok`; features v5 uses the design's full form Δ·ΔS + ½Γ·ΔS² + vega·ΔIV + theta·Δt | replay |
 | IV trend while underlying moves | `ivTrend` RISING/FLAT/FALLING; v4 scores FALLING as 0 | replay |
 
 ## Regimes
@@ -63,7 +64,10 @@ live polling.
 | Expected daily and remaining move; room to the next level vs expected move | `RegimeFeatures.expectedMove*`, `LevelFeatures.expectedReach*`; v4 runner component | replay |
 | India VIX level, Δ 5 m / 15 m / day, percentile 60 d / 252 d | `VolatilityFeatures.vix*` (v3) from `ref.index_candle` + live ticks/polling | VIX |
 | Realised volatility, ATR percentile | `realizedVol`, `realizedVolPercentile`, `atrPercentile` (same minute of earlier sessions) | replay |
-| Volatility regime LOW/NORMAL/HIGH/EXTREME (< 20 / 20–70 / 70–90 / > 90) | `VolatilityRegime`: VIX leads NIFTY, IV leads SENSEX/BANKNIFTY, realised-vol escalation | replay + VIX |
+| Volatility regime LOW/NORMAL/HIGH/EXTREME (< 20 / 20–70 / 70–90 / > 90) | `VolatilityRegime`: VIX leads NIFTY, IV leads SENSEX/BANKNIFTY; v6 inputs: realised vol, ATR percentile, VIX 15 m move, IV 5 m move, futures RVOL ≥ 2, expiry final hour (any one raises one level) | replay + VIX |
+| High-volatility event day | exchange file v3 `events` (RBI MPC, FOMC, US CPI, Budget); v6 floors the regime at HIGH | — |
+| Regime changes strike selection and stop distance | v6 `strike_offset` (1 ITM in HIGH/EXTREME) and `structure_stop_atr` (wider invalidation band) | — |
+| Named market state (TREND_UP …) and the dashboard's VOL REGIME / CAS panels | v6 `MarketState.label`; Live page panels | — |
 | Regime changes size, confirmation, stop distance | v4 `vol_regime.adjustments` (HIGH: half size, +5 confirm, 35% stop; EXTREME: +10, 40%, no probe) → `OrderIntent.premiumStopPct`, OMS per-position stop | — |
 | Expiry runner: new highs, futures momentum, level holding, EMA9, RVOL elevated, no opposite wall, premium efficient | stall exit, trail, invalidation, v4 `expiry_runner` gates and exits (`OPPOSITE_WALL`, `PREMIUM_LAGGING`, `EXPIRY_MOMENTUM_LOST`) | replay |
 
@@ -80,7 +84,8 @@ live polling.
 | Constituent IEP return × weight (CAS pressure) | `weightedIepReturnPct` | **live** |
 | Normalised imbalance, weighted, imbalance velocity | `weightedImbalance`, `weightedImbalanceChange` | **live** |
 | CAS breadth, top-3 concentration | `casBreadthPct`, `topConcentration` | **live** |
-| Liquidity confidence (tradable quantity vs history) | `auctionTurnoverCr` (absolute). A percentile needs recorded auction history, which is not captured yet | **live** (partial) |
+| Liquidity confidence (tradable quantity vs history) | `auctionLiquidityPercentile` against recorded auction turnover at the same minute (`md.auction_tick`, captured from live sessions); null until 5 sessions are recorded | **live** |
+| CAS config: settlement method, index IEP available | exchange file v3 `cas.settlement_method`, `cas.index_iep_available` (false, as observed); v6 honours the flag | — |
 | CAS score weights 15/10/15/15/5/10/10/10/5/5, bands 55/65/75/85 | `CasScorer` (renormalises without per-stock data) | replay + live |
 | CAS_RUNNER: hold while CAS agrees, tighten/exit when it disagrees | v4 `cas_mode`: a RUNNER at 15:15 is held while the CAS score ≥ 55, exits `CAS_DISAGREES` below, `CAS_END` at 15:35 | replay |
 | CAS entries by band | v4 entry window 15:20–15:30, bands 65/75/85, one per side, only with per-stock data and futures agreeing | **live** |
@@ -90,10 +95,14 @@ live polling.
 ## Known limits
 
 - Per-stock auction data exists only on the live Upstox feed; zt-tiger-v2 records constituent prices
-  that hold until the auction close. CAS entries therefore cannot be replayed from past data, and
-  CAS runner management in replays uses the index-level score.
-- The futures order book is only available on the Upstox feed.
-- CAS liquidity against history and auction-data replays need the live feed captured into own tables
-  (the plan's "capture" gap).
+  that hold until the auction close. Past sessions (including everything since 3 Aug) can never be
+  replayed with it. From 28 Sep the live feed is recorded into `md.*` (`LiveCapture`), and those
+  sessions replay with `lifecycle --from own`.
+- The futures order book is only available on the Upstox feed (recorded from 28 Sep).
+- BANKNIFTY is subscribed and recorded, but it needs 5 recorded sessions before its RVOL (and so
+  confirmation) exists; zt-tiger-v2 holds none.
+- Exits: the design gives none; every exit rule is a documented placeholder.
+- Profit targets: the design only asks whether a target is realistic (room vs expected move, used as
+  a runner condition); it gives no target rule, so none is invented.
 - IV percentile history is as deep as zt-tiger-v2's `option_tick_snapshots` (18 sessions on
   2026-09-26); expiry-day percentiles stay null until 5 earlier expiry days exist.

@@ -30,6 +30,10 @@ public enum MdTable {
             "price_semantics", "event_time_phase", "received_time_phase", "price", "official_final",
             "continuously_tradable", "source", "idempotency_key")),
 
+    AUCTION_TICK("md.auction_tick", false, List.of(
+            "manifest_id", "session_date", "underlying", "recv_ts", "exch_ts", "instrument_token", "symbol", "iep",
+            "ref_price", "eq_qty", "imbalance_total", "imbalance_market", "cas_eligible")),
+
     CANDLE("md.candle", false, List.of(
             "manifest_id", "session_date", "underlying", "instrument_key", "timeframe", "source", "bar_start",
             "open", "high", "low", "close", "volume", "volume_complete", "volume_source",

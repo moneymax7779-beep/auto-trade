@@ -66,3 +66,41 @@ Two consequences recorded as they were found:
 
 Files: `early-confirm-runner.v5.yaml` `sha256:b6e6dfd9b6e3…`, `features.v4.yaml` `sha256:234935418e5c…`,
 `paper-risk.v3.yaml` `sha256:4c721da1bc53…`. No trade result was looked at to choose any value.
+
+# Strategy v6 / features v5 (registered 2026-09-26, before computing)
+
+Same method: ChatGPT values unchanged; placeholders by a stated principle or a percentile of the
+feature's own distribution on 11, 15, 16, 17, 18 Sep; no trade results used.
+
+| Placeholder | Rule |
+|---|---|
+| `breadth.mover_neutral_pct` (features v5) | 25th percentile of \|5-minute constituent return\| on 15–18 Sep (computed first: 0.028% → 0.03). |
+| `vol_regime.escalation.vix_change_15m_abs` | 95th percentile of \|India VIX change over 15 min\| (a 1-in-20 move = "changing rapidly"). |
+| `vol_regime.escalation.iv_change_5m_abs` | 95th percentile of \|ATM IV change over 5 min\|. |
+| `vol_regime.escalation.atr_percentile` | Principle: 90, the same boundary as the realised-vol escalation and the design's EXTREME bucket. |
+| `vol_regime.escalation.futures_rvol` | Design value: 2.0, its "expansion" RVOL band. |
+| `vol_regime.escalation.expiry_final_minutes` | Principle: the last 60 minutes before expiry close on DTE 0 (gamma highest). |
+| `vol_regime.event_day_floor` | Design: a scheduled event day is at least HIGH ("high-volatility event day"). |
+| `vol_regime.adjustments.*.strike_offset` | Principle: ATM normally and on expiry (the design's near-ATM gamma); 1 strike ITM in HIGH/EXTREME (less vega, so less IV-crush risk, and higher delta). |
+| `vol_regime.adjustments.*.structure_stop_atr` | The v2 invalidation band 0.10 ATR scaled by each regime's realised vol ratio from the v5 calibration (HIGH 1.63×, EXTREME 1.49×), rounded to 0.05. |
+| `order_book.flow_edge_pct` | 75th percentile of \|bid change % − ask change %\| of the ATM options over 20 s. |
+| `order_book.liquidity_drop_pct` | 5th percentile of the ATM options' one-minute depth change (the worst 5% of drops block new entries). |
+| `market_state` labels | Principle: TREND_UP/DOWN when direction and structure are both ≥ 50 on the same side, RANGE when \|direction\| < 20, else TRANSITION. |
+| `early_entry.breadth_measure` | Design definition: MOVER breadth (weighted bullish minus bearish stocks); the +50 threshold is unchanged. |
+
+## v6 results (computed 2026-09-26 on 11, 15, 16, 17, 18 Sep; 3,590 continuous minutes)
+
+| Placeholder | Measurement | Value |
+|---|---|---|
+| `breadth.mover_neutral_pct` | 25th percentile of \|5-min constituent return\| on 15–18 Sep: 0.028% (median 0.061%) | 0.03 |
+| `vix_change_15m_abs` | 95th percentile: 0.1805 VIX points (median 0.040; n = 3,440) | 0.18 |
+| `iv_change_5m_abs` | 95th percentile: 0.0113 (n = 3,518) | 0.011 |
+| `flow_edge_pct` | 75th percentile of \|bid% − ask%\| over 20 s: 4.47 (median 2.06; n = 7,127) | 4.5 |
+| `liquidity_drop_pct` | 5th percentile of 1-minute depth change: −49.2% (median 0; n = 7,116) | 49 |
+| structure stop HIGH / EXTREME | 0.10 × 1.63 = 0.163, 0.10 × 1.49 = 0.149, rounded to 0.05 | 0.15 / 0.15 |
+
+Mover breadth reaches ±50 in 17.7% of these minutes; the v2 momentum breadth did in 7.2%.
+
+Process note: the first computation of these features ran on a stale CLI jar (the Spring Boot jar
+was not repackaged after module changes) and lacked the v5 columns; it was discarded, the jar rebuilt
+cleanly, and everything above recomputed. `bin/autotrade` now refuses to run a stale jar.

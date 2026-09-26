@@ -22,7 +22,15 @@ final class SideFeatures {
     private final LevelFeatures lv;
     private final BookFeatures bk;
 
+    private final boolean moverBreadth;
+
     SideFeatures(OptionSide side, FeatureSnapshot snapshot) {
+        this(side, snapshot, false);
+    }
+
+    /** @param moverBreadth v6: breadth is the design's weighted bullish-minus-bearish mover count */
+    SideFeatures(OptionSide side, FeatureSnapshot snapshot, boolean moverBreadth) {
+        this.moverBreadth = moverBreadth;
         this.side = side;
         this.s = snapshot;
         this.st = snapshot.structure();
@@ -98,7 +106,7 @@ final class SideFeatures {
 
     /** Weighted breadth in this side's favour: +100 = every constituent moving this way. */
     double breadth() {
-        return side.sign() * s.breadth().momentumBreadth();
+        return side.sign() * (moverBreadth ? s.breadth().moverBreadth() : s.breadth().momentumBreadth());
     }
 
     /** Futures price/OI state from this side's view (FRESH_SHORT is FRESH_LONG for PE). */
@@ -212,6 +220,27 @@ final class SideFeatures {
     boolean bookAgainst(double min) {
         double optionEdge = ce() ? bk.atmPeMinLong() - bk.atmCeMaxLong() : bk.atmCeMinLong() - bk.atmPeMaxLong();
         return (ce() ? bk.futuresMaxLong() <= -min : bk.futuresMinLong() >= min) || optionEdge >= min;
+    }
+
+    /**
+     * v6 "bid changes / ask changes": this side's ATM option has bids building faster than asks (in
+     * percent over the long window) by at least {@code edge}.
+     */
+    boolean flowFavourable(double edge) {
+        double flow = ce() ? bk.atmCeBidChangePct() - bk.atmCeAskChangePct() : bk.atmPeBidChangePct() - bk.atmPeAskChangePct();
+        return flow >= edge;
+    }
+
+    /** The opposite option's bids building faster than its asks by {@code edge}. */
+    boolean flowAgainst(double edge) {
+        double flow = ce() ? bk.atmPeBidChangePct() - bk.atmPeAskChangePct() : bk.atmCeBidChangePct() - bk.atmCeAskChangePct();
+        return flow >= edge;
+    }
+
+    /** v6 "liquidity suddenly disappears": this side's ATM depth fell by at least {@code dropPct} percent. */
+    boolean liquidityDropped(double dropPct) {
+        double change = ce() ? bk.atmCeDepthChangePct() : bk.atmPeDepthChangePct();
+        return change <= -dropPct;
     }
 
     /** This side's ATM premium rising over the last minute. */

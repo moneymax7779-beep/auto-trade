@@ -1,0 +1,121 @@
+# Feature definitions used by the feature engine (Phase 1). These are measurement choices, not
+# trading thresholds; trading thresholds live in config/strategy/. Values marked "placeholder"
+# were chosen here and have no calibration behind them.
+# v3 (2026-09-26): every v2 definition unchanged; adds the design elements that were missing:
+# level acceptance extras and the ladder, order-book imbalance, option premium behaviour, straddle
+# compression ending, 1 ITM / 1 OTM IV, IV / ATR / realised-vol percentiles, India VIX, and the
+# closing-auction (CAS) features. Sections: levels, order_book, premium, straddle, volatility, cas.
+# v4 (2026-09-26): iv_trend_threshold set by the rule in docs/CALIBRATION-v5.md (70th percentile of
+# |ATM IV change 5m| on 11-18 Sep); nothing else changed.
+# v5 (2026-09-26): the design items that were simplified: the full premium-response formula
+# (+ vega x dIV + theta x dt), mover breadth (the design's weighted bullish minus bearish stocks),
+# order-book bid/ask changes and depth drop, auction liquidity history. v4 definitions unchanged.
+version: features-v5
+name: features
+status: UNCALIBRATED
+
+session_windows:                     # strategy priors from the design (not exchange rules)
+  OPENING_DISCOVERY: "09:15-09:25"
+  TREND_WINDOW: "09:25-11:15"
+  MIDDAY: "11:15-13:15"
+  AFTERNOON: "13:15-14:30"
+  LATE: "14:30-15:15"
+
+structure:
+  opening_range_minutes: 15          # same as zt-tiger-v2
+  atr_period: 14
+  ema_fast: 9
+  ema_slow: 20
+  ema_slope_bars: 3
+  swing_strength: 2                  # pivot needs this many bars on each side (confirmed late)
+  distance_atr: ATR_3M               # ATR used for "distance to level in ATR"
+  retest_band_atr: 0.10              # placeholder: a touch within this of a level counts as a retest
+  pdh_pdl_until: "15:15"             # previous-day high/low from continuous trading only (CAS excluded)
+
+futures:
+  momentum_windows_sec: [30, 60, 180]
+  acceleration_window_sec: 60
+  basis_change_windows_min: [1, 3]
+  oi_state_window_min: 3
+  oi_state_min_price_atr: 0.10       # placeholder: smaller price moves are NEUTRAL
+  oi_state_min_oi_fraction: 0.0005   # placeholder: smaller OI changes (0.05% of OI) are NEUTRAL
+
+rvol:
+  slot_minutes: 3
+  # SENSEX futures trade ~20 contracts a minute (45% of minutes have none); a 3-minute ratio is
+  # noise. A 10-minute slot has a median of ~320 contracts. (v2)
+  slot_minutes_by_underlying: { SENSEX: 10 }
+  min_slot_median_volume: 100        # placeholder: RVOL is null when the historical slot median is below this (v2)
+  lookback_sessions: 20
+  min_history_sessions: 5            # placeholder: RVOL is null with fewer prior sessions
+  slope_points: 4
+
+options_chain:
+  near_atm_strikes: 3
+  heavy_weight_strikes: 2
+  outer_strike_weight: 0.5           # placeholder: weight of strikes beyond the heavy band
+  oi_delta_windows_min: [1, 3, 5, 10]
+  oi_flow_flat_fraction: 0.001       # placeholder: |ΔOI| below 0.1% of near-ATM OI is FLAT
+  wall_weakening_lookback_min: [10, 5, 3, 1]
+  barrier_weights: { oi: 0.50, fresh_oi: 0.25, volume: 0.25 }   # placeholder
+  proximity_decay_strikes: 2.0       # placeholder: weight = exp(-distance / (decay × step))
+  straddle_change_window_min: 5
+  iv_change_windows_min: [1, 3, 5]
+  premium_response_min_move_atr: 0.25   # placeholder: below this spot move the ratio is null
+  premium_response_terms: FULL       # v5: delta x dS + 0.5 gamma dS^2 + vega x dIV + theta x dt (design's full form)
+
+breadth:
+  return_window_min: 5               # placeholder
+  return_scale_pct: 0.10             # placeholder: tanh(return / 0.10%) per constituent
+  concentration_top_n: 3
+  mover_neutral_pct: 0.03            # v5 calibrated: 25th percentile of |5-min constituent return| on 15-18 Sep (0.028%)
+
+greeks:
+  risk_free_rate: 0.065              # placeholder (approx. 91-day T-bill)
+  expiry_close: "15:30"
+
+# Expected move (v2). STRADDLE: one-standard-deviation move to expiry = ATM straddle time value
+# × sqrt(pi/2), spread over the trading minutes left to expiry. Avoids the v1 error of applying a
+# calendar-time IV per trading minute, which overstated the move (2.4× on SENSEX expiry day).
+# Falls back to IV × sqrt(calendar time to expiry) when there is no straddle.
+expected_move:
+  method: STRADDLE
+  trading_minutes_per_day: 375
+
+snapshot:
+  interval_sec: 60
+
+# ---------------------------------------------------------------------------------------------
+# v3 additions
+levels:
+  ladder_window_min: 15              # design: "if price progressively reclaims these levels"; window is a placeholder
+  breakout_volume_average_bars: 10   # placeholder: breakout-bar futures volume vs the previous 10 three-minute bars
+
+order_book:
+  persistence_windows_sec: [10, 20]  # design: imbalance persistence "for 10-20 seconds"
+  liquidity_window_sec: 60           # v5 placeholder: depth change measured over one minute ("liquidity suddenly disappears")
+
+premium:
+  momentum_windows_min: [1, 3]
+  new_high_window_min: 15            # placeholder: "premium making higher highs"
+  volume_expansion_baseline_min: 10  # placeholder: last minute's option volume vs the previous 10 minutes' rate
+
+straddle:
+  compression_lookback_min: 10       # placeholder: straddle falling over the prior 10 minutes...
+  stop_window_min: 3                 # ...and not falling over the last 3 ("straddle stops falling")
+
+volatility:
+  realized_window_min: 30            # placeholder
+  annualisation_minutes: 94500       # 252 sessions x 375 minutes (design's expected-move convention)
+  history_sessions: 60
+  min_history_sessions: 5            # placeholder: percentiles are null with fewer comparable sessions
+  iv_trend_threshold: 0.0014         # calibrated (v4): top 30% of 5-minute ATM IV moves = RISING / FALLING
+  vix_percentile_days: [60, 252]     # design: VIX_PERCENTILE_60D, VIX_PERCENTILE_252D
+  vix_change_windows_min: [5, 15]    # design: VIX_CHANGE_5M, VIX_CHANGE_15M (and day)
+
+cas:
+  reference_window: "15:00-15:15"    # design: CAS reference = 15:00-15:15 VWAP (index: mean spot)
+  indicative_windows_sec: [20, 60, 180]   # design: IEP_20_SEC, IEP_1_MIN, IEP_3_MIN
+  imbalance_velocity_window_sec: 60
+  concentration_top_n: 3             # design: CAS_TOP3_CONTRIBUTION
+  auction_history_sessions: 20       # v5: auction turnover percentile against up to 20 recorded sessions

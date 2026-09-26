@@ -10,5 +10,7 @@ mvn -q -DskipTests -pl app-trading-core -am clean install
 # a trading-core started by hand would hold port 8095
 pkill -f "app-trading-core-.*\.jar" 2>/dev/null && sleep 2 || true
 docker compose up -d --build trading-core
+# `docker compose run` without AUTOTRADE_CODE_VERSION uses :latest, so point it at what is deployed.
+docker tag "autotrade-trading-core:$AUTOTRADE_CODE_VERSION" autotrade-trading-core:latest
 docker compose ps trading-core
 echo "UI: http://127.0.0.1:8095"

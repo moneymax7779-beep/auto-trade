@@ -6,9 +6,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 JAR="$(ls app-trading-core/target/app-trading-core-*.jar | grep -v original | head -1)"
+# The Spring Boot jar embeds the other modules and is not rebuilt when only they change. Running a
+# stale jar silently runs old code, so refuse (set AUTOTRADE_ALLOW_STALE=1 to override).
 for module_jar in */target/*-SNAPSHOT.jar; do
   if [[ "$module_jar" != app-trading-core/* && "$module_jar" != autotrade-tools/* && "$module_jar" -nt "$JAR" ]]; then
-    echo "warning: $module_jar is newer than the trading-core jar; run: mvn -q -DskipTests -pl app-trading-core -am clean install" >&2
+    echo "error: $module_jar is newer than the trading-core jar; run: mvn -q -DskipTests -pl app-trading-core -am clean install" >&2
+    [[ "${AUTOTRADE_ALLOW_STALE:-0}" == "1" ]] || exit 3
     break
   fi
 done

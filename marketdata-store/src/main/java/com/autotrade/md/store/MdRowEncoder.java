@@ -3,6 +3,7 @@ package com.autotrade.md.store;
 import java.time.Instant;
 import java.time.LocalDate;
 
+import com.autotrade.core.event.AuctionTick;
 import com.autotrade.core.event.ConstituentTick;
 import com.autotrade.core.event.DepthLevels;
 import com.autotrade.core.event.FutureTick;
@@ -77,6 +78,23 @@ public final class MdRowEncoder {
                 .int64(tick.cumulativeVolume())
                 .float64(tick.sessionVwap())
                 .float64(tick.weightPercent())
+                .endRow();
+    }
+
+    public byte[] auction(AuctionTick tick, long manifestId, LocalDate sessionDate) {
+        return row.int64(manifestId)
+                .date(sessionDate)
+                .text(tick.underlying())
+                .timestamp(tick.receivedAt())
+                .timestamp(tick.exchangeTime())
+                .int64(tick.instrumentToken())
+                .text(tick.symbol())
+                .float64(tick.indicativePrice())
+                .float64(tick.referencePrice())
+                .int64(tick.equilibriumQuantity())
+                .int64(tick.imbalanceTotal())
+                .int64(tick.imbalanceMarket())
+                .bool(tick.casEligible())
                 .endRow();
     }
 

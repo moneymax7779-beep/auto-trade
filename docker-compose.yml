@@ -50,7 +50,7 @@ services:
       dockerfile: app-trading-core/Dockerfile
       args:
         CODE_VERSION: ${AUTOTRADE_CODE_VERSION:-dev}
-    image: autotrade-trading-core:${AUTOTRADE_CODE_VERSION:-dev}
+    image: autotrade-trading-core:${AUTOTRADE_CODE_VERSION:-latest}
     container_name: autotrade-trading-core
     command: ["--mode=auto"]
     environment:

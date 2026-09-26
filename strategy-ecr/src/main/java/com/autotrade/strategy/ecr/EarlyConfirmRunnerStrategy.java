@@ -112,7 +112,7 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
         Map<OptionSide, SideView> views = new EnumMap<>(OptionSide.class);
         Map<OptionSide, Map<String, Double>> subs = new EnumMap<>(OptionSide.class);
         for (OptionSide side : OptionSide.values()) {
-            SideFeatures f = new SideFeatures(side, snapshot);
+            SideFeatures f = new SideFeatures(side, snapshot, ext != null && ext.v6() != null && ext.v6().moverBreadth());
             Map<String, Double> sub = scorer.subScores(f);
             subs.put(side, sub);
             Map<String, Boolean> conditions = conditions(f, dteRegime);
@@ -123,6 +123,16 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
                 required += ctx.adjustment().confirmAdd();
                 boolean favourable = f.bookFavourable(ext.bookImbalanceMin());
                 boolean against = f.bookAgainst(ext.bookImbalanceMin());
+                if (ext.v6() != null) {
+                    // v6: bid/ask changes count alongside imbalance persistence (still one small confirmation).
+                    boolean flowFor = f.flowFavourable(ext.v6().flowEdgePct());
+                    boolean flowAgainst = f.flowAgainst(ext.v6().flowEdgePct());
+                    conditions.put("book_flow_favourable", flowFor);
+                    conditions.put("book_flow_against", flowAgainst);
+                    conditions.put("liquidity_ok", !f.liquidityDropped(ext.v6().liquidityDropPct()));
+                    favourable = favourable || flowFor;
+                    against = against || flowAgainst;
+                }
                 conditions.put("book_favourable", favourable);
                 conditions.put("book_against", against);
                 // A small confirmation only: a few points either way, never a trigger by itself.
@@ -154,7 +164,7 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
             if (mine) {
                 manage(side, f, snapshot, ctx, confirmed, runner, conditions, cas, orders);
             } else if (!position.open()) {
-                if (!casEntry(side, snapshot, ctx, cas, orders)) {
+                if (!casEntry(side, snapshot, ctx, cas, conditions, orders)) {
                     open(side, snapshot, ctx, conditions, early, confirmed, orders);
                 }
             } else if (!stages.get(side).holdsPosition() && stages.get(side) != Stage.EXITED) {
@@ -181,7 +191,8 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
             return;
         }
         boolean entryWindow = ctx.continuous() && !ctx.time().isBefore(config.earliestEntry())
-                && ctx.time().isBefore(config.lastNewEntry()) && snapshot.structure().orComplete() && campaigns.get(side) < 1;
+                && ctx.time().isBefore(config.lastNewEntry()) && snapshot.structure().orComplete() && campaigns.get(side) < 1
+                && conditions.getOrDefault("liquidity_ok", true);
         Stage next = watchStage(conditions);
         int lots = intendedLots(ctx);
         int[] tranches = config.tranches(ctx.expiry(), lots);
@@ -208,7 +219,7 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
      * snapshot is handled by CAS logic (so the continuous-session rules do not run).
      */
     private boolean casEntry(OptionSide side, FeatureSnapshot snapshot, Context ctx, CasScorer.Score cas,
-                             List<OrderIntent> orders) {
+                             Map<String, Boolean> conditions, List<OrderIntent> orders) {
         if (cas == null) {
             return false;
         }
@@ -224,7 +235,7 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
         if (c.entriesRequireConstituents() && !cas.constituentData()) {
             return true;
         }
-        if (!(cas.futuresAlignment() >= c.minFuturesAlignment())) {
+        if (!(cas.futuresAlignment() >= c.minFuturesAlignment()) || !conditions.getOrDefault("liquidity_ok", true)) {
             return true;
         }
         double add = ctx.expiry() ? c.expiryBandAdd() : 0;
@@ -284,7 +295,7 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
                 }
             }
             case CONFIRMED -> {
-                if (invalidated(f)) {
+                if (invalidated(f, ctx)) {
                     exit(side, stage, "INVALIDATED", orders);
                 } else if (runner >= config.runnerScoreMin() && runnerGates(conditions, expiry)) {
                     if (config.scaling(intendedLots(ctx)) && tranches[2] > 0) {
@@ -303,7 +314,7 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
                 }
                 Map<OptionSide, Set<String>> exitStates = Map.of(
                         OptionSide.CE, config.ceRunnerExitStates(), OptionSide.PE, config.peRunnerExitStates());
-                if (invalidated(f)) {
+                if (invalidated(f, ctx)) {
                     exit(side, stage, "INVALIDATED", orders);
                 } else if (!f.trailHolds()) {
                     exit(side, stage, "RUNNER_TRAIL", orders);
@@ -359,7 +370,8 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
     private OrderIntent intent(OrderIntent.Action action, OptionSide side, int lots, Stage stage, String reason,
                                Context ctx) {
         double stop = ext == null ? Double.NaN : ctx.adjustment().premiumStopPct();
-        return new OrderIntent(action, side, lots, stage, reason, stop);
+        int strike = ext == null || action != OrderIntent.Action.ENTER ? 0 : ctx.adjustment().strikeOffset();
+        return new OrderIntent(action, side, lots, stage, reason, stop, strike);
     }
 
     /** Intended lots for the campaign: the file's lots, scaled by the volatility regime in v4. */
@@ -370,9 +382,16 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
         return Math.max(1, (int) Math.round(config.intendedLots() * ctx.adjustment().sizeFactor()));
     }
 
-    /** A 3-minute close back through the level by more than the invalidation band. */
-    private boolean invalidated(SideFeatures f) {
-        return f.closesBeyond() == 0 && f.levelDistance() < -config.invalidationAtr();
+    /**
+     * A 3-minute close back through the level by more than the invalidation band: the structure stop.
+     * v6 widens it per volatility regime (the design's "wide structure SL" on high-volatility days).
+     */
+    private boolean invalidated(SideFeatures f, Context ctx) {
+        double band = config.invalidationAtr();
+        if (ctx.adjustment() != null && Double.isFinite(ctx.adjustment().structureStopAtr())) {
+            band = ctx.adjustment().structureStopAtr();
+        }
+        return f.closesBeyond() == 0 && f.levelDistance() < -band;
     }
 
     private void exit(OptionSide side, Stage stage, String reason, List<OrderIntent> orders) {
@@ -448,6 +467,18 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
         double ceRunner = scorer.runnerScore(ce);
         double peRunner = scorer.runnerScore(pe);
         double continuation = direction >= 0 ? ceRunner : -peRunner;
-        return new MarketState(direction, participation, structure, continuation, regime);
+        String label = null;
+        if (ext != null && ext.v6() != null) {
+            if (direction >= ext.v6().trendMin() && structure >= ext.v6().trendMin()) {
+                label = "TREND_UP";
+            } else if (direction <= -ext.v6().trendMin() && structure <= -ext.v6().trendMin()) {
+                label = "TREND_DOWN";
+            } else if (Math.abs(direction) < ext.v6().rangeMax()) {
+                label = "RANGE";
+            } else {
+                label = "TRANSITION";
+            }
+        }
+        return new MarketState(direction, participation, structure, continuation, regime, label);
     }
 }

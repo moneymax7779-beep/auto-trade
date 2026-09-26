@@ -41,7 +41,13 @@ import com.autotrade.md.live.ReplayAsLiveFeed;
 import com.autotrade.md.live.ZtTailFeed;
 import com.autotrade.md.zt.ZtReadOnlyDataSource;
 import com.autotrade.core.history.SessionHistory;
+import com.autotrade.core.history.CombinedSessionHistory;
+import com.autotrade.core.history.IndexWeightFiles;
+import com.autotrade.md.store.LiveCapture;
+import com.autotrade.md.store.OwnSessionHistory;
 import com.autotrade.md.store.ReferenceStore;
+import com.autotrade.md.store.Runs;
+import com.autotrade.md.store.SnapshotWriter;
 import com.autotrade.md.zt.ZtSessionHistory;
 import com.autotrade.upstox.UpstoxCandles;
 import com.autotrade.md.zt.ZtSessionSource;
@@ -242,10 +248,18 @@ class SessionRunner implements ApplicationRunner {
             feed = new ZtTailFeed(source, session, t.underlyings(), Duration.ofMillis(t.pollIntervalMs()),
                     Duration.ofMillis(t.recheckWindowMs()));
         }
+        // The Upstox feed is recorded into auto-trade's own md.* tables (auction data, futures book, VIX
+        // included): zt-tiger-v2 keeps only its newest sessions and none of that data.
+        UpstoxFeed upstoxFeed = feed instanceof UpstoxFeed u ? u : null;
+        LiveCapture capture = null;
+        if (upstoxFeed != null) {
+            capture = new LiveCapture(target, session, "UPSTOX_V3_LIVE", CodeVersion.current());
+            feed = new CapturingFeed(feed, capture);
+        }
         ReferenceStore referenceStore = new ReferenceStore(target);
         LiveReference liveReference = replay ? null : new LiveReference(referenceStore, session, new UpstoxCandles());
-        SessionHistory history = new ZtSessionHistory(source)
-                .withReference(replay ? referenceStore : liveReference);
+        SessionHistory history = new CombinedSessionHistory(new ZtSessionHistory(source),
+                new OwnSessionHistory(target), replay ? referenceStore : liveReference);
         TradingSession.Settings settings = new TradingSession.Settings(
                 replay ? TradingSession.Mode.PAPER_REPLAY : TradingSession.Mode.PAPER_LIVE, t.account(), session,
                 t.underlyings(), features, history, strategies, strategies.premiumStopPct(),
@@ -264,7 +278,8 @@ class SessionRunner implements ApplicationRunner {
                 }
             }), 5, 30, TimeUnit.SECONDS);
             LocalTime stopAfter = LocalTime.parse(t.stopAfter());
-            if (feed instanceof UpstoxFeed upstox) {
+            if (upstoxFeed != null) {
+                UpstoxFeed upstox = upstoxFeed;
                 // A silent Upstox feed in market hours fails the session; the scheduler restarts it on the tail.
                 timer.scheduleAtFixedRate(safe(() -> {
                     LocalTime now = ZonedDateTime.now(MarketTime.IST).toLocalTime();
@@ -283,9 +298,37 @@ class SessionRunner implements ApplicationRunner {
                 }
             }), 10, 10, TimeUnit.SECONDS);
         }
-        boolean upstoxFeedUsed = feed instanceof UpstoxFeed;
+        boolean upstoxFeedUsed = upstoxFeed != null;
+        LiveCapture recorder = capture;
+        if (recorder != null) {
+            timer.scheduleAtFixedRate(safe(recorder::flush), 5, 5, TimeUnit.SECONDS);
+        }
+        Runs runs = new Runs(target);
+        Long snapshotRun = null;
+        SnapshotWriter snapshots = null;
+        if (!replay) {
+            // Live feature snapshots: the decision evidence, and IV history for later sessions.
+            snapshotRun = runs.start("LIVE_FEATURES", CodeVersion.current(), feed.name(), List.of(session),
+                    t.underlyings(), new tools.jackson.databind.json.JsonMapper().writeValueAsString(hashes));
+            snapshots = new SnapshotWriter(target, snapshotRun);
+            trading.recordSnapshots(snapshots);
+            timer.scheduleAtFixedRate(safe(snapshots::flush), 60, 60, TimeUnit.SECONDS);
+        }
+        SnapshotWriter snapshotWriter = snapshots;
+        Long snapshotRunId = snapshotRun;
         Thread worker = Thread.ofPlatform().name("trading-session-" + session).start(() -> {
             Map<String, Object> summary = trading.run();
+            if (recorder != null) {
+                recorder.close();
+            }
+            if (snapshotWriter != null) {
+                try {
+                    snapshotWriter.close();
+                    runs.finish(snapshotRunId, "{\"snapshots\": " + snapshotWriter.written() + "}");
+                } catch (Exception e) {
+                    log.warn("live snapshot run not finalised: {}", e.getMessage());
+                }
+            }
             if (upstoxFeedUsed && "FAILED".equals(trading.status().get("status"))) {
                 upstoxFailed.add(session);
             }
@@ -362,9 +405,12 @@ class SessionRunner implements ApplicationRunner {
     private LiveFeed upstoxFeed(LocalDate session, List<String> underlyings, InstrumentMaster instruments,
                                 ZtSessionHistory history, UpstoxToken token) throws Exception {
         TradingProperties.Upstox upstox = properties.upstox();
+        IndexWeightFiles official = new IndexWeightFiles(Path.of("config", "reference", "weights"));
         return UpstoxFeeds.build(token, instruments, session, underlyings, Path.of(upstox.instrumentDir()),
-                underlying -> history.constituentWeights(underlying, session), upstox.strikesEachSide(),
-                upstox.recenterStrikes());
+                underlying -> {
+                    Map<String, Double> weights = official.weights(underlying, session);
+                    return weights.isEmpty() ? history.constituentWeights(underlying, session) : weights;
+                }, upstox.strikesEachSide(), upstox.recenterStrikes());
     }
 
     private void exit(int code) {

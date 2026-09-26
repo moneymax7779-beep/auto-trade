@@ -1,0 +1,64 @@
+# Exchange session timings used by auto-trade. Exchange rules, not strategy choices; update from
+# NSE/BSE circulars by adding a new version. Effective from the CAS rollout on 3 Aug 2026.
+version: nse-bse-sessions-v3
+name: nse-bse-sessions
+status: UNCALIBRATED
+effective_from: "2026-08-03"
+
+normal:
+  pre_open_start: "09:00"
+  open: "09:15"
+  continuous_close: "15:15"          # cash market (CAS-eligible stocks) continuous trading ends
+  derivatives_close: "15:40"
+
+cas:
+  start: "15:15"
+  reference_calc_end: "15:20"        # reference price = 15:00–15:15 VWAP
+  market_and_limit_end: "15:25"
+  limit_only_end: "15:30"            # random close within the last 2 minutes of this window
+  random_close_window_min: 2
+  end: "15:35"
+  price_band_pct: 3.0
+  # v3 (2026-09-26). Index derivatives settle on the index closing value, whose constituent closing
+  # prices come from the closing auction since 3 Aug 2026; SEBI's 12 Sep 2026 consultation reviews
+  # this, so it is configuration, not code. Verify against the current exchange circular.
+  settlement_method: INDEX_CLOSE_FROM_CAS
+  # Whether the index feed carries a live indicative index during CAS. Observed 11-25 Sep 2026 in the
+  # recorded broker index feed: it holds the 15:15 value until about 15:29, so false.
+  index_iep_available: false
+
+# Trading holidays 2026 (NSE equity and F&O; BSE follows the same list). Source: NSE holiday list
+# as published on upstox.com/stocks-market/nse-holidays (checked 2026-09-25). Cross-checked with
+# the data: 14 Sep has no capture, and the Upstox contract file moves the 20 Oct NIFTY weekly
+# expiry to Monday 19 Oct. Special sessions (1 Feb budget day, 8 Nov Muhurat) are not holidays.
+holidays:
+  - "2026-01-26"   # Republic Day
+  - "2026-03-03"   # Holi
+  - "2026-03-26"   # Shri Ram Navami
+  - "2026-03-31"   # Shri Mahavir Jayanti
+  - "2026-04-03"   # Good Friday
+  - "2026-04-14"   # Dr. Baba Saheb Ambedkar Jayanti
+  - "2026-05-01"   # Maharashtra Day
+  - "2026-05-28"   # Bakri Id
+  - "2026-06-26"   # Muharram
+  - "2026-09-14"   # Ganesh Chaturthi
+  - "2026-10-02"   # Mahatma Gandhi Jayanti
+  - "2026-10-20"   # Dussehra
+  - "2026-11-10"   # Diwali Balipratipada
+  - "2026-11-24"   # Prakash Gurpurb Sri Guru Nanak Dev
+  - "2026-12-25"   # Christmas
+
+# v3: scheduled high-volatility events, dated by the Indian session they affect (a US release after
+# the Indian close affects the next session). Sources: RBI press release on the 2026-27 MPC calendar
+# (decision on the third day, 10:00 IST); Federal Reserve FOMC calendar (decision 14:00 ET =
+# 23:30 / 00:30 IST); BLS CPI release schedule (08:30 ET = 18:00 / 19:00 IST). Checked 2026-09-26.
+events:
+  - { date: "2026-10-07", name: "RBI MPC decision", kind: CENTRAL_BANK }
+  - { date: "2026-10-15", name: "US CPI (released 14 Oct evening IST)", kind: MACRO_DATA }
+  - { date: "2026-10-29", name: "FOMC decision (28 Oct, 23:30 IST)", kind: CENTRAL_BANK }
+  - { date: "2026-11-11", name: "US CPI (released 10 Nov evening IST)", kind: MACRO_DATA }
+  - { date: "2026-12-04", name: "RBI MPC decision", kind: CENTRAL_BANK }
+  - { date: "2026-12-10", name: "FOMC decision (9 Dec, 00:30 IST 10 Dec)", kind: CENTRAL_BANK }
+  - { date: "2026-12-11", name: "US CPI (released 10 Dec evening IST)", kind: MACRO_DATA }
+  - { date: "2027-02-01", name: "Union Budget (by convention; confirm when announced)", kind: FISCAL }
+  - { date: "2027-02-05", name: "RBI MPC decision", kind: CENTRAL_BANK }

@@ -28,14 +28,26 @@ record EcrExtensions(
         double wallScoreMin,
         double expiryRunnerRvolMin,
         Map<String, Double> futuresStateScore,
-        Cas cas) {
+        Cas cas,
+        V6 v6) {
 
     /** A volatility bucket on the percentile scale: {@code from <= p < to}. */
     record Bucket(String name, double from, double to) {
     }
 
-    /** How a volatility regime changes the rules. */
-    record Adjustment(double sizeFactor, double confirmAdd, double premiumStopPct, boolean allowEarly) {
+    /**
+     * How a volatility regime changes the rules. v6: {@code strikeOffset} (strikes in the money) and
+     * {@code structureStopAtr} (the invalidation band; NaN = the file's exits value).
+     */
+    record Adjustment(double sizeFactor, double confirmAdd, double premiumStopPct, boolean allowEarly,
+                      int strikeOffset, double structureStopAtr) {
+    }
+
+    /** Strategy v6: the design's remaining regime inputs, order-book flow, liquidity and named states. */
+    record V6(double escalationAtrPercentile, double escalationVixChange15m, double escalationIvChange5m,
+              double escalationFuturesRvol, int escalationExpiryFinalMinutes, String eventDayFloor,
+              double flowEdgePct, double liquidityDropPct, double trendMin, double rangeMax, boolean moverBreadth,
+              boolean useExchangeIepFlag) {
     }
 
     record Cas(
@@ -57,7 +69,8 @@ record EcrExtensions(
             double iepReturnScalePct,
             double moveScaleAtr,
             double imbalanceChangeScale,
-            boolean indexFallbackNeedsMovingIndicative) {
+            boolean indexFallbackNeedsMovingIndicative,
+            boolean useExchangeIepFlag) {
     }
 
     static EcrExtensions from(ThresholdConfig c) {
@@ -74,7 +87,9 @@ record EcrExtensions(
         for (String regime : c.getMap("vol_regime.adjustments").keySet()) {
             String path = "vol_regime.adjustments." + regime;
             adjustments.put(regime, new Adjustment(c.getDouble(path + ".size_factor"), c.getDouble(path + ".confirm_add"),
-                    c.getDouble(path + ".premium_stop_pct"), c.getBoolean(path + ".allow_early")));
+                    c.getDouble(path + ".premium_stop_pct"), c.getBoolean(path + ".allow_early"),
+                    c.has(path + ".strike_offset") ? c.getInt(path + ".strike_offset") : 0,
+                    c.has(path + ".structure_stop_atr") ? c.getDouble(path + ".structure_stop_atr") : Double.NaN));
         }
         Map<String, Double> weights = c.getNumberMap("cas.weights");
         @SuppressWarnings("unchecked")
@@ -102,7 +117,25 @@ record EcrExtensions(
                         c.getDouble("cas_mode.scales.iep_return_pct"), c.getDouble("cas_mode.scales.move_atr"),
                         c.getDouble("cas_mode.scales.imbalance_change"),
                         c.has("cas_mode.index_fallback_needs_moving_indicative")
-                                && c.getBoolean("cas_mode.index_fallback_needs_moving_indicative")));
+                                && c.getBoolean("cas_mode.index_fallback_needs_moving_indicative"),
+                        c.has("cas_mode.use_exchange_index_iep_flag") && c.getBoolean("cas_mode.use_exchange_index_iep_flag")),
+                v6(c));
+    }
+
+    private static V6 v6(ThresholdConfig c) {
+        if (!c.has("vol_regime.escalation")) {
+            return null;
+        }
+        return new V6(c.getDouble("vol_regime.escalation.atr_percentile"),
+                c.getDouble("vol_regime.escalation.vix_change_15m_abs"),
+                c.getDouble("vol_regime.escalation.iv_change_5m_abs"),
+                c.getDouble("vol_regime.escalation.futures_rvol"),
+                c.getInt("vol_regime.escalation.expiry_final_minutes"),
+                c.getString("vol_regime.event_day_floor"),
+                c.getDouble("order_book.flow_edge_pct"), c.getDouble("order_book.liquidity_drop_pct"),
+                c.getDouble("market_state.trend_min"), c.getDouble("market_state.range_max"),
+                "MOVER".equals(c.getString("early_entry.breadth_measure")),
+                c.has("cas_mode.use_exchange_index_iep_flag") && c.getBoolean("cas_mode.use_exchange_index_iep_flag"));
     }
 
     /** Rule changes for a volatility regime (NORMAL's for UNKNOWN or an unlisted regime). */

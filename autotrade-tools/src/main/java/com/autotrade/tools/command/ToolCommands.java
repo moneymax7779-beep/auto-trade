@@ -38,6 +38,8 @@ import com.autotrade.md.store.LoadManifest;
 import com.autotrade.md.store.LoadManifests;
 import com.autotrade.md.store.MdTable;
 import com.autotrade.md.store.SequenceDigest;
+import com.autotrade.core.history.CombinedSessionHistory;
+import com.autotrade.md.store.OwnSessionHistory;
 import com.autotrade.md.store.ReferenceStore;
 import com.autotrade.core.history.ReferenceData;
 import com.autotrade.upstox.UpstoxFeed;
@@ -74,8 +76,8 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
 
     private static final JsonMapper JSON = JsonMapper.builder().build();
     private static final String DEFAULT_UNDERLYINGS = "NIFTY,SENSEX";
-    static final String FEATURES_FILE = "config/features/features.v4.yaml";
-    static final String EXCHANGE_FILE = "config/exchange/nse-bse-sessions.v2.yaml";
+    static final String FEATURES_FILE = "config/features/features.v5.yaml";
+    static final String EXCHANGE_FILE = "config/exchange/nse-bse-sessions.v3.yaml";
 
     private final DataSource target;
     private final SourceDatabase source;
@@ -149,7 +151,7 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                   instruments --file NSE.json.gz[,BSE.json.gz] [--date D] [--underlying NIFTY,BANKNIFTY,SENSEX]
                                                              load an Upstox contract-master file into ref.instrument
                   lifecycle [--split TUNING|HELD_OUT | --session D[,D]] [--underlying ...] [--strategy FILE] [--save]
-                            [--held-out] [--descriptive] [--force]
+                            [--held-out] [--descriptive] [--from zt|own] [--force]
                                                              replay the early-confirm-runner lifecycle and report
                                                              (no --split/--session: the strategy's evaluation window;
                                                              --descriptive: behaviour check on held-out sessions this
@@ -370,7 +372,8 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
         SessionEventSource eventSource = args.get("from", "zt").equals("own")
                 ? new StoredSessionSource(target) : new ZtSessionSource(source.dataSource(), false);
         List<LocalTime> printAt = args.list("at", "").stream().map(LocalTime::parse).toList();
-        return FeaturesCommand.run(eventSource, new ZtSessionHistory(source.dataSource()).withReference(new ReferenceStore(target)), sessions.getFirst(),
+        return FeaturesCommand.run(eventSource, new CombinedSessionHistory(new ZtSessionHistory(source.dataSource()), new OwnSessionHistory(target),
+                new ReferenceStore(target)), sessions.getFirst(),
                 args.upperList("underlying", DEFAULT_UNDERLYINGS),
                 Path.of(args.get("features-file", FEATURES_FILE)), Path.of(args.get("exchange-file", EXCHANGE_FILE)),
                 Path.of(args.get("out", ".local/features")), printAt,
@@ -436,7 +439,7 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
 
     private int lifecycle(ToolArgs args) throws Exception {
         args.allowOnly(Set.of("split", "session", "underlying", "strategy", "save", "held-out", "descriptive", "force",
-                "features-file", "exchange-file", "costs-file"));
+                "features-file", "exchange-file", "costs-file", "from"));
         if (!args.flag("force") && MarketHoursGuard.isBlocked(ZonedDateTime.now(MarketTime.IST))) {
             System.err.println("refusing to read zt-tiger-v2 during market hours (09:00-15:50 IST); use --force");
             return 3;
@@ -449,10 +452,13 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
         } else {
             sessions = args.dates("session");
         }
-        return LifecycleCommand.run(target, source.dataSource(), new ZtSessionSource(source.dataSource(), false),
-                new ZtSessionHistory(source.dataSource()).withReference(new ReferenceStore(target)), new LifecycleCommand.Request(sessions,
+        SessionEventSource lifecycleSource = args.get("from", "zt").equals("own")
+                ? new StoredSessionSource(target) : new ZtSessionSource(source.dataSource(), false);
+        return LifecycleCommand.run(target, source.dataSource(), lifecycleSource,
+                new CombinedSessionHistory(new ZtSessionHistory(source.dataSource()), new OwnSessionHistory(target),
+                new ReferenceStore(target)), new LifecycleCommand.Request(sessions,
                         args.upperList("underlying", DEFAULT_UNDERLYINGS),
-                        Path.of(args.get("strategy", "config/strategy/early-confirm-runner.v5.yaml")),
+                        Path.of(args.get("strategy", "config/strategy/early-confirm-runner.v6.yaml")),
                         Path.of(args.get("features-file", FEATURES_FILE)), Path.of(args.get("exchange-file", EXCHANGE_FILE)),
                         Path.of(args.get("costs-file", "config/costs/india-index-options-costs.v1.yaml")),
                         args.flag("save"), args.flag("held-out"), args.flag("descriptive"), CodeVersion.current()));

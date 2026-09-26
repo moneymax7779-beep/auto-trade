@@ -419,3 +419,28 @@ zt-tiger-v2 tail when there is no token or the feed fails or stays silent for 60
 are downloaded daily. Verified 2026-09-26: token accepted for BM6462; a 20-second feed check
 subscribed 185 instruments and received index, VIX, futures, 80 constituents and 100 options.
 auto-trade stores no zt-tiger-v2 user or credential and never re-authenticates with its app.
+
+**Remaining design items and data recording (2026-09-26).** Built after the review found them
+simplified or missing: the full premium-response formula (vega·ΔIV, theta·Δt), the design's mover
+breadth, order-book bid/ask changes and the liquidity-drop guard, the remaining volatility-regime
+inputs (ATR percentile, VIX and IV moves, futures RVOL, expiry final hour), a scheduled-event
+calendar (RBI MPC, FOMC, US CPI, Budget; exchange file v3) that floors the regime at HIGH, strike
+selection and a wider structure stop per regime, named market states and the dashboard's volatility
+and CAS panels, the exchange's CAS settlement method and index-IEP flag, and the CAS liquidity
+percentile (features v5, strategy ecr-v6; values per `docs/CALIBRATION-v5.md`).
+
+Also built: `LiveCapture` records the Upstox feed (ticks, futures book, India VIX and per-stock
+auction data, new table `md.auction_tick`, migration V11) into auto-trade's own database; live
+sessions save their feature snapshots (run kind `LIVE_FEATURES`); `OwnSessionHistory` and
+`CombinedSessionHistory` use that data as history where zt-tiger-v2 has less; official index weights
+live in `config/reference/weights/`; BANKNIFTY is subscribed and recorded (it cannot confirm a trade
+until 5 recorded sessions give it RVOL history); `lifecycle --from own` replays recorded sessions.
+
+Found and fixed on the way: the CLI ran a stale Spring Boot jar after module changes (a warning
+existed but was filtered out of command output); `bin/autotrade` and `bin/trading-core` now refuse
+to run stale. `docker compose run` used an old `:dev` image for live-path replays; `bin/deploy` now
+tags the deployed image `:latest`, which compose uses by default. v5 recomputed on the fresh build
+gives the same result, so earlier runs were not affected.
+
+Not possible: an auction backtest before 28 Sep (no per-stock auction data exists for past sessions);
+exit rules and profit targets from the design (it gives none).

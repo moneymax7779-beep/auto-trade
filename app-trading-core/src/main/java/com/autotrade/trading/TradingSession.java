@@ -62,6 +62,8 @@ public final class TradingSession {
 
     private static final Logger log = LoggerFactory.getLogger(TradingSession.class);
     private static final Duration STALE_ALERT = Duration.ofSeconds(10);
+    private static final tools.jackson.databind.json.JsonMapper SNAPSHOT_JSON =
+            tools.jackson.databind.json.JsonMapper.builder().build();
     private static final Duration MAX_DECISION_AGE = Duration.ofSeconds(60);
 
     private final Settings settings;
@@ -86,6 +88,8 @@ public final class TradingSession {
     private Instant lastStaleAlert;
     private boolean squaredOff;
     private volatile String status = "STARTING";
+    private com.autotrade.md.store.SnapshotWriter snapshotWriter;
+    private final Map<String, FeatureSnapshot> lastSnapshots = new LinkedHashMap<>();
 
     public TradingSession(Settings settings, LiveFeed feed, TradeStore store) {
         this.settings = settings;
@@ -149,6 +153,11 @@ public final class TradingSession {
         feed.stop();
     }
 
+    /** Saves every feature snapshot (the live decision evidence, and later IV history) through {@code writer}. */
+    public void recordSnapshots(com.autotrade.md.store.SnapshotWriter writer) {
+        this.snapshotWriter = writer;
+    }
+
     private void onEvent(MarketEvent event) {
         synchronized (lock) {
             events.incrementAndGet();
@@ -204,7 +213,17 @@ public final class TradingSession {
         Decision decision = strategies.get(underlying).decide(snapshot, oms.view(underlying));
         lastDecisions.put(underlying, decision);
         lastSpot.put(underlying, snapshot.spot());
+        lastSnapshots.put(underlying, snapshot);
         store.decision(sessionId, decision, snapshot.spot());
+        if (snapshotWriter != null) {
+            try {
+                snapshotWriter.add(snapshot.session(), underlying, snapshot.time(), snapshot.phase(), snapshot.spot(),
+                        SNAPSHOT_JSON.writeValueAsString(com.autotrade.features.snapshot.SnapshotFlattener.jsonSafe(
+                                com.autotrade.features.snapshot.SnapshotFlattener.flatten(snapshot))));
+            } catch (RuntimeException e) {
+                log.warn("feature snapshot not saved: {}", e.getMessage());
+            }
+        }
         if (risk.squareOffDue(time)) {
             if (!oms.livePositions().isEmpty()) {
                 oms.exitAll("SQUARE_OFF");
@@ -223,9 +242,10 @@ public final class TradingSession {
             }
             switch (intent.action()) {
                 case ENTER -> {
-                    var contract = contracts.find(underlying, snapshot.options().atmStrike(), intent.side());
+                    var contract = contracts.find(underlying,
+                            intent.strike(snapshot.options().atmStrike(), snapshot.options().strikeStep()), intent.side());
                     if (contract.isEmpty()) {
-                        rejected(underlying, "ENTER " + intent.side(), "no quotes for the ATM contract yet");
+                        rejected(underlying, "ENTER " + intent.side(), "no quotes for the chosen strike yet");
                         continue;
                     }
                     RiskDecision result = oms.enter(underlying, intent.side(), contract.get(), intent.lots(),
@@ -324,17 +344,70 @@ public final class TradingSession {
             }
             status.put("closedPositions", closed);
             Map<String, Object> stages = new LinkedHashMap<>();
-            lastDecisions.forEach((underlying, decision) -> stages.put(underlying, Map.of(
-                    "time", decision.time().atZone(MarketTime.IST).toLocalTime().toString(),
-                    "spot", lastSpot.getOrDefault(underlying, Double.NaN),
-                    "CE", sideSummary(decision.ce()),
-                    "PE", sideSummary(decision.pe()),
-                    "state", decision.state())));
+            lastDecisions.forEach((underlying, decision) -> {
+                Map<String, Object> view = new LinkedHashMap<>();
+                view.put("time", decision.time().atZone(MarketTime.IST).toLocalTime().toString());
+                view.put("spot", lastSpot.getOrDefault(underlying, Double.NaN));
+                view.put("CE", sideSummary(decision.ce()));
+                view.put("PE", sideSummary(decision.pe()));
+                view.put("state", decision.state());
+                FeatureSnapshot snapshot = lastSnapshots.get(underlying);
+                if (snapshot != null) {
+                    view.put("volatility", volatilityPanel(snapshot));
+                    view.put("cas", casPanel(snapshot));
+                }
+                stages.put(underlying, view);
+            });
             status.put("strategy", stages);
             synchronized (recentRejections) {
                 status.put("recentRejections", List.copyOf(recentRejections));
             }
             return status;
+        }
+    }
+
+    /** The design's VOL REGIME panel: its inputs as the snapshot measured them (finite values only). */
+    private static Map<String, Object> volatilityPanel(FeatureSnapshot s) {
+        Map<String, Object> panel = new LinkedHashMap<>();
+        put(panel, "dte", s.regime().dteTradingDays());
+        put(panel, "minutesToExpiry", s.regime().minutesToExpiryClose());
+        put(panel, "atmIvPct", s.options().atmIv() * 100);
+        put(panel, "ivPercentile", s.volatility().atmIvPercentile());
+        put(panel, "ivTrend", s.volatility().ivTrend());
+        put(panel, "vix", s.volatility().vix());
+        put(panel, "vixPercentile252d", s.volatility().vixPercentile252d());
+        put(panel, "vixChange15m", s.volatility().vixChange15m());
+        put(panel, "realizedVolPct", s.volatility().realizedVol() * 100);
+        put(panel, "realizedVolPercentile", s.volatility().realizedVolPercentile());
+        put(panel, "atrPercentile", s.volatility().atrPercentile());
+        put(panel, "futuresRvol", s.futures().rvolTod());
+        put(panel, "expectedMoveRemaining", s.regime().expectedMoveRemaining());
+        put(panel, "event", s.regime().marketEvent());
+        return panel;
+    }
+
+    /** The design's CAS panel (from 15:15). */
+    private static Map<String, Object> casPanel(FeatureSnapshot s) {
+        Map<String, Object> panel = new LinkedHashMap<>();
+        put(panel, "phase", s.cas().feedPhase());
+        put(panel, "indicative", s.cas().indicativeIndex());
+        put(panel, "reference", s.cas().referenceIndex());
+        put(panel, "iepPressurePct", s.cas().weightedIepReturnPct());
+        put(panel, "imbalance", s.cas().weightedImbalance());
+        put(panel, "breadthPct", s.cas().casBreadthPct());
+        put(panel, "top3", s.cas().topConcentration());
+        put(panel, "futuresVsIndicative", s.cas().futuresVsIndicative());
+        put(panel, "liquidityPercentile", s.cas().auctionLiquidityPercentile());
+        put(panel, "coveragePct", s.cas().constituentCoveragePct());
+        return panel;
+    }
+
+    private static void put(Map<String, Object> panel, String key, Object value) {
+        if (value instanceof Double d && !Double.isFinite(d)) {
+            return;
+        }
+        if (value != null) {
+            panel.put(key, value instanceof Double d ? Math.round(d * 100) / 100.0 : value);
         }
     }
 

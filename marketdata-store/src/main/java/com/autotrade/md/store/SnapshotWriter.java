@@ -34,7 +34,8 @@ public final class SnapshotWriter implements AutoCloseable {
         this.runId = runId;
     }
 
-    public void add(LocalDate session, String underlying, Instant time, String phase, double spot, String featuresJson) {
+    public synchronized void add(LocalDate session, String underlying, Instant time, String phase, double spot,
+                                 String featuresJson) {
         byte[] line = row.int64(runId).date(session).text(underlying).timestamp(time).text(phase)
                 .float64(Double.isFinite(spot) ? spot : null).text(featuresJson).endRow();
         buffer.writeBytes(line);
@@ -48,7 +49,7 @@ public final class SnapshotWriter implements AutoCloseable {
         return written;
     }
 
-    public void flush() {
+    public synchronized void flush() {
         if (buffer.size() == 0) {
             return;
         }

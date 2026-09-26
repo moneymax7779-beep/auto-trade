@@ -12,6 +12,10 @@ package com.autotrade.features.snapshot;
  * imbalance / (2 × equilibrium quantity + |imbalance|)) and its change, CAS breadth (weight share
  * whose IEP is above reference), top-N concentration of the dominant side, equilibrium turnover
  * (₹ crore) and the weight coverage of stocks with auction data. NaN without that data.
+ *
+ * <p>v5: {@code auctionLiquidityPercentile} ranks the equilibrium turnover against recorded sessions at
+ * the same minute (NaN until enough auction history is captured); the exchange file's settlement
+ * method and whether the exchange publishes a true index IEP are carried for the strategy.
  */
 public record CasFeatures(
         String feedPhase,
@@ -36,12 +40,16 @@ public record CasFeatures(
         double topConcentration,
         double auctionTurnoverCr,
         double constituentCoveragePct,
-        int auctionStocks) {
+        int auctionStocks,
+        double auctionLiquidityPercentile,
+        int auctionHistorySessions,
+        String settlementMethod,
+        Boolean indexIepAvailable) {
 
     /** Only the v2 fields (indicative index, its gap to the last continuous spot, futures basis). */
     public static CasFeatures basic(String feedPhase, double indicative, double vsLastContinuous, double futuresBasis) {
         double n = Double.NaN;
         return new CasFeatures(feedPhase, indicative, n, n, vsLastContinuous, n, n, n, n, futuresBasis, n, n, n,
-                false, false, n, n, n, n, n, n, n, 0);
+                false, false, n, n, n, n, n, n, n, 0, n, 0, null, null);
     }
 }

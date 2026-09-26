@@ -30,7 +30,11 @@ public record FeatureExtensions(
         LocalTime casReferenceTo,
         List<Integer> casIndicativeWindowsSec,
         int casImbalanceVelocitySec,
-        int casConcentrationTopN) {
+        int casConcentrationTopN,
+        boolean premiumResponseFull,
+        double moverNeutralPct,
+        int liquidityWindowSec,
+        int auctionHistorySessions) {
 
     public static FeatureExtensions from(ThresholdConfig c) {
         if (!c.has("levels")) {
@@ -56,7 +60,13 @@ public record FeatureExtensions(
                 LocalTime.parse(reference[0]), LocalTime.parse(reference[1]),
                 ints(c, "cas.indicative_windows_sec"),
                 c.getInt("cas.imbalance_velocity_window_sec"),
-                c.getInt("cas.concentration_top_n"));
+                c.getInt("cas.concentration_top_n"),
+                // v5 additions; absent in v3/v4 files, which then keep their v3/v4 definitions
+                c.has("options_chain.premium_response_terms")
+                        && "FULL".equals(c.getString("options_chain.premium_response_terms")),
+                c.has("breadth.mover_neutral_pct") ? c.getDouble("breadth.mover_neutral_pct") : Double.NaN,
+                c.has("order_book.liquidity_window_sec") ? c.getInt("order_book.liquidity_window_sec") : 60,
+                c.has("cas.auction_history_sessions") ? c.getInt("cas.auction_history_sessions") : 20);
     }
 
     private static List<Integer> ints(ThresholdConfig config, String path) {

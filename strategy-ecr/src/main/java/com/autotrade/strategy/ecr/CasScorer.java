@@ -40,6 +40,10 @@ final class CasScorer {
         // components are then left out instead of scoring a false "no move".
         boolean indicativeLive = !config.indexFallbackNeedsMovingIndicative()
                 || (!Double.isNaN(cas.indicativeChangeLong()) && cas.indicativeChangeLong() != 0);
+        // v6: the exchange file says whether a true index IEP is published at all.
+        if (config.useExchangeIepFlag() && Boolean.FALSE.equals(cas.indexIepAvailable())) {
+            indicativeLive = false;
+        }
         double iepReturn = constituents ? cas.weightedIepReturnPct()
                 : indicativeLive ? cas.indicativeReturnPct() : Double.NaN;
         c.put("iep_direction", squash(sign * iepReturn, config.iepReturnScalePct()));

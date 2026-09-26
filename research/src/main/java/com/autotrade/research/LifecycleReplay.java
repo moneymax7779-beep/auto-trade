@@ -144,7 +144,8 @@ public final class LifecycleReplay {
             if (open.containsKey(snapshot.underlying()) || Double.isNaN(snapshot.options().atmStrike())) {
                 return;
             }
-            OptionBook.Contract contract = book.find(snapshot.options().atmStrike(), order.side());
+            OptionBook.Contract contract = book.find(order.strike(snapshot.options().atmStrike(),
+                    snapshot.options().strikeStep()), order.side());
             if (contract == null) {
                 return;
             }

@@ -34,6 +34,7 @@ export interface MarketState {
   structure: number;
   continuation: number;
   regime: string;
+  label?: string | null;
 }
 
 export interface StrategyView {
@@ -42,6 +43,8 @@ export interface StrategyView {
   CE: string;
   PE: string;
   state: MarketState;
+  volatility?: Record<string, number | string>;
+  cas?: Record<string, number | string>;
 }
 
 export interface Status {

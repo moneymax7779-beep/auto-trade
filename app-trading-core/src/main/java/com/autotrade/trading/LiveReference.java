@@ -49,6 +49,12 @@ final class LiveReference implements ReferenceData {
         return INDIA_VIX.equals(symbol) && day.equals(session) ? today : store.intradayBars(symbol, day);
     }
 
+    @Override
+    public List<java.util.Map<java.time.LocalTime, Double>> auctionTurnover(String underlying, LocalDate before,
+                                                                           int sessions) {
+        return store.auctionTurnover(underlying, before, sessions);
+    }
+
     /** Fetches today's VIX minutes and appends the newly completed ones. Never throws. */
     void poll() {
         try {

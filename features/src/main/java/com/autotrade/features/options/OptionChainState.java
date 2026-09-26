@@ -36,6 +36,9 @@ public final class OptionChainState {
         final TimedSeries mid = new TimedSeries(RETENTION);
         final TimedSeries volume = new TimedSeries(RETENTION);
         final TimedSeries imbalance = new TimedSeries(RETENTION);
+        final TimedSeries bidQuantity = new TimedSeries(RETENTION);
+        final TimedSeries askQuantity = new TimedSeries(RETENTION);
+        final TimedSeries depth = new TimedSeries(RETENTION);
         String imbalanceSource = "NONE";
         OptionTick last;
 
@@ -56,6 +59,14 @@ public final class OptionChainState {
             mid.add(time, midPrice(tick));
             Double buy = tick.totalBuyQuantity();
             Double sell = tick.totalSellQuantity();
+            double visible = depthTotal(tick.bids()) + depthTotal(tick.asks());
+            if (visible > 0) {
+                depth.add(time, visible);
+            }
+            if (buy != null && sell != null) {
+                bidQuantity.add(time, buy);
+                askQuantity.add(time, sell);
+            }
             if (buy != null && sell != null && buy + sell > 0) {
                 imbalance.add(time, (buy - sell) / (buy + sell));
                 imbalanceSource = "TOTAL_QTY";
@@ -324,6 +335,17 @@ public final class OptionChainState {
             return Double.NaN;
         }
         double expected = quote.delta * spotMove + 0.5 * value(quote.gamma) * spotMove * spotMove;
+        if (config.extended() && config.extensions().premiumResponseFull()) {
+            // v5, the design's full form: + vega × ΔIV (vega per IV point) + theta × Δt (theta per
+            // calendar day; one minute = 1/1440 day, consistent with calendar-time IV).
+            double ivChange = atmIvSeries.change(time, Duration.ofMinutes(1));
+            if (!Double.isNaN(ivChange) && !Double.isNaN(quote.vega)) {
+                expected += quote.vega * ivChange * 100;
+            }
+            if (!Double.isNaN(quote.theta)) {
+                expected += quote.theta / 1440.0;
+            }
+        }
         double actual = contract.mid.change(time, Duration.ofMinutes(1));
         if (Double.isNaN(actual) || Math.abs(expected) < 0.05) {
             return Double.NaN;
@@ -332,20 +354,30 @@ public final class OptionChainState {
     }
 
     /** ATM call and put book imbalance: [now, minShort, maxShort, minLong, maxLong, changeLong] each. */
-    public record AtmBook(double[] ce, double[] pe, String source) {
+    public record AtmBook(double[] ce, double[] pe, String source, double[] changes) {
     }
 
     public AtmBook atmBook(Instant time, double spot, List<Integer> windowsSec) {
         double step = strikeStep();
         double[] none = {Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN};
+        double[] noChanges = {Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN};
         if (expiry == null || Double.isNaN(step) || Double.isNaN(spot)) {
-            return new AtmBook(none, none, "NONE");
+            return new AtmBook(none, none, "NONE", noChanges);
         }
         double atm = Math.round(spot / step) * step;
         Contract ce = find(atm, true);
         Contract pe = find(atm, false);
         String source = ce != null ? ce.imbalanceSource : pe != null ? pe.imbalanceSource : "NONE";
-        return new AtmBook(book(ce, time, windowsSec), book(pe, time, windowsSec), source);
+        Duration longWindow = Duration.ofSeconds(windowsSec.get(1));
+        Duration liquidity = Duration.ofSeconds(config.extended() ? config.extensions().liquidityWindowSec() : 60);
+        double[] changes = {
+                ce == null ? Double.NaN : percentChange(ce.bidQuantity, time, longWindow),
+                ce == null ? Double.NaN : percentChange(ce.askQuantity, time, longWindow),
+                pe == null ? Double.NaN : percentChange(pe.bidQuantity, time, longWindow),
+                pe == null ? Double.NaN : percentChange(pe.askQuantity, time, longWindow),
+                ce == null ? Double.NaN : percentChange(ce.depth, time, liquidity),
+                pe == null ? Double.NaN : percentChange(pe.depth, time, liquidity)};
+        return new AtmBook(book(ce, time, windowsSec), book(pe, time, windowsSec), source, changes);
     }
 
     /** [now, minShort, maxShort, minLong, maxLong, changeLong] of a book-imbalance series. */

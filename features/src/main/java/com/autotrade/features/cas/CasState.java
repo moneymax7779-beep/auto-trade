@@ -31,11 +31,25 @@ public final class CasState {
     private final TimedSeries indicative = new TimedSeries(RETENTION);
     private final TimedSeries weightedImbalance = new TimedSeries(RETENTION);
     private final Map<String, AuctionTick> auctions = new HashMap<>();
+    private final List<Map<java.time.LocalTime, Double>> turnoverHistory;
+    private final String settlementMethod;
+    private final Boolean indexIepAvailable;
     private double referenceSum;
     private int referenceCount;
 
     public CasState(FeatureExtensions ext, LocalDate session) {
+        this(ext, session, List.of(), null, null);
+    }
+
+    /**
+     * @param turnoverHistory earlier sessions' auction turnover per IST minute (newest first)
+     */
+    public CasState(FeatureExtensions ext, LocalDate session, List<Map<java.time.LocalTime, Double>> turnoverHistory,
+                    String settlementMethod, Boolean indexIepAvailable) {
         this.ext = ext;
+        this.turnoverHistory = turnoverHistory;
+        this.settlementMethod = settlementMethod;
+        this.indexIepAvailable = indexIepAvailable;
         this.referenceFrom = session.atTime(ext.casReferenceFrom()).atZone(MarketTime.IST).toInstant();
         this.referenceTo = session.atTime(ext.casReferenceTo()).atZone(MarketTime.IST).toInstant();
     }
@@ -100,7 +114,26 @@ public final class CasState {
                 inCas && value > orh, inCas && value < orl,
                 inCas ? c.iepReturnPct : n, inCas ? c.imbalance : n, imbalanceChange,
                 inCas ? c.breadthPct : n, inCas ? c.concentration : n, inCas ? c.turnoverCr : n,
-                inCas ? c.coveragePct : n, inCas ? c.stocks : 0);
+                inCas ? c.coveragePct : n, inCas ? c.stocks : 0,
+                inCas ? liquidityPercentile(time, c.turnoverCr) : n, turnoverHistory.size(),
+                settlementMethod, indexIepAvailable);
+    }
+
+    /** Turnover now against earlier sessions' turnover in the last complete minute (percent below). */
+    private double liquidityPercentile(Instant time, double turnoverCr) {
+        if (Double.isNaN(turnoverCr)) {
+            return Double.NaN;
+        }
+        java.time.LocalTime minute = time.atZone(MarketTime.IST).toLocalTime().minusMinutes(1).withSecond(0).withNano(0);
+        List<Double> history = new ArrayList<>();
+        for (Map<java.time.LocalTime, Double> day : turnoverHistory) {
+            Double value = day.get(minute);
+            if (value != null) {
+                history.add(value);
+            }
+        }
+        return history.size() < ext.volatilityMinHistorySessions() ? Double.NaN
+                : com.autotrade.features.volatility.VolatilityState.percentile(turnoverCr * 1e7, history);
     }
 
     private record Constituents(double iepReturnPct, double imbalance, double breadthPct, double concentration,

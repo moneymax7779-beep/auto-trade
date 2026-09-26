@@ -89,7 +89,9 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
         this.breadth = new BreadthState(config);
         this.ext = config.extensions();
         this.volatility = ext == null ? null : new VolatilityState(config, underlying, session, history);
-        this.cas = ext == null ? null : new CasState(ext, session);
+        this.cas = ext == null ? null : new CasState(ext, session,
+                history.reference().auctionTurnover(underlying, session, ext.auctionHistorySessions()),
+                config.casSettlementMethod(), config.indexIepAvailable());
         this.interval = Duration.ofSeconds(config.snapshotIntervalSec());
         this.nextSnapshotAt = open.plus(interval);
         this.lastSnapshotAt = session.atTime(config.derivativesClose())
@@ -201,9 +203,13 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
                     regimeFeatures.expectedMoveRemaining());
             double[] fut = OptionChainState.book(futures.imbalance(), time, ext.bookPersistenceWindowsSec());
             OptionChainState.AtmBook atm = options.atmBook(time, reference, ext.bookPersistenceWindowsSec());
+            double[] futChange = futures.bookChangePct(time,
+                    java.time.Duration.ofSeconds(ext.bookPersistenceWindowsSec().get(1)));
+            double[] ch = atm.changes();
             book = new BookFeatures(fut[0], fut[1], fut[2], fut[3], fut[4], fut[5],
                     atm.ce()[0], atm.ce()[1], atm.ce()[2], atm.ce()[3], atm.ce()[4], atm.ce()[5],
-                    atm.pe()[0], atm.pe()[1], atm.pe()[2], atm.pe()[3], atm.pe()[4], atm.pe()[5], atm.source());
+                    atm.pe()[0], atm.pe()[1], atm.pe()[2], atm.pe()[3], atm.pe()[4], atm.pe()[5], atm.source(),
+                    futChange[0], futChange[1], ch[0], ch[1], ch[2], ch[3], ch[4], ch[5]);
             premium = options.premium(time, reference, ext);
             vol = volatility.snapshot(time, structure.oneMinuteBars(), structure.atr1m(), optionsFeatures.atmIv(),
                     optionsFeatures.atmIvChange5m(), session.equals(options.expiry()));
@@ -220,14 +226,15 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
         LocalDate expiry = options.expiry();
         if (expiry == null) {
             return new RegimeFeatures(null, -1, -1, -1, Double.NaN, Double.NaN, Double.NaN, "NONE", Double.NaN,
-                    nextSessionGapDays());
+                    nextSessionGapDays(), config.marketEvents().get(session));
         }
         int dte = clock.tradingDaysToExpiry(session, expiry);
         double dayRange = structure.dayRange();
         ExpectedMove move = expectedMove(time, reference, chain, expiry, dte);
         return new RegimeFeatures(expiry.toString(), dte, (int) ChronoUnit.DAYS.between(session, expiry),
                 clock.minutesToExpiryClose(time, expiry), move.toExpiry, move.daily, move.remaining, move.method,
-                move.daily > 0 ? dayRange / move.daily : Double.NaN, nextSessionGapDays());
+                move.daily > 0 ? dayRange / move.daily : Double.NaN, nextSessionGapDays(),
+                config.marketEvents().get(session));
     }
 
     /** Non-trading calendar days between this session and the next one (2 over a normal weekend). */

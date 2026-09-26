@@ -106,6 +106,34 @@ public final class ReferenceStore implements ReferenceData {
         return bars;
     }
 
+    @Override
+    public List<java.util.Map<java.time.LocalTime, Double>> auctionTurnover(String underlying, LocalDate session,
+                                                                           int sessions) {
+        String sql = "with last as (select distinct on (a.session_date, a.symbol, date_trunc('minute', a.recv_ts)) "
+                + "a.session_date, (date_trunc('minute', a.recv_ts) at time zone 'Asia/Kolkata')::time m, "
+                + "a.iep * coalesce(a.eq_qty, 0) v from md.auction_tick a join md.load_manifest l on l.id = a.manifest_id "
+                + "and l.status = 'ACTIVE' where a.underlying = ? and a.session_date < ? and a.session_date >= ? "
+                + "order by a.session_date, a.symbol, date_trunc('minute', a.recv_ts), a.recv_ts desc) "
+                + "select session_date, m, sum(v) from last group by 1, 2 order by 1 desc, 2";
+        java.util.Map<LocalDate, java.util.Map<java.time.LocalTime, Double>> byDay = new java.util.TreeMap<>(
+                java.util.Comparator.reverseOrder());
+        try (Connection connection = dataSource.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, underlying);
+            statement.setObject(2, session);
+            statement.setObject(3, session.minusDays(120));
+            try (ResultSet rs = statement.executeQuery()) {
+                while (rs.next()) {
+                    byDay.computeIfAbsent(rs.getObject(1, LocalDate.class), d -> new java.util.TreeMap<>())
+                            .put(rs.getObject(2, java.time.LocalTime.class), rs.getDouble(3));
+                }
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("auction turnover history lookup failed", e);
+        }
+        return byDay.values().stream().limit(sessions).toList();
+    }
+
     /** Stored bar counts and date range per timeframe, for the CLI. */
     public List<String> coverage(String symbol) {
         String sql = "select timeframe, count(*), min(session_date), max(session_date) from ref.index_candle "

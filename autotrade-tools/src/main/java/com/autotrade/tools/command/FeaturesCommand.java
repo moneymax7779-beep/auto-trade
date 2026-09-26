@@ -115,19 +115,8 @@ final class FeaturesCommand {
         return 0;
     }
 
-    /** JSON-safe copy: NaN/infinite numbers become null, times and dates become ISO strings. */
     static Map<String, Object> jsonValues(Map<String, Object> row) {
-        Map<String, Object> values = new LinkedHashMap<>();
-        row.forEach((key, value) -> {
-            if (value instanceof Double d && !Double.isFinite(d)) {
-                values.put(key, null);
-            } else if (value instanceof Instant || value instanceof LocalDate) {
-                values.put(key, value.toString());
-            } else {
-                values.put(key, value);
-            }
-        });
-        return values;
+        return SnapshotFlattener.jsonSafe(row);
     }
 
     private static String summary(Map<String, Object> row) {

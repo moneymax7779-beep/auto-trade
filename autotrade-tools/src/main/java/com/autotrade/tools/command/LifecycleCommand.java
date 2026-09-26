@@ -100,7 +100,8 @@ final class LifecycleCommand {
         }
         List<LocalDate> sessions = new ArrayList<>();
         for (LocalDate session : requested) {
-            if (hasTicks(sourceDb, session, request.underlyings())) {
+            // Own-database replays (recorded live sessions) do not depend on what zt-tiger-v2 still holds.
+            if (!source.name().contains("zt") || hasTicks(sourceDb, session, request.underlyings())) {
                 sessions.add(session);
             } else {
                 System.out.printf("skip %s: zt-tiger-v2 no longer holds its ticks (archived to the external drive)%n",
