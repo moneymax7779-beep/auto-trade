@@ -23,6 +23,7 @@ Multi-user, multi-broker, Upstox first. PAPER only until the gates in
 | `marketdata-live` | Live feed tailing zt-tiger-v2 (read-only); replay-as-live |
 | `broker-upstox` | Upstox browser login and token store; Market Data Feed V3 (SDK 1.29: depth, Greeks, VIX, per-stock CAS). No orders |
 | `app-trading-core` | PAPER trading service (`bin/trading-core`), operator API on 127.0.0.1:8095 |
+| `ui/` | React operator UI (served by trading-core on 127.0.0.1:8095) |
 | `autotrade-tools` | Operator CLI: `sessions`, `zt-sessions`, `replay`, `features`, `simulate`, `instruments`, `clone`, `verify`, `manifests`, `config-hash` |
 
 ## Run locally
@@ -106,6 +107,20 @@ Everything is PAPER: no code path sends an order to a real broker. Records are i
    `bin/trading-core --mode=live --autotrade.trading.feed=upstox`.
 
 Upstox allows two feed connections per user; auto-trade uses one, and zt-tiger-v2 runs on the same user.
+
+## Operator UI (Phase 4)
+
+```bash
+cd ui && npm install && npm run build && cd ..   # once, and after UI changes
+bin/trading-core --mode=serve                     # UI + history only; or run --mode=live / --mode=replay
+open http://127.0.0.1:8095
+```
+
+Pages: **Live** (stages, scores, the four market states, positions, P&L, feed lag, kill switch /
+exit all / stop with a confirm click), **Sessions** (minute timeline with entries and exits, stage
+changes, orders, positions), **Research** (lifecycle runs, episodes, frame charts), **Replay**
+(every saved feature at any minute), **Config** (versioned files and hashes). For UI development,
+`cd ui && npm run dev` serves on 127.0.0.1:5173 and proxies `/api` to trading-core.
 
 ## Config files
 

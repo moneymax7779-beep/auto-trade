@@ -1,6 +1,6 @@
 # auto-trade — implementation plan
 
-Status: agreed 2026-09-25. Phase 0 done (736a423), Phase 1 done (8067b4c), Phase 2 done (616a018, d340a30), Phase 3 in progress; see sections 10–12.
+Status: agreed 2026-09-25. Phase 0 done (736a423), Phase 1 done (8067b4c), Phase 2 done (616a018, d340a30), Phase 3 in progress, Phase 4 in progress; see sections 10–13.
 
 **Database decision (2026-09-25, for testing and implementation):** market data is read directly
 from zt-tiger-v2's database, read-only, with no copying (`bin/autotrade replay --from zt`, the
@@ -323,3 +323,32 @@ it with `--autotrade.trading.feed=upstox`. No order API is wired: PAPER only.
 Still to do in Phase 3: capture the Upstox feed into the own `md.*` tables (so PAPER sessions on
 the Upstox feed can be replayed without zt-tiger-v2); first connection test once the app's key is
 in `.env`; measuring feed lag live; ten clean PAPER sessions (the exit criterion) from 28 Sep.
+
+## 13. Phase 4 status (2026-09-26)
+
+Built: `ui/` (React 19, TypeScript, Vite, Tailwind 4, TanStack Query, TradingView Lightweight
+Charts), served by trading-core from `ui/dist` on 127.0.0.1:8095; `--mode=serve` runs the UI and a
+read-only history API without a trading session (`/api/sessions/**`, `/api/runs/**`,
+`/api/snapshots/**`, `/api/configs/**`).
+
+- **Live**: session header (status, day P&L net of costs, feed, last event, lag, kill switches),
+  per-index cards with the four market states and CE/PE stage plus early/confirm/runner scores,
+  open and closed positions, recent refusals; kill switch, release, exit all and stop, each behind
+  a second confirming click. Polls every 2 s.
+- **Sessions**: list; per session a price timeline with buy/add/exit markers, confirm and runner
+  scores through the day, stage changes, positions and every order's last state.
+- **Research**: lifecycle runs; per run lane totals (base/stressed), episodes, and per-session
+  minute frames with the four states.
+- **Replay**: scrub a saved feature run minute by minute (price with ORH/ORL, VWAP, EMA20) and
+  read every feature at that minute.
+- **Config**: every versioned file with version, status and hash; view the file.
+
+Verified in the browser against real data: session 5 (24 Sep, −₹1,356), run 4, feature runs 1–2,
+and a replay in progress (kill switch engaged and released from the UI, both recorded in
+`ops.kill_switch_event`).
+
+Deviations from the stack table: no AG Grid, shadcn/ui or Zustand yet (plain Tailwind tables and
+React Query state were enough); WebSocket push is replaced by 2-second polling on loopback.
+
+Still to do: authentication (Phase 5, Keycloak) before the UI leaves loopback; an audit view
+(kill-switch events, rejections across sessions); a config diff between versions.

@@ -75,6 +75,11 @@ class SessionRunner implements ApplicationRunner {
     @Override
     public void run(ApplicationArguments args) throws Exception {
         String mode = first(args, "mode", "live");
+        if (mode.equals("serve")) {
+            log.info("serving the UI and history API only (no trading session); open http://127.0.0.1:{}",
+                    context.getEnvironment().getProperty("server.port", "8095"));
+            return;
+        }
         LocalDate session = LocalDate.parse(first(args, "session", LocalDate.now(MarketTime.IST).toString()));
         TradingProperties.Trading t = properties.trading();
 

@@ -1,0 +1,32 @@
+@import "tailwindcss";
+
+/* Design tokens. Dark by default (a trading screen); light when the OS prefers it. */
+@theme {
+  --color-bg: #0b0f14;
+  --color-panel: #121821;
+  --color-panel-2: #1a2230;
+  --color-line: #263041;
+  --color-text: #e6edf3;
+  --color-muted: #8b98a9;
+  --color-up: #22c55e;
+  --color-down: #ef4444;
+  --color-warn: #f59e0b;
+  --color-accent: #60a5fa;
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --color-bg: #f6f8fa;
+    --color-panel: #ffffff;
+    --color-panel-2: #f0f3f6;
+    --color-line: #d8dee4;
+    --color-text: #1f2328;
+    --color-muted: #59636e;
+  }
+}
+
+html, body, #root { height: 100%; }
+body { background: var(--color-bg); color: var(--color-text); font-family: var(--font-sans); }
+.num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }

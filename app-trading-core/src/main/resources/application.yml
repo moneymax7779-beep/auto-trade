@@ -3,6 +3,9 @@ spring:
     import: optional:file:.env[.properties]
   main:
     banner-mode: off
+  web:
+    resources:
+      static-locations: file:ui/dist/,classpath:/static/   # the React build (npm run build in ui/)
   datasource:
     url: ${AUTOTRADE_DB_URL:jdbc:postgresql://127.0.0.1:5500/autotrade}
     username: ${AUTOTRADE_DB_USER:autotrade}

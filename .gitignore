@@ -6,3 +6,4 @@ target/
 .vscode/
 .DS_Store
 node_modules/
+ui/dist/

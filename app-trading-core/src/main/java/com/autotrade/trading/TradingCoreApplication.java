@@ -10,6 +10,7 @@ import org.springframework.boot.context.properties.ConfigurationPropertiesScan;
  * <pre>
  *   --mode=live [--session=YYYY-MM-DD]     tail zt-tiger-v2's capture for today, until stop-after
  *   --mode=replay --session=YYYY-MM-DD     run a recorded session through the same live path, then exit
+ *   --mode=serve                           UI and history API only, no trading session
  * </pre>
  */
 @SpringBootApplication
