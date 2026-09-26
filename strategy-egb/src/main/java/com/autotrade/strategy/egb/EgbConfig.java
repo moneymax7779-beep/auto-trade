@@ -18,6 +18,7 @@ record EgbConfig(
         LocalTime lastNewEntry,
         LocalTime flatBy,
         Map<OptionSide, List<String>> triggerLevels,
+        boolean requireTrendSwings,
         int intendedLots,
         double[] fractions,
         boolean compressionRequired,
@@ -57,6 +58,8 @@ record EgbConfig(
                 c.getTime("scope.flat_by"),
                 Map.of(OptionSide.CE, strings(c, "scope.trigger_levels.CE"), OptionSide.PE,
                         strings(c, "scope.trigger_levels.PE")),
+                // v1 has no structure section: its structure bias requires trend swings
+                !c.has("structure.require_trend_swings") || c.getBoolean("structure.require_trend_swings"),
                 c.getInt("sizing.intended_lots"),
                 new double[] {c.getDouble("sizing.fractions.early"), c.getDouble("sizing.fractions.confirm"),
                         c.getDouble("sizing.fractions.runner")},

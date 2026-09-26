@@ -1,0 +1,72 @@
+# Expiry-day gamma breakout -> retest -> runner (user's design, 2026-09-26).
+# v2 (user's request, 2026-09-26): identical to v1 except the structure bias no longer requires
+# swing structure (higher lows for CE, lower highs for PE). Chosen after seeing that rule block the
+# 22/24 Sep near misses, so replays on 3-24 Sep are descriptive, not evidence.
+# Design, calibration rules and results: docs/CALIBRATION-egb.md. Ledger: A-006.
+# Values from the design are marked "design"; calibrated values name their rule; everything else is
+# a placeholder. Any change is a new file version. Needs features-v6 (sections compression, gamma).
+version: egb-v2
+strategy: expiry-gamma-breakout
+status: UNCALIBRATED
+source: user-design-2026-09-26
+
+scope:
+  dte: 0                               # design: expiry day only
+  earliest_entry: "09:30"              # after the opening range completes
+  last_new_entry: "14:45"
+  flat_by: "15:15"                     # placeholder: before the closing auction decides settlement
+  trigger_levels:                      # design: ORH/PDH for CE, ORL/PDL for PE (swings are too fluid to trade)
+    CE: [ORH, PDH]
+    PE: [ORL, PDL]
+
+sizing:
+  intended_lots: 4
+  fractions: { early: 0.25, confirm: 0.45, runner: 0.30 }   # design: 25 / 45 / 30
+
+structure:
+  require_trend_swings: false          # v2: VWAP side, EMA alignment and EMA9 slope only (v1: true)
+
+compression:                           # design: COMPRESSION state before ARMED
+  required: true                       # design's state machine; variant runs set false
+  range_vs_session_max: 0.66           # calibrated: p25 of rangeVsSession on 15/17 Sep expiry minutes (0.655)
+  ema_gap_atr_max: 0.30                # calibrated: p25 of emaGapAtr (0.300)
+  volume_rate_ratio_max: 1.0           # principle: futures volume not rising
+  memory_min: 30                       # placeholder: a compression counts for 30 minutes after it ends
+
+armed:
+  distance_atr: 0.15                   # design: distance to resistance < 0.15 ATR
+
+early:
+  max_beyond_level_atr: 0.15           # placeholder (as ecr-v6): anticipation, at most this far through
+  acceleration_min: 0.75               # placeholder: 6 of 8 acceleration components (never calibratable so far)
+  breadth_min: 50                      # design: bullish breadth (weighted mover breadth >= +50)
+
+confirmation:
+  body_to_range_min: 0.60              # design: body > ~60% of range
+  close_location_top_pct: 0.25         # design: close near candle high
+  upper_wick_max_pct: 0.20             # placeholder (design: "small upper wick")
+  volume_ratio_min: 1.2                # placeholder (as ecr-v6): breakout-bar futures volume vs previous bars
+  room_min_atr: 0.5                    # placeholder: "no large resistance immediately overhead"
+  premium_response_min: 0.6            # placeholder (as ecr-v6): "option premium fails to respond" rejects
+
+runner:
+  require_retest: true                 # design: the retest is the important part; variant runs set false
+  pullback_volume_ratio_max: 1.0       # principle: "selling volume decreases" on the retest
+  reject_futures_states: { CE: [FRESH_SHORT], PE: [FRESH_LONG] }   # design: "OI doesn't flip to fresh shorts"
+
+exits:
+  probe_max_minutes: 9                 # placeholder (as ecr-v6)
+  probe_fail_atr: 0.25                 # placeholder (as ecr-v6)
+  invalidation_atr: 0.10               # placeholder (as ecr-v6)
+  theta_stop_minutes: 6                # placeholder: 2 three-minute bars to beat the breakeven move
+  stall_minutes: 6                     # placeholder (as ecr-v6 expiry stall)
+  exit_futures_states: { CE: [FRESH_SHORT], PE: [FRESH_LONG] }     # design: fresh short buildup -> exit
+  premium_stop_pct: 30                 # placeholder: emergency resting stop; structure exits come first
+
+rejections:
+  vwap_crosses_max: 1                  # calibrated: p75 of vwapCrosses (30 min) on 15/17 Sep expiry minutes
+  breakout_wick_max_pct: 0.40          # placeholder (design: "huge breakout wick")
+  max_spread_pct: 1.0                  # placeholder (design: "very wide option bid/ask spread")
+
+option:
+  target_abs_delta: 0.55               # placeholder: ATM or 1 ITM, whichever is closer (design: ATM or 1 ITM)

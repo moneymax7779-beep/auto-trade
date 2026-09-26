@@ -114,8 +114,9 @@ final class EgbSide {
     }
 
     /** The design's directional bias: VWAP side, EMA9 over EMA20, EMA9 sloping the trade's way, trend swings. */
-    boolean structureBias() {
-        return vwapSide() && emaAligned() && emaSlopeFavourable() && trendSwings();
+    /** VWAP side, EMA9/EMA20 aligned and EMA9 sloping the trade's way, plus swing structure when required. */
+    boolean structureBias(boolean requireTrendSwings) {
+        return vwapSide() && emaAligned() && emaSlopeFavourable() && (!requireTrendSwings || trendSwings());
     }
 
     private boolean vwapSide() {
@@ -130,7 +131,8 @@ final class EgbSide {
         return favourable(st.ema9Slope());
     }
 
-    private boolean trendSwings() {
+    /** Higher lows for CE, lower highs for PE. */
+    boolean trendSwings() {
         return ce() ? st.higherLows() : st.lowerHighs();
     }
 

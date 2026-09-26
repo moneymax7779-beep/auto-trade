@@ -129,3 +129,38 @@ trades, so none of the fixes could have changed a result.
 - `gamma.regime_thresholds` must be three ascending values (checked on load, was an index error per
   snapshot); two versions of one strategy in one session are refused at start (they would share a
   position key); OMS rejections now record the strategy they were refused for.
+
+## All seven expiry days (2026-09-26, code be54f52, runs 15–22)
+Each expiry day replayed on the index that expires that day only. 3/8/10 Sep were restored from the
+zt-tiger-v2 archive into a scratch database (`zt_archive` in autotrade-postgres; SHA-256 and row
+counts matched the archive manifest) and had not been used for this strategy or its calibration.
+
+| Day | Index | ecr-v6 (base / stressed ₹) | egb-v1 (base / stressed ₹) |
+| --- | --- | --- | --- |
+| 3 Sep | SENSEX | 0 trades | 0 trades |
+| 8 Sep | NIFTY | 0 trades | 0 trades |
+| 10 Sep | SENSEX | 74800 PE 10:59–11:03 INVALIDATED −659 / −698 | 74800 PE 14:19–14:21 CONFIRMED entry, INVALIDATED −854 / −949 |
+| 15 Sep | NIFTY | 0 trades | 0 trades |
+| 17 Sep | SENSEX | 0 trades | 0 trades |
+| 22 Sep | NIFTY | 23400 PE 10:33–10:37 +259 / +207 | 0 trades |
+| 24 Sep | SENSEX | 74200 PE 10:18–10:25 +195 / +329 | 0 trades |
+| Total | | 3 trades, 2 wins, −205 / −162 | 1 trade, 0 wins, −854 / −949 |
+
+Four trades over seven days is not a sample; nothing here supports or rejects either strategy.
+
+## egb-v2: structure bias without swing structure (user's request, 2026-09-26; runs 23–26)
+v2 removes "higher lows (CE) / lower highs (PE)" from the structure bias; everything else is v1
+(swing structure is still one of the eight acceleration components, and is reported as the
+`trend_swings` condition). The rule was removed after seeing it block the 22/24 Sep near misses, so
+these replays are descriptive.
+
+| Day | Index | egb-v2 (base / stressed ₹) |
+| --- | --- | --- |
+| 3 Sep | SENSEX | 0 trades |
+| 8 Sep | NIFTY | 0 trades (PE armed 11 minutes, no early or confirmed entry) |
+| 10 Sep | SENSEX | 74800 PE 14:19–14:21 INVALIDATED −854 / −949 (same as v1) |
+| 15 Sep | NIFTY | 0 trades |
+| 17 Sep | SENSEX | 0 trades |
+| 22 Sep | NIFTY | 23350 PE: CONFIRMED 13:54 (2 lots) → RETEST 13:57 → retest held, RUNNER +1 lot 14:00 → MOMENTUM_FADE 14:07; +685 / +354 |
+| 24 Sep | SENSEX | 0 trades (PE armed 3 minutes, acceleration 25–50 %, no confirmation) |
+| Total | | 2 trades, 1 win, −169 / −595 |

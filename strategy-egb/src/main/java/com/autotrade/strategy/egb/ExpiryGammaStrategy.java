@@ -318,7 +318,8 @@ final class ExpiryGammaStrategy implements Strategy {
         c.put("near_level", !Double.isNaN(d) && d >= -1.0);
         c.put("compressed", compressedNow);
         c.put("compressed_recently", compressedRecently);
-        c.put("structure_bias", f.structureBias());
+        c.put("trend_swings", f.trendSwings());
+        c.put("structure_bias", f.structureBias(config.requireTrendSwings()));
         c.put("armed_distance", !Double.isNaN(d) && d >= -config.armedDistanceAtr() && d <= config.earlyMaxBeyondAtr());
         int closes = f.closesBeyond(level);
         c.put("broke_level", closes >= 1 && closes <= 2 && d > 0);

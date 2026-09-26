@@ -39,6 +39,21 @@ class ExpiryGammaStrategyTest {
     }
 
     @Test
+    void v2DropsTheSwingStructureFromTheStructureBias() {
+        Snapshots noHigherLows = Snapshots.bullishCoil().set("structure.higherLows", false);
+        Decision v1 = strategy.decide(noHigherLows.at("12:41"), PositionView.FLAT);
+        assertThat(v1.ce().conditions()).containsEntry("trend_swings", false).containsEntry("structure_bias", false);
+        assertThat(v1.orders()).isEmpty();
+
+        ThresholdConfig v2Config = ThresholdConfig.load(Path.of("..", "config", "strategy", "expiry-gamma-breakout.v2.yaml"));
+        assertThat(v2Config.version()).isEqualTo("egb-v2");
+        Strategy v2 = new ExpiryGammaFactory(v2Config).create("NIFTY", Snapshots.SESSION);
+        Decision early = v2.decide(noHigherLows.at("12:41"), PositionView.FLAT);
+        assertThat(early.ce().conditions()).containsEntry("trend_swings", false).containsEntry("structure_bias", true);
+        assertThat(early.orders()).singleElement().extracting(OrderIntent::stage).isEqualTo(Stage.EARLY_ENTRY);
+    }
+
+    @Test
     void doesNothingOffExpiryDay() {
         Decision decision = strategy.decide(Snapshots.bullishCoil().set("regime.dteTradingDays", 2).at("12:40"),
                 PositionView.FLAT);
