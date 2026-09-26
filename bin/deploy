@@ -6,6 +6,8 @@ cd "$ROOT"
 export AUTOTRADE_CODE_VERSION="$(git rev-parse --short=12 HEAD)$( [ -n "$(git status --porcelain --untracked-files=no)" ] && echo -dirty)"
 echo "building $AUTOTRADE_CODE_VERSION"
 mvn -q -DskipTests -pl app-trading-core -am clean install
+# the CLI embeds the same modules; rebuild it too so bin/autotrade does not run stale code
+mvn -q -DskipTests -pl autotrade-tools clean install
 (cd ui && npm ci --no-audit --no-fund --silent && npm run build --silent)
 # a trading-core started by hand would hold port 8095
 pkill -f "app-trading-core-.*\.jar" 2>/dev/null && sleep 2 || true
