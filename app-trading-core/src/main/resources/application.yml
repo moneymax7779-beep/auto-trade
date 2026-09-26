@@ -6,6 +6,9 @@ spring:
   web:
     resources:
       static-locations: file:ui/dist/,classpath:/static/   # the React build (npm run build in ui/)
+      cache:
+        cachecontrol:
+          no-cache: true             # browsers revalidate, so a new UI build shows on reload
   datasource:
     url: ${AUTOTRADE_DB_URL:jdbc:postgresql://127.0.0.1:5500/autotrade}
     username: ${AUTOTRADE_DB_USER:autotrade}

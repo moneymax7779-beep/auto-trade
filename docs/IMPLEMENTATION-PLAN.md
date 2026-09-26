@@ -350,5 +350,7 @@ and a replay in progress (kill switch engaged and released from the UI, both rec
 Deviations from the stack table: no AG Grid, shadcn/ui or Zustand yet (plain Tailwind tables and
 React Query state were enough); WebSocket push is replaced by 2-second polling on loopback.
 
-Still to do: authentication (Phase 5, Keycloak) before the UI leaves loopback; an audit view
-(kill-switch events, rejections across sessions); a config diff between versions.
+Still to do: an audit view (kill-switch events, rejections across sessions); a config diff between
+versions. Authentication: **deferred by decision (2026-09-26)** — no UI login until Phase 5; the
+UI and operator API stay bound to 127.0.0.1. auto-trade does not use zt-tiger-v2's users or broker
+accounts (only its market data); the Upstox feed uses auto-trade's own Upstox app. Phase 5 is parked.
