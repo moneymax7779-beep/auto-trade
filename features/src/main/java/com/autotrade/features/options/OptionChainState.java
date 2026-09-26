@@ -208,6 +208,60 @@ public final class OptionChainState {
                 ceQuote.spreadPct, peQuote.spreadPct);
     }
 
+    /** Straddle change over {@code minutes}, percent; NaN without history. Call after {@link #snapshot}. */
+    public double straddleChangePct(Instant time, int minutes) {
+        return percentChange(straddleSeries, time, Duration.ofMinutes(minutes));
+    }
+
+    /**
+     * Gamma panel (features v6) for the ATM and one-strike-ITM call and put.
+     *
+     * @param spotChange spot change over the gamma horizon (for the realised gamma P&amp;L estimate)
+     */
+    public com.autotrade.features.snapshot.GammaFeatures gamma(Instant time, double spot, double spotChange,
+                                                             int horizonMin, List<Double> regimeThresholds) {
+        double step = strikeStep();
+        if (expiry == null || Double.isNaN(step) || Double.isNaN(spot)) {
+            return com.autotrade.features.snapshot.GammaFeatures.EMPTY;
+        }
+        double atm = Math.round(spot / step) * step;
+        double years = clock.yearsToExpiry(time, expiry);
+        Quote atmCe = quote(find(atm, true), spot, years);
+        Quote itmCe = quote(find(atm - step, true), spot, years);
+        Quote atmPe = quote(find(atm, false), spot, years);
+        Quote itmPe = quote(find(atm + step, false), spot, years);
+        double gammaPct = average(atmCe.gamma, atmPe.gamma) * spot / 100;
+        String regime = "UNKNOWN";
+        if (!Double.isNaN(gammaPct)) {
+            regime = gammaPct < regimeThresholds.get(0) ? "LOW" : gammaPct < regimeThresholds.get(1) ? "NORMAL"
+                    : gammaPct < regimeThresholds.get(2) ? "HIGH" : "EXTREME";
+        }
+        return new com.autotrade.features.snapshot.GammaFeatures(horizonMin, gammaPct, regime,
+                breakeven(atmCe, horizonMin), breakeven(atmPe, horizonMin),
+                gammaPnl(atmCe, spotChange, horizonMin), gammaPnl(atmPe, spotChange, horizonMin),
+                atm, atmCe.delta, atmCe.gamma, atmCe.theta / 1440.0, atmCe.mid, atmCe.spreadPct,
+                atm - step, itmCe.delta, itmCe.gamma, itmCe.theta / 1440.0, itmCe.mid, itmCe.spreadPct,
+                atm, atmPe.delta, atmPe.gamma, atmPe.theta / 1440.0, atmPe.mid, atmPe.spreadPct,
+                atm + step, itmPe.delta, itmPe.gamma, itmPe.theta / 1440.0, itmPe.mid, itmPe.spreadPct);
+    }
+
+    /** Spot move over {@code minutes} at which ½·Γ·ΔS² pays that horizon's theta: √(2·|Θ|·h / Γ). */
+    static double breakeven(Quote quote, int minutes) {
+        double thetaPerMin = quote.theta / 1440.0;
+        if (!(quote.gamma > 0) || Double.isNaN(thetaPerMin)) {
+            return Double.NaN;
+        }
+        return Math.sqrt(2 * Math.abs(thetaPerMin) * minutes / quote.gamma);
+    }
+
+    /** ½·Γ·ΔS² + Θ·h, rupees per unit, for the realised move over the horizon. */
+    static double gammaPnl(Quote quote, double spotChange, int minutes) {
+        if (Double.isNaN(quote.gamma) || Double.isNaN(quote.theta) || Double.isNaN(spotChange)) {
+            return Double.NaN;
+        }
+        return 0.5 * quote.gamma * spotChange * spotChange + quote.theta / 1440.0 * minutes;
+    }
+
     private record Barrier(double strike, double score, Contract contract) {
     }
 
@@ -292,7 +346,7 @@ public final class OptionChainState {
         return side;
     }
 
-    private record Quote(double mid, double iv, double delta, double gamma, double vega, double theta,
+    record Quote(double mid, double iv, double delta, double gamma, double vega, double theta,
                          double spreadPct, String source) {
         static final Quote NONE = new Quote(Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN,
                 Double.NaN, "NONE");

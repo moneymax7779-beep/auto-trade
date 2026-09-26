@@ -12,7 +12,8 @@ public interface OmsListener {
     default void orderUpdated(ManagedPosition position, String role, OrderUpdate update) {
     }
 
-    default void rejected(String underlying, String intent, String reason) {
+    /** A refused intent; {@code strategyId} is the strategy it was refused for. */
+    default void rejected(String strategyId, String underlying, String intent, String reason) {
     }
 
     default void closed(ManagedPosition position) {

@@ -45,6 +45,10 @@
         </dependency>
         <dependency>
             <groupId>com.autotrade</groupId>
+            <artifactId>strategy-egb</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.autotrade</groupId>
             <artifactId>research</artifactId>
         </dependency>
         <dependency>

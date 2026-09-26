@@ -34,7 +34,26 @@ public record FeatureExtensions(
         boolean premiumResponseFull,
         double moverNeutralPct,
         int liquidityWindowSec,
-        int auctionHistorySessions) {
+        int auctionHistorySessions,
+        V6 v6) {
+
+    /** Features v6: compression, gamma and retest (null before v6). */
+    public record V6(int compressionWindowMin, int volumeRecentMin, int volumePriorMin, int gammaHorizonMin,
+                     List<Double> gammaRegimeThresholds) {
+
+        public V6 {
+            if (compressionWindowMin <= 0 || volumeRecentMin <= 0 || volumePriorMin <= 0 || gammaHorizonMin <= 0) {
+                throw new IllegalArgumentException("features v6 windows must be positive minutes");
+            }
+            // Four gamma regimes (LOW, NORMAL, HIGH, EXTREME) need three ascending boundaries.
+            if (gammaRegimeThresholds.size() != 3 || gammaRegimeThresholds.get(0) >= gammaRegimeThresholds.get(1)
+                    || gammaRegimeThresholds.get(1) >= gammaRegimeThresholds.get(2)) {
+                throw new IllegalArgumentException("gamma.regime_thresholds needs three ascending values, got "
+                        + gammaRegimeThresholds);
+            }
+            gammaRegimeThresholds = List.copyOf(gammaRegimeThresholds);
+        }
+    }
 
     public static FeatureExtensions from(ThresholdConfig c) {
         if (!c.has("levels")) {
@@ -66,7 +85,10 @@ public record FeatureExtensions(
                         && "FULL".equals(c.getString("options_chain.premium_response_terms")),
                 c.has("breadth.mover_neutral_pct") ? c.getDouble("breadth.mover_neutral_pct") : Double.NaN,
                 c.has("order_book.liquidity_window_sec") ? c.getInt("order_book.liquidity_window_sec") : 60,
-                c.has("cas.auction_history_sessions") ? c.getInt("cas.auction_history_sessions") : 20);
+                c.has("cas.auction_history_sessions") ? c.getInt("cas.auction_history_sessions") : 20,
+                !c.has("gamma") ? null : new V6(c.getInt("compression.window_min"), c.getInt("compression.volume_recent_min"),
+                        c.getInt("compression.volume_prior_min"), c.getInt("gamma.horizon_min"),
+                        c.getDoubleList("gamma.regime_thresholds")));
     }
 
     private static List<Integer> ints(ThresholdConfig config, String path) {

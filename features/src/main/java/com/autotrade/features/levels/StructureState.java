@@ -72,6 +72,15 @@ public final class StructureState {
     private double previousOneMinuteClose = Double.NaN;
     private final Deque<long[]> ladderCrossings = new ArrayDeque<>();
     private final Deque<Bar> oneMinuteBars = new ArrayDeque<>();
+    // features v6: retest trackers, trailing range history and VWAP crossings
+    private RetestTracker orhRetest;
+    private RetestTracker orlRetest;
+    private final RetestTracker pdhRetest;
+    private final RetestTracker pdlRetest;
+    // Trailing ranges at each 1-minute close: every one but the latest, kept sorted for the session median.
+    private final java.util.List<Double> earlierRangesSorted = new java.util.ArrayList<>();
+    private double latestRange = Double.NaN;
+    private final Deque<Long> vwapCrossings = new ArrayDeque<>();
 
     public StructureState(FeatureConfig config, Instant sessionOpen, Optional<DailyBar> previousSession) {
         this.config = config;
@@ -88,6 +97,8 @@ public final class StructureState {
         this.pdl = previousSession.map(DailyBar::low).orElse(Double.NaN);
         this.pdhAcceptance = Double.isNaN(pdh) ? null : new LevelAcceptance(pdh);
         this.pdlAcceptance = Double.isNaN(pdl) ? null : new LevelAcceptance(pdl);
+        this.pdhRetest = Double.isNaN(pdh) ? null : new RetestTracker(pdh, true);
+        this.pdlRetest = Double.isNaN(pdl) ? null : new RetestTracker(pdl, false);
         oneMinute.onClose(this::onOneMinuteClose);
         threeMinute.onClose(this::onThreeMinuteClose);
     }
@@ -119,6 +130,8 @@ public final class StructureState {
         if (orhAcceptance == null && !time.isBefore(openingRangeEnd) && Double.isFinite(orHigh)) {
             orhAcceptance = new LevelAcceptance(orHigh);
             orlAcceptance = new LevelAcceptance(orLow);
+            orhRetest = new RetestTracker(orHigh, true);
+            orlRetest = new RetestTracker(orLow, false);
         }
     }
 
@@ -158,11 +171,99 @@ public final class StructureState {
                 }
             }
         }
+        if (!Double.isNaN(previousOneMinuteClose) && Double.isFinite(vwapProxy)
+                && (previousOneMinuteClose - vwapProxy) * (bar.close() - vwapProxy) < 0) {
+            vwapCrossings.addLast(bar.end().toEpochMilli());
+        }
         previousOneMinuteClose = bar.close();
         oneMinuteBars.addLast(bar);
         if (oneMinuteBars.size() > CLOSES_KEPT) {
             oneMinuteBars.removeFirst();
         }
+        double range = trailingRange(compressionWindowBars());
+        if (!Double.isNaN(range)) {
+            if (!Double.isNaN(latestRange)) {
+                int at = java.util.Collections.binarySearch(earlierRangesSorted, latestRange);
+                earlierRangesSorted.add(at >= 0 ? at : -at - 1, latestRange);
+            }
+            latestRange = range;
+        }
+    }
+
+    /** The compression window of features v6 (30 one-minute bars if the file has no v6 section). */
+    private int compressionWindowBars() {
+        return config.extended() && config.extensions().v6() != null ? config.extensions().v6().compressionWindowMin() : 30;
+    }
+
+    /** High − low of the last {@code bars} one-minute bars; NaN until that many exist. */
+    private double trailingRange(int bars) {
+        if (oneMinuteBars.size() < bars) {
+            return Double.NaN;
+        }
+        double high = Double.NEGATIVE_INFINITY;
+        double low = Double.POSITIVE_INFINITY;
+        java.util.Iterator<Bar> it = oneMinuteBars.descendingIterator();
+        for (int i = 0; i < bars && it.hasNext(); i++) {
+            Bar b = it.next();
+            high = Math.max(high, b.high());
+            low = Math.min(low, b.low());
+        }
+        return high - low;
+    }
+
+    /** Compression features (v6) over the features file's window. */
+    public com.autotrade.features.snapshot.CompressionFeatures compression(Instant time, FuturesVolume futures,
+                                                                         double straddleChangePct, int windowMin,
+                                                                         int volumeRecentMin, int volumePriorMin) {
+        double range = trailingRange(windowMin);
+        double median = Double.NaN;
+        if (earlierRangesSorted.size() >= windowMin) {
+            median = earlierRangesSorted.get(earlierRangesSorted.size() / 2);
+        }
+        long since = time.minus(Duration.ofMinutes(windowMin)).toEpochMilli();
+        while (!vwapCrossings.isEmpty() && vwapCrossings.peekFirst() < since) {
+            vwapCrossings.removeFirst();
+        }
+        double atr = atr3m.value();
+        double gap = Double.isNaN(ema9.value()) || Double.isNaN(ema20.value()) || !(atr > 0) ? Double.NaN
+                : Math.abs(ema9.value() - ema20.value()) / atr;
+        Instant recentFrom = time.minus(Duration.ofMinutes(volumeRecentMin));
+        Instant priorFrom = recentFrom.minus(Duration.ofMinutes(volumePriorMin));
+        double recent = futures.volume(recentFrom, time) / volumeRecentMin;
+        double prior = futures.volume(priorFrom, recentFrom) / volumePriorMin;
+        return new com.autotrade.features.snapshot.CompressionFeatures(range,
+                median > 0 && !Double.isNaN(range) ? range / median : Double.NaN, gap,
+                prior > 0 && !Double.isNaN(recent) ? recent / prior : Double.NaN, straddleChangePct, vwapCrossings.size());
+    }
+
+    /** Break → retest → hold of ORH/ORL/PDH/PDL (v6). */
+    public com.autotrade.features.snapshot.RetestFeatures retest(Instant time, FuturesVolume futures) {
+        double[] orh = retestValues(orhRetest, time, futures);
+        double[] orl = retestValues(orlRetest, time, futures);
+        double[] pdhV = retestValues(pdhRetest, time, futures);
+        double[] pdlV = retestValues(pdlRetest, time, futures);
+        return new com.autotrade.features.snapshot.RetestFeatures(
+                name(orhRetest), orh[0], orh[1], name(orlRetest), orl[0], orl[1],
+                name(pdhRetest), pdhV[0], pdhV[1], name(pdlRetest), pdlV[0], pdlV[1]);
+    }
+
+    private static String name(RetestTracker tracker) {
+        return tracker == null ? "NONE" : tracker.state().name();
+    }
+
+    /** [minutes in state, pullback volume ratio]. */
+    private static double[] retestValues(RetestTracker tracker, Instant time, FuturesVolume futures) {
+        if (tracker == null || tracker.stateAt() == null) {
+            return new double[] {Double.NaN, Double.NaN};
+        }
+        double minutes = Duration.between(tracker.stateAt(), time).toSeconds() / 60.0;
+        double ratio = Double.NaN;
+        if (tracker.breakBar() != null && tracker.touchBar() != null) {
+            double breakVolume = futures.volume(tracker.breakBar().start(), tracker.breakBar().end());
+            double touchVolume = futures.volume(tracker.touchBar().start(), tracker.touchBar().end());
+            ratio = breakVolume > 0 && !Double.isNaN(touchVolume) ? touchVolume / breakVolume : Double.NaN;
+        }
+        return new double[] {minutes, ratio};
     }
 
     /** The spot VWAP proxy (futures VWAP − basis) used by the ladder; set by the engine as it changes. */
@@ -298,14 +399,20 @@ public final class StructureState {
         if (orhAcceptance == null && !bar.end().isBefore(openingRangeEnd) && Double.isFinite(orHigh)) {
             orhAcceptance = new LevelAcceptance(orHigh);
             orlAcceptance = new LevelAcceptance(orLow);
+            orhRetest = new RetestTracker(orHigh, true);
+            orlRetest = new RetestTracker(orLow, false);
         }
         if (orhAcceptance != null && bar.start().compareTo(openingRangeEnd) >= 0) {
             orhAcceptance.update(bar, band);
             orlAcceptance.update(bar, band);
+            orhRetest.update(bar, band);
+            orlRetest.update(bar, band);
         }
         if (pdhAcceptance != null) {
             pdhAcceptance.update(bar, band);
             pdlAcceptance.update(bar, band);
+            pdhRetest.update(bar, band);
+            pdlRetest.update(bar, band);
         }
         double average = recentRanges.stream().mapToDouble(Double::doubleValue).average().orElse(Double.NaN);
         lastBarRangeVsAvg = average > 0 ? bar.range() / average : Double.NaN;

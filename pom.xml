@@ -27,6 +27,7 @@
         <module>instrument-master</module>
         <module>strategy-api</module>
         <module>strategy-ecr</module>
+        <module>strategy-egb</module>
         <module>research</module>
         <module>broker-api</module>
         <module>broker-paper</module>
@@ -89,6 +90,11 @@
             <dependency>
                 <groupId>com.autotrade</groupId>
                 <artifactId>strategy-ecr</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.autotrade</groupId>
+                <artifactId>strategy-egb</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>

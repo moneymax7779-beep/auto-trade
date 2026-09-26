@@ -50,16 +50,20 @@ class HistoryController {
                 + "from trade.session order by id desc limit 200");
     }
 
+    /** One underlying's decisions; {@code strategy} selects one strategy when several traded (default: all). */
     @GetMapping("/sessions/{id}/decisions")
-    List<Map<String, Object>> decisions(@PathVariable long id, @RequestParam String underlying) {
-        return query("select to_char(snap_time at time zone '" + IST + "', 'HH24:MI') t, spot, ce_stage, pe_stage, "
-                + "ce_scores::text ce_scores, pe_scores::text pe_scores, state::text state, orders from trade.decision "
-                + "where session_id = ? and underlying = ? order by snap_time", id, underlying);
+    List<Map<String, Object>> decisions(@PathVariable long id, @RequestParam String underlying,
+                                        @RequestParam(required = false) String strategy) {
+        return query("select to_char(snap_time at time zone '" + IST + "', 'HH24:MI') t, strategy_id, spot, ce_stage, "
+                + "pe_stage, ce_scores::text ce_scores, pe_scores::text pe_scores, state::text state, orders "
+                + "from trade.decision where session_id = ? and underlying = ? and (?::text is null or strategy_id = ?) "
+                + "order by snap_time, strategy_id", id, underlying, strategy, strategy);
     }
 
     @GetMapping("/sessions/{id}/orders")
     List<Map<String, Object>> orders(@PathVariable long id) {
-        return query("select o.client_order_id, o.underlying, o.option_side, o.role, o.order_side, o.order_type, o.symbol, "
+        return query("select o.client_order_id, o.strategy_id, o.underlying, o.option_side, o.role, o.order_side, "
+                + "o.order_type, o.symbol, "
                 + "o.quantity, o.limit_price, o.trigger_price, " + ist("o.sent_at") + ", e.status, e.filled, "
                 + "e.average_price from trade.orders o left join lateral (select status, filled, average_price "
                 + "from trade.order_event where client_order_id = o.client_order_id order by id desc limit 1) e on true "
@@ -68,13 +72,13 @@ class HistoryController {
 
     @GetMapping("/sessions/{id}/positions")
     List<Map<String, Object>> positions(@PathVariable long id) {
-        return query("select underlying, option_side, symbol, " + ist("opened_at") + ", " + ist("closed_at")
+        return query("select strategy_id, underlying, option_side, symbol, " + ist("opened_at") + ", " + ist("closed_at")
                 + ", stages, exit_reason, realised, costs, net from trade.position where session_id = ? order by opened_at", id);
     }
 
     @GetMapping("/sessions/{id}/rejections")
     List<Map<String, Object>> rejections(@PathVariable long id) {
-        return query("select underlying, intent, reason, " + ist("at") + " from trade.rejection where session_id = ? "
+        return query("select strategy_id, underlying, intent, reason, " + ist("at") + " from trade.rejection where session_id = ? "
                 + "order by id", id);
     }
 

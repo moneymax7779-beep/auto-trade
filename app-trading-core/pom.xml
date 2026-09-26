@@ -13,6 +13,7 @@
     <dependencies>
         <dependency><groupId>com.autotrade</groupId><artifactId>features</artifactId></dependency>
         <dependency><groupId>com.autotrade</groupId><artifactId>strategy-ecr</artifactId></dependency>
+        <dependency><groupId>com.autotrade</groupId><artifactId>strategy-egb</artifactId></dependency>
         <dependency><groupId>com.autotrade</groupId><artifactId>oms</artifactId></dependency>
         <dependency><groupId>com.autotrade</groupId><artifactId>broker-paper</artifactId></dependency>
         <dependency><groupId>com.autotrade</groupId><artifactId>marketdata-live</artifactId></dependency>

@@ -6,9 +6,11 @@ import java.time.LocalDate;
 import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
@@ -54,10 +56,31 @@ public final class TradingSession {
 
     public enum Mode { PAPER_LIVE, PAPER_REPLAY }
 
+    /** {@code strategies}: every strategy traded in this session (each keeps its own positions). */
     public record Settings(Mode mode, String account, LocalDate session, List<String> underlyings,
-                           FeatureConfig features, SessionHistory history, StrategyFactory strategies,
-                           double premiumStopPct, RiskLimits risk, CostModel costs, FillModel fills,
+                           FeatureConfig features, SessionHistory history, List<StrategyFactory> strategies,
+                           RiskLimits risk, CostModel costs, FillModel fills,
                            InstrumentMaster instruments, Map<String, String> configHashes, String codeVersion) {
+
+        public Settings {
+            if (strategies.isEmpty()) {
+                throw new IllegalArgumentException("a trading session needs at least one strategy");
+            }
+            // Positions, OMS keys and decision rows are keyed by strategy id: two versions of one
+            // strategy in the same session would share a position.
+            Set<String> ids = new HashSet<>();
+            for (StrategyFactory factory : strategies) {
+                if (!ids.add(factory.id())) {
+                    throw new IllegalArgumentException("strategy " + factory.id()
+                            + " is configured twice; run one version per session");
+                }
+            }
+            strategies = List.copyOf(strategies);
+        }
+    }
+
+    /** One strategy instance for one underlying, with the factory it came from. */
+    private record Slot(StrategyFactory factory, Strategy strategy) {
     }
 
     private static final Logger log = LoggerFactory.getLogger(TradingSession.class);
@@ -78,7 +101,7 @@ public final class TradingSession {
     private OrderManager oms;
     private final ContractResolver contracts;
     private final Map<String, FeatureEngine> engines = new LinkedHashMap<>();
-    private final Map<String, Strategy> strategies = new HashMap<>();
+    private final Map<String, List<Slot>> strategies = new HashMap<>();
     private final Map<String, Decision> lastDecisions = new LinkedHashMap<>();
     private final Map<String, Double> lastSpot = new HashMap<>();
     private final List<String> recentRejections = new ArrayList<>();
@@ -109,7 +132,11 @@ public final class TradingSession {
         this.risk = new RiskEngine(settings.risk(), killSwitch);
         this.contracts = new ContractResolver(settings.session(), settings.instruments());
         for (String underlying : settings.underlyings()) {
-            strategies.put(underlying, settings.strategies().create(underlying, settings.session()));
+            List<Slot> slots = new ArrayList<>();
+            for (StrategyFactory factory : settings.strategies()) {
+                slots.add(new Slot(factory, factory.create(underlying, settings.session())));
+            }
+            strategies.put(underlying, slots);
             engines.put(underlying, new FeatureEngine(underlying, settings.session(), settings.features(),
                     settings.history(), this::onSnapshot));
         }
@@ -117,13 +144,15 @@ public final class TradingSession {
 
     /** Runs the session until the feed ends (replay) or {@link #stop()} (live). */
     public Map<String, Object> run() {
+        String ids = String.join("+", settings.strategies().stream().map(StrategyFactory::id).toList());
+        String hashes = String.join("+", settings.strategies().stream().map(StrategyFactory::configHash).toList());
         sessionId = store.startSession(settings.account(), settings.mode().name(), settings.session(), feed.name(),
-                settings.strategies().id(), settings.strategies().configHash(), settings.configHashes(),
-                settings.codeVersion());
+                ids, hashes, settings.configHashes(), settings.codeVersion());
         // Order ids carry the session id so they never repeat across runs of the same day.
         broker = new PaperBroker(settings.account(), settings.fills().latency(), settings.fills().adverseBps(), clock);
-        oms = new OrderManager(settings.account(), settings.account() + "-S" + sessionId, settings.strategies().id(),
-                settings.session(), broker, risk, settings.costs(), settings.premiumStopPct(), clock,
+        StrategyFactory primary = settings.strategies().getFirst();
+        oms = new OrderManager(settings.account(), settings.account() + "-S" + sessionId, primary.id(),
+                settings.session(), broker, risk, settings.costs(), primary.premiumStopPct(), clock,
                 new StoreListener());
         status = "RUNNING";
         log.info("trading session {} ({} {}, {}) started on {}", sessionId, settings.mode(), settings.session(),
@@ -210,11 +239,8 @@ public final class TradingSession {
     private void onSnapshot(FeatureSnapshot snapshot) {
         String underlying = snapshot.underlying();
         LocalTime time = snapshot.time().atZone(MarketTime.IST).toLocalTime();
-        Decision decision = strategies.get(underlying).decide(snapshot, oms.view(underlying));
-        lastDecisions.put(underlying, decision);
         lastSpot.put(underlying, snapshot.spot());
         lastSnapshots.put(underlying, snapshot);
-        store.decision(sessionId, decision, snapshot.spot());
         if (snapshotWriter != null) {
             try {
                 snapshotWriter.add(snapshot.session(), underlying, snapshot.time(), snapshot.phase(), snapshot.spot(),
@@ -224,47 +250,67 @@ public final class TradingSession {
                 log.warn("feature snapshot not saved: {}", e.getMessage());
             }
         }
-        if (risk.squareOffDue(time)) {
-            if (!oms.livePositions().isEmpty()) {
-                oms.exitAll("SQUARE_OFF");
-            }
-            return;
-        }
+        boolean squareOff = risk.squareOffDue(time);
         MarketContext market = new MarketContext(time, snapshot.secondsSinceSpot(), snapshot.secondsSinceOption());
         // Live: never open or add from a stale snapshot (e.g. while the feed catches up on the morning).
         boolean stale = settings.mode() == Mode.PAPER_LIVE
                 && Duration.between(snapshot.time(), Instant.now()).compareTo(MAX_DECISION_AGE) > 0;
-        for (OrderIntent intent : decision.orders()) {
-            if (stale && intent.action() != OrderIntent.Action.EXIT) {
-                rejected(underlying, intent.action() + " " + intent.side(), "snapshot "
-                        + Duration.between(snapshot.time(), Instant.now()).toSeconds() + " s old (catching up)");
+        for (Slot slot : strategies.get(underlying)) {
+            String strategyId = slot.factory().id();
+            Decision decision = slot.strategy().decide(snapshot, oms.view(strategyId, underlying));
+            lastDecisions.put(decisionKey(underlying, strategyId), decision);
+            store.decision(sessionId, strategyId, decision, snapshot.spot());
+            if (squareOff) {
                 continue;
             }
-            switch (intent.action()) {
-                case ENTER -> {
-                    var contract = contracts.find(underlying,
-                            intent.strike(snapshot.options().atmStrike(), snapshot.options().strikeStep()), intent.side());
-                    if (contract.isEmpty()) {
-                        rejected(underlying, "ENTER " + intent.side(), "no quotes for the chosen strike yet");
-                        continue;
-                    }
-                    RiskDecision result = oms.enter(underlying, intent.side(), contract.get(), intent.lots(),
-                            intent.stage().name(), market, intent.premiumStopPct());
-                    logDecision(underlying, intent, result, contract.get());
+            for (OrderIntent intent : decision.orders()) {
+                act(slot, underlying, snapshot, intent, market, stale, time);
+            }
+        }
+        if (squareOff && !oms.livePositions().isEmpty()) {
+            oms.exitAll("SQUARE_OFF");
+        }
+    }
+
+    /** One strategy's intent through risk and the OMS, in that strategy's name. */
+    private void act(Slot slot, String underlying, FeatureSnapshot snapshot, OrderIntent intent, MarketContext market,
+                     boolean stale, LocalTime time) {
+        String strategyId = slot.factory().id();
+        if (stale && intent.action() != OrderIntent.Action.EXIT) {
+            rejected(strategyId, underlying, intent.action() + " " + intent.side(), "snapshot "
+                    + Duration.between(snapshot.time(), Instant.now()).toSeconds() + " s old (catching up)");
+            return;
+        }
+        switch (intent.action()) {
+            case ENTER -> {
+                var contract = contracts.find(underlying,
+                        intent.strike(snapshot.options().atmStrike(), snapshot.options().strikeStep()), intent.side());
+                if (contract.isEmpty()) {
+                    rejected(strategyId, underlying, "ENTER " + intent.side(), "no quotes for the chosen strike yet");
+                    return;
                 }
-                case ADD -> logDecision(underlying, intent,
-                        oms.add(underlying, intent.lots(), intent.stage().name(), market), null);
-                case EXIT -> {
-                    oms.exit(underlying, intent.reason());
-                    log.info("{} {} EXIT {} ({})", time, underlying, intent.side(), intent.reason());
-                }
+                RiskDecision result = oms.enter(strategyId, underlying, intent.side(), contract.get(), intent.lots(),
+                        intent.stage().name(), market, intent.stopPctOr(slot.factory().premiumStopPct()));
+                logDecision(strategyId, underlying, intent, result, contract.get());
+            }
+            case ADD -> logDecision(strategyId, underlying, intent,
+                    oms.add(strategyId, underlying, intent.lots(), intent.stage().name(), market), null);
+            case EXIT -> {
+                oms.exit(strategyId, underlying, intent.reason());
+                log.info("{} {} {} EXIT {} ({})", time, underlying, strategyId, intent.side(), intent.reason());
             }
         }
     }
 
-    private void logDecision(String underlying, OrderIntent intent, RiskDecision result, Contract contract) {
-        log.info("{} {} {} {} {} lots {}{}", clock.get().atZone(MarketTime.IST).toLocalTime().withNano(0), underlying,
-                intent.action(), intent.side(), intent.lots(), result.approved() ? "APPROVED" : "REJECTED: " + result.reason(),
+    /** Status key: the underlying alone with one strategy, "underlying · strategy" with several. */
+    private String decisionKey(String underlying, String strategyId) {
+        return settings.strategies().size() == 1 ? underlying : underlying + " · " + strategyId;
+    }
+
+    private void logDecision(String strategyId, String underlying, OrderIntent intent, RiskDecision result,
+                             Contract contract) {
+        log.info("{} {} {} {} {} {} lots {}{}", clock.get().atZone(MarketTime.IST).toLocalTime().withNano(0), underlying,
+                strategyId, intent.action(), intent.side(), intent.lots(), result.approved() ? "APPROVED" : "REJECTED: " + result.reason(),
                 contract == null ? "" : " " + contract.symbol());
     }
 
@@ -276,8 +322,8 @@ public final class TradingSession {
         }
     }
 
-    private void rejected(String underlying, String intent, String reason) {
-        store.rejection(sessionId, underlying, intent, reason, clock.get());
+    private void rejected(String strategyId, String underlying, String intent, String reason) {
+        store.rejection(sessionId, strategyId, underlying, intent, reason, clock.get());
         synchronized (recentRejections) {
             recentRejections.add(clock.get().atZone(MarketTime.IST).toLocalTime().withNano(0) + " " + underlying + " "
                     + intent + ": " + reason);
@@ -344,7 +390,8 @@ public final class TradingSession {
             }
             status.put("closedPositions", closed);
             Map<String, Object> stages = new LinkedHashMap<>();
-            lastDecisions.forEach((underlying, decision) -> {
+            lastDecisions.forEach((key, decision) -> {
+                String underlying = decision.underlying();
                 Map<String, Object> view = new LinkedHashMap<>();
                 view.put("time", decision.time().atZone(MarketTime.IST).toLocalTime().toString());
                 view.put("spot", lastSpot.getOrDefault(underlying, Double.NaN));
@@ -356,7 +403,7 @@ public final class TradingSession {
                     view.put("volatility", volatilityPanel(snapshot));
                     view.put("cas", casPanel(snapshot));
                 }
-                stages.put(underlying, view);
+                stages.put(key, view);
             });
             status.put("strategy", stages);
             synchronized (recentRejections) {
@@ -420,6 +467,7 @@ public final class TradingSession {
     private static Map<String, Object> position(ManagedPosition p) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("underlying", p.underlying());
+        m.put("strategy", p.strategy());
         m.put("side", p.side());
         m.put("symbol", p.contract().symbol());
         m.put("state", p.state());
@@ -465,8 +513,8 @@ public final class TradingSession {
         }
 
         @Override
-        public void rejected(String underlying, String intent, String reason) {
-            TradingSession.this.rejected(underlying, intent, reason);
+        public void rejected(String strategyId, String underlying, String intent, String reason) {
+            TradingSession.this.rejected(strategyId, underlying, intent, reason);
         }
 
         @Override

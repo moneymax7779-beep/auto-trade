@@ -12,6 +12,9 @@ import com.autotrade.core.time.MarketTime;
 import com.autotrade.features.snapshot.BookFeatures;
 import com.autotrade.features.snapshot.BreadthFeatures;
 import com.autotrade.features.snapshot.CasFeatures;
+import com.autotrade.features.snapshot.CompressionFeatures;
+import com.autotrade.features.snapshot.GammaFeatures;
+import com.autotrade.features.snapshot.RetestFeatures;
 import com.autotrade.features.snapshot.FeatureSnapshot;
 import com.autotrade.features.snapshot.FuturesFeatures;
 import com.autotrade.features.snapshot.LevelFeatures;
@@ -87,7 +90,9 @@ final class Snapshots {
                 build(OptionsFeatures.class, "options."), build(BreadthFeatures.class, "breadth."),
                 build(RegimeFeatures.class, "regime."), build(CasFeatures.class, "cas."),
                 build(LevelFeatures.class, "levels."), build(BookFeatures.class, "book."),
-                build(PremiumFeatures.class, "premium."), build(VolatilityFeatures.class, "volatility."), "f", "e");
+                build(PremiumFeatures.class, "premium."), build(VolatilityFeatures.class, "volatility."),
+                build(CompressionFeatures.class, "compression."), build(GammaFeatures.class, "gamma."),
+                build(RetestFeatures.class, "retest."), "f", "e");
     }
 
     private <T extends Record> T build(Class<T> type, String prefix) {

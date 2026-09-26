@@ -86,6 +86,7 @@ export interface Scores { stage: string; early: number; confirm: number; runner:
 
 export interface DecisionRow {
   t: string;
+  strategy_id?: string;
   spot: number | null;
   ce_stage: string;
   pe_stage: string;

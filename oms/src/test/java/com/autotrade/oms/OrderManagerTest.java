@@ -92,6 +92,36 @@ class OrderManagerTest {
     }
 
     @Test
+    void twoStrategiesHoldTheSameUnderlyingIndependently() {
+        quote("10:00:00", 99.5, 100, 100);
+        assertThat(oms.enter("ecr", "NIFTY", OptionSide.CE, CE, 1, "EARLY", market("10:00"), Double.NaN).approved())
+                .isTrue();
+        assertThat(oms.enter("egb", "NIFTY", OptionSide.CE, CE, 2, "EARLY", market("10:00"), 30).approved()).isTrue();
+        assertThat(oms.enter("egb", "NIFTY", OptionSide.CE, CE, 1, "EARLY", market("10:00"), 30).approved())
+                .as("one position per strategy and underlying").isFalse();
+        quote("10:00:01", 99.5, 100, 100);
+
+        assertThat(oms.view("ecr", "NIFTY").lots()).isEqualTo(1);
+        assertThat(oms.view("egb", "NIFTY").lots()).isEqualTo(2);
+        assertThat(oms.view("other", "NIFTY").open()).isFalse();
+        assertThat(sent).extracting(OrderRequest::tag).contains("ecr", "egb");
+        assertThat(sent).extracting(OrderRequest::clientOrderId).doesNotHaveDuplicates();
+
+        // the per-underlying lot limit (4) counts both strategies: 1 + 2 held, 2 more would be 5
+        assertThat(oms.add("egb", "NIFTY", 2, "CONFIRMED", market("10:01")).reason())
+                .contains("max lots per underlying");
+        assertThat(oms.add("egb", "NIFTY", 1, "CONFIRMED", market("10:01")).approved()).isTrue();
+
+        oms.exit("ecr", "NIFTY", "TEST");
+        quote("10:02:00", 99.5, 100, 100);
+        quote("10:02:01", 99.5, 100, 100);
+        assertThat(oms.view("ecr", "NIFTY").open()).isFalse();
+        assertThat(oms.view("egb", "NIFTY").open()).isTrue();
+        assertThat(oms.closedPositions()).singleElement().extracting(ManagedPosition::strategy).isEqualTo("ecr");
+        assertThat(oms.reconcile()).isTrue();
+    }
+
+    @Test
     void anEntryCanCarryItsOwnPremiumStop() {
         quote("10:00:00", 99.5, 100, 100);
         assertThat(oms.enter("NIFTY", OptionSide.CE, CE, 1, "CONFIRMED", market("10:00"), 35).approved()).isTrue();

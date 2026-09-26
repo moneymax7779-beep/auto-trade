@@ -25,6 +25,9 @@ import com.autotrade.features.futures.VolumeProfile;
 import com.autotrade.features.levels.StructureState;
 import com.autotrade.features.options.OptionChainState;
 import com.autotrade.features.snapshot.BookFeatures;
+import com.autotrade.features.snapshot.CompressionFeatures;
+import com.autotrade.features.snapshot.GammaFeatures;
+import com.autotrade.features.snapshot.RetestFeatures;
 import com.autotrade.features.snapshot.BreadthFeatures;
 import com.autotrade.features.snapshot.CasFeatures;
 import com.autotrade.features.snapshot.FeatureSnapshot;
@@ -192,6 +195,9 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
         BookFeatures book = BookFeatures.EMPTY;
         PremiumFeatures premium = PremiumFeatures.EMPTY;
         VolatilityFeatures vol = VolatilityFeatures.EMPTY;
+        CompressionFeatures compression = CompressionFeatures.EMPTY;
+        GammaFeatures gamma = GammaFeatures.EMPTY;
+        RetestFeatures retest = RetestFeatures.EMPTY;
         if (ext == null) {
             casFeatures = CasFeatures.basic(casFeedPhase, showIndicative ? casIndicative : Double.NaN,
                     phase.isCas() ? casIndicative - lastContinuousSpot : Double.NaN,
@@ -213,13 +219,22 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
             premium = options.premium(time, reference, ext);
             vol = volatility.snapshot(time, structure.oneMinuteBars(), structure.atr1m(), optionsFeatures.atmIv(),
                     optionsFeatures.atmIvChange5m(), session.equals(options.expiry()));
+            FeatureExtensions.V6 v6 = ext.v6();
+            if (v6 != null) {
+                compression = structure.compression(time, futures, options.straddleChangePct(time, 10),
+                        v6.compressionWindowMin(), v6.volumeRecentMin(), v6.volumePriorMin());
+                gamma = options.gamma(time, reference,
+                        structure.spotSeries().change(time, java.time.Duration.ofMinutes(v6.gammaHorizonMin())),
+                        v6.gammaHorizonMin(), v6.gammaRegimeThresholds());
+                retest = structure.retest(time, futures);
+            }
         }
         return new FeatureSnapshot(
                 time, underlying, session, phase.name(), reference,
                 secondsSince(time, spotTime), secondsSince(time, futures.lastTime()),
                 secondsSince(time, options.lastTime()),
                 structureFeatures, futuresFeatures, optionsFeatures, breadthFeatures, regimeFeatures, casFeatures,
-                levels, book, premium, vol, config.featuresHash(), config.exchangeHash());
+                levels, book, premium, vol, compression, gamma, retest, config.featuresHash(), config.exchangeHash());
     }
 
     private RegimeFeatures regime(Instant time, double reference, OptionsFeatures chain) {

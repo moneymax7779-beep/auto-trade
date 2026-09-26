@@ -35,7 +35,7 @@ import com.autotrade.strategy.OptionSide;
 import com.autotrade.strategy.PositionView;
 
 /**
- * Runs one account's positions (one per underlying) on a broker.
+ * Runs one account's positions (one per strategy and underlying) on a broker.
  *
  * <ul>
  *   <li>Entries and adds are risk-checked, priced as marketable limits (ask + buffer ticks), sliced
@@ -101,8 +101,14 @@ public final class OrderManager implements Consumer<OrderUpdate> {
 
     // ---------------------------------------------------------------- strategy-facing
 
+    /** The default strategy's position (single-strategy callers). */
     public synchronized PositionView view(String underlying) {
-        ManagedPosition position = live.get(underlying);
+        return view(strategy, underlying);
+    }
+
+    /** What {@code strategyId} holds in {@code underlying} (never another strategy's position). */
+    public synchronized PositionView view(String strategyId, String underlying) {
+        ManagedPosition position = live.get(key(strategyId, underlying));
         if (position == null) {
             return PositionView.FLAT;
         }
@@ -112,46 +118,64 @@ public final class OrderManager implements Consumer<OrderUpdate> {
     /** Buys {@code lots} to open a position with the default premium stop; returns the risk decision. */
     public synchronized RiskDecision enter(String underlying, OptionSide side, Contract contract, int lots, String stage,
                                            MarketContext market) {
-        return enter(underlying, side, contract, lots, stage, market, Double.NaN);
+        return enter(strategy, underlying, side, contract, lots, stage, market, Double.NaN);
+    }
+
+    public synchronized RiskDecision enter(String underlying, OptionSide side, Contract contract, int lots, String stage,
+                                           MarketContext market, double stopPct) {
+        return enter(strategy, underlying, side, contract, lots, stage, market, stopPct);
     }
 
     /**
-     * Buys {@code lots} to open a position; {@code stopPct} is this position's resting premium stop
-     * (percent below average cost), NaN for the default.
+     * Buys {@code lots} for {@code strategyId} to open a position; {@code stopPct} is this position's
+     * resting premium stop (percent below average cost), NaN for the default. Risk limits (open
+     * positions, lots per underlying, order rate, daily loss) count every strategy's positions.
      */
-    public synchronized RiskDecision enter(String underlying, OptionSide side, Contract contract, int lots, String stage,
-                                           MarketContext market, double stopPct) {
-        if (live.containsKey(underlying)) {
-            return reject(underlying, "ENTER", "a position is already open in " + underlying);
+    public synchronized RiskDecision enter(String strategyId, String underlying, OptionSide side, Contract contract,
+                                           int lots, String stage, MarketContext market, double stopPct) {
+        String key = key(strategyId, underlying);
+        if (live.containsKey(key)) {
+            return reject(strategyId, underlying, "ENTER", strategyId + " already holds a position in " + underlying);
         }
-        RiskDecision decision = riskCheck(underlying, false, lots, 0, contract, market);
+        RiskDecision decision = riskCheck(strategyId, underlying, false, lots, lotsHeld(underlying), contract, market, null);
         if (!decision.approved()) {
-            return reject(underlying, "ENTER " + side, decision.reason());
+            return reject(strategyId, underlying, "ENTER " + side, decision.reason());
         }
-        ManagedPosition position = new ManagedPosition(underlying, side, contract, clock.get());
+        ManagedPosition position = new ManagedPosition(strategyId, underlying, side, contract, clock.get());
         position.stopFraction = Double.isNaN(stopPct) ? stopFraction : stopPct / 100.0;
-        live.put(underlying, position);
+        live.put(key, position);
         buy(position, lots, stage);
         return decision;
     }
 
     public synchronized RiskDecision add(String underlying, int lots, String stage, MarketContext market) {
-        ManagedPosition position = live.get(underlying);
+        return add(strategy, underlying, lots, stage, market);
+    }
+
+    public synchronized RiskDecision add(String strategyId, String underlying, int lots, String stage,
+                                         MarketContext market) {
+        ManagedPosition position = live.get(key(strategyId, underlying));
         if (position == null || (position.state != ManagedPosition.State.OPEN
                 && position.state != ManagedPosition.State.OPENING)) {
-            return reject(underlying, "ADD", "no open position to add to");
+            return reject(strategyId, underlying, "ADD", "no open position to add to");
         }
-        RiskDecision decision = riskCheck(underlying, true, lots, position.lots(), position.contract, market);
+        RiskDecision decision = riskCheck(strategyId, underlying, true, lots, lotsHeld(underlying), position.contract, market,
+                position);
         if (!decision.approved()) {
-            return reject(underlying, "ADD", decision.reason());
+            return reject(strategyId, underlying, "ADD", decision.reason());
         }
         buy(position, lots, stage);
         return decision;
     }
 
-    /** Closes the position; always allowed. */
+    /** Closes the default strategy's position; always allowed. */
     public synchronized void exit(String underlying, String reason) {
-        ManagedPosition position = live.get(underlying);
+        exit(strategy, underlying, reason);
+    }
+
+    /** Closes {@code strategyId}'s position in {@code underlying}; always allowed. */
+    public synchronized void exit(String strategyId, String underlying, String reason) {
+        ManagedPosition position = live.get(key(strategyId, underlying));
         if (position == null || position.state == ManagedPosition.State.CANCELLING_FOR_EXIT
                 || position.state == ManagedPosition.State.EXITING) {
             return;
@@ -168,9 +192,24 @@ public final class OrderManager implements Consumer<OrderUpdate> {
     }
 
     public synchronized void exitAll(String reason) {
-        for (String underlying : List.copyOf(live.keySet())) {
-            exit(underlying, reason);
+        for (ManagedPosition position : List.copyOf(live.values())) {
+            exit(position.strategy, position.underlying, reason);
         }
+    }
+
+    private static String key(String strategyId, String underlying) {
+        return strategyId + "|" + underlying;
+    }
+
+    /** Lots every strategy holds in {@code underlying} (the per-underlying risk limit is shared). */
+    private int lotsHeld(String underlying) {
+        int lots = 0;
+        for (ManagedPosition position : live.values()) {
+            if (position.underlying.equals(underlying)) {
+                lots += position.lots();
+            }
+        }
+        return lots;
     }
 
     // ---------------------------------------------------------------- market and time
@@ -313,17 +352,16 @@ public final class OrderManager implements Consumer<OrderUpdate> {
 
     // ---------------------------------------------------------------- internals
 
-    private RiskDecision riskCheck(String underlying, boolean add, int lots, int held, Contract contract,
-                                   MarketContext market) {
+    private RiskDecision riskCheck(String strategyId, String underlying, boolean add, int lots, int held,
+                                   Contract contract, MarketContext market, ManagedPosition existing) {
         Instant now = clock.get();
         while (!recentOrders.isEmpty() && Duration.between(recentOrders.peekFirst(), now).toSeconds() >= 60) {
             recentOrders.removeFirst();
         }
         double spreadPct = Double.NaN;
-        ManagedPosition existing = live.get(underlying);
         double bid = existing == null ? Double.NaN : existing.lastBid;
         double ask = existing == null ? Double.NaN : existing.lastAsk;
-        if (existing == null) {
+        if (existing == null || !(bid > 0 && ask > 0)) {
             double[] quote = lastQuotes.get(contract.token());
             if (quote != null) {
                 bid = quote[0];
@@ -333,7 +371,7 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         if (bid > 0 && ask > 0) {
             spreadPct = (ask - bid) / ((ask + bid) / 2) * 100;
         }
-        return risk.checkEntry(new RiskCheck(account, strategy, underlying, add, lots, held, live.size(), dayPnl(),
+        return risk.checkEntry(new RiskCheck(account, strategyId, underlying, add, lots, held, live.size(), dayPnl(),
                 market.secondsSinceSpot(), market.secondsSinceOption(), spreadPct, market.time(), recentOrders.size()),
                 now);
     }
@@ -352,7 +390,7 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         double[] quote = lastQuotes.get(position.contract.token());
         double ask = quote != null ? quote[1] : position.lastAsk;
         if (!(ask > 0)) {
-            listener.rejected(position.underlying, "BUY", "no ask for " + position.contract.symbol());
+            listener.rejected(position.strategy, position.underlying, "BUY", "no ask for " + position.contract.symbol());
             return;
         }
         double limit = position.contract.roundUp(ask + limits.entryBufferTicks() * position.contract.tickSize());
@@ -443,7 +481,7 @@ public final class OrderManager implements Consumer<OrderUpdate> {
                 + ROLE_CODES.get(role);
         OrderRequest request = new OrderRequest(id, position.contract.token(), position.contract.instrumentKey(),
                 position.contract.symbol(), position.contract.exchange(), side, type, quantity, limit, trigger,
-                strategy);
+                position.strategy);
         roles.put(id, new Role(position, role));
         bucket.add(id);
         position.orderSentAt.put(id, clock.get());
@@ -477,13 +515,13 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         }
         position.state = ManagedPosition.State.CLOSED;
         position.closedAt = clock.get();
-        live.remove(position.underlying);
+        live.remove(key(position.strategy, position.underlying));
         closed.add(position);
         listener.closed(position);
     }
 
-    private RiskDecision reject(String underlying, String intent, String reason) {
-        listener.rejected(underlying, intent, reason);
+    private RiskDecision reject(String strategyId, String underlying, String intent, String reason) {
+        listener.rejected(strategyId, underlying, intent, reason);
         return RiskDecision.rejected(reason);
     }
 

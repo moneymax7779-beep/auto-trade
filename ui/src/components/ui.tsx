@@ -27,7 +27,9 @@ export function Stat({ label, value, tone }: { label: string; value: ReactNode; 
 const STAGE_COLORS: Record<string, string> = {
   IDLE: "bg-panel-2 text-muted",
   WATCH: "bg-sky-500/15 text-sky-700 dark:text-sky-300",
+  COMPRESSION: "bg-indigo-500/15 text-indigo-700 dark:text-indigo-300",
   ARMED: "bg-amber-500/20 text-amber-700 dark:text-amber-300",
+  RETEST: "bg-teal-500/20 text-teal-700 dark:text-teal-300",
   EARLY_ENTRY: "bg-violet-500/20 text-violet-700 dark:text-violet-300",
   CONFIRMED: "bg-emerald-500/20 text-emerald-700 dark:text-emerald-300",
   RUNNER: "bg-emerald-600 text-white",

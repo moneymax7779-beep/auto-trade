@@ -58,11 +58,11 @@ final class TradeStore {
 
     void order(long session, ManagedPosition position, String role, OrderRequest request, Instant at) {
         jdbc.update("insert into trade.orders (client_order_id, session_id, underlying, option_side, role, order_side, "
-                        + "order_type, symbol, quantity, limit_price, trigger_price, sent_at) values (?,?,?,?,?,?,?,?,?,?,?,?) "
-                        + "on conflict (client_order_id) do nothing",
+                        + "order_type, symbol, quantity, limit_price, trigger_price, sent_at, strategy_id) "
+                        + "values (?,?,?,?,?,?,?,?,?,?,?,?,?) on conflict (client_order_id) do nothing",
                 request.clientOrderId(), session, position.underlying(), position.side().name(), role,
                 request.side().name(), request.type().name(), request.symbol(), request.quantity(), request.limitPrice(),
-                request.triggerPrice() > 0 ? request.triggerPrice() : null, ts(at));
+                request.triggerPrice() > 0 ? request.triggerPrice() : null, ts(at), position.strategy());
     }
 
     void orderEvent(OrderUpdate update) {
@@ -75,30 +75,31 @@ final class TradeStore {
 
     void position(long session, ManagedPosition position) {
         jdbc.update("insert into trade.position (session_id, underlying, option_side, symbol, opened_at, closed_at, "
-                        + "stages, exit_reason, realised, costs, net) values (?,?,?,?,?,?,?,?,?,?,?)",
+                        + "stages, exit_reason, realised, costs, net, strategy_id) values (?,?,?,?,?,?,?,?,?,?,?,?)",
                 session, position.underlying(), position.side().name(), position.contract().symbol(),
                 ts(position.openedAt()), ts(position.closedAt()),
                 position.stages().toArray(new String[0]), position.exitReason(), position.realised(), position.costs(),
-                position.net());
+                position.net(), position.strategy());
     }
 
-    void decision(long session, Decision decision, double spot) {
+    void decision(long session, String strategyId, Decision decision, double spot) {
         StringBuilder orders = new StringBuilder();
         for (OrderIntent order : decision.orders()) {
             orders.append(orders.isEmpty() ? "" : " ").append(order.action()).append(':').append(order.side())
                     .append(':').append(order.lots()).append(':').append(order.reason());
         }
         jdbc.update("insert into trade.decision (session_id, underlying, snap_time, spot, ce_stage, pe_stage, ce_scores, "
-                        + "pe_scores, state, orders) values (?,?,?,?,?,?,?::jsonb,?::jsonb,?::jsonb,?) "
+                        + "pe_scores, state, orders, strategy_id) values (?,?,?,?,?,?,?::jsonb,?::jsonb,?::jsonb,?,?) "
                         + "on conflict do nothing",
                 session, decision.underlying(), ts(decision.time()), Double.isFinite(spot) ? spot : null,
                 decision.ce().stage().name(), decision.pe().stage().name(), scores(decision.ce()), scores(decision.pe()),
-                JSON.writeValueAsString(decision.state()), orders.isEmpty() ? null : orders.toString());
+                JSON.writeValueAsString(decision.state()), orders.isEmpty() ? null : orders.toString(), strategyId);
     }
 
-    void rejection(long session, String underlying, String intent, String reason, Instant at) {
-        jdbc.update("insert into trade.rejection (session_id, underlying, intent, reason, at) values (?,?,?,?,?)",
-                session, underlying, intent, reason, ts(at));
+    void rejection(long session, String strategyId, String underlying, String intent, String reason, Instant at) {
+        jdbc.update("insert into trade.rejection (session_id, underlying, intent, reason, at, strategy_id) "
+                        + "values (?,?,?,?,?,?)",
+                session, underlying, intent, reason, ts(at), strategyId);
     }
 
     void killSwitch(Long session, String scope, boolean engaged, String reason, Instant at, String by) {

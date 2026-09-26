@@ -16,6 +16,8 @@ public final class ManagedPosition {
     public enum State { OPENING, OPEN, CANCELLING_FOR_EXIT, EXITING, CLOSED }
 
     final String underlying;
+    /** The strategy that owns this position (several strategies may hold the same underlying). */
+    final String strategy;
     final OptionSide side;
     final Contract contract;
     final Instant openedAt;
@@ -42,7 +44,8 @@ public final class ManagedPosition {
     Instant exitPricedAt;
     int exitChases;
 
-    ManagedPosition(String underlying, OptionSide side, Contract contract, Instant openedAt) {
+    ManagedPosition(String strategy, String underlying, OptionSide side, Contract contract, Instant openedAt) {
+        this.strategy = strategy;
         this.underlying = underlying;
         this.side = side;
         this.contract = contract;
@@ -51,6 +54,10 @@ public final class ManagedPosition {
 
     public String underlying() {
         return underlying;
+    }
+
+    public String strategy() {
+        return strategy;
     }
 
     public OptionSide side() {

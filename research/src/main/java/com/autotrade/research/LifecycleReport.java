@@ -51,11 +51,12 @@ public final class LifecycleReport {
 
         out.append("\n## Frame funnel (").append("minutes of continuous trading, one lane)\n\n");
         out.append("Frames are per-minute observations, not opportunities.\n\n");
-        out.append("| Index side | IDLE | WATCH | ARMED | EARLY | CONFIRMED | RUNNER | EXITED | near-level frames | all-early frames |\n");
-        out.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
-        frames.stageFrames.forEach((key, stages) -> out.append(String.format("| %s | %d | %d | %d | %d | %d | %d | %d | %d | %d |%n",
-                key, count(stages, "IDLE"), count(stages, "WATCH"), count(stages, "ARMED"), count(stages, "EARLY_ENTRY"),
-                count(stages, "CONFIRMED"), count(stages, "RUNNER"), count(stages, "EXITED"),
+        out.append("| Index side | IDLE | WATCH | COMPRESSION | ARMED | EARLY | CONFIRMED | RETEST | RUNNER | EXITED | near-level frames | all-early frames |\n");
+        out.append("| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
+        frames.stageFrames.forEach((key, stages) -> out.append(String.format("| %s | %d | %d | %d | %d | %d | %d | %d | %d | %d | %d | %d |%n",
+                key, count(stages, "IDLE"), count(stages, "WATCH"), count(stages, "COMPRESSION"), count(stages, "ARMED"),
+                count(stages, "EARLY_ENTRY"), count(stages, "CONFIRMED"), count(stages, "RETEST"), count(stages, "RUNNER"),
+                count(stages, "EXITED"),
                 frames.nearFrames.getOrDefault(key, 0), frames.allEarlyFrames.getOrDefault(key, 0))));
 
         out.append("\n### How often each condition held while price was near the level\n\n");

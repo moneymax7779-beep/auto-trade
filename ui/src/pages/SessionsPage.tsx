@@ -36,17 +36,24 @@ export function SessionsPage() {
 export function SessionDetailPage() {
   const { id } = useParams();
   const [underlying, setUnderlying] = useState("NIFTY");
+  const [chosenStrategy, setChosenStrategy] = useState<string | null>(null);
   const sessions = useQuery({ queryKey: ["sessions"], queryFn: () => get<SessionRow[]>("/api/sessions") });
+  const sessionRow = sessions.data?.find((s) => String(s.id) === id);
+  // A session may run several strategies ("a+b"); the charts show one at a time.
+  const strategyIds = (sessionRow?.strategy_id ?? "").split("+").filter(Boolean);
+  const strategy = chosenStrategy ?? strategyIds[0] ?? null;
   const decisions = useQuery({
-    queryKey: ["decisions", id, underlying],
-    queryFn: () => get<DecisionRow[]>(`/api/sessions/${id}/decisions?underlying=${underlying}`),
+    queryKey: ["decisions", id, underlying, strategy],
+    enabled: strategy !== null,
+    queryFn: () => get<DecisionRow[]>(`/api/sessions/${id}/decisions?underlying=${underlying}`
+      + `&strategy=${encodeURIComponent(strategy ?? "")}`),
   });
   const orders = useQuery({ queryKey: ["orders", id], queryFn: () => get<OrderRow[]>(`/api/sessions/${id}/orders`) });
   const positions = useQuery({
     queryKey: ["positions", id],
     queryFn: () => get<TradePositionRow[]>(`/api/sessions/${id}/positions`),
   });
-  const session = sessions.data?.find((s) => String(s.id) === id);
+  const session = sessionRow;
   const rows = decisions.data ?? [];
 
   const price = useMemo(() => [{ name: underlying, color: "--color-text", points: rows.map((r) => ({ t: r.t, value: r.spot })) }], [rows, underlying]);
@@ -64,8 +71,12 @@ export function SessionDetailPage() {
       <Panel
         title={<>Session {id} {session && <>· {session.session_date} · {session.mode} · net <Pnl value={session.summary?.net} /></>}</>}
         right={
-          <div className="flex gap-1">
-            {["NIFTY", "SENSEX"].map((u) => (
+          <div className="flex flex-wrap gap-1">
+            {strategyIds.length > 1 && strategyIds.map((sid) => (
+              <button key={sid} onClick={() => setChosenStrategy(sid)}
+                className={`rounded px-3 py-1 text-xs ${sid === strategy ? "bg-accent text-black" : "border border-line"}`}>{sid}</button>
+            ))}
+            {["NIFTY", "BANKNIFTY", "SENSEX"].map((u) => (
               <button key={u} onClick={() => setUnderlying(u)}
                 className={`rounded px-3 py-1 text-sm ${u === underlying ? "bg-accent text-black" : "border border-line"}`}>{u}</button>
             ))}

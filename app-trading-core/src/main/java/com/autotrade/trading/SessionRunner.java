@@ -54,7 +54,8 @@ import com.autotrade.md.zt.ZtSessionSource;
 import com.autotrade.risk.RiskLimits;
 import com.autotrade.sim.CostModel;
 import com.autotrade.sim.FillModel;
-import com.autotrade.strategy.ecr.EarlyConfirmRunnerFactory;
+import com.autotrade.strategy.Strategies;
+import com.autotrade.strategy.StrategyFactory;
 import com.autotrade.upstox.UpstoxFeed;
 import com.autotrade.upstox.UpstoxFeeds;
 import com.autotrade.upstox.UpstoxLogin;
@@ -197,7 +198,8 @@ class SessionRunner implements ApplicationRunner {
     private Running start(LocalDate session, boolean replay) throws Exception {
         TradingProperties.Trading t = properties.trading();
 
-        ThresholdConfig strategyFile = ThresholdConfig.load(Path.of(t.strategyFile()));
+        List<ThresholdConfig> strategyFiles = t.strategyFileList().stream()
+                .map(file -> ThresholdConfig.load(Path.of(file))).toList();
         ThresholdConfig featuresFile = ThresholdConfig.load(Path.of(t.featuresFile()));
         ThresholdConfig exchangeFile = ThresholdConfig.load(Path.of(t.exchangeFile()));
         ThresholdConfig costsFile = ThresholdConfig.load(Path.of(t.costsFile()));
@@ -207,13 +209,21 @@ class SessionRunner implements ApplicationRunner {
             log.warn("{} is not a trading day (weekend or exchange holiday); no session", session);
             return null;
         }
-        EarlyConfirmRunnerFactory strategies = new EarlyConfirmRunnerFactory(strategyFile);
-        if (strategyFile.has("vol_regime") && !featuresFile.has("levels")) {
-            throw new IllegalStateException(t.strategyFile() + " needs the features-v3 sections (features file "
-                    + t.featuresFile() + " lacks them)");
+        List<StrategyFactory> strategies = new ArrayList<>();
+        for (ThresholdConfig file : strategyFiles) {
+            StrategyFactory factory = Strategies.create(file);
+            for (String section : factory.requiredFeatureSections()) {
+                if (!featuresFile.has(section)) {
+                    throw new IllegalStateException(file.sourceName() + " needs feature section '" + section
+                            + "' (features file " + t.featuresFile() + " lacks it)");
+                }
+            }
+            strategies.add(factory);
         }
         Map<String, String> hashes = new LinkedHashMap<>();
-        for (ThresholdConfig file : List.of(strategyFile, featuresFile, exchangeFile, costsFile, riskFile)) {
+        List<ThresholdConfig> files = new ArrayList<>(strategyFiles);
+        files.addAll(List.of(featuresFile, exchangeFile, costsFile, riskFile));
+        for (ThresholdConfig file : files) {
             hashes.put(file.sourceName(), file.contentHash());
         }
 
@@ -262,7 +272,7 @@ class SessionRunner implements ApplicationRunner {
                 new OwnSessionHistory(target), replay ? referenceStore : liveReference);
         TradingSession.Settings settings = new TradingSession.Settings(
                 replay ? TradingSession.Mode.PAPER_REPLAY : TradingSession.Mode.PAPER_LIVE, t.account(), session,
-                t.underlyings(), features, history, strategies, strategies.premiumStopPct(),
+                t.underlyings(), features, history, strategies,
                 RiskLimits.from(riskFile), CostModel.from(costsFile), FillModel.from(costsFile, t.fillModel()),
                 instruments, hashes, CodeVersion.current());
         TradingSession trading = new TradingSession(settings, feed, new TradeStore(target));

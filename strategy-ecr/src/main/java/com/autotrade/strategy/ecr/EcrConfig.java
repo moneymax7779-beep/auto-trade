@@ -8,6 +8,7 @@ import java.util.Map;
 import java.util.Set;
 
 import com.autotrade.config.ThresholdConfig;
+import com.autotrade.strategy.Tranches;
 
 /** Typed view of early-confirm-runner.vN.yaml (v2 onward; {@code ext} holds the v4 additions, null before). */
 record EcrConfig(
@@ -117,27 +118,7 @@ record EcrConfig(
             double scale = (1 - expiryEarlyFraction) / rest;
             fractions = new double[] {expiryEarlyFraction, fractions[1] * scale, fractions[2] * scale};
         }
-        int[] lots = new int[3];
-        double[] remainders = new double[3];
-        int assigned = 0;
-        for (int i = 0; i < 3; i++) {
-            double exact = fractions[i] * intendedLots;
-            lots[i] = (int) Math.floor(exact);
-            remainders[i] = exact - lots[i];
-            assigned += lots[i];
-        }
-        while (assigned < intendedLots) {
-            int best = 0;
-            for (int i = 1; i < 3; i++) {
-                if (remainders[i] > remainders[best]) {
-                    best = i;
-                }
-            }
-            lots[best]++;
-            remainders[best] = -1;
-            assigned++;
-        }
-        return lots;
+        return Tranches.split(intendedLots, fractions);
     }
 
     boolean scaling() {

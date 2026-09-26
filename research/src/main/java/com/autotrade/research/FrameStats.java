@@ -60,10 +60,10 @@ public final class FrameStats implements FrameSink {
     private static int rank(Stage stage) {
         return switch (stage) {
             case IDLE -> 0;
-            case WATCH -> 1;
+            case WATCH, COMPRESSION -> 1;
             case ARMED -> 2;
             case EARLY_ENTRY -> 3;
-            case CONFIRMED -> 4;
+            case CONFIRMED, RETEST -> 4;
             case RUNNER -> 5;
             case EXITED -> 3;
         };

@@ -30,7 +30,8 @@ import com.autotrade.research.LifecycleReport;
 import com.autotrade.research.LifecycleStore;
 import com.autotrade.sim.CostModel;
 import com.autotrade.sim.FillModel;
-import com.autotrade.strategy.ecr.EarlyConfirmRunnerFactory;
+import com.autotrade.strategy.Strategies;
+import com.autotrade.strategy.StrategyFactory;
 
 import tools.jackson.databind.json.JsonMapper;
 
@@ -53,11 +54,13 @@ final class LifecycleCommand {
         ThresholdConfig featuresConfig = ThresholdConfig.load(request.featuresFile());
         ThresholdConfig exchangeConfig = ThresholdConfig.load(request.exchangeFile());
         ThresholdConfig costConfig = ThresholdConfig.load(request.costsFile());
-        EarlyConfirmRunnerFactory strategies = new EarlyConfirmRunnerFactory(strategyConfig);
-        if (strategyConfig.has("vol_regime") && !featuresConfig.has("levels")) {
-            System.err.println(request.strategyFile() + " needs the features-v3 sections; use --features-file "
-                    + "config/features/features.v3.yaml");
-            return 2;
+        StrategyFactory strategies = Strategies.create(strategyConfig);
+        for (String section : strategies.requiredFeatureSections()) {
+            if (!featuresConfig.has(section)) {
+                System.err.println(request.strategyFile() + " needs feature section '" + section + "', which "
+                        + request.featuresFile() + " lacks");
+                return 2;
+            }
         }
         List<LocalDate> requested = request.sessions();
         if (requested.isEmpty()) {
@@ -172,7 +175,7 @@ final class LifecycleCommand {
         header.put("Underlyings", request.underlyings().toString());
         header.put("Sizing", "research default from the strategy file (rules.intended_lots)");
         header.put("Elapsed", Duration.between(started, Instant.now()).toSeconds() + " s");
-        String report = LifecycleReport.render("Lifecycle replay: early-confirm-runner", header, episodes, frames);
+        String report = LifecycleReport.render("Lifecycle replay: " + strategies.id(), header, episodes, frames);
         Path reports = Files.createDirectories(Path.of(".local", "reports"));
         Path file = reports.resolve("lifecycle-" + (runId == null ? "unsaved-" + System.currentTimeMillis() : "run-" + runId) + ".md");
         Files.writeString(file, report);
