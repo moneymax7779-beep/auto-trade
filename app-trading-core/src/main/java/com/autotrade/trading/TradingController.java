@@ -1,5 +1,6 @@
 package com.autotrade.trading;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -27,7 +28,14 @@ class TradingController {
     @GetMapping("/status")
     ResponseEntity<Map<String, Object>> status() {
         TradingSession session = runner.current();
-        return session == null ? ResponseEntity.ok(Map.of("status", "NO_SESSION")) : ResponseEntity.ok(session.status());
+        Map<String, Object> status = new LinkedHashMap<>();
+        if (session == null) {
+            status.put("status", "NO_SESSION");
+        } else {
+            status.putAll(session.status());
+        }
+        status.put("schedule", runner.schedule());
+        return ResponseEntity.ok(status);
     }
 
     @GetMapping("/orders")

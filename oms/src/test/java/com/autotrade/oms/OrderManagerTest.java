@@ -92,6 +92,32 @@ class OrderManagerTest {
     }
 
     @Test
+    void anEntryCanCarryItsOwnPremiumStop() {
+        quote("10:00:00", 99.5, 100, 100);
+        assertThat(oms.enter("NIFTY", OptionSide.CE, CE, 1, "CONFIRMED", market("10:00"), 35).approved()).isTrue();
+        quote("10:00:01", 99.5, 100, 100);
+        OrderRequest stop = sent.get(1);
+        assertThat(stop.type()).isEqualTo(OrderType.STOP_LIMIT);
+        assertThat(stop.triggerPrice()).isEqualTo(65.0); // 35% below 100, not the default 25%
+    }
+
+    @Test
+    void riskV3AllowsEntriesInTheClosingAuctionWindowOnly() {
+        RiskLimits v3 = RiskLimits.from(ThresholdConfig.load(Path.of("..", "config", "risk", "paper-risk.v3.yaml")));
+        RiskEngine risk = new RiskEngine(v3, killSwitch);
+        assertThat(v3.squareOffAt()).isEqualTo(LocalTime.of(15, 36));
+        assertThat(risk.checkEntry(check("15:00"), clock.get()).reason()).contains("after 14:45");
+        assertThat(risk.checkEntry(check("15:22"), clock.get()).approved()).isTrue();
+        assertThat(risk.checkEntry(check("15:30"), clock.get()).approved()).isFalse();
+        assertThat(LIMITS.inCasEntryWindow(LocalTime.of(15, 22))).as("v2 has no CAS window").isFalse();
+    }
+
+    private static com.autotrade.risk.RiskCheck check(String time) {
+        return new com.autotrade.risk.RiskCheck("P1", "ecr", "NIFTY", false, 1, 0, 0, 0, 0.2, 0.2, 0.3,
+                LocalTime.parse(time), 0);
+    }
+
+    @Test
     void anAddResizesTheSingleStopInPlace() {
         quote("10:00:00", 99.5, 100, 100);
         oms.enter("NIFTY", OptionSide.CE, CE, 1, "EARLY", market("10:00"));

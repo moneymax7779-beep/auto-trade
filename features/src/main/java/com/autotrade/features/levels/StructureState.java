@@ -5,6 +5,7 @@ import java.time.Instant;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
@@ -16,6 +17,7 @@ import com.autotrade.features.indicators.Ema;
 import com.autotrade.features.indicators.SwingTracker;
 import com.autotrade.features.indicators.TimedSeries;
 import com.autotrade.features.indicators.WilderAtr;
+import com.autotrade.features.snapshot.LevelFeatures;
 import com.autotrade.features.snapshot.StructureFeatures;
 
 /**
@@ -25,8 +27,19 @@ import com.autotrade.features.snapshot.StructureFeatures;
 public final class StructureState {
 
     private static final int RANGE_AVERAGE_BARS = 10;
+    private static final int CLOSES_KEPT = 120;
+
+    /** Futures volume, for volume after a level break and breakout-bar volume (v3). */
+    public interface FuturesVolume {
+        /** Futures volume traded in the completed minutes of [from, to); NaN when no future is tracked. */
+        double volume(Instant from, Instant to);
+
+        /** Volume in [from, to) over the historical median volume of the same minutes; NaN when unknown. */
+        double todRatio(Instant from, Instant to);
+    }
 
     private final FeatureConfig config;
+    private final Instant sessionOpen;
     private final Instant openingRangeEnd;
     private final BarSeries oneMinute;
     private final BarSeries threeMinute;
@@ -55,9 +68,14 @@ public final class StructureState {
     private double lastSpot = Double.NaN;
     private Bar lastThreeMinuteBar;
     private double lastBarRangeVsAvg = Double.NaN;
+    private double vwapProxy = Double.NaN;
+    private double previousOneMinuteClose = Double.NaN;
+    private final Deque<long[]> ladderCrossings = new ArrayDeque<>();
+    private final Deque<Bar> oneMinuteBars = new ArrayDeque<>();
 
     public StructureState(FeatureConfig config, Instant sessionOpen, Optional<DailyBar> previousSession) {
         this.config = config;
+        this.sessionOpen = sessionOpen;
         this.openingRangeEnd = sessionOpen.plus(Duration.ofMinutes(config.openingRangeMinutes()));
         this.oneMinute = new BarSeries(Duration.ofMinutes(1), sessionOpen, 400);
         this.threeMinute = new BarSeries(Duration.ofMinutes(3), sessionOpen, 200);
@@ -128,6 +146,145 @@ public final class StructureState {
         atr1m.update(bar);
         closeSum += bar.close();
         closeCount++;
+        if (!Double.isNaN(previousOneMinuteClose)) {
+            for (double level : ladder(bar.end()).values()) {
+                if (Double.isNaN(level)) {
+                    continue;
+                }
+                if (previousOneMinuteClose <= level && bar.close() > level) {
+                    ladderCrossings.addLast(new long[] {bar.end().toEpochMilli(), 1});
+                } else if (previousOneMinuteClose >= level && bar.close() < level) {
+                    ladderCrossings.addLast(new long[] {bar.end().toEpochMilli(), -1});
+                }
+            }
+        }
+        previousOneMinuteClose = bar.close();
+        oneMinuteBars.addLast(bar);
+        if (oneMinuteBars.size() > CLOSES_KEPT) {
+            oneMinuteBars.removeFirst();
+        }
+    }
+
+    /** The spot VWAP proxy (futures VWAP − basis) used by the ladder; set by the engine as it changes. */
+    public void setVwapProxy(double vwapProxy) {
+        this.vwapProxy = vwapProxy;
+    }
+
+    /** Completed 1-minute bars of continuous trading, oldest first (at most the last {@value #CLOSES_KEPT}). */
+    public List<Bar> oneMinuteBars() {
+        return List.copyOf(oneMinuteBars);
+    }
+
+    /** The level ladder at {@code time}: opening range (once complete), previous day, anchors, swings. */
+    private Map<String, Double> ladder(Instant time) {
+        boolean orComplete = !time.isBefore(openingRangeEnd) && Double.isFinite(orHigh);
+        SwingTracker.Swing swingHigh = swings.lastHigh();
+        SwingTracker.Swing swingLow = swings.lastLow();
+        Map<String, Double> ladder = new LinkedHashMap<>();
+        ladder.put("ORH", orComplete ? orHigh : Double.NaN);
+        ladder.put("ORL", orComplete ? orLow : Double.NaN);
+        ladder.put("PDH", pdh);
+        ladder.put("PDL", pdl);
+        ladder.put("PREV_CLOSE", prevClose);
+        ladder.put("DAY_OPEN", dayOpen);
+        ladder.put("VWAP", vwapProxy);
+        ladder.put("EMA20", ema20.value());
+        ladder.put("SESSION_MEAN", closeCount == 0 ? Double.NaN : closeSum / closeCount);
+        ladder.put("SWING_HIGH", swingHigh == null ? Double.NaN : swingHigh.price());
+        ladder.put("SWING_LOW", swingLow == null ? Double.NaN : swingLow.price());
+        return ladder;
+    }
+
+    /**
+     * Level acceptance extras, ladder and room (features v3).
+     *
+     * @param expectedRemaining the expected remaining move for today, in points (NaN if unknown)
+     */
+    public LevelFeatures levelFeatures(Instant time, FuturesVolume futures, int ladderWindowMin,
+                                       int breakoutVolumeAverageBars, double expectedRemaining) {
+        double atr = atr3m.value();
+        long windowStart = time.minus(Duration.ofMinutes(ladderWindowMin)).toEpochMilli();
+        while (!ladderCrossings.isEmpty() && ladderCrossings.peekFirst()[0] < windowStart) {
+            ladderCrossings.removeFirst();
+        }
+        int reclaims = 0;
+        int losses = 0;
+        for (long[] crossing : ladderCrossings) {
+            if (crossing[1] > 0) {
+                reclaims++;
+            } else {
+                losses++;
+            }
+        }
+        int below = 0;
+        int above = 0;
+        double roomAbove = Double.NaN;
+        double roomBelow = Double.NaN;
+        if (!Double.isNaN(lastSpot)) {
+            for (double level : ladder(time).values()) {
+                if (Double.isNaN(level)) {
+                    continue;
+                }
+                if (level < lastSpot) {
+                    below++;
+                    roomBelow = Double.isNaN(roomBelow) ? lastSpot - level : Math.min(roomBelow, lastSpot - level);
+                } else if (level > lastSpot) {
+                    above++;
+                    roomAbove = Double.isNaN(roomAbove) ? level - lastSpot : Math.min(roomAbove, level - lastSpot);
+                }
+            }
+        }
+        double barVolumeRatio = Double.NaN;
+        boolean barVolumeRising = false;
+        Bar last = lastThreeMinuteBar;
+        if (last != null) {
+            Duration length = Duration.between(last.start(), last.end());
+            double current = futures.volume(last.start(), last.end());
+            double sum = 0;
+            int bars = 0;
+            for (int i = 1; i <= breakoutVolumeAverageBars; i++) {
+                Instant start = last.start().minus(length.multipliedBy(i));
+                if (start.isBefore(sessionOpen)) {
+                    break;
+                }
+                double volume = futures.volume(start, start.plus(length));
+                if (!Double.isNaN(volume)) {
+                    sum += volume;
+                    bars++;
+                }
+            }
+            double previous = futures.volume(last.start().minus(length), last.start());
+            barVolumeRatio = bars > 0 && sum > 0 && !Double.isNaN(current) ? current / (sum / bars) : Double.NaN;
+            barVolumeRising = !Double.isNaN(current) && !Double.isNaN(previous) && current > previous;
+        }
+        return new LevelFeatures(
+                orhAcceptance == null ? 0 : orhAcceptance.minutesAbove(time), travel(orhAcceptance, true, atr),
+                afterBreak(orhAcceptance, true, time, futures),
+                orlAcceptance == null ? 0 : orlAcceptance.minutesBelow(time), travel(orlAcceptance, false, atr),
+                afterBreak(orlAcceptance, false, time, futures),
+                pdhAcceptance == null ? 0 : pdhAcceptance.minutesAbove(time), travel(pdhAcceptance, true, atr),
+                afterBreak(pdhAcceptance, true, time, futures), pdhAcceptance != null && pdhAcceptance.retestHeldAbove(),
+                pdlAcceptance == null ? 0 : pdlAcceptance.minutesBelow(time), travel(pdlAcceptance, false, atr),
+                afterBreak(pdlAcceptance, false, time, futures), pdlAcceptance != null && pdlAcceptance.retestHeldBelow(),
+                below, above, reclaims, losses, barVolumeRatio, barVolumeRising, roomAbove, roomBelow,
+                roomAbove > 0 ? expectedRemaining / roomAbove : Double.NaN,
+                roomBelow > 0 ? expectedRemaining / roomBelow : Double.NaN);
+    }
+
+    private static double travel(LevelAcceptance level, boolean up, double atr) {
+        if (level == null || !(atr > 0)) {
+            return Double.NaN;
+        }
+        Instant broke = up ? level.brokeUpAt() : level.brokeDownAt();
+        return broke == null ? Double.NaN : (up ? level.maxAboveAfterBreak() : level.maxBelowAfterBreak()) / atr;
+    }
+
+    private static double afterBreak(LevelAcceptance level, boolean up, Instant time, FuturesVolume futures) {
+        if (level == null) {
+            return Double.NaN;
+        }
+        Instant broke = up ? level.brokeUpAt() : level.brokeDownAt();
+        return broke == null ? Double.NaN : futures.todRatio(broke, time);
     }
 
     private void onThreeMinuteClose(Bar bar) {
@@ -168,18 +325,8 @@ public final class StructureState {
         SwingTracker.Swing swingHigh = swings.lastHigh();
         SwingTracker.Swing swingLow = swings.lastLow();
 
-        Map<String, Double> ladder = new LinkedHashMap<>();
-        ladder.put("ORH", orh);
-        ladder.put("ORL", orl);
-        ladder.put("PDH", pdh);
-        ladder.put("PDL", pdl);
-        ladder.put("PREV_CLOSE", prevClose);
-        ladder.put("DAY_OPEN", dayOpen);
-        ladder.put("VWAP", vwapSpotProxy);
-        ladder.put("EMA20", ema20.value());
-        ladder.put("SESSION_MEAN", sessionMean);
-        ladder.put("SWING_HIGH", swingHigh == null ? Double.NaN : swingHigh.price());
-        ladder.put("SWING_LOW", swingLow == null ? Double.NaN : swingLow.price());
+        this.vwapProxy = vwapSpotProxy;
+        Map<String, Double> ladder = ladder(time);
         String above = null;
         String below = null;
         double aboveGap = Double.POSITIVE_INFINITY;

@@ -36,6 +36,8 @@ public final class ManagedPosition {
     double lastAsk = Double.NaN;
     double lastPrice = Double.NaN;
     String exitReason;
+    /** This position's resting premium stop as a fraction below average cost. */
+    double stopFraction;
     Instant closedAt;
     Instant exitPricedAt;
     int exitChases;

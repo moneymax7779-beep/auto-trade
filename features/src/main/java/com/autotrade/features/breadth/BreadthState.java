@@ -43,6 +43,17 @@ public final class BreadthState {
         }
     }
 
+    /** Latest known index weight (percent) per constituent symbol. */
+    public Map<String, Double> weights() {
+        Map<String, Double> weights = new HashMap<>();
+        stocks.forEach((symbol, stock) -> {
+            if (!Double.isNaN(stock.weight)) {
+                weights.put(symbol, stock.weight);
+            }
+        });
+        return weights;
+    }
+
     public BreadthFeatures snapshot(Instant time) {
         Duration window = Duration.ofMinutes(config.breadthReturnWindowMin());
         double scale = config.breadthReturnScalePct() / 100.0;

@@ -13,9 +13,11 @@ export function ResearchPage() {
   return (
     <Panel title="Research runs">
       <Table rows={runs.data!} columns={[
-        { key: "id", label: "#", render: (r) => r.kind === "LIFECYCLE"
+        { key: "id", label: "#", render: (r) => r.kind.startsWith("LIFECYCLE")
             ? <Link className="text-accent underline" to={`/research/${r.id}`}>{r.id}</Link> : r.id },
-        { key: "k", label: "Kind", render: (r) => r.kind },
+        { key: "k", label: "Kind", render: (r) => r.kind === "LIFECYCLE_DESCRIPTIVE"
+            ? <span title="Behaviour check on sessions this strategy family already consumed; the P&L is not evidence">
+                DESCRIPTIVE</span> : r.kind },
         { key: "st", label: "Status", render: (r) => r.status },
         { key: "s", label: "Sessions", render: (r) => <span className="num text-xs">{r.sessions}</span> },
         { key: "u", label: "Indices", render: (r) => r.underlyings },

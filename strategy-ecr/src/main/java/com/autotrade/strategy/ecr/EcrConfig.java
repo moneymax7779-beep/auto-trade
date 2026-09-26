@@ -9,7 +9,7 @@ import java.util.Set;
 
 import com.autotrade.config.ThresholdConfig;
 
-/** Typed view of early-confirm-runner.v2.yaml. */
+/** Typed view of early-confirm-runner.vN.yaml (v2 onward; {@code ext} holds the v4 additions, null before). */
 record EcrConfig(
         String hash,
         String version,
@@ -48,7 +48,8 @@ record EcrConfig(
         double invalidationAtr,
         Set<String> ceRunnerExitStates,
         Set<String> peRunnerExitStates,
-        int expiryStallMinutes) {
+        int expiryStallMinutes,
+        EcrExtensions ext) {
 
     record Window(LocalTime from, LocalTime to, double score) {
     }
@@ -90,7 +91,8 @@ record EcrConfig(
                 c.getDouble("exits.premium_stop_pct"), c.getInt("exits.early_probe_max_minutes"),
                 c.getDouble("exits.early_probe_fail_atr"), c.getDouble("exits.invalidation_close_atr"),
                 strings(c, "exits.runner_exit_futures_states.CE"), strings(c, "exits.runner_exit_futures_states.PE"),
-                c.getInt("exits.expiry_runner_stall_minutes"));
+                c.getInt("exits.expiry_runner_stall_minutes"),
+                EcrExtensions.from(c));
     }
 
     /** Minimum confirm score for the window containing {@code time}; the last window's if none. */
@@ -103,8 +105,12 @@ record EcrConfig(
         return confirmWindows.getLast().score();
     }
 
-    /** Lots per tranche [early, confirm, runner] by largest remainder, summing to the intended lots. */
     int[] tranches(boolean expiry) {
+        return tranches(expiry, intendedLots);
+    }
+
+    /** Lots per tranche [early, confirm, runner] by largest remainder, summing to {@code intendedLots}. */
+    int[] tranches(boolean expiry, int intendedLots) {
         double[] fractions = standardFractions.clone();
         if (expiry) {
             double rest = fractions[1] + fractions[2];
@@ -135,7 +141,11 @@ record EcrConfig(
     }
 
     boolean scaling() {
-        return intendedLots >= minLotsForScaling;
+        return scaling(intendedLots);
+    }
+
+    boolean scaling(int lots) {
+        return lots >= minLotsForScaling;
     }
 
     @SuppressWarnings("unchecked")

@@ -67,7 +67,8 @@ public record FeatureConfig(
         LocalTime casMarketAndLimitEnd,
         LocalTime casLimitOnlyEnd,
         LocalTime casEnd,
-        Set<LocalDate> holidays) {
+        Set<LocalDate> holidays,
+        FeatureExtensions extensions) {
 
     public static FeatureConfig from(ThresholdConfig features, ThresholdConfig exchange) {
         Map<String, LocalTime[]> windows = new LinkedHashMap<>();
@@ -135,7 +136,13 @@ public record FeatureConfig(
                 exchange.getTime("cas.market_and_limit_end"),
                 exchange.getTime("cas.limit_only_end"),
                 exchange.getTime("cas.end"),
-                Set.copyOf(holidays));
+                Set.copyOf(holidays),
+                FeatureExtensions.from(features));
+    }
+
+    /** True when the file defines the v3 feature sections. */
+    public boolean extended() {
+        return extensions != null;
     }
 
     /** RVOL slot length for an underlying (a per-underlying override, else the default). */

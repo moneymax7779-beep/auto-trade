@@ -10,7 +10,12 @@ public final class CodeVersion {
     private CodeVersion() {
     }
 
+    /** AUTOTRADE_CODE_VERSION when set (container images have no git), else the working tree's commit. */
     public static String current() {
+        String fromEnvironment = System.getenv("AUTOTRADE_CODE_VERSION");
+        if (fromEnvironment != null && !fromEnvironment.isBlank()) {
+            return fromEnvironment;
+        }
         String commit = git("rev-parse", "--short=12", "HEAD");
         if (commit == null) {
             return "unknown";

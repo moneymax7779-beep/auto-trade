@@ -46,6 +46,7 @@ public final class UpstoxFeed implements LiveFeed {
     private final Set<String> subscribed = new HashSet<>();
     private final AtomicLong messages = new AtomicLong();
     private volatile boolean stopped;
+    private volatile String failure;
     private volatile Instant last;
     private volatile String connection = "NOT_CONNECTED";
     private MarketDataStreamerV3 streamer;
@@ -105,6 +106,15 @@ public final class UpstoxFeed implements LiveFeed {
         } finally {
             streamer.disconnect();
         }
+        if (failure != null) {
+            throw new IllegalStateException("Upstox feed failed: " + failure);
+        }
+    }
+
+    /** Stops the feed as a failure (the session ends FAILED, so the scheduler can fall back). */
+    public void fail(String reason) {
+        failure = reason;
+        stopped = true;
     }
 
     /** Subscribes the option band once each index has a price, and again when it drifts too far. */

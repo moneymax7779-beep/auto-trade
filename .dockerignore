@@ -1,0 +1,4 @@
+# Only what the trading-core image needs; everything else stays out of the build context.
+*
+!app-trading-core/target/app-trading-core-0.1.0-SNAPSHOT.jar
+!ui/dist

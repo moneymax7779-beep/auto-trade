@@ -5,7 +5,8 @@ import java.time.LocalDate;
 
 /**
  * Everything the platform knew about one underlying at {@code time}, computed only from events
- * received before {@code time}. The config hashes identify the definitions used.
+ * received before {@code time}. The config hashes identify the definitions used. The levels, book,
+ * premium and volatility sections are features v3; with older feature files they are EMPTY.
  */
 public record FeatureSnapshot(
         Instant time,
@@ -22,6 +23,10 @@ public record FeatureSnapshot(
         BreadthFeatures breadth,
         RegimeFeatures regime,
         CasFeatures cas,
+        LevelFeatures levels,
+        BookFeatures book,
+        PremiumFeatures premium,
+        VolatilityFeatures volatility,
         String featuresHash,
         String exchangeHash) {
 }

@@ -68,7 +68,7 @@ public final class ReplayReader {
     private enum Source {
         INDEX("select underlying, recv_ts, exch_ts, src_seq, price, prev_close, atm_strike from md.index_tick"),
         FUTURE("select underlying, recv_ts, exch_ts, src_seq, instrument_token, symbol, expiry, price, volume, oi, "
-                + "session_vwap from md.future_tick"),
+                + "session_vwap, total_buy_qty, total_sell_qty from md.future_tick"),
         OPTION("select underlying, recv_ts, exch_ts, src_seq, instrument_token, symbol, expiry, strike, option_type, "
                 + "lot_size, ltp, volume, oi, total_buy_qty, total_sell_qty, bid_px, bid_qty, bid_orders, ask_px, "
                 + "ask_qty, ask_orders, iv, delta, gamma, theta, vega, rho, analytics_ts, analytics_complete, "
@@ -144,7 +144,8 @@ public final class ReplayReader {
                 case FUTURE -> new FutureTick(received, instant("exch_ts"), underlying, sequence,
                         rows.getLong("instrument_token"), rows.getString("symbol"), date("expiry"),
                         rows.getDouble("price"), nullableLong("volume"), nullableDouble("oi"),
-                        nullableDouble("session_vwap"));
+                        nullableDouble("session_vwap"), nullableDouble("total_buy_qty"),
+                        nullableDouble("total_sell_qty"));
                 case OPTION -> new OptionTick(received, instant("exch_ts"), underlying, sequence,
                         rows.getLong("instrument_token"), rows.getString("symbol"), date("expiry"),
                         rows.getDouble("strike"), OptionTick.OptionType.valueOf(rows.getString("option_type")),

@@ -36,25 +36,47 @@ import com.autotrade.strategy.Strategy;
  *   <li>RUNNER: runner score above its minimum while confirmed; buys the runner tranche and
  *       switches to the EMA9 trail.</li>
  * </ul>
+ *
+ * <p>Strategy v4 (files with the {@code vol_regime} section) adds:
+ * <ul>
+ *   <li>the volatility regime (LOW / NORMAL / HIGH / EXTREME), which scales size, raises the
+ *       confirmation threshold, widens the premium stop and can disallow early probes;</li>
+ *   <li>order-book imbalance persistence as a small plus or minus on the confirm score;</li>
+ *   <li>breakout-bar volume in the breakout quality; runner promotion only when the option premium
+ *       responds efficiently, and on expiry only without an opposite wall forming and with RVOL still
+ *       elevated; expiry runners also exit when that changes or futures momentum turns;</li>
+ *   <li>the closing-auction mode: at 15:15 a RUNNER switches to CAS_RUNNER management (held while the
+ *       CAS score agrees, closed when it falls to NO_TRADE or at {@code exit_by}); other positions
+ *       close as before. New CAS entries are taken in the entry window by CAS score band, only with
+ *       per-stock auction data and futures agreeing, one per side; stricter on expiry day.</li>
+ * </ul>
  */
 final class EarlyConfirmRunnerStrategy implements Strategy {
 
     private static final String ID = "early-confirm-runner";
 
     private final EcrConfig config;
+    private final EcrExtensions ext;
     private final Scorer scorer;
+    private final CasScorer casScorer;
     private final Map<OptionSide, Stage> stages = new EnumMap<>(OptionSide.class);
     private final Map<OptionSide, Integer> campaigns = new EnumMap<>(OptionSide.class);
+    private final Map<OptionSide, Integer> casCampaigns = new EnumMap<>(OptionSide.class);
+    private final Map<OptionSide, Boolean> casManaged = new EnumMap<>(OptionSide.class);
     private Instant stageSince;
     private double bestSpotInRunner = Double.NaN;
     private Instant bestSpotTime;
 
     EarlyConfirmRunnerStrategy(EcrConfig config) {
         this.config = config;
+        this.ext = config.ext();
         this.scorer = new Scorer(config);
+        this.casScorer = ext == null ? null : new CasScorer(ext.cas());
         for (OptionSide side : OptionSide.values()) {
             stages.put(side, Stage.IDLE);
             campaigns.put(side, 0);
+            casCampaigns.put(side, 0);
+            casManaged.put(side, false);
         }
     }
 
@@ -68,11 +90,24 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
         return config.hash();
     }
 
+    /** Everything decided once per snapshot that both sides share. */
+    private record Context(LocalTime time, String dteRegime, String volRegime, boolean continuous, boolean casPhase,
+                           EcrExtensions.Adjustment adjustment) {
+
+        boolean expiry() {
+            return "EXPIRY".equals(dteRegime);
+        }
+    }
+
     @Override
     public Decision decide(FeatureSnapshot snapshot, PositionView position) {
         LocalTime time = snapshot.time().atZone(MarketTime.IST).toLocalTime();
-        String regime = regime(snapshot.regime().dteTradingDays());
-        boolean continuous = SessionPhase.valueOf(snapshot.phase()).isContinuous();
+        SessionPhase phase = SessionPhase.valueOf(snapshot.phase());
+        String dteRegime = regime(snapshot.regime().dteTradingDays());
+        String volRegime = ext == null ? null : VolatilityRegime.classify(snapshot, ext).regime();
+        Context ctx = new Context(time, dteRegime, volRegime, phase.isContinuous(),
+                phase.isCas() || phase == SessionPhase.DERIVATIVES_ONLY,
+                ext == null ? null : ext.adjustment(volRegime));
         List<OrderIntent> orders = new ArrayList<>();
         Map<OptionSide, SideView> views = new EnumMap<>(OptionSide.class);
         Map<OptionSide, Map<String, Double>> subs = new EnumMap<>(OptionSide.class);
@@ -80,53 +115,84 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
             SideFeatures f = new SideFeatures(side, snapshot);
             Map<String, Double> sub = scorer.subScores(f);
             subs.put(side, sub);
-            Map<String, Boolean> conditions = conditions(f, regime);
+            Map<String, Boolean> conditions = conditions(f, dteRegime);
             double early = earlyScore(conditions);
-            double confirm = scorer.confirmScore(sub, regime);
+            double confirm = scorer.confirmScore(sub, dteRegime);
+            double required = config.requiredConfirmScore(time);
+            if (ext != null) {
+                required += ctx.adjustment().confirmAdd();
+                boolean favourable = f.bookFavourable(ext.bookImbalanceMin());
+                boolean against = f.bookAgainst(ext.bookImbalanceMin());
+                conditions.put("book_favourable", favourable);
+                conditions.put("book_against", against);
+                // A small confirmation only: a few points either way, never a trigger by itself.
+                confirm += favourable && !against ? ext.bookConfirmPoints() : against && !favourable
+                        ? -ext.bookConfirmPoints() : 0;
+                conditions.put("breakout_volume", f.breakoutVolumeRatio() >= ext.breakoutVolumeRatioMin());
+                double response = f.premiumResponse();
+                conditions.put("premium_response_ok", Double.isNaN(response) || response >= ext.premiumResponseRatioMin());
+                conditions.put("target_reachable", !(f.expectedReach() < 1));
+                conditions.put("opposite_wall", f.oppositeWallForming(ext.wallScoreMin()));
+                conditions.put("rvol_elevated", f.rvol() >= ext.expiryRunnerRvolMin());
+                conditions.put("early_allowed", ctx.adjustment().allowEarly());
+            }
             double runner = scorer.runnerScore(sub);
-            boolean confirmed = conditions.get("broke_level") && conditions.get("rvol_confirms")
-                    && conditions.get("breakout_bar") && confirm >= config.requiredConfirmScore(time);
-            conditions.put("confirm_score_ok", confirm >= config.requiredConfirmScore(time));
+            boolean breakout = conditions.get("breakout_bar") && (ext == null || conditions.get("breakout_volume"));
+            boolean confirmed = conditions.get("broke_level") && conditions.get("rvol_confirms") && breakout
+                    && confirm >= required;
+            conditions.put("confirm_score_ok", confirm >= required);
             conditions.put("runner_score_ok", runner >= config.runnerScoreMin());
+
+            CasScorer.Score cas = ctx.casPhase() && casScorer != null && ext.cas().enabled()
+                    ? casScorer.score(side, snapshot) : null;
+            if (cas != null) {
+                conditions.put("cas_constituent_data", cas.constituentData());
+                conditions.put("cas_futures_agree", cas.futuresAlignment() >= ext.cas().minFuturesAlignment());
+            }
 
             boolean mine = position.open() && position.side() == side;
             if (mine) {
-                manage(side, f, snapshot, time, regime, confirmed, runner, orders);
+                manage(side, f, snapshot, ctx, confirmed, runner, conditions, cas, orders);
             } else if (!position.open()) {
-                open(side, f, snapshot, time, regime, continuous, conditions, early, confirmed, orders);
+                if (!casEntry(side, snapshot, ctx, cas, orders)) {
+                    open(side, snapshot, ctx, conditions, early, confirmed, orders);
+                }
             } else if (!stages.get(side).holdsPosition() && stages.get(side) != Stage.EXITED) {
                 stages.put(side, watchStage(conditions));
             }
             views.put(side, new SideView(side, stages.get(side), early, confirm, runner,
-                    Collections.unmodifiableMap(conditions)));
+                    cas == null ? Double.NaN : cas.value(), Collections.unmodifiableMap(conditions)));
         }
-        return new Decision(snapshot.time(), snapshot.underlying(), marketState(snapshot, subs, regime),
+        String regimeLabel = volRegime == null ? dteRegime : dteRegime + "/" + volRegime;
+        return new Decision(snapshot.time(), snapshot.underlying(), marketState(snapshot, subs, regimeLabel),
                 views.get(OptionSide.CE), views.get(OptionSide.PE), List.copyOf(orders));
     }
 
-    private void open(OptionSide side, SideFeatures f, FeatureSnapshot snapshot, LocalTime time, String regime,
-                      boolean continuous, Map<String, Boolean> conditions, double early, boolean confirmed,
-                      List<OrderIntent> orders) {
+    private void open(OptionSide side, FeatureSnapshot snapshot, Context ctx, Map<String, Boolean> conditions,
+                      double early, boolean confirmed, List<OrderIntent> orders) {
         Stage stage = stages.get(side);
         if (stage.holdsPosition()) {
             // The executor reports flat (e.g. the resting premium stop filled): the campaign is over.
             stages.put(side, Stage.EXITED);
+            casManaged.put(side, false);
             return;
         }
         if (stage == Stage.EXITED) {
             return;
         }
-        boolean entryWindow = continuous && !time.isBefore(config.earliestEntry()) && time.isBefore(config.lastNewEntry())
-                && snapshot.structure().orComplete() && campaigns.get(side) < 1;
+        boolean entryWindow = ctx.continuous() && !ctx.time().isBefore(config.earliestEntry())
+                && ctx.time().isBefore(config.lastNewEntry()) && snapshot.structure().orComplete() && campaigns.get(side) < 1;
         Stage next = watchStage(conditions);
-        boolean expiry = "EXPIRY".equals(regime);
-        int[] tranches = config.tranches(expiry);
-        if (entryWindow && config.scaling() && early >= config.earlyMin()) {
-            orders.add(new OrderIntent(OrderIntent.Action.ENTER, side, tranches[0], Stage.EARLY_ENTRY, "EARLY"));
+        int lots = intendedLots(ctx);
+        int[] tranches = config.tranches(ctx.expiry(), lots);
+        boolean scaling = config.scaling(lots);
+        boolean earlyAllowed = ext == null || ctx.adjustment().allowEarly();
+        if (entryWindow && scaling && earlyAllowed && early >= config.earlyMin()) {
+            orders.add(intent(OrderIntent.Action.ENTER, side, tranches[0], Stage.EARLY_ENTRY, "EARLY", ctx));
             next = Stage.EARLY_ENTRY;
         } else if (entryWindow && confirmed) {
-            int lots = config.scaling() ? tranches[1] : config.intendedLots();
-            orders.add(new OrderIntent(OrderIntent.Action.ENTER, side, lots, Stage.CONFIRMED, "CONFIRMED"));
+            int entryLots = scaling ? tranches[1] + (earlyAllowed ? 0 : tranches[0]) : lots;
+            orders.add(intent(OrderIntent.Action.ENTER, side, entryLots, Stage.CONFIRMED, "CONFIRMED", ctx));
             next = Stage.CONFIRMED;
         }
         if (next.holdsPosition()) {
@@ -136,19 +202,79 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
         stages.put(side, next);
     }
 
-    private void manage(OptionSide side, SideFeatures f, FeatureSnapshot snapshot, LocalTime time, String regime,
-                        boolean confirmed, double runner, List<OrderIntent> orders) {
+    /**
+     * A new closing-auction entry: inside the CAS entry window, CAS score in an entry band, per-stock
+     * auction data present (if required) and futures agreeing with the auction. Returns true when this
+     * snapshot is handled by CAS logic (so the continuous-session rules do not run).
+     */
+    private boolean casEntry(OptionSide side, FeatureSnapshot snapshot, Context ctx, CasScorer.Score cas,
+                             List<OrderIntent> orders) {
+        if (cas == null) {
+            return false;
+        }
+        if (stages.get(side).holdsPosition()) {
+            stages.put(side, Stage.EXITED);
+            casManaged.put(side, false);
+        }
+        EcrExtensions.Cas c = ext.cas();
+        boolean window = !ctx.time().isBefore(c.entryFrom()) && ctx.time().isBefore(c.entryTo());
+        if (!window || casCampaigns.get(side) >= 1 || Double.isNaN(cas.value())) {
+            return true;
+        }
+        if (c.entriesRequireConstituents() && !cas.constituentData()) {
+            return true;
+        }
+        if (!(cas.futuresAlignment() >= c.minFuturesAlignment())) {
+            return true;
+        }
+        double add = ctx.expiry() ? c.expiryBandAdd() : 0;
+        int lots = intendedLots(ctx);
+        int[] tranches = config.tranches(ctx.expiry(), lots);
+        int entryLots;
+        String reason;
+        if (cas.value() >= c.highConvictionMin() + add) {
+            entryLots = ctx.expiry() ? tranches[0] + tranches[1] : lots;
+            reason = "CAS_HIGH_CONVICTION";
+        } else if (cas.value() >= c.confirmedMin() + add) {
+            entryLots = ctx.expiry() ? tranches[0] : tranches[0] + tranches[1];
+            reason = "CAS_CONFIRMED";
+        } else if (cas.value() >= c.earlySmallMin() + add) {
+            entryLots = tranches[0];
+            reason = "CAS_EARLY_SMALL";
+        } else {
+            return true;
+        }
+        entryLots = Math.max(1, entryLots);
+        orders.add(intent(OrderIntent.Action.ENTER, side, entryLots, Stage.CONFIRMED, reason, ctx));
+        stages.put(side, Stage.CONFIRMED);
+        casManaged.put(side, true);
+        casCampaigns.merge(side, 1, Integer::sum);
+        stageSince = snapshot.time();
+        return true;
+    }
+
+    private void manage(OptionSide side, SideFeatures f, FeatureSnapshot snapshot, Context ctx, boolean confirmed,
+                        double runner, Map<String, Boolean> conditions, CasScorer.Score cas, List<OrderIntent> orders) {
         Stage stage = stages.get(side);
-        if (!time.isBefore(config.flatBy())) {
-            exit(side, stage, "FLAT_BY", orders);
+        if (!ctx.time().isBefore(config.flatBy()) && !casManaged.get(side)) {
+            if (ext != null && ext.cas().enabled() && stage == Stage.RUNNER) {
+                // The design's CAS_RUNNER: a runner is not closed at 15:15 but managed by the auction.
+                casManaged.put(side, true);
+            } else {
+                exit(side, stage, "FLAT_BY", orders);
+                return;
+            }
+        }
+        if (casManaged.get(side)) {
+            manageCas(side, stage, ctx, cas, orders);
             return;
         }
-        boolean expiry = "EXPIRY".equals(regime);
-        int[] tranches = config.tranches(expiry);
+        boolean expiry = ctx.expiry();
+        int[] tranches = config.tranches(expiry, intendedLots(ctx));
         switch (stage) {
             case EARLY_ENTRY -> {
                 if (confirmed) {
-                    orders.add(new OrderIntent(OrderIntent.Action.ADD, side, tranches[1], Stage.CONFIRMED, "CONFIRMED"));
+                    orders.add(intent(OrderIntent.Action.ADD, side, tranches[1], Stage.CONFIRMED, "CONFIRMED", ctx));
                     stages.put(side, Stage.CONFIRMED);
                     stageSince = snapshot.time();
                 } else if (f.levelDistance() < -config.probeFailAtr()) {
@@ -160,9 +286,9 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
             case CONFIRMED -> {
                 if (invalidated(f)) {
                     exit(side, stage, "INVALIDATED", orders);
-                } else if (runner >= config.runnerScoreMin()) {
-                    if (config.scaling() && tranches[2] > 0) {
-                        orders.add(new OrderIntent(OrderIntent.Action.ADD, side, tranches[2], Stage.RUNNER, "RUNNER"));
+                } else if (runner >= config.runnerScoreMin() && runnerGates(conditions, expiry)) {
+                    if (config.scaling(intendedLots(ctx)) && tranches[2] > 0) {
+                        orders.add(intent(OrderIntent.Action.ADD, side, tranches[2], Stage.RUNNER, "RUNNER", ctx));
                     }
                     stages.put(side, Stage.RUNNER);
                     stageSince = snapshot.time();
@@ -186,11 +312,62 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
                 } else if (expiry && Duration.between(bestSpotTime, snapshot.time()).toMinutes()
                         >= config.expiryStallMinutes()) {
                     exit(side, stage, "EXPIRY_STALL", orders);
+                } else if (ext != null && expiry) {
+                    expiryRunnerExit(side, f, stage, conditions, orders);
                 }
             }
             default -> {
             }
         }
+    }
+
+    /** v4 runner promotion gates: efficient premium response; on expiry also no opposite wall and RVOL elevated. */
+    private boolean runnerGates(Map<String, Boolean> conditions, boolean expiry) {
+        if (ext == null) {
+            return true;
+        }
+        boolean gates = conditions.get("premium_response_ok");
+        if (expiry) {
+            gates = gates && !conditions.get("opposite_wall") && conditions.get("rvol_elevated");
+        }
+        return gates;
+    }
+
+    /** The design's expiry-runner requirements, checked while holding (v4). */
+    private void expiryRunnerExit(OptionSide side, SideFeatures f, Stage stage, Map<String, Boolean> conditions,
+                                  List<OrderIntent> orders) {
+        if (conditions.get("opposite_wall")) {
+            exit(side, stage, "OPPOSITE_WALL", orders);
+        } else if (!conditions.get("premium_response_ok")) {
+            exit(side, stage, "PREMIUM_LAGGING", orders);
+        } else if (!f.futuresMomentum() && !f.futuresAcceleration()) {
+            exit(side, stage, "EXPIRY_MOMENTUM_LOST", orders);
+        }
+    }
+
+    /** CAS_RUNNER / CAS entry management: hold while the auction agrees, close when it disagrees or at exit_by. */
+    private void manageCas(OptionSide side, Stage stage, Context ctx, CasScorer.Score cas, List<OrderIntent> orders) {
+        EcrExtensions.Cas c = ext.cas();
+        double holdMin = ctx.expiry() ? c.expiryRunnerHoldMin() : c.runnerHoldMin();
+        if (!ctx.time().isBefore(c.exitBy())) {
+            exit(side, stage, "CAS_END", orders);
+        } else if (cas != null && !Double.isNaN(cas.value()) && cas.value() < holdMin) {
+            exit(side, stage, "CAS_DISAGREES", orders);
+        }
+    }
+
+    private OrderIntent intent(OrderIntent.Action action, OptionSide side, int lots, Stage stage, String reason,
+                               Context ctx) {
+        double stop = ext == null ? Double.NaN : ctx.adjustment().premiumStopPct();
+        return new OrderIntent(action, side, lots, stage, reason, stop);
+    }
+
+    /** Intended lots for the campaign: the file's lots, scaled by the volatility regime in v4. */
+    private int intendedLots(Context ctx) {
+        if (ext == null) {
+            return config.intendedLots();
+        }
+        return Math.max(1, (int) Math.round(config.intendedLots() * ctx.adjustment().sizeFactor()));
     }
 
     /** A 3-minute close back through the level by more than the invalidation band. */
@@ -201,6 +378,7 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
     private void exit(OptionSide side, Stage stage, String reason, List<OrderIntent> orders) {
         orders.add(OrderIntent.exit(side, stage, reason));
         stages.put(side, Stage.EXITED);
+        casManaged.put(side, false);
     }
 
     private Stage watchStage(Map<String, Boolean> c) {

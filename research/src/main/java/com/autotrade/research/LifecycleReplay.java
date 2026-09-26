@@ -11,6 +11,7 @@ import java.util.Map;
 import com.autotrade.core.event.MarketEvent;
 import com.autotrade.core.event.OptionTick;
 import com.autotrade.core.event.SessionEventSource;
+import com.autotrade.core.history.ReferenceData;
 import com.autotrade.core.history.SessionHistory;
 import com.autotrade.features.FeatureEngine;
 import com.autotrade.features.config.FeatureConfig;
@@ -74,9 +75,13 @@ public final class LifecycleReplay {
                     underlyingBook.accept(tick);
                 }
             }
-            FeatureEngine engine = engines.get(event.underlying());
-            if (engine != null) {
-                engine.accept(event);
+            if (ReferenceData.INDIA_VIX.equals(event.underlying())) {
+                engines.values().forEach(engine -> engine.accept(event));
+            } else {
+                FeatureEngine engine = engines.get(event.underlying());
+                if (engine != null) {
+                    engine.accept(event);
+                }
             }
             for (Lane lane : lanes) {
                 lane.onEvent(event);
@@ -145,7 +150,7 @@ public final class LifecycleReplay {
             }
             String exchange = snapshot.underlying().equals("SENSEX") ? "BSE" : "NSE";
             OptionPositionSimulator simulator = new OptionPositionSimulator(contract.token(), contract.symbol(),
-                    exchange, session, model, settings.costs(), settings.premiumStopPct());
+                    exchange, session, model, settings.costs(), order.stopPctOr(settings.premiumStopPct()));
             simulator.buy(snapshot.time(), (long) order.lots() * contract.lotSize(), order.stage().name());
             Campaign campaign = new Campaign(snapshot.underlying(), order.side(), contract.lotSize(), simulator,
                     snapshot.time());

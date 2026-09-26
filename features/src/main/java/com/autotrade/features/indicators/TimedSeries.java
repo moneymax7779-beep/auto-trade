@@ -58,6 +58,35 @@ public final class TimedSeries {
         return Double.NaN;
     }
 
+    /**
+     * Smallest value in force at any moment of the window ({@code now − window}, {@code now}]: the
+     * value at the window start and every sample after it. NaN when the series does not reach back
+     * to the window start, so a short history never passes for persistence.
+     */
+    public double min(Instant now, Duration window) {
+        return extreme(now, window, true);
+    }
+
+    /** Largest value in force during the window; see {@link #min}. */
+    public double max(Instant now, Duration window) {
+        return extreme(now, window, false);
+    }
+
+    private double extreme(Instant now, Duration window, boolean min) {
+        long start = now.minus(window).toEpochMilli();
+        long end = now.toEpochMilli();
+        double result = valueAt(now.minus(window));
+        if (Double.isNaN(result)) {
+            return Double.NaN;
+        }
+        for (Sample sample : samples) {
+            if (sample.millis() > start && sample.millis() <= end) {
+                result = min ? Math.min(result, sample.value()) : Math.max(result, sample.value());
+            }
+        }
+        return result;
+    }
+
     /** latest − value {@code ago} before {@code now}; NaN when either is missing. */
     public double change(Instant now, Duration ago) {
         double past = valueAt(now.minus(ago));

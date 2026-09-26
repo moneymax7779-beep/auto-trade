@@ -21,6 +21,7 @@ import com.autotrade.broker.OrderUpdate;
 import com.autotrade.broker.paper.PaperBroker;
 import com.autotrade.core.event.MarketEvent;
 import com.autotrade.core.event.OptionTick;
+import com.autotrade.core.history.ReferenceData;
 import com.autotrade.core.history.SessionHistory;
 import com.autotrade.core.time.MarketTime;
 import com.autotrade.features.FeatureEngine;
@@ -158,9 +159,14 @@ public final class TradingSession {
                 contracts.accept(tick);
                 oms.observe(tick);
             }
-            FeatureEngine engine = engines.get(event.underlying());
-            if (engine != null) {
-                engine.accept(event);
+            if (ReferenceData.INDIA_VIX.equals(event.underlying())) {
+                // Market-wide context: every underlying's engine takes India VIX.
+                engines.values().forEach(engine -> engine.accept(event));
+            } else {
+                FeatureEngine engine = engines.get(event.underlying());
+                if (engine != null) {
+                    engine.accept(event);
+                }
             }
             broker.accept(event);
             reconcileIfDue();
@@ -223,7 +229,7 @@ public final class TradingSession {
                         continue;
                     }
                     RiskDecision result = oms.enter(underlying, intent.side(), contract.get(), intent.lots(),
-                            intent.stage().name(), market);
+                            intent.stage().name(), market, intent.premiumStopPct());
                     logDecision(underlying, intent, result, contract.get());
                 }
                 case ADD -> logDecision(underlying, intent,
@@ -321,10 +327,8 @@ public final class TradingSession {
             lastDecisions.forEach((underlying, decision) -> stages.put(underlying, Map.of(
                     "time", decision.time().atZone(MarketTime.IST).toLocalTime().toString(),
                     "spot", lastSpot.getOrDefault(underlying, Double.NaN),
-                    "CE", decision.ce().stage() + " early " + Math.round(decision.ce().earlyScore()) + " confirm "
-                            + Math.round(decision.ce().confirmScore()) + " runner " + Math.round(decision.ce().runnerScore()),
-                    "PE", decision.pe().stage() + " early " + Math.round(decision.pe().earlyScore()) + " confirm "
-                            + Math.round(decision.pe().confirmScore()) + " runner " + Math.round(decision.pe().runnerScore()),
+                    "CE", sideSummary(decision.ce()),
+                    "PE", sideSummary(decision.pe()),
                     "state", decision.state())));
             status.put("strategy", stages);
             synchronized (recentRejections) {
@@ -332,6 +336,12 @@ public final class TradingSession {
             }
             return status;
         }
+    }
+
+    private static String sideSummary(com.autotrade.strategy.SideView view) {
+        return view.stage() + " early " + Math.round(view.earlyScore()) + " confirm " + Math.round(view.confirmScore())
+                + " runner " + Math.round(view.runnerScore())
+                + (Double.isNaN(view.casScore()) ? "" : " cas " + Math.round(view.casScore()));
     }
 
     private static Map<String, Object> position(ManagedPosition p) {

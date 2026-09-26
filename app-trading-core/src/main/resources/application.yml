@@ -34,16 +34,18 @@ autotrade:
     account: PAPER-1
     underlyings: [NIFTY, SENSEX]
     fill-model: base
-    strategy-file: config/strategy/early-confirm-runner.v3.yaml
-    features-file: config/features/features.v2.yaml
+    strategy-file: config/strategy/early-confirm-runner.v5.yaml
+    features-file: config/features/features.v4.yaml
     exchange-file: config/exchange/nse-bse-sessions.v2.yaml
     costs-file: config/costs/india-index-options-costs.v1.yaml
-    risk-file: config/risk/paper-risk.v2.yaml
+    risk-file: config/risk/paper-risk.v3.yaml
     poll-interval-ms: 250
     recheck-window-ms: 3000
+    start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"
-    feed: zt-tail                  # zt-tail (default) or upstox
+    feed: upstox                   # upstox (falls back to zt-tail when no token or the feed fails) or zt-tail
   upstox:
+    token-source: zt                     # zt: read zt-tiger-v2's Upstox token (read-only); file: own token file only
     token-file: ${UPSTOX_TOKEN_FILE:.local/upstox/token.json}
     instrument-dir: .local/instruments   # NSE-*.json.gz / BSE-*.json.gz contract files (newest used)
     strikes-each-side: 12

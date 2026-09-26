@@ -76,8 +76,15 @@ bin/autotrade instruments --file .local/instruments/NSE-2026-09-25.json.gz --dat
 bin/autotrade features --session 2026-09-25 --save                 # also into feat.snapshot
 bin/autotrade lifecycle --save                                     # sessions from the strategy's evaluation window
 bin/autotrade lifecycle --session 2026-09-28 --save                # one session
-# sessions marked HELD_OUT additionally need --held-out (consumed once per strategy family)
+bin/autotrade lifecycle --strategy config/strategy/early-confirm-runner.v5.yaml --save   # v5 (default; features v4 is the default)
+# sessions marked HELD_OUT additionally need --held-out (consumed once per strategy family);
+# --descriptive replays held-out sessions the family already consumed, marked as not evidence
+bin/autotrade vix-backfill                                         # India VIX daily + 1-minute bars (public Upstox API)
 ```
+
+Feature files: `features.v3.yaml`/`features.v4.yaml` (v4 is the default) add level acceptance, order-book imbalance, premium
+behaviour, IV/ATR/realised-vol percentiles, India VIX and the closing-auction features;
+`docs/DESIGN-COVERAGE.md` maps every element of the design to its code.
 
 Register a hypothesis in `docs/EXPERIMENT-LEDGER.md` before running it.
 
@@ -86,9 +93,24 @@ After changing any module, rebuild the CLI jar: `mvn -q -DskipTests -pl autotrad
 
 ## PAPER trading (Phase 3)
 
+trading-core runs as an always-on Docker service (`--mode=auto`): it serves the UI and starts the
+live session itself at 09:00 IST on every trading day (exchange holiday file), stops it at 15:45,
+and restarts it straight away if the service restarts during market hours. Nothing to start by hand.
+
+```bash
+bin/deploy                                              # build jar + UI + image, (re)start the service
+docker compose logs -f trading-core                     # watch it
+docker compose stop trading-core                        # pause automation
+```
+
+The host still has to be awake with Docker running (on the Mac: Docker Desktop "start when you sign
+in", and no system sleep during market hours); zt-tiger-v2 must be logged in to Upstox and capturing.
+
+Manual runs, outside the service (stop it first; it holds port 8095):
+
 ```bash
 bin/trading-core --mode=replay --session=2026-09-25     # a recorded day through the live path, then exit
-bin/trading-core --mode=live                            # today: tails zt-tiger-v2's capture until 15:45
+bin/trading-core --mode=live                            # today only, until 15:45
 curl -s http://127.0.0.1:8095/api/status                 # positions, P&L, stages, feed lag, kill switches
 curl -s -X POST 'http://127.0.0.1:8095/api/kill?scope=GLOBAL&reason=manual'   # block new entries
 curl -s -X POST http://127.0.0.1:8095/api/exit-all       # close everything
@@ -97,23 +119,28 @@ curl -s -X POST http://127.0.0.1:8095/api/stop           # close everything and 
 
 Everything is PAPER: no code path sends an order to a real broker. Records are in `trade.*`.
 
-### Upstox feed (instead of tailing zt-tiger-v2)
+### Upstox feed (default) and the shared Upstox login
 
-1. Put `UPSTOX_API_KEY` and `UPSTOX_API_SECRET` of the auto-trade Upstox app in `.env`; the app's
-   redirect URL must be `http://127.0.0.1:5055/upstox/callback`.
-2. Each morning: `bin/autotrade upstox-login`, open the printed link and sign in to Upstox yourself.
-   The day's token goes to `.local/upstox/token.json` (owner-only) and expires at 03:30 IST.
-3. `bin/autotrade upstox-status` checks it; then
-   `bin/trading-core --mode=live --autotrade.trading.feed=upstox`.
+Live sessions use the Upstox market-data feed (per-stock auction data, futures book, India VIX)
+with **zt-tiger-v2's Upstox login**: trading-core reads the access token of zt-tiger-v2's primary
+Upstox account from its database (read-only, in memory only; `autotrade.upstox.token-source: zt`)
+and checks it against the profile API. Sign in to Upstox once each morning **in zt-tiger-v2**;
+auto-trade never logs in with zt-tiger-v2's app (that would invalidate its token).
 
-Upstox allows two feed connections per user; auto-trade uses one, and zt-tiger-v2 runs on the same user.
+- No valid token, or the Upstox feed fails or goes silent for 60 s in market hours: the session
+  falls back to tailing zt-tiger-v2's database for the rest of the day.
+- Each session downloads that day's Upstox contract files (public) into `.local/instruments` and
+  `ref.instrument` if not already there.
+- Upstox allows 2 feed connections per user (normal plan): zt-tiger-v2 uses one, auto-trade the other.
+- `bin/autotrade upstox-status` checks both tokens; `bin/autotrade upstox-feed-check` connects for
+  20 s and counts what arrives. auto-trade's own app login (`bin/autotrade upstox-login`, keys in
+  `.env`) remains as a fallback (`token-source: file`).
 
 ## Operator UI (Phase 4)
 
 ```bash
 cd ui && npm install && npm run build && cd ..   # once, and after UI changes
-bin/trading-core --mode=serve                     # UI + history only; or run --mode=live / --mode=replay
-open http://127.0.0.1:8095
+open http://127.0.0.1:8095                        # served by the trading-core service (bin/deploy)
 ```
 
 Pages: **Live** (stages, scores, the four market states, positions, P&L, feed lag, kill switch /

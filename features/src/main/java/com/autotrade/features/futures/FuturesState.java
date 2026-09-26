@@ -16,10 +16,11 @@ import com.autotrade.features.bars.BarSeries;
 import com.autotrade.features.config.FeatureConfig;
 import com.autotrade.features.indicators.TimedSeries;
 import com.autotrade.features.indicators.WilderAtr;
+import com.autotrade.features.levels.StructureState;
 import com.autotrade.features.snapshot.FuturesFeatures;
 
 /** The nearest-expiry future: momentum, acceleration, basis, OI state and time-of-day RVOL. */
-public final class FuturesState {
+public final class FuturesState implements StructureState.FuturesVolume {
 
     private static final Duration RETENTION = Duration.ofMinutes(15);
 
@@ -38,6 +39,7 @@ public final class FuturesState {
     private TimedSeries price;
     private TimedSeries basis;
     private TimedSeries oi;
+    private TimedSeries imbalance;
     private BarSeries oneMinute;
     private WilderAtr atr;
     private Map<LocalTime, Long> minuteVolumes;
@@ -90,6 +92,11 @@ public final class FuturesState {
         if (tick.sessionVwap() != null && tick.sessionVwap() > 0) {
             vwap = tick.sessionVwap();
         }
+        if (tick.totalBuyQuantity() != null && tick.totalSellQuantity() != null
+                && tick.totalBuyQuantity() + tick.totalSellQuantity() > 0) {
+            imbalance.add(time, (tick.totalBuyQuantity() - tick.totalSellQuantity())
+                    / (tick.totalBuyQuantity() + tick.totalSellQuantity()));
+        }
         lastTime = time;
     }
 
@@ -100,6 +107,7 @@ public final class FuturesState {
         price = new TimedSeries(RETENTION);
         basis = new TimedSeries(RETENTION);
         oi = new TimedSeries(RETENTION);
+        imbalance = new TimedSeries(RETENTION);
         oneMinute = new BarSeries(Duration.ofMinutes(1), sessionOpen, 400);
         atr = new WilderAtr(config.atrPeriod());
         oneMinute.onClose(atr::update);
@@ -123,6 +131,54 @@ public final class FuturesState {
 
     public double vwap() {
         return vwap;
+    }
+
+    /** Price change over {@code window} ending at {@code time}; NaN before the future is seen. */
+    public double priceChange(Instant time, Duration window) {
+        return price == null ? Double.NaN : price.change(time, window);
+    }
+
+    /** Book imbalance of the selected future (empty series when the feed has no book totals). */
+    public TimedSeries imbalance() {
+        return imbalance == null ? new TimedSeries(RETENTION) : imbalance;
+    }
+
+    @Override
+    public double volume(Instant from, Instant to) {
+        if (minuteVolumes == null) {
+            return Double.NaN;
+        }
+        long total = 0;
+        for (LocalTime minute : completedMinutes(from, to)) {
+            total += minuteVolumes.getOrDefault(minute, 0L);
+        }
+        return total;
+    }
+
+    @Override
+    public double todRatio(Instant from, Instant to) {
+        List<LocalTime> minutes = completedMinutes(from, to);
+        if (minuteVolumes == null || minutes.isEmpty()) {
+            return Double.NaN;
+        }
+        VolumeProfile.SlotMedian median = profile.slotMedian(minutes);
+        if (median.sessions() < config.rvolMinHistorySessions() || !(median.median() > 0)) {
+            return Double.NaN;
+        }
+        return volume(from, to) / median.median();
+    }
+
+    /** IST minutes wholly inside [from, to). */
+    private static List<LocalTime> completedMinutes(Instant from, Instant to) {
+        List<LocalTime> minutes = new ArrayList<>();
+        Instant start = from.truncatedTo(ChronoUnit.MINUTES);
+        if (start.isBefore(from)) {
+            start = start.plus(Duration.ofMinutes(1));
+        }
+        for (Instant minute = start; !minute.plus(Duration.ofMinutes(1)).isAfter(to); minute = minute.plus(Duration.ofMinutes(1))) {
+            minutes.add(minuteOf(minute));
+        }
+        return minutes;
     }
 
     public FuturesFeatures snapshot(Instant time, double spotAtr3m) {

@@ -17,18 +17,25 @@ import java.util.TreeMap;
 import javax.sql.DataSource;
 
 import com.autotrade.core.history.DailyBar;
+import com.autotrade.core.history.IvSession;
+import com.autotrade.core.history.MinuteBar;
 import com.autotrade.core.history.SessionHistory;
+import com.autotrade.core.time.MarketTime;
 
 /**
  * History from zt-tiger-v2's one-minute candles (kept for every session, unlike raw ticks):
  * spot bars from {@code MULTI_TICK} with {@code BROKER_HISTORICAL_BACKFILL} as fallback, and futures
- * volume from {@code INDEX_FUTURES_MINUTE_VOLUME_LIVE_V4}. Bar times are zone-less IST.
+ * volume from {@code INDEX_FUTURES_MINUTE_VOLUME_LIVE_V4}, and nearest-expiry ATM IV per minute from
+ * {@code option_tick_snapshots}. Bar times are zone-less IST.
  */
 public final class ZtSessionHistory implements SessionHistory {
 
     static final List<String> SPOT_SOURCES = List.of("MULTI_TICK", "BROKER_HISTORICAL_BACKFILL");
     static final String FUTURES_VOLUME_SOURCE = "INDEX_FUTURES_MINUTE_VOLUME_LIVE_V4";
     private static final LocalTime OPEN = LocalTime.of(9, 15);
+    private static final LocalTime CONTINUOUS_CLOSE = LocalTime.of(15, 15);
+    /** How far back IV and spot-bar lookups search for earlier sessions (calendar days). */
+    private static final int SEARCH_DAYS = 400;
 
     private final DataSource source;
 
@@ -106,6 +113,70 @@ public final class ZtSessionHistory implements SessionHistory {
             throw new IllegalStateException("futures volume history lookup failed", e);
         }
         return result;
+    }
+
+    @Override
+    public List<List<MinuteBar>> spotMinuteBars(String underlying, LocalDate session, int sessions) {
+        String key = ZtSourceKeys.underlyingKey(underlying);
+        String sql = "select bar_start, open_price, high_price, low_price, close_price from market_candles "
+                + "where underlying_key = ? and source = ? and timeframe = '1minute' and bar_start >= ? and bar_start < ? "
+                + "and bar_start::time >= ? and bar_start::time < ? order by bar_start";
+        Map<LocalDate, List<MinuteBar>> byDate = new TreeMap<>(java.util.Comparator.reverseOrder());
+        try (Connection connection = source.getConnection()) {
+            for (String spotSource : SPOT_SOURCES) {
+                Map<LocalDate, List<MinuteBar>> found = new TreeMap<>();
+                try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                    statement.setString(1, key);
+                    statement.setString(2, spotSource);
+                    statement.setObject(3, session.minusDays(SEARCH_DAYS).atStartOfDay());
+                    statement.setObject(4, session.atStartOfDay());
+                    statement.setObject(5, OPEN);
+                    statement.setObject(6, CONTINUOUS_CLOSE);
+                    try (ResultSet rs = statement.executeQuery()) {
+                        while (rs.next()) {
+                            LocalDateTime start = rs.getObject(1, LocalDateTime.class);
+                            found.computeIfAbsent(start.toLocalDate(), d -> new ArrayList<>()).add(new MinuteBar(
+                                    MarketTime.fromIstLocal(start), rs.getDouble(2), rs.getDouble(3), rs.getDouble(4),
+                                    rs.getDouble(5)));
+                        }
+                    }
+                }
+                // The first source (live multi-tick bars) wins; the backfill fills sessions it lacks.
+                found.forEach(byDate::putIfAbsent);
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("spot minute bar history lookup failed", e);
+        }
+        return byDate.values().stream().limit(sessions).map(List::copyOf).toList();
+    }
+
+    @Override
+    public List<IvSession> atmIvMinutes(String underlying, LocalDate session, int sessions) {
+        String key = ZtSourceKeys.underlyingKey(underlying);
+        String sql = "select captured_at::date d, bool_or(captured_at::date = expiry_date) expiry_day, "
+                + "date_trunc('minute', captured_at)::time m, avg(implied_volatility) iv from option_tick_snapshots "
+                + "where underlying_key = ? and nearest_expiry and strike_price = atm_strike and implied_volatility > 0 "
+                + "and captured_at >= ? and captured_at < ? group by 1, 3 order by 1 desc, 3";
+        Map<LocalDate, Map<LocalTime, Double>> minutes = new TreeMap<>(java.util.Comparator.reverseOrder());
+        Map<LocalDate, Boolean> expiryDays = new TreeMap<>();
+        try (Connection connection = source.getConnection();
+             PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, key);
+            statement.setObject(2, session.minusDays(SEARCH_DAYS).atStartOfDay());
+            statement.setObject(3, session.atStartOfDay());
+            try (ResultSet rs = statement.executeQuery()) {
+                while (rs.next()) {
+                    LocalDate date = rs.getObject(1, LocalDate.class);
+                    expiryDays.merge(date, rs.getBoolean(2), Boolean::logicalOr);
+                    minutes.computeIfAbsent(date, d -> new TreeMap<>()).put(rs.getObject(3, LocalTime.class),
+                            rs.getDouble(4));
+                }
+            }
+        } catch (SQLException e) {
+            throw new IllegalStateException("ATM IV history lookup failed", e);
+        }
+        return minutes.entrySet().stream().limit(sessions)
+                .map(e -> new IvSession(e.getKey(), expiryDays.get(e.getKey()), Map.copyOf(e.getValue()))).toList();
     }
 
     /**

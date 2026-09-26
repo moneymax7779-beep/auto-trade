@@ -109,9 +109,18 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         return new PositionView(true, position.side, position.lots(), position.averageCost, position.openedAt);
     }
 
-    /** Buys {@code lots} to open a position; returns the risk decision. */
+    /** Buys {@code lots} to open a position with the default premium stop; returns the risk decision. */
     public synchronized RiskDecision enter(String underlying, OptionSide side, Contract contract, int lots, String stage,
                                            MarketContext market) {
+        return enter(underlying, side, contract, lots, stage, market, Double.NaN);
+    }
+
+    /**
+     * Buys {@code lots} to open a position; {@code stopPct} is this position's resting premium stop
+     * (percent below average cost), NaN for the default.
+     */
+    public synchronized RiskDecision enter(String underlying, OptionSide side, Contract contract, int lots, String stage,
+                                           MarketContext market, double stopPct) {
         if (live.containsKey(underlying)) {
             return reject(underlying, "ENTER", "a position is already open in " + underlying);
         }
@@ -120,6 +129,7 @@ public final class OrderManager implements Consumer<OrderUpdate> {
             return reject(underlying, "ENTER " + side, decision.reason());
         }
         ManagedPosition position = new ManagedPosition(underlying, side, contract, clock.get());
+        position.stopFraction = Double.isNaN(stopPct) ? stopFraction : stopPct / 100.0;
         live.put(underlying, position);
         buy(position, lots, stage);
         return decision;
@@ -360,7 +370,7 @@ public final class OrderManager implements Consumer<OrderUpdate> {
      * modified in place (never two live stops); only above the freeze quantity is it replaced.
      */
     private void protect(ManagedPosition position) {
-        double trigger = position.contract.roundDown(position.averageCost * (1 - stopFraction));
+        double trigger = position.contract.roundDown(position.averageCost * (1 - position.stopFraction));
         double limit = position.contract.roundDown(trigger * (1 - limits.stopLimitOffsetPct() / 100));
         long slice = (long) position.contract.maxLotsPerOrder() * position.contract.lotSize();
         List<String> stops = working(position.stopOrders);

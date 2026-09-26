@@ -1,5 +1,8 @@
 package com.autotrade.features.levels;
 
+import java.time.Duration;
+import java.time.Instant;
+
 import com.autotrade.features.bars.Bar;
 
 /**
@@ -18,6 +21,8 @@ public final class LevelAcceptance {
     private double maxAboveAfterBreak;
     private double maxBelowAfterBreak;
     private Double previousClose;
+    private Instant brokeUpAt;
+    private Instant brokeDownAt;
 
     public LevelAcceptance(double level) {
         this.level = level;
@@ -31,11 +36,13 @@ public final class LevelAcceptance {
                 brokeDown = false;
                 retestHeldAbove = false;
                 maxAboveAfterBreak = 0;
+                brokeUpAt = bar.end();
             } else if (previousClose >= level && bar.close() < level) {
                 brokeDown = true;
                 brokeUp = false;
                 retestHeldBelow = false;
                 maxBelowAfterBreak = 0;
+                brokeDownAt = bar.end();
             }
         }
         if (bar.close() > level) {
@@ -86,5 +93,23 @@ public final class LevelAcceptance {
 
     public double maxBelowAfterBreak() {
         return brokeDown ? maxBelowAfterBreak : 0;
+    }
+
+    /** End of the bar that closed up through the level (the latest break), or null. */
+    public Instant brokeUpAt() {
+        return brokeUp ? brokeUpAt : null;
+    }
+
+    public Instant brokeDownAt() {
+        return brokeDown ? brokeDownAt : null;
+    }
+
+    /** Minutes since the upward break while closes stay above the level; 0 otherwise. */
+    public double minutesAbove(Instant now) {
+        return brokeUp && closesAbove > 0 ? Duration.between(brokeUpAt, now).toSeconds() / 60.0 : 0;
+    }
+
+    public double minutesBelow(Instant now) {
+        return brokeDown && closesBelow > 0 ? Duration.between(brokeDownAt, now).toSeconds() / 60.0 : 0;
     }
 }

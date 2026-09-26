@@ -114,9 +114,13 @@ final class TradeStore {
                 + "where o.session_id = ? order by o.sent_at", session);
     }
 
+    /** Stage, scores and the named conditions that held (the evidence behind the stage). */
     private static String scores(SideView view) {
+        List<String> held = view.conditions().entrySet().stream().filter(Map.Entry::getValue).map(Map.Entry::getKey)
+                .toList();
         return JSON.writeValueAsString(Map.of("stage", view.stage().name(), "early", finite(view.earlyScore()),
-                "confirm", finite(view.confirmScore()), "runner", finite(view.runnerScore())));
+                "confirm", finite(view.confirmScore()), "runner", finite(view.runnerScore()),
+                "cas", finite(view.casScore()), "held", held));
     }
 
     private static double finite(double value) {

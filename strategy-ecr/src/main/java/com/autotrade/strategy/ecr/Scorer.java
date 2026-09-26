@@ -16,9 +16,16 @@ final class Scorer {
     }
 
     Map<String, Double> subScores(SideFeatures f) {
+        EcrExtensions ext = config.ext();
         Map<String, Double> sub = new LinkedHashMap<>();
-        sub.put("structure", mean(f.vwapOk(), f.emaAligned(), f.emaSlopeOk(), f.levelDistance() > 0,
-                f.closesBeyond() >= 1, f.swingIntact()));
+        if (ext == null) {
+            sub.put("structure", mean(f.vwapOk(), f.emaAligned(), f.emaSlopeOk(), f.levelDistance() > 0,
+                    f.closesBeyond() >= 1, f.swingIntact()));
+        } else {
+            // v4: the ladder counts ("if price progressively reclaims these levels").
+            sub.put("structure", mean(f.vwapOk(), f.emaAligned(), f.emaSlopeOk(), f.levelDistance() > 0,
+                    f.closesBeyond() >= 1, f.swingIntact(), f.ladderNet() > 0));
+        }
         sub.put("futures", mean(stateScore(f), bool(f.futuresMomentum()), bool(f.futuresAcceleration()),
                 bool(f.basisSupportive())));
         sub.put("momentum", mean(bool(f.futuresMomentum()), bool(f.futuresAcceleration()),
@@ -29,12 +36,32 @@ final class Scorer {
         sub.put("oi", mean(f.againstWritersFlow(), f.supportWritersFlow(), f.wallWeakening() ? 1.0 : 0.5));
         sub.put("breadth", Double.isNaN(f.breadth()) ? 0.5 : clamp01((f.breadth() + 100) / 200));
         sub.put("premium", premium(f.premiumResponse()));
-        sub.put("iv_options", mean(premium(f.premiumResponse()),
-                Double.isNaN(f.ivChange3m()) ? 0.5 : f.ivChange3m() >= 0 ? 1.0 : 0.5,
-                Double.isNaN(f.spreadPct()) ? 0.5 : f.spreadPct() <= config.maxSpreadPct() ? 1.0 : 0.0));
-        sub.put("structure_runner", mean(f.closesBeyond() >= config.closesAboveMin(),
-                f.retestHeld() || !config.retestRequired(), f.trailHolds() && f.emaAligned(), f.swingIntact(),
-                f.trendSwings()));
+        double spread = Double.isNaN(f.spreadPct()) ? 0.5 : f.spreadPct() <= config.maxSpreadPct() ? 1.0 : 0.0;
+        if (ext == null) {
+            sub.put("iv_options", mean(premium(f.premiumResponse()),
+                    Double.isNaN(f.ivChange3m()) ? 0.5 : f.ivChange3m() >= 0 ? 1.0 : 0.5, spread));
+            sub.put("structure_runner", mean(f.closesBeyond() >= config.closesAboveMin(),
+                    f.retestHeld() || !config.retestRequired(), f.trailHolds() && f.emaAligned(), f.swingIntact(),
+                    f.trendSwings()));
+        } else {
+            // v4: the option itself confirms (premium higher highs, option volume, IV not collapsing,
+            // straddle expansion) and acceptance includes travel, volume after the break and room.
+            double ivTrend = switch (f.ivTrend()) {
+                case "RISING", "FLAT" -> 1.0;
+                case "FALLING" -> 0.0;
+                default -> 0.5;
+            };
+            sub.put("iv_options", mean(premium(f.premiumResponse()), ivTrend, spread,
+                    bool(f.premiumRising() || f.premiumNewHigh()), bool(f.optionVolumeExpanding()),
+                    f.straddleCompressionEnded() ? 1.0 : 0.5));
+            double volumeAfter = f.volumeAfterBreak();
+            sub.put("structure_runner", mean(bool(f.closesBeyond() >= config.closesAboveMin()),
+                    bool(f.retestHeld() || !config.retestRequired()), bool(f.trailHolds() && f.emaAligned()),
+                    bool(f.swingIntact()), bool(f.trendSwings()),
+                    bool(f.travelAtr() >= ext.minTravelAtr()),
+                    Double.isNaN(volumeAfter) ? 0.5 : bool(volumeAfter >= ext.minVolumeAfterBreak()),
+                    Double.isNaN(f.expectedReach()) ? 0.5 : bool(f.expectedReach() >= 1)));
+        }
         return sub;
     }
 
@@ -77,7 +104,12 @@ final class Scorer {
         return weightSum > 0 ? 100 * total / weightSum : Double.NaN;
     }
 
+    /** Futures price/OI state for this side, 0..1. v4 maps the design's +2..−2 scale directly. */
     private double stateScore(SideFeatures f) {
+        if (config.ext() != null) {
+            Double points = config.ext().futuresStateScore().get(f.futuresState());
+            return points == null ? 0.5 : (points + 2) / 4;
+        }
         Double value = config.futuresStateMap().get(f.futuresState());
         return value == null ? 0.5 : value;
     }

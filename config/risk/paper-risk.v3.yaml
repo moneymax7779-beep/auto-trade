@@ -1,0 +1,36 @@
+# Pre-trade risk limits for PAPER trading. Exits are never blocked by risk; these limits stop new
+# entries and adds, and force a square-off. Values are placeholders chosen for one research account.
+# v2 (2026-09-25): exits price at bid − max(4 ticks, 1%) and re-price every 2 s (v1: bid − 4 ticks,
+# 5 s), after a replay showed a falling bid outrunning the exit for 13 s. Execution only; no strategy change.
+version: paper-risk-v3
+# v3 (2026-09-26): for the closing-auction mode of strategy ecr-v4. The square-off moves from 15:20
+# to 15:36 (after the auction ends at 15:35, before the 15:40 derivatives close) and new entries are
+# allowed again inside the CAS entry window 15:20-15:30. Everything else is unchanged from v2.
+name: paper-risk
+status: UNCALIBRATED
+
+account:
+  capital: 500000                      # notional PAPER capital, rupees
+  daily_loss_limit: 10000              # realised + marked-to-bid loss that engages the account kill switch
+  max_open_positions: 2                # across underlyings
+  max_lots_per_underlying: 4
+  max_orders_per_minute: 20
+
+time:
+  no_new_entries_after: "14:45"
+  square_off_at: "15:36"               # v3: hard exit of everything after CAS ends, before the 15:40 close
+  cas_entry_window: "15:20-15:30"      # v3: entries allowed here despite no_new_entries_after (CAS mode)
+
+data:
+  max_feed_age_sec: 5                  # a stale index or option feed blocks new entries
+  max_spread_pct: 1.5                  # entries refused when the option's spread is wider
+
+orders:
+  entry_buffer_ticks: 4                # marketable limit: ask + 4 ticks for a buy
+  exit_buffer_ticks: 4                 # sell limit: bid − max(4 ticks, exit_buffer_pct)
+  exit_buffer_pct: 1.0                 # v2: 1% of the bid, so exits keep up with a falling bid
+  entry_timeout_sec: 10                # an unfilled entry is cancelled after this
+  exit_chase_sec: 2                    # v2 (was 5): an unfilled exit is re-priced at the new touch after this
+  exit_chase_max: 6                    # re-pricings before the exit crosses 5% through the touch
+  stop_limit_offset_pct: 5             # stop-limit's limit is this far below its trigger
+  reconcile_every_sec: 30

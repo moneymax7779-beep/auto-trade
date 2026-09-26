@@ -35,7 +35,7 @@ public final class RiskEngine {
                     now, "risk");
             return RiskDecision.rejected("daily loss limit");
         }
-        if (!c.time().isBefore(limits.noNewEntriesAfter())) {
+        if (!c.time().isBefore(limits.noNewEntriesAfter()) && !limits.inCasEntryWindow(c.time())) {
             return RiskDecision.rejected("after " + limits.noNewEntriesAfter());
         }
         if (!c.add() && c.openPositions() >= limits.maxOpenPositions()) {

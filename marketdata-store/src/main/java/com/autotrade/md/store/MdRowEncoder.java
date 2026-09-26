@@ -34,6 +34,8 @@ public final class MdRowEncoder {
                 .float64(tick.openInterest())
                 .float64(tick.sessionVwap())
                 .text(meta.quoteSource())
+                .float64(tick.totalBuyQuantity())
+                .float64(tick.totalSellQuantity())
                 .endRow();
     }
 

@@ -354,3 +354,68 @@ Still to do: an audit view (kill-switch events, rejections across sessions); a c
 versions. Authentication: **deferred by decision (2026-09-26)** — no UI login until Phase 5; the
 UI and operator API stay bound to 127.0.0.1. auto-trade does not use zt-tiger-v2's users or broker
 accounts (only its market data); the Upstox feed uses auto-trade's own Upstox app. Phase 5 is parked.
+
+**Automatic daily sessions (2026-09-26).** Scheduling is part of the application, not the OS:
+trading-core `--mode=auto` stays up, serves the UI, starts the live PAPER session at 09:00 IST on
+trading days (holiday file), stops it at 15:45, retries a failed start up to three times a day, and
+restarts at once after a service restart in market hours. It runs as the `trading-core` service in
+`docker-compose.yml` (`restart: unless-stopped`, built by `bin/deploy`), reaching zt-tiger-v2 via
+`host.docker.internal:5490` (read-only, password file mounted read-only). A launchd job was tried
+and removed: macOS privacy controls block background jobs from the Desktop folder, and it tied the
+app to one OS. Known gap: a mid-day restart loses the paper broker's in-memory positions (the new
+session starts flat); position recovery from `trade.*` comes with the Upstox order path.
+
+## 14. Strategy and data completion (2026-09-26)
+
+The review found design elements that were not built (order-book imbalance, IV/VIX percentile,
+level acceptance extras, volatility regime, the CAS mode). They are now implemented without
+changing any ChatGPT value; `docs/DESIGN-COVERAGE.md` maps every design element to its code and
+says which data each needs.
+
+- **Features v3** (`features.v3.yaml`; every v2 definition unchanged, v2 snapshots reproduce):
+  level acceptance (minutes beyond, travel, time-of-day volume after the break), the level ladder,
+  breakout-bar volume, room to the next level vs the expected move; order-book imbalance with
+  10/20 s persistence (ATM options from total quantities; futures from Upstox book totals);
+  premium momentum, new highs, option volume expansion, straddle compression ending, 1 ITM/OTM IV;
+  IV percentile (same minute of earlier sessions from zt `option_tick_snapshots`, expiry days apart),
+  realised vol, RV/IV, ATR and realised-vol percentiles; India VIX level, 5/15-minute and day change,
+  60/252-day percentiles; weekend/holiday gap; CAS reference, indicative velocity/acceleration,
+  futures-vs-CAS basis and follow ratio, CAS ORH/ORL cross, and per-stock CAS pressure, imbalance
+  and its velocity, CAS breadth, top-3 concentration and auction turnover.
+- **Strategy ecr-v4**: volatility regime engine (VIX leads NIFTY, IV leads SENSEX/BANKNIFTY,
+  realised-vol escalation) that changes size, confirmation threshold, premium stop and early probes;
+  imbalance as ±3 confirm points; breakout volume; runner gates (premium response ≥ 0.6, room);
+  expiry runner gates and exits; futures state score +2…−2; CAS mode (CAS_RUNNER from 15:15, CAS
+  entries by band in 15:20–15:30 with per-stock data and futures agreement, CAS_EXPIRY_MODE, exit by
+  15:35). **Risk v3**: square-off 15:36, CAS entry window.
+- **Data**: migration V10 (`md.future_tick` book totals, `ref.index_candle`); `bin/autotrade
+  vix-backfill` loads India VIX from Upstox's public candle API (272 daily bars, 44 sessions of
+  one-minute bars on 2026-09-26); live sessions poll today's VIX minutes and save them; Upstox VIX
+  ticks reach every engine. `OrderIntent` carries a premium stop; the OMS and the research simulator
+  honour it per position. Live decisions now store the named conditions that held.
+- **Research**: `lifecycle --descriptive` replays held-out sessions a family has already consumed,
+  records the run as `LIFECYCLE_DESCRIPTIVE` and does not claim anything; fresh held-out sessions
+  cannot be read that way.
+
+Verified: all tests pass (new: features v3 engine and units, strategy v4 regime/CAS/sizing, OMS
+per-position stop, risk v3 window); the v3 strategy on features v2 reproduces run 4 exactly (6
+episodes, base +₹1,145, stressed +₹791), so nothing old changed.
+
+Limits: per-stock auction data and the futures book exist only on the live Upstox feed, so CAS
+entries cannot be replayed from zt-tiger-v2; CAS liquidity percentiles need captured auction history.
+
+**Placeholders calibrated, v5 live (2026-09-26).** On the user's instruction to choose the best
+values, placeholders were set by rules registered before computing (`docs/CALIBRATION-v5.md`):
+feature distributions of 11–18 Sep only, never trade results. Result: strategy ecr-v5 and features
+v4 (travel 0.8 ATR, opposite wall 70, IV trend 0.0014, HIGH stop 40%, EXTREME stop 35%; CAS
+index-level components only while the indicative index moves, since the recorded one is frozen
+15:15–~15:29). trading-core runs ecr-v5 + features v4 + risk v3 from Monday 28 Sep (ledger A-004).
+
+**Shared Upstox login (2026-09-26, user decision).** "Use the same Upstox and user data as
+zt-tiger-v2 for now": live sessions read the Upstox token of zt-tiger-v2's primary Upstox account
+(user BM6462) from its `trading_accounts`, read-only and in memory only, and use the Upstox feed
+(one of the two connections Upstox allows per user; zt-tiger-v2 holds the other). Fallback to the
+zt-tiger-v2 tail when there is no token or the feed fails or stays silent for 60 s. Contract files
+are downloaded daily. Verified 2026-09-26: token accepted for BM6462; a 20-second feed check
+subscribed 185 instruments and received index, VIX, futures, 80 constituents and 100 options.
+auto-trade stores no zt-tiger-v2 user or credential and never re-authenticates with its app.

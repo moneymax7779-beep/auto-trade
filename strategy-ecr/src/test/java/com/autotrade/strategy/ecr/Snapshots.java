@@ -9,13 +9,17 @@ import java.util.HashMap;
 import java.util.Map;
 
 import com.autotrade.core.time.MarketTime;
+import com.autotrade.features.snapshot.BookFeatures;
 import com.autotrade.features.snapshot.BreadthFeatures;
 import com.autotrade.features.snapshot.CasFeatures;
 import com.autotrade.features.snapshot.FeatureSnapshot;
 import com.autotrade.features.snapshot.FuturesFeatures;
+import com.autotrade.features.snapshot.LevelFeatures;
 import com.autotrade.features.snapshot.OptionsFeatures;
+import com.autotrade.features.snapshot.PremiumFeatures;
 import com.autotrade.features.snapshot.RegimeFeatures;
 import com.autotrade.features.snapshot.StructureFeatures;
+import com.autotrade.features.snapshot.VolatilityFeatures;
 
 /**
  * Builds feature snapshots for tests: every field defaults to "unknown" (NaN / 0 / false / null)
@@ -81,7 +85,9 @@ final class Snapshots {
                 (double) values.getOrDefault("spot", Double.NaN), 0, 0, 0,
                 build(StructureFeatures.class, "structure."), build(FuturesFeatures.class, "futures."),
                 build(OptionsFeatures.class, "options."), build(BreadthFeatures.class, "breadth."),
-                build(RegimeFeatures.class, "regime."), build(CasFeatures.class, "cas."), "f", "e");
+                build(RegimeFeatures.class, "regime."), build(CasFeatures.class, "cas."),
+                build(LevelFeatures.class, "levels."), build(BookFeatures.class, "book."),
+                build(PremiumFeatures.class, "premium."), build(VolatilityFeatures.class, "volatility."), "f", "e");
     }
 
     private <T extends Record> T build(Class<T> type, String prefix) {

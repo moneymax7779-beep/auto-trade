@@ -60,6 +60,7 @@ export interface Status {
   closedPositions?: PositionRow[];
   strategy?: Record<string, StrategyView>;
   recentRejections?: string[];
+  schedule?: { mode: string; nextStart?: string; dailyWindow?: string };
 }
 
 export interface SessionRow {

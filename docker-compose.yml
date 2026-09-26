@@ -1,8 +1,9 @@
 name: autotrade
 
-# Local development stack. Everything binds to loopback only.
-#   docker compose up -d                   -> PostgreSQL/TimescaleDB only
-#   docker compose --profile platform up -d -> adds Valkey and Keycloak (needed from Phase 3/5)
+# auto-trade stack. Everything binds to loopback only.
+#   bin/deploy                              -> build and (re)start trading-core with its database
+#   docker compose up -d                    -> PostgreSQL/TimescaleDB and trading-core
+#   docker compose --profile platform up -d -> adds Valkey and Keycloak (Phase 5)
 
 services:
   postgres:
@@ -39,6 +40,39 @@ services:
       interval: 10s
       timeout: 5s
       retries: 10
+    restart: unless-stopped
+
+  # The PAPER trading service, always on. It serves the UI and starts the live session itself at
+  # 09:00 IST on trading days (--mode=auto); Docker restarts it and starts it whenever Docker starts.
+  trading-core:
+    build:
+      context: .
+      dockerfile: app-trading-core/Dockerfile
+      args:
+        CODE_VERSION: ${AUTOTRADE_CODE_VERSION:-dev}
+    image: autotrade-trading-core:${AUTOTRADE_CODE_VERSION:-dev}
+    container_name: autotrade-trading-core
+    command: ["--mode=auto"]
+    environment:
+      AUTOTRADE_DB_URL: jdbc:postgresql://postgres:5432/autotrade
+      AUTOTRADE_DB_PASSWORD: ${AUTOTRADE_DB_PASSWORD:-autotrade}
+      # zt-tiger-v2's database on this machine's loopback, read-only; its password file is mounted below.
+      ZT_SOURCE_URL: jdbc:postgresql://host.docker.internal:5490/trading
+      ZT_SOURCE_PASSWORD_FILE: /run/zt/runtime.env
+      UPSTOX_TOKEN_FILE: /app/.local/upstox/token.json
+      SERVER_ADDRESS: 0.0.0.0        # inside the container; the published port below is loopback-only
+    ports:
+      - "127.0.0.1:8095:8095"
+    volumes:
+      - ./config:/app/config:ro
+      - ./.local:/app/.local
+      - ../zt-tiger-v2/.local/v2/runtime.env:/run/zt/runtime.env:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 3g
     restart: unless-stopped
 
   valkey:

@@ -38,6 +38,13 @@ import com.autotrade.md.store.LoadManifest;
 import com.autotrade.md.store.LoadManifests;
 import com.autotrade.md.store.MdTable;
 import com.autotrade.md.store.SequenceDigest;
+import com.autotrade.md.store.ReferenceStore;
+import com.autotrade.core.history.ReferenceData;
+import com.autotrade.upstox.UpstoxFeed;
+import com.autotrade.upstox.UpstoxFeeds;
+import com.autotrade.upstox.UpstoxUniverse;
+import com.autotrade.upstox.ZtTigerTokenSource;
+import com.autotrade.upstox.UpstoxCandles;
 import com.autotrade.md.store.StoredSessionSource;
 import com.autotrade.md.store.TableChecks;
 import com.autotrade.tools.MarketHoursGuard;
@@ -67,7 +74,7 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
 
     private static final JsonMapper JSON = JsonMapper.builder().build();
     private static final String DEFAULT_UNDERLYINGS = "NIFTY,SENSEX";
-    static final String FEATURES_FILE = "config/features/features.v2.yaml";
+    static final String FEATURES_FILE = "config/features/features.v4.yaml";
     static final String EXCHANGE_FILE = "config/exchange/nse-bse-sessions.v2.yaml";
 
     private final DataSource target;
@@ -89,7 +96,8 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
     public void run(ApplicationArguments arguments) {
         String[] args = arguments.getSourceArgs();
         try {
-            ToolArgs parsed = ToolArgs.parse(args, Set.of("force", "all", "source", "verify-hashes", "save", "held-out"));
+            ToolArgs parsed = ToolArgs.parse(args, Set.of("force", "all", "source", "verify-hashes", "save", "held-out",
+                    "descriptive"));
             exitCode = switch (parsed.command()) {
                 case "sessions" -> sessions(parsed);
                 case "clone" -> cloneSessions(parsed);
@@ -103,6 +111,8 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                 case "lifecycle" -> lifecycle(parsed);
                 case "upstox-login" -> upstoxLogin(parsed);
                 case "upstox-status" -> upstoxStatus(parsed);
+                case "vix-backfill" -> vixBackfill(parsed);
+                case "upstox-feed-check" -> upstoxFeedCheck(parsed);
                 default -> usage("unknown command: " + parsed.command());
             };
         } catch (IllegalArgumentException e) {
@@ -139,11 +149,20 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                   instruments --file NSE.json.gz[,BSE.json.gz] [--date D] [--underlying NIFTY,BANKNIFTY,SENSEX]
                                                              load an Upstox contract-master file into ref.instrument
                   lifecycle [--split TUNING|HELD_OUT | --session D[,D]] [--underlying ...] [--strategy FILE] [--save]
-                            [--held-out] [--force]           replay the early-confirm-runner lifecycle and report
-                                                             (no --split/--session: the strategy's evaluation window)
+                            [--held-out] [--descriptive] [--force]
+                                                             replay the early-confirm-runner lifecycle and report
+                                                             (no --split/--session: the strategy's evaluation window;
+                                                             --descriptive: behaviour check on held-out sessions this
+                                                             family already consumed, marked as not evidence)
                   upstox-login                               print the Upstox login link, wait for your browser sign-in,
                                                              save the day's token (.local/upstox/token.json)
-                  upstox-status                              check the saved Upstox token against the profile API
+                  upstox-status                              check zt-tiger-v2's Upstox token (used first, read-only)
+                                                             and auto-trade's own against the profile API
+                  upstox-feed-check [--seconds 20]           connect the Upstox feed briefly with the zt-tiger-v2 token
+                                                             and count what arrives (one of the 2 allowed connections)
+                  vix-backfill [--daily-from D] [--minutes-from D] [--to D]
+                                                             India VIX daily and one-minute bars from Upstox's public
+                                                             candle API into ref.index_candle (no token needed)
                   config-hash <file.yaml> [...]              hash and validate threshold files (no database)""");
         return 2;
     }
@@ -351,7 +370,7 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
         SessionEventSource eventSource = args.get("from", "zt").equals("own")
                 ? new StoredSessionSource(target) : new ZtSessionSource(source.dataSource(), false);
         List<LocalTime> printAt = args.list("at", "").stream().map(LocalTime::parse).toList();
-        return FeaturesCommand.run(eventSource, new ZtSessionHistory(source.dataSource()), sessions.getFirst(),
+        return FeaturesCommand.run(eventSource, new ZtSessionHistory(source.dataSource()).withReference(new ReferenceStore(target)), sessions.getFirst(),
                 args.upperList("underlying", DEFAULT_UNDERLYINGS),
                 Path.of(args.get("features-file", FEATURES_FILE)), Path.of(args.get("exchange-file", EXCHANGE_FILE)),
                 Path.of(args.get("out", ".local/features")), printAt,
@@ -416,7 +435,7 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
     }
 
     private int lifecycle(ToolArgs args) throws Exception {
-        args.allowOnly(Set.of("split", "session", "underlying", "strategy", "save", "held-out", "force",
+        args.allowOnly(Set.of("split", "session", "underlying", "strategy", "save", "held-out", "descriptive", "force",
                 "features-file", "exchange-file", "costs-file"));
         if (!args.flag("force") && MarketHoursGuard.isBlocked(ZonedDateTime.now(MarketTime.IST))) {
             System.err.println("refusing to read zt-tiger-v2 during market hours (09:00-15:50 IST); use --force");
@@ -431,12 +450,88 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
             sessions = args.dates("session");
         }
         return LifecycleCommand.run(target, source.dataSource(), new ZtSessionSource(source.dataSource(), false),
-                new ZtSessionHistory(source.dataSource()), new LifecycleCommand.Request(sessions,
+                new ZtSessionHistory(source.dataSource()).withReference(new ReferenceStore(target)), new LifecycleCommand.Request(sessions,
                         args.upperList("underlying", DEFAULT_UNDERLYINGS),
-                        Path.of(args.get("strategy", "config/strategy/early-confirm-runner.v3.yaml")),
+                        Path.of(args.get("strategy", "config/strategy/early-confirm-runner.v5.yaml")),
                         Path.of(args.get("features-file", FEATURES_FILE)), Path.of(args.get("exchange-file", EXCHANGE_FILE)),
                         Path.of(args.get("costs-file", "config/costs/india-index-options-costs.v1.yaml")),
-                        args.flag("save"), args.flag("held-out"), CodeVersion.current()));
+                        args.flag("save"), args.flag("held-out"), args.flag("descriptive"), CodeVersion.current()));
+    }
+
+    /**
+     * India VIX history from Upstox's public candle endpoints into ref.index_candle: daily bars for
+     * the percentiles (default: the last 400 days) and one-minute bars for intraday changes in
+     * replays (default: the last 60 days). Idempotent; re-running replaces the same bars.
+     */
+    private int vixBackfill(ToolArgs args) throws Exception {
+        args.allowOnly(Set.of("daily-from", "minutes-from", "to"));
+        LocalDate today = LocalDate.now(MarketTime.IST);
+        LocalDate to = LocalDate.parse(args.get("to", today.minusDays(1).toString()));
+        LocalDate dailyFrom = LocalDate.parse(args.get("daily-from", to.minusDays(400).toString()));
+        LocalDate minutesFrom = LocalDate.parse(args.get("minutes-from", to.minusDays(60).toString()));
+        UpstoxCandles candles = new UpstoxCandles();
+        ReferenceStore store = new ReferenceStore(target);
+        String key = UpstoxUniverse.VIX_KEY;
+        List<ReferenceStore.Candle> daily = new ArrayList<>();
+        for (UpstoxCandles.Candle c : candles.daily(key, dailyFrom, to)) {
+            daily.add(new ReferenceStore.Candle(ReferenceStore.dayStart(c.session()), c.session(), c.open(), c.high(),
+                    c.low(), c.close()));
+        }
+        int dailyRows = store.upsert(ReferenceData.INDIA_VIX, ReferenceStore.DAY, "UPSTOX_V2_DAY", daily);
+        List<ReferenceStore.Candle> minutes = new ArrayList<>();
+        for (UpstoxCandles.Candle c : candles.minutes(key, minutesFrom, to)) {
+            minutes.add(new ReferenceStore.Candle(c.start().toInstant(), c.session(), c.open(), c.high(), c.low(),
+                    c.close()));
+        }
+        int minuteRows = store.upsert(ReferenceData.INDIA_VIX, ReferenceStore.MINUTE, "UPSTOX_V3_1MIN", minutes);
+        System.out.printf("India VIX: %d daily bars (%s .. %s), %d one-minute bars (%s .. %s) written%n", dailyRows,
+                dailyFrom, to, minuteRows, minutesFrom, to);
+        store.coverage(ReferenceData.INDIA_VIX).forEach(line -> System.out.println("  " + line));
+        return 0;
+    }
+
+    /**
+     * Connects the Upstox market-data feed for a few seconds with the token trading-core would use and
+     * counts the events by kind: a check of token, universe and subscriptions outside market hours.
+     */
+    private int upstoxFeedCheck(ToolArgs args) throws Exception {
+        args.allowOnly(Set.of("seconds", "underlying"));
+        int seconds = Integer.parseInt(args.get("seconds", "20"));
+        Optional<UpstoxToken> token = new ZtTigerTokenSource(source.dataSource()).current(Instant.now());
+        if (token.isEmpty()) {
+            token = new UpstoxTokenStore(Path.of(properties.upstox().tokenFile())).valid(Instant.now());
+        }
+        if (token.isEmpty()) {
+            System.out.println("No valid Upstox token: sign in to Upstox in zt-tiger-v2");
+            return 1;
+        }
+        LocalDate today = LocalDate.now(MarketTime.IST);
+        ZtSessionHistory history = new ZtSessionHistory(source.dataSource());
+        UpstoxFeed feed = UpstoxFeeds.build(token.get(), new InstrumentStore(target).latest(today), today,
+                args.upperList("underlying", DEFAULT_UNDERLYINGS), Path.of(".local", "instruments"),
+                underlying -> history.constituentWeights(underlying, today), 12, 8);
+        Map<String, Long> counts = new java.util.concurrent.ConcurrentSkipListMap<>();
+        Map<String, Double> lastIndex = new java.util.concurrent.ConcurrentSkipListMap<>();
+        Thread runner = Thread.ofPlatform().name("upstox-feed-check").start(() -> {
+            try {
+                feed.run(event -> {
+                    counts.merge(event.underlying() + " " + event.kind(), 1L, Long::sum);
+                    if (event instanceof com.autotrade.core.event.IndexTick tick) {
+                        lastIndex.put(tick.underlying(), tick.price());
+                    }
+                });
+            } catch (Exception e) {
+                System.out.println("feed ended: " + e.getMessage());
+            }
+        });
+        Thread.sleep(seconds * 1000L);
+        feed.stop();
+        runner.join(10_000);
+        System.out.printf("connection %s, %d messages, %d instruments subscribed (token user %s)%n", feed.connection(),
+                feed.messages(), feed.subscriptions(), token.get().userId());
+        counts.forEach((key, count) -> System.out.printf("  %-24s %,d%n", key, count));
+        lastIndex.forEach((key, value) -> System.out.printf("  last %-10s %s%n", key, value));
+        return feed.messages() > 0 ? 0 : 1;
     }
 
     private int upstoxLogin(ToolArgs args) throws Exception {
@@ -457,18 +552,34 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
         return 0;
     }
 
+    /** Checks zt-tiger-v2's Upstox token (read-only; what trading-core uses first) and auto-trade's own. */
     private int upstoxStatus(ToolArgs args) throws Exception {
         args.allowOnly(Set.of());
-        UpstoxTokenStore store = new UpstoxTokenStore(Path.of(properties.upstox().tokenFile()));
-        Optional<UpstoxToken> token = store.valid(Instant.now());
-        if (token.isEmpty()) {
-            System.out.println("No valid Upstox token; run: bin/autotrade upstox-login");
-            return 1;
+        int ok = 0;
+        Optional<UpstoxToken> zt = new ZtTigerTokenSource(source.dataSource()).current(Instant.now());
+        ok += report("zt-tiger-v2's token", zt);
+        ok += report("auto-trade's own token", new UpstoxTokenStore(Path.of(properties.upstox().tokenFile()))
+                .valid(Instant.now()));
+        if (ok == 0) {
+            System.out.println("No valid Upstox token: sign in to Upstox in zt-tiger-v2 (or run bin/autotrade upstox-login)");
         }
-        String user = UpstoxLogin.verify(token.get(), HttpClient.newHttpClient());
-        System.out.printf("Upstox token OK for %s, valid until %s IST%n", user,
-                token.get().expiresAt().atZone(MarketTime.IST).toLocalDateTime());
-        return 0;
+        return ok > 0 ? 0 : 1;
+    }
+
+    private static int report(String name, Optional<UpstoxToken> token) {
+        if (token.isEmpty()) {
+            System.out.println(name + ": none valid");
+            return 0;
+        }
+        try {
+            String user = UpstoxLogin.verify(token.get(), HttpClient.newHttpClient());
+            System.out.printf("%s: OK for %s, valid until %s IST%n", name, user,
+                    token.get().expiresAt().atZone(MarketTime.IST).toLocalDateTime());
+            return 1;
+        } catch (Exception e) {
+            System.out.println(name + ": refused by Upstox (" + e.getMessage() + ")");
+            return 0;
+        }
     }
 
     private int ztSessions(ToolArgs args) throws SQLException {

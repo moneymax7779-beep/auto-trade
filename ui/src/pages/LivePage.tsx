@@ -15,12 +15,22 @@ export function LivePage() {
   if (status.error) return <ErrorNote error={status.error} />;
   const s = status.data!;
   if (s.status === "NO_SESSION" || s.session == null) {
+    const next = s.schedule?.nextStart;
     return (
-      <Panel title="No trading session running">
-        <p className="text-sm text-muted">
-          Start one with <code className="num">bin/trading-core --mode=live</code> (or{" "}
-          <code className="num">--mode=replay --session=YYYY-MM-DD</code>). Past sessions are under{" "}
-          <Link to="/sessions" className="text-accent underline">Sessions</Link>.
+      <Panel title={s.schedule?.mode === "auto" ? "Waiting for the next trading session" : "No trading session running"}>
+        {s.schedule?.mode === "auto" && next ? (
+          <p className="text-sm">
+            The live PAPER session starts automatically at{" "}
+            <span className="num font-semibold">{formatStart(next)}</span> IST ({s.schedule.dailyWindow} on trading days).
+          </p>
+        ) : (
+          <p className="text-sm text-muted">
+            This service is not scheduling sessions (mode {s.schedule?.mode ?? "?"}). Run it with{" "}
+            <code className="num">--mode=auto</code> to start sessions automatically.
+          </p>
+        )}
+        <p className="mt-2 text-sm text-muted">
+          Past sessions are under <Link to="/sessions" className="text-accent underline">Sessions</Link>.
         </p>
       </Panel>
     );
@@ -136,4 +146,13 @@ function PositionsTable({ rows, empty }: { rows: PositionRow[]; empty: string })
       ]}
     />
   );
+}
+
+/** "2026-09-28T09:00+05:30[Asia/Kolkata]" → "Mon 28 Sep 09:00". */
+function formatStart(value: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}:\d{2})/.exec(value);
+  if (!m) return value;
+  const date = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  const day = date.toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
+  return `${day} ${m[4]}`;
 }

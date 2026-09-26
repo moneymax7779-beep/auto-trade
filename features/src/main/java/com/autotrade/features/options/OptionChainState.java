@@ -11,6 +11,8 @@ import java.util.TreeSet;
 
 import com.autotrade.core.event.OptionTick;
 import com.autotrade.features.config.FeatureConfig;
+import com.autotrade.features.config.FeatureExtensions;
+import com.autotrade.features.snapshot.PremiumFeatures;
 import com.autotrade.features.greeks.BlackScholes;
 import com.autotrade.features.indicators.TimedSeries;
 import com.autotrade.features.time.SessionClock;
@@ -23,7 +25,8 @@ import com.autotrade.features.snapshot.OptionsFeatures;
  */
 public final class OptionChainState {
 
-    private static final Duration RETENTION = Duration.ofMinutes(15);
+    /** Longer than the longest lookback (15-minute premium high) so the value at its start is kept. */
+    private static final Duration RETENTION = Duration.ofMinutes(20);
 
     /** Recent state of one option contract. */
     static final class Contract {
@@ -32,6 +35,8 @@ public final class OptionChainState {
         final TimedSeries oi = new TimedSeries(RETENTION);
         final TimedSeries mid = new TimedSeries(RETENTION);
         final TimedSeries volume = new TimedSeries(RETENTION);
+        final TimedSeries imbalance = new TimedSeries(RETENTION);
+        String imbalanceSource = "NONE";
         OptionTick last;
 
         Contract(double strike, boolean call) {
@@ -49,7 +54,28 @@ public final class OptionChainState {
                 volume.add(time, tick.cumulativeVolume());
             }
             mid.add(time, midPrice(tick));
+            Double buy = tick.totalBuyQuantity();
+            Double sell = tick.totalSellQuantity();
+            if (buy != null && sell != null && buy + sell > 0) {
+                imbalance.add(time, (buy - sell) / (buy + sell));
+                imbalanceSource = "TOTAL_QTY";
+            } else {
+                double bids = depthTotal(tick.bids());
+                double asks = depthTotal(tick.asks());
+                if (bids + asks > 0) {
+                    imbalance.add(time, (bids - asks) / (bids + asks));
+                    imbalanceSource = "DEPTH";
+                }
+            }
         }
+    }
+
+    private static double depthTotal(com.autotrade.core.event.DepthLevels levels) {
+        double total = 0;
+        for (int i = 0; i < levels.size(); i++) {
+            total += levels.quantity(i);
+        }
+        return total;
     }
 
     private final FeatureConfig config;
@@ -303,6 +329,90 @@ public final class OptionChainState {
             return Double.NaN;
         }
         return actual / expected;
+    }
+
+    /** ATM call and put book imbalance: [now, minShort, maxShort, minLong, maxLong, changeLong] each. */
+    public record AtmBook(double[] ce, double[] pe, String source) {
+    }
+
+    public AtmBook atmBook(Instant time, double spot, List<Integer> windowsSec) {
+        double step = strikeStep();
+        double[] none = {Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN, Double.NaN};
+        if (expiry == null || Double.isNaN(step) || Double.isNaN(spot)) {
+            return new AtmBook(none, none, "NONE");
+        }
+        double atm = Math.round(spot / step) * step;
+        Contract ce = find(atm, true);
+        Contract pe = find(atm, false);
+        String source = ce != null ? ce.imbalanceSource : pe != null ? pe.imbalanceSource : "NONE";
+        return new AtmBook(book(ce, time, windowsSec), book(pe, time, windowsSec), source);
+    }
+
+    /** [now, minShort, maxShort, minLong, maxLong, changeLong] of a book-imbalance series. */
+    public static double[] book(TimedSeries series, Instant time, List<Integer> windowsSec) {
+        Duration shortWindow = Duration.ofSeconds(windowsSec.get(0));
+        Duration longWindow = Duration.ofSeconds(windowsSec.get(1));
+        return new double[] {series.valueAt(time), series.min(time, shortWindow), series.max(time, shortWindow),
+                series.min(time, longWindow), series.max(time, longWindow), series.change(time, longWindow)};
+    }
+
+    private static double[] book(Contract contract, Instant time, List<Integer> windowsSec) {
+        return book(contract == null ? new TimedSeries(RETENTION) : contract.imbalance, time, windowsSec);
+    }
+
+    /**
+     * Premium behaviour of the ATM options, the straddle's compression ending and IV one strike in and
+     * out of the money. Call after {@link #snapshot} for the same time (it records the straddle).
+     */
+    public PremiumFeatures premium(Instant time, double spot, FeatureExtensions ext) {
+        double step = strikeStep();
+        if (expiry == null || Double.isNaN(step) || Double.isNaN(spot)) {
+            return PremiumFeatures.EMPTY;
+        }
+        double atm = Math.round(spot / step) * step;
+        Contract ce = find(atm, true);
+        Contract pe = find(atm, false);
+        double[] ceFlow = flow(ce, time, ext);
+        double[] peFlow = flow(pe, time, ext);
+        Duration recent = Duration.ofMinutes(ext.straddleStopWindowMin());
+        Duration lookback = Duration.ofMinutes(ext.straddleCompressionLookbackMin());
+        double straddleNow = straddleSeries.valueAt(time);
+        double straddleRecentStart = straddleSeries.valueAt(time.minus(recent));
+        double straddleLookbackStart = straddleSeries.valueAt(time.minus(lookback));
+        double lookbackChange = straddleRecentStart - straddleLookbackStart;
+        double recentChange = straddleNow - straddleRecentStart;
+        double years = clock.yearsToExpiry(time, expiry);
+        return new PremiumFeatures(
+                ceFlow[0], ceFlow[1], ceFlow[2] > 0, ceFlow[3], ceFlow[4],
+                peFlow[0], peFlow[1], peFlow[2] > 0, peFlow[3], peFlow[4],
+                lookbackChange, recentChange, lookbackChange < 0 && recentChange >= 0,
+                quote(find(atm - step, true), spot, years).iv, quote(find(atm + step, true), spot, years).iv,
+                quote(find(atm + step, false), spot, years).iv, quote(find(atm - step, false), spot, years).iv);
+    }
+
+    /** [change short %, change long %, new high (1/0), volume last minute, volume expansion]. */
+    private static double[] flow(Contract contract, Instant time, FeatureExtensions ext) {
+        if (contract == null) {
+            return new double[] {Double.NaN, Double.NaN, 0, Double.NaN, Double.NaN};
+        }
+        List<Integer> windows = ext.premiumMomentumWindowsMin();
+        double now = contract.mid.valueAt(time);
+        double changeShort = percentChange(contract.mid, time, Duration.ofMinutes(windows.get(0)));
+        double changeLong = percentChange(contract.mid, time, Duration.ofMinutes(windows.get(1)));
+        double high = contract.mid.max(time, Duration.ofMinutes(ext.premiumNewHighWindowMin()));
+        boolean newHigh = !Double.isNaN(high) && !Double.isNaN(now) && now >= high;
+        double volume1m = contract.volume.change(time, Duration.ofMinutes(1));
+        int baselineMinutes = ext.volumeExpansionBaselineMin();
+        double baseline = contract.volume.change(time.minus(Duration.ofMinutes(1)), Duration.ofMinutes(baselineMinutes))
+                / baselineMinutes;
+        double expansion = baseline > 0 && !Double.isNaN(volume1m) ? volume1m / baseline : Double.NaN;
+        return new double[] {changeShort, changeLong, newHigh ? 1 : 0, volume1m, expansion};
+    }
+
+    private static double percentChange(TimedSeries series, Instant time, Duration window) {
+        double before = series.valueAt(time.minus(window));
+        double now = series.valueAt(time);
+        return before > 0 && !Double.isNaN(now) ? 100 * (now / before - 1) : Double.NaN;
     }
 
     private Contract find(double strike, boolean call) {

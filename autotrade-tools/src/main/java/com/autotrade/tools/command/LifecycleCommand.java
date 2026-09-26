@@ -40,7 +40,8 @@ final class LifecycleCommand {
     private static final JsonMapper JSON = JsonMapper.builder().build();
 
     record Request(List<LocalDate> sessions, List<String> underlyings, Path strategyFile, Path featuresFile,
-                   Path exchangeFile, Path costsFile, boolean save, boolean heldOutAllowed, String codeVersion) {
+                   Path exchangeFile, Path costsFile, boolean save, boolean heldOutAllowed, boolean descriptive,
+                   String codeVersion) {
     }
 
     private LifecycleCommand() {
@@ -53,6 +54,11 @@ final class LifecycleCommand {
         ThresholdConfig exchangeConfig = ThresholdConfig.load(request.exchangeFile());
         ThresholdConfig costConfig = ThresholdConfig.load(request.costsFile());
         EarlyConfirmRunnerFactory strategies = new EarlyConfirmRunnerFactory(strategyConfig);
+        if (strategyConfig.has("vol_regime") && !featuresConfig.has("levels")) {
+            System.err.println(request.strategyFile() + " needs the features-v3 sections; use --features-file "
+                    + "config/features/features.v3.yaml");
+            return 2;
+        }
         List<LocalDate> requested = request.sessions();
         if (requested.isEmpty()) {
             if (!strategyConfig.has("evaluation.sessions_from")) {
@@ -67,7 +73,19 @@ final class LifecycleCommand {
 
         Map<LocalDate, String> splits = LifecycleStore.splits(target);
         List<LocalDate> heldOut = requested.stream().filter(d -> "HELD_OUT".equals(splits.get(d))).toList();
-        if (!heldOut.isEmpty()) {
+        boolean descriptive = false;
+        if (!heldOut.isEmpty() && request.descriptive()) {
+            // A descriptive run may only look at held-out sessions this strategy family has already
+            // consumed: it cannot spend fresh held-out data, and its results are not evidence.
+            List<LocalDate> used = LifecycleStore.heldOutAlreadyUsed(target, strategies.id(), heldOut);
+            if (!used.containsAll(heldOut)) {
+                List<LocalDate> fresh = heldOut.stream().filter(d -> !used.contains(d)).toList();
+                System.err.println("--descriptive only covers held-out sessions already consumed by " + strategies.id()
+                        + "; " + fresh + " are still unseen");
+                return 2;
+            }
+            descriptive = true;
+        } else if (!heldOut.isEmpty()) {
             if (!request.heldOutAllowed() || !request.save()) {
                 System.err.println("sessions " + heldOut + " are HELD_OUT; pass --held-out --save to use them "
                         + "(once per strategy configuration)");
@@ -100,10 +118,10 @@ final class LifecycleCommand {
         configs.put(request.exchangeFile().getFileName().toString(), exchangeConfig.contentHash());
         configs.put(request.costsFile().getFileName().toString(), costConfig.contentHash());
         Runs runs = new Runs(target);
-        Long runId = request.save() ? runs.start("LIFECYCLE", request.codeVersion(), source.name(), sessions,
+        Long runId = request.save() ? runs.start(descriptive ? "LIFECYCLE_DESCRIPTIVE" : "LIFECYCLE", request.codeVersion(), source.name(), sessions,
                 request.underlyings(), JSON.writeValueAsString(configs)) : null;
         LifecycleStore store = runId == null ? null : new LifecycleStore(target, runId);
-        if (store != null && !heldOut.isEmpty()) {
+        if (store != null && !heldOut.isEmpty() && !descriptive) {
             store.claimHeldOut(strategies.id(), strategies.configHash(), heldOut);
         }
 
@@ -143,8 +161,13 @@ final class LifecycleCommand {
         header.put("Code", request.codeVersion());
         header.put("Strategy", strategies.version() + " " + strategies.configHash().substring(0, 19));
         header.put("Configs", configs.toString());
-        header.put("Sessions", sessions + (heldOut.isEmpty() ? "" : " (includes held-out " + heldOut + ", now consumed for "
-                + strategies.id() + ")"));
+        header.put("Sessions", sessions + (heldOut.isEmpty() ? "" : descriptive
+                ? " (includes held-out " + heldOut + " already consumed for " + strategies.id() + ")"
+                : " (includes held-out " + heldOut + ", now consumed for " + strategies.id() + ")"));
+        if (descriptive) {
+            header.put("Status", "DESCRIPTIVE: behaviour check on sessions this family has already seen; the P&L is "
+                    + "not evidence for or against the strategy");
+        }
         header.put("Underlyings", request.underlyings().toString());
         header.put("Sizing", "research default from the strategy file (rules.intended_lots)");
         header.put("Elapsed", Duration.between(started, Instant.now()).toSeconds() + " s");

@@ -1,7 +1,9 @@
 package com.autotrade.strategy.ecr;
 
+import com.autotrade.features.snapshot.BookFeatures;
 import com.autotrade.features.snapshot.FeatureSnapshot;
 import com.autotrade.features.snapshot.FuturesFeatures;
+import com.autotrade.features.snapshot.LevelFeatures;
 import com.autotrade.features.snapshot.OptionsFeatures;
 import com.autotrade.features.snapshot.StructureFeatures;
 import com.autotrade.strategy.OptionSide;
@@ -17,6 +19,8 @@ final class SideFeatures {
     private final StructureFeatures st;
     private final FuturesFeatures fu;
     private final OptionsFeatures op;
+    private final LevelFeatures lv;
+    private final BookFeatures bk;
 
     SideFeatures(OptionSide side, FeatureSnapshot snapshot) {
         this.side = side;
@@ -24,6 +28,8 @@ final class SideFeatures {
         this.st = snapshot.structure();
         this.fu = snapshot.futures();
         this.op = snapshot.options();
+        this.lv = snapshot.levels();
+        this.bk = snapshot.book();
     }
 
     private boolean ce() {
@@ -160,6 +166,85 @@ final class SideFeatures {
 
     double spot() {
         return s.spot();
+    }
+
+    // ------------------------------------------------------------------ features v3 (strategy v4)
+
+    /** Furthest travel beyond the traded level since its break, in ATR3m. */
+    double travelAtr() {
+        return ce() ? lv.orhTravelAtr() : lv.orlTravelAtr();
+    }
+
+    /** Futures volume since the break, time-of-day normalised (1 = normal). */
+    double volumeAfterBreak() {
+        return ce() ? lv.orhVolumeAfterBreak() : lv.orlVolumeAfterBreak();
+    }
+
+    /** Ladder levels reclaimed minus lost in this side's direction over the ladder window. */
+    int ladderNet() {
+        int net = lv.ladderReclaims() - lv.ladderLosses();
+        return ce() ? net : -net;
+    }
+
+    double breakoutVolumeRatio() {
+        return lv.breakoutBarVolumeRatio();
+    }
+
+    /** Expected remaining move over the room to the next level in this direction; +inf with no level ahead. */
+    double expectedReach() {
+        double reach = ce() ? lv.expectedReachAbove() : lv.expectedReachBelow();
+        double room = ce() ? lv.roomAbovePoints() : lv.roomBelowPoints();
+        return Double.isNaN(room) ? Double.POSITIVE_INFINITY : reach;
+    }
+
+    /**
+     * Order flow persistently on this side over the long window: the futures book (absolute), or this
+     * side's ATM option book against the other side's. Option books carry a structural bid bias (both
+     * ATM call and put show +0.5 or more all day on NSE), so for options only the call-minus-put
+     * difference is informative; its window minimum must clear the threshold.
+     */
+    boolean bookFavourable(double min) {
+        double optionEdge = ce() ? bk.atmCeMinLong() - bk.atmPeMaxLong() : bk.atmPeMinLong() - bk.atmCeMaxLong();
+        return (ce() ? bk.futuresMinLong() >= min : bk.futuresMaxLong() <= -min) || optionEdge >= min;
+    }
+
+    /** Order flow persistently against this side (the mirror of {@link #bookFavourable}). */
+    boolean bookAgainst(double min) {
+        double optionEdge = ce() ? bk.atmPeMinLong() - bk.atmCeMaxLong() : bk.atmCeMinLong() - bk.atmPeMaxLong();
+        return (ce() ? bk.futuresMaxLong() <= -min : bk.futuresMinLong() >= min) || optionEdge >= min;
+    }
+
+    /** This side's ATM premium rising over the last minute. */
+    boolean premiumRising() {
+        double change = ce() ? s.premium().ceChange1mPct() : s.premium().peChange1mPct();
+        return !Double.isNaN(change) && change > 0;
+    }
+
+    boolean premiumNewHigh() {
+        return ce() ? s.premium().ceNewHigh() : s.premium().peNewHigh();
+    }
+
+    /** This side's ATM option traded more in the last minute than its recent rate. */
+    boolean optionVolumeExpanding() {
+        double expansion = ce() ? s.premium().ceVolumeExpansion() : s.premium().peVolumeExpansion();
+        return !Double.isNaN(expansion) && expansion >= 1;
+    }
+
+    boolean straddleCompressionEnded() {
+        return s.premium().straddleCompressionEnded();
+    }
+
+    String ivTrend() {
+        String trend = s.volatility().ivTrend();
+        return trend == null ? "UNKNOWN" : trend;
+    }
+
+    /** Writers building a strong barrier ahead (calls above for CE, puts below for PE). */
+    boolean oppositeWallForming(double minScore) {
+        String flow = ce() ? op.ceOiFlow() : op.peOiFlow();
+        double score = ce() ? op.callBarrierScore() : op.putSupportScore();
+        boolean building = "BUILD".equals(flow) || "ACCELERATING_BUILD".equals(flow);
+        return building && score >= minScore;
     }
 
     private boolean favourable(double value) {

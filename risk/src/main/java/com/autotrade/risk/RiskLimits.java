@@ -4,7 +4,7 @@ import java.time.LocalTime;
 
 import com.autotrade.config.ThresholdConfig;
 
-/** Typed view of a risk file (config/risk/*.yaml). */
+/** Typed view of a risk file (config/risk/*.yaml); the CAS entry window is risk v3 (null before). */
 public record RiskLimits(
         String hash,
         double capital,
@@ -23,7 +23,14 @@ public record RiskLimits(
         int exitChaseSec,
         int exitChaseMax,
         double stopLimitOffsetPct,
-        int reconcileEverySec) {
+        int reconcileEverySec,
+        LocalTime casEntryFrom,
+        LocalTime casEntryTo) {
+
+    /** True inside the closing-auction entry window (risk v3), where entries after the cutoff are allowed. */
+    public boolean inCasEntryWindow(LocalTime time) {
+        return casEntryFrom != null && !time.isBefore(casEntryFrom) && time.isBefore(casEntryTo);
+    }
 
     public static RiskLimits from(ThresholdConfig c) {
         return new RiskLimits(c.contentHash(),
@@ -36,6 +43,8 @@ public record RiskLimits(
                 c.has("orders.exit_buffer_pct") ? c.getDouble("orders.exit_buffer_pct") : 0,
                 c.getInt("orders.entry_timeout_sec"), c.getInt("orders.exit_chase_sec"),
                 c.getInt("orders.exit_chase_max"), c.getDouble("orders.stop_limit_offset_pct"),
-                c.getInt("orders.reconcile_every_sec"));
+                c.getInt("orders.reconcile_every_sec"),
+                c.has("time.cas_entry_window") ? LocalTime.parse(c.getString("time.cas_entry_window").split("-")[0]) : null,
+                c.has("time.cas_entry_window") ? LocalTime.parse(c.getString("time.cas_entry_window").split("-")[1]) : null);
     }
 }
