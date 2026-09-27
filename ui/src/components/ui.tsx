@@ -2,10 +2,11 @@ import { type ReactNode, useState } from "react";
 
 export function Panel({ title, right, children }: { title?: ReactNode; right?: ReactNode; children: ReactNode }) {
   return (
-    <section className="rounded-lg border border-line bg-panel">
+    // min-w-0: inside a grid a panel may be narrower than its widest table (which then scrolls)
+    <section className="min-w-0 rounded-lg border border-line bg-panel">
       {title != null && (
-        <header className="flex items-center justify-between border-b border-line px-4 py-2.5">
-          <h2 className="text-sm font-semibold tracking-wide">{title}</h2>
+        <header className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-2.5">
+          <h2 className="min-w-0 text-sm font-semibold tracking-wide">{title}</h2>
           {right}
         </header>
       )}

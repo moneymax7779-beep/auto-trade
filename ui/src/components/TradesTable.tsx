@@ -25,6 +25,9 @@ function parse(symbol: string) {
 
 const time = (ts: string | null) => (ts ? ts.slice(11, 16) : null);
 
+/** +₹3,06,033 / −₹1,55,158 */
+const signed = (value: number) => `${value > 0 ? "+" : value < 0 ? "−" : ""}${rupees(Math.abs(value))}`;
+
 /**
  * Groups a straddle's two legs (same strategy, index and entry second, one call and one put) into
  * one trade with the combined net; every other position is a trade of its own.
@@ -48,7 +51,7 @@ export function groupTrades(rows: TradePositionRow[]): Trade[] {
       trades.push({
         strategy: call.strategy_id ?? null, underlying: call.underlying,
         title: `${call.underlying} ${strikes}`,
-        detail: `CE ${rupees(call.net)} · PE ${rupees(put.net)}${c ? ` · ${c.expiry}` : ""}`,
+        detail: `CE ${signed(call.net)} · PE ${signed(put.net)}${c ? ` · ${c.expiry}` : ""}`,
         opened: call.opened_at, closed: closes.length === 2 ? closes[1] : null,
         stages: [...new Set(legs.flatMap((l) => l.stages))].join(" → "),
         exit: exits.join(" / "),
@@ -74,7 +77,7 @@ export function exitMarkers(rows: TradePositionRow[], underlying: string, strate
   return groupTrades(rows)
     .filter((t) => t.underlying === underlying && (strategy == null || t.strategy == null || t.strategy === strategy)
       && t.closed != null)
-    .map((t) => ({ t: time(t.closed)!, text: `exit ${t.exit ?? ""} ${rupees(t.net)}`, tone: "info" as const }));
+    .map((t) => ({ t: time(t.closed)!, text: `exit ${t.exit ?? ""} ${signed(t.net)}`, tone: "info" as const }));
 }
 
 /** Trades with a straddle as one row; narrow enough for a phone or a side pane. */

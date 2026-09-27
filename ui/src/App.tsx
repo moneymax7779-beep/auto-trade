@@ -17,12 +17,12 @@ export function App() {
   return (
     <div className="min-h-full">
       <header className="sticky top-0 z-10 border-b border-line bg-bg/90 backdrop-blur">
-        <div className="mx-auto flex max-w-7xl items-center gap-6 px-4 py-2.5">
-          <div className="flex items-center gap-2">
+        <div className="mx-auto flex max-w-7xl items-center gap-3 px-4 py-2.5 sm:gap-6">
+          <div className="flex shrink-0 items-center gap-2">
             <span className="font-semibold">auto-trade</span>
             <span className="rounded bg-warn/15 px-1.5 py-0.5 text-[10px] font-bold tracking-wider text-warn">PAPER</span>
           </div>
-          <nav className="flex gap-1 overflow-x-auto">
+          <nav className="flex min-w-0 gap-1 overflow-x-auto">
             {NAV.map(([to, label]) => (
               <NavLink key={to} to={to}
                 className={({ isActive }) => `rounded px-3 py-1.5 text-sm ${isActive ? "bg-panel-2 font-semibold" : "text-muted hover:text-text"}`}>
