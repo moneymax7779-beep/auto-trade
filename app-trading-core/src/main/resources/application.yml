@@ -42,7 +42,7 @@ autotrade:
     # another strategy trigger together, it takes the capital ("straddle first").
     strategy-files:
       - config/strategy/expiry-breakout-straddle.v1.yaml
-      - config/strategy/early-confirm-runner.v7.yaml
+      - config/strategy/early-confirm-runner.v8.yaml   # v8: v7 on expiry days only (user, 2026-09-27)
       - config/strategy/expiry-gamma-breakout.v3.yaml
     features-file: config/features/features.v6.yaml   # v6 = v5 + compression, gamma, retest (ecr-v6 decisions unchanged)
     exchange-file: config/exchange/nse-bse-sessions.v3.yaml

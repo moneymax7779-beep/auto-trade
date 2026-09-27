@@ -50,7 +50,9 @@ record EcrConfig(
         Set<String> ceRunnerExitStates,
         Set<String> peRunnerExitStates,
         int expiryStallMinutes,
-        EcrExtensions ext) {
+        EcrExtensions ext,
+        /** v8: open new campaigns only when the index expires today (DTE bucket EXPIRY); v7 and earlier: every day. */
+        boolean expiryDaysOnly) {
 
     record Window(LocalTime from, LocalTime to, double score) {
     }
@@ -93,7 +95,8 @@ record EcrConfig(
                 c.getDouble("exits.early_probe_fail_atr"), c.getDouble("exits.invalidation_close_atr"),
                 strings(c, "exits.runner_exit_futures_states.CE"), strings(c, "exits.runner_exit_futures_states.PE"),
                 c.getInt("exits.expiry_runner_stall_minutes"),
-                EcrExtensions.from(c));
+                EcrExtensions.from(c),
+                c.has("rules.expiry_days_only") && c.getBoolean("rules.expiry_days_only"));
     }
 
     /** Minimum confirm score for the window containing {@code time}; the last window's if none. */

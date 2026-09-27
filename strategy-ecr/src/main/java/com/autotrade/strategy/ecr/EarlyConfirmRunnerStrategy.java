@@ -192,7 +192,8 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
         }
         boolean entryWindow = ctx.continuous() && !ctx.time().isBefore(config.earliestEntry())
                 && ctx.time().isBefore(config.lastNewEntry()) && snapshot.structure().orComplete() && campaigns.get(side) < 1
-                && conditions.getOrDefault("liquidity_ok", true);
+                && conditions.getOrDefault("liquidity_ok", true)
+                && (!config.expiryDaysOnly() || ctx.expiry());       // v8: expiry days only
         Stage next = watchStage(conditions);
         int lots = intendedLots(ctx);
         int[] tranches = config.tranches(ctx.expiry(), lots);

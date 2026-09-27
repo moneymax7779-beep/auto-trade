@@ -22,4 +22,24 @@ class EarlyConfirmRunnerSizingTest {
         assertThat(v7.version()).isEqualTo("ecr-v7");
         assertThat(v7.premiumStopPct()).isEqualTo(v6.premiumStopPct());
     }
+
+    @Test
+    void v8OpensCampaignsOnlyWhenTheIndexExpiresToday() {
+        StrategyFactory v7 = Strategies.load(Path.of("..", "config", "strategy", "early-confirm-runner.v7.yaml"));
+        StrategyFactory v8 = Strategies.load(Path.of("..", "config", "strategy", "early-confirm-runner.v8.yaml"));
+        assertThat(v8.version()).isEqualTo("ecr-v8");
+        assertThat(v8.premiumBudget()).isEqualTo(v7.premiumBudget());
+        java.util.function.Function<Integer, Snapshots> breakout = dte -> Snapshots.bullishEarly().confirmedBreakout()
+                .set("volatility.vixPercentile252d", 80.0).set("levels.breakoutBarVolumeRatio", 1.5)
+                .set("breadth.moverBreadth", 60.0).set("regime.dteTradingDays", dte);
+        com.autotrade.strategy.PositionView flat = com.autotrade.strategy.PositionView.FLAT;
+
+        assertThat(v7.create("NIFTY", Snapshots.SESSION).decide(breakout.apply(3).at("10:33"), flat).orders())
+                .as("v7 trades a non-expiry day").isNotEmpty();
+        assertThat(v8.create("NIFTY", Snapshots.SESSION).decide(breakout.apply(3).at("10:33"), flat).orders())
+                .as("v8 does not").isEmpty();
+        assertThat(v8.create("NIFTY", Snapshots.SESSION).decide(breakout.apply(0).at("10:33"), flat).orders())
+                .as("v8 trades the index's expiry day").singleElement()
+                .extracting(com.autotrade.strategy.OrderIntent::action).isEqualTo(com.autotrade.strategy.OrderIntent.Action.ENTER);
+    }
 }
