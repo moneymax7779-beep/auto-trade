@@ -285,7 +285,7 @@ class SessionRunner implements ApplicationRunner {
                 new OwnSessionHistory(target), replay ? referenceStore : liveReference);
         TradingSession.Settings settings = new TradingSession.Settings(
                 replay ? TradingSession.Mode.PAPER_REPLAY : TradingSession.Mode.PAPER_LIVE, t.account(), session,
-                t.underlyings(), features, history, strategies,
+                t.underlyings(), t.tradeUnderlyingList(), features, history, strategies,
                 RiskLimits.from(riskFile), CostModel.from(costsFile), FillModel.from(costsFile, t.fillModel()),
                 instruments, hashes, CodeVersion.current());
         TradingSession trading = new TradingSession(settings, feed, new TradeStore(target));

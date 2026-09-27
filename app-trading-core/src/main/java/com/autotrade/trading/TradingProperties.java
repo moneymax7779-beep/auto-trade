@@ -14,7 +14,13 @@ public record TradingProperties(Trading trading, Source source, Upstox upstox) {
     public record Trading(String account, List<String> underlyings, String fillModel, String strategyFile,
                           List<String> strategyFiles, String featuresFile, String exchangeFile, String costsFile,
                           String riskFile, long pollIntervalMs, long recheckWindowMs, String startAt, String stopAfter,
-                          String feed, double replaySpeed) {
+                          String feed, double replaySpeed, List<String> tradeUnderlyings) {
+
+        /** The underlyings strategies trade: {@code trade-underlyings}, else every recorded underlying. */
+        public List<String> tradeUnderlyingList() {
+            return tradeUnderlyings != null && !tradeUnderlyings.isEmpty() ? tradeUnderlyings : underlyings;
+        }
+
 
         public List<String> strategyFileList() {
             return strategyFiles != null && !strategyFiles.isEmpty() ? strategyFiles : List.of(strategyFile);

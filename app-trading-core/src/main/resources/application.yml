@@ -33,6 +33,10 @@ autotrade:
   trading:
     account: PAPER-1
     underlyings: [NIFTY, BANKNIFTY, SENSEX]
+    # Strategies trade only these (user's decision 2026-09-27): BANKNIFTY is subscribed and recorded
+    # for its own history but not traded until it has been replayed (no zt-tiger-v2 data, thresholds
+    # calibrated on NIFTY/SENSEX).
+    trade-underlyings: [NIFTY, SENSEX]
     fill-model: base
     strategy-file: config/strategy/early-confirm-runner.v6.yaml   # used only when strategy-files is empty
     # Every strategy runs side by side on the same feed (positions per strategy, risk limits and the

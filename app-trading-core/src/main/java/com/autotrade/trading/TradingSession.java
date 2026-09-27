@@ -57,9 +57,13 @@ public final class TradingSession {
 
     public enum Mode { PAPER_LIVE, PAPER_REPLAY }
 
-    /** {@code strategies}: every strategy traded in this session (each keeps its own positions). */
+    /**
+     * {@code strategies}: every strategy traded in this session (each keeps its own positions).
+     * {@code underlyings} are subscribed, recorded and get features; only {@code tradeUnderlyings}
+     * (a subset; all of them when empty) are given strategies.
+     */
     public record Settings(Mode mode, String account, LocalDate session, List<String> underlyings,
-                           FeatureConfig features, SessionHistory history, List<StrategyFactory> strategies,
+                           List<String> tradeUnderlyings, FeatureConfig features, SessionHistory history, List<StrategyFactory> strategies,
                            RiskLimits risk, CostModel costs, FillModel fills,
                            InstrumentMaster instruments, Map<String, String> configHashes, String codeVersion) {
 
@@ -77,6 +81,12 @@ public final class TradingSession {
                 }
             }
             strategies = List.copyOf(strategies);
+            tradeUnderlyings = tradeUnderlyings == null || tradeUnderlyings.isEmpty() ? List.copyOf(underlyings)
+                    : List.copyOf(tradeUnderlyings);
+            if (!underlyings.containsAll(tradeUnderlyings)) {
+                throw new IllegalArgumentException("trade underlyings " + tradeUnderlyings + " must be among the "
+                        + "recorded underlyings " + underlyings);
+            }
         }
     }
 
@@ -137,10 +147,15 @@ public final class TradingSession {
         this.contracts = new ContractResolver(settings.session(), settings.instruments());
         for (String underlying : settings.underlyings()) {
             List<Slot> slots = new ArrayList<>();
-            for (StrategyFactory factory : settings.strategies()) {
-                slots.add(new Slot(factory, factory.create(underlying, settings.session())));
+            if (settings.tradeUnderlyings().contains(underlying)) {
+                for (StrategyFactory factory : settings.strategies()) {
+                    slots.add(new Slot(factory, factory.create(underlying, settings.session())));
+                }
             }
-            strategies.put(underlying, slots);
+            strategies.put(underlying, slots);  // empty: recorded with features, never traded
+            if (slots.isEmpty()) {
+                log.info("{}: recorded with features, not traded (not in trade-underlyings)", underlying);
+            }
             engines.put(underlying, new FeatureEngine(underlying, settings.session(), settings.features(),
                     settings.history(), this::onSnapshot));
         }
