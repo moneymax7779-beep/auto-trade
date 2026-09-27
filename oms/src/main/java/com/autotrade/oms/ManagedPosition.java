@@ -104,6 +104,11 @@ public final class ManagedPosition {
         return quantity;
     }
 
+    /** Everything bought over the position's life (quantity is what is still held). */
+    public long boughtQuantity() {
+        return boughtQuantity;
+    }
+
     public int lots() {
         return (int) (quantity / contract.lotSize());
     }
@@ -121,6 +126,15 @@ public final class ManagedPosition {
     }
 
     /** Held quantity valued at the bid (what could be sold now). */
+    /** The last bid seen for this contract (NaN before any quote). */
+    public double lastBid() {
+        return lastBid;
+    }
+
+    public double lastPrice() {
+        return lastPrice;
+    }
+
     public double unrealised() {
         return quantity > 0 && !Double.isNaN(lastBid) ? (lastBid - averageCost) * quantity : 0;
     }

@@ -86,12 +86,17 @@ final class TradeStore {
     }
 
     void position(long session, ManagedPosition position) {
+        long bought = position.boughtQuantity();
+        // average exit from the realised P&L: realised = (exit − cost) × quantity sold (all of it once closed)
+        Double exit = bought > 0 && position.quantity() == 0 ? position.averageCost() + position.realised() / bought : null;
         jdbc.update("insert into trade.position (session_id, underlying, option_side, symbol, opened_at, closed_at, "
-                        + "stages, exit_reason, realised, costs, net, strategy_id) values (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        + "stages, exit_reason, realised, costs, net, strategy_id, quantity, lot_size, average_cost, "
+                        + "average_exit) values (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 session, position.underlying(), position.side().name(), position.contract().symbol(),
                 ts(position.openedAt()), ts(position.closedAt()),
                 position.stages().toArray(new String[0]), position.exitReason(), position.realised(), position.costs(),
-                position.net(), position.strategy());
+                position.net(), position.strategy(), bought, position.contract().lotSize(),
+                bought > 0 ? position.averageCost() : null, exit);
     }
 
     void decision(long session, String strategyId, Decision decision, double spot) {

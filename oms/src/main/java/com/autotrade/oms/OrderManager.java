@@ -285,6 +285,20 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         return total;
     }
 
+    /**
+     * A live straddle's combined exit as percentages {target, stop} of the premium paid; null for a
+     * single-leg position or once the bracket has fired.
+     */
+    public synchronized double[] bracket(String strategyId, String underlying) {
+        Bracket bracket = brackets.get(key(strategyId, underlying));
+        return bracket == null ? null : new double[] {bracket.target() * 100, bracket.stop() * 100};
+    }
+
+    /** The contract's last ask seen (NaN before any quote). */
+    public synchronized double ask(Contract contract) {
+        return askOf(contract);
+    }
+
     private double askOf(Contract contract) {
         double[] quote = lastQuotes.get(contract.token());
         return quote != null ? quote[1] : Double.NaN;

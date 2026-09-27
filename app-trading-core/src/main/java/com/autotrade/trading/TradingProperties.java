@@ -14,7 +14,7 @@ public record TradingProperties(Trading trading, Source source, Upstox upstox) {
     public record Trading(String account, List<String> underlyings, String fillModel, String strategyFile,
                           List<String> strategyFiles, String featuresFile, String exchangeFile, String costsFile,
                           String riskFile, long pollIntervalMs, long recheckWindowMs, String startAt, String stopAfter,
-                          String feed) {
+                          String feed, double replaySpeed) {
 
         public List<String> strategyFileList() {
             return strategyFiles != null && !strategyFiles.isEmpty() ? strategyFiles : List.of(strategyFile);

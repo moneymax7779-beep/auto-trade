@@ -54,6 +54,16 @@ class ExpiryGammaStrategyTest {
     }
 
     @Test
+    void v3IsV2WithAPremiumBudget() {
+        StrategyFactory v2 = Strategies.load(Path.of("..", "config", "strategy", "expiry-gamma-breakout.v2.yaml"));
+        StrategyFactory v3 = Strategies.load(Path.of("..", "config", "strategy", "expiry-gamma-breakout.v3.yaml"));
+        assertThat(v2.premiumBudget()).isNaN();
+        assertThat(v3.premiumBudget()).isEqualTo(500_000);
+        assertThat(v3.intendedLots()).isEqualTo(4);
+        assertThat(v3.version()).isEqualTo("egb-v3");
+    }
+
+    @Test
     void doesNothingOffExpiryDay() {
         Decision decision = strategy.decide(Snapshots.bullishCoil().set("regime.dteTradingDays", 2).at("12:40"),
                 PositionView.FLAT);

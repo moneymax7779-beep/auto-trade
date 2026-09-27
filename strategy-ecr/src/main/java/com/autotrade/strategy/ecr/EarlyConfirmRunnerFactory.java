@@ -11,12 +11,24 @@ import com.autotrade.strategy.StrategyFactory;
 public final class EarlyConfirmRunnerFactory implements StrategyFactory {
 
     private final EcrConfig config;
+    private final double premiumBudget;
 
     public EarlyConfirmRunnerFactory(ThresholdConfig config) {
         if (!"early-confirm-runner".equals(config.strategy())) {
             throw new IllegalArgumentException("not an early-confirm-runner file: " + config.sourceName());
         }
         this.config = EcrConfig.from(config);
+        this.premiumBudget = config.has("sizing.premium_budget") ? config.getDouble("sizing.premium_budget") : Double.NaN;
+    }
+
+    @Override
+    public double premiumBudget() {
+        return premiumBudget;
+    }
+
+    @Override
+    public int intendedLots() {
+        return config.intendedLots();
     }
 
     public static EarlyConfirmRunnerFactory load(Path file) {

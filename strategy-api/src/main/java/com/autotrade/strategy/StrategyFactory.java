@@ -19,6 +19,20 @@ public interface StrategyFactory {
         return java.util.List.of();
     }
 
+    /**
+     * Rupees of premium the executor sizes a whole position to (a file's {@code sizing.premium_budget});
+     * NaN = trade the strategy's lots as they are. With a budget, the strategy's lots are units of its
+     * {@link #intendedLots()} plan, scaled so the full plan costs the budget at the entry price.
+     */
+    default double premiumBudget() {
+        return Double.NaN;
+    }
+
+    /** The lots a full position of this strategy adds up to (the unit of {@link #premiumBudget()}). */
+    default int intendedLots() {
+        return 0;
+    }
+
     /** The strategy file's version label (for reports). */
     default String version() {
         return configHash().substring(0, Math.min(19, configHash().length()));

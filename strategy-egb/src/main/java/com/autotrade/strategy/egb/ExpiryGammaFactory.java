@@ -11,12 +11,24 @@ import com.autotrade.strategy.StrategyFactory;
 public final class ExpiryGammaFactory implements StrategyFactory {
 
     private final EgbConfig config;
+    private final double premiumBudget;
 
     public ExpiryGammaFactory(ThresholdConfig config) {
         if (!ExpiryGammaStrategy.ID.equals(config.strategy())) {
             throw new IllegalArgumentException("not an expiry-gamma-breakout file: " + config.sourceName());
         }
         this.config = EgbConfig.from(config);
+        this.premiumBudget = config.has("sizing.premium_budget") ? config.getDouble("sizing.premium_budget") : Double.NaN;
+    }
+
+    @Override
+    public double premiumBudget() {
+        return premiumBudget;
+    }
+
+    @Override
+    public int intendedLots() {
+        return config.intendedLots();
     }
 
     @Override

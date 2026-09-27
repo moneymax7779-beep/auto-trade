@@ -248,7 +248,8 @@ class SessionRunner implements ApplicationRunner {
         }
         LiveFeed feed = null;
         if (replay) {
-            feed = new ReplayAsLiveFeed(new ZtSessionSource(source, false), session, t.underlyings());
+            // replay-speed (market seconds per second; 0 = as fast as possible) lets the UI be watched
+            feed = new ReplayAsLiveFeed(new ZtSessionSource(source, false), session, t.underlyings(), t.replaySpeed());
         } else if ("upstox".equals(t.feed()) && !upstoxFailed.contains(session)) {
             // Upstox feed (auction data, futures book, VIX) with the token zt-tiger-v2 holds; anything
             // missing or failing falls back to tailing zt-tiger-v2's capture.

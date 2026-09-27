@@ -47,6 +47,7 @@ autotrade:
     costs-file: config/costs/india-index-options-costs.v1.yaml
     risk-file: config/risk/paper-risk.v4.yaml   # v4: capital enforced, loss limit for the full-capital straddle
     poll-interval-ms: 250
+    replay-speed: 0                # --mode=replay only: market seconds per second (e.g. 60); 0 = as fast as possible
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"

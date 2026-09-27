@@ -16,6 +16,20 @@ export async function post<T>(path: string): Promise<T> {
 
 export interface PositionRow {
   underlying: string;
+  strategy?: string;
+  /** "" for a single-leg position, "CE"/"PE" for a straddle leg */
+  leg?: string;
+  boughtQuantity?: number;
+  lotSize?: number;
+  premiumPaid?: number;
+  bid?: number | null;
+  value?: number | null;
+  unrealised?: number;
+  realised?: number;
+  costs?: number;
+  exitPrice?: number | null;
+  targetPct?: number | null;
+  stopPct?: number | null;
   side: string;
   symbol: string;
   state: string;
@@ -129,6 +143,10 @@ export interface OrderRow {
 
 export interface TradePositionRow {
   strategy_id?: string | null;
+  quantity?: number | null;
+  lot_size?: number | null;
+  average_cost?: number | null;
+  average_exit?: number | null;
   underlying: string;
   option_side: string;
   symbol: string;

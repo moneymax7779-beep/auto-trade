@@ -2,11 +2,12 @@ import { type ReactNode, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router";
 import {
-  get, parseSide, post, rupees, type LastDecisionRow, type MarketState, type PositionRow, type RejectionRow, type Scores,
+  get, parseSide, post, rupees, type LastDecisionRow, type MarketState, type RejectionRow, type Scores,
   type SessionRow, type Status, type TradePositionRow,
 } from "../api";
-import { ConfirmButton, ErrorNote, Loading, Panel, Pnl, ScoreBar, SignedGauge, StageBadge, Stat, Table } from "../components/ui";
+import { ConfirmButton, ErrorNote, Loading, Panel, Pnl, ScoreBar, SignedGauge, StageBadge, Stat } from "../components/ui";
 import { groupTrades, TradesTable } from "../components/TradesTable";
+import { LivePositions } from "../components/LivePositions";
 
 export function LivePage() {
   const queryClient = useQueryClient();
@@ -84,10 +85,10 @@ export function LivePage() {
       </div>
 
       <Panel title="Open positions">
-        <PositionsTable rows={s.openPositions ?? []} empty="Flat." />
+        <LivePositions rows={s.openPositions ?? []} closed={false} empty="Flat." />
       </Panel>
       <Panel title="Closed today">
-        <PositionsTable rows={s.closedPositions ?? []} empty="No closed positions yet." />
+        <LivePositions rows={s.closedPositions ?? []} closed empty="No closed positions yet." />
       </Panel>
       <Panel title="Recent refusals (risk, stale data, missing quotes)">
         {(s.recentRejections ?? []).length === 0 ? (
@@ -171,27 +172,6 @@ function FactPanel({ title, facts }: { title: string; facts?: Record<string, num
         ))}
       </dl>
     </div>
-  );
-}
-
-function PositionsTable({ rows, empty }: { rows: PositionRow[]; empty: string }) {
-  return (
-    <Table
-      rows={rows}
-      empty={empty}
-      columns={[
-        { key: "u", label: "Index", render: (r) => r.underlying },
-        { key: "s", label: "Contract", render: (r) => `${r.symbol}` },
-        { key: "st", label: "Stages", render: (r) => r.stages.join(" → ") },
-        { key: "state", label: "State", render: (r) => r.state },
-        { key: "q", label: "Qty", align: "right", render: (r) => r.quantity },
-        { key: "a", label: "Avg cost", align: "right", render: (r) => r.averageCost.toFixed(2) },
-        { key: "o", label: "Opened", render: (r) => r.opened ?? "–" },
-        { key: "c", label: "Closed", render: (r) => r.closed ?? "–" },
-        { key: "x", label: "Exit", render: (r) => r.exitReason ?? "–" },
-        { key: "n", label: "Net", align: "right", render: (r) => <Pnl value={r.net} /> },
-      ]}
-    />
   );
 }
 

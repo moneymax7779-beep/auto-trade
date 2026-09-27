@@ -106,20 +106,20 @@ export function SessionDetailPage() {
           )}
       </Panel>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        <Panel title="Stage changes">
-          <Table rows={changes} columns={[
-            { key: "t", label: "Time", render: (r) => r.t },
-            { key: "s", label: "Spot", align: "right", render: (r) => fixed(r.spot) },
-            { key: "ce", label: "CE", render: (r) => <StageBadge stage={r.ce_stage} /> },
-            { key: "pe", label: "PE", render: (r) => <StageBadge stage={r.pe_stage} /> },
-            { key: "o", label: "Orders", render: (r) => <span className="num text-xs">{r.orders ?? ""}</span> },
-          ]} />
-        </Panel>
-        <Panel title="Trades">
-          <TradesTable rows={positions.data ?? []} showStrategy={strategyIds.length > 1} empty="No trades." />
-        </Panel>
-      </div>
+      <Panel title="Trades">
+        <TradesTable rows={positions.data ?? []} showStrategy={strategyIds.length > 1} empty="No trades." />
+      </Panel>
+
+      <Panel title="Stage changes">
+        <Table rows={changes} columns={[
+          { key: "t", label: "Time", render: (r) => r.t },
+          { key: "s", label: "Spot", align: "right", render: (r) => fixed(r.spot) },
+          { key: "ce", label: "CE", render: (r) => <StageBadge stage={r.ce_stage} /> },
+          { key: "pe", label: "PE", render: (r) => <StageBadge stage={r.pe_stage} /> },
+          { key: "o", label: "Orders", render: (r) => <span className="num text-xs">{r.orders ?? ""}</span> },
+        ]} />
+      </Panel>
+
 
       <Panel title="Orders (last state of each)">
         <Table rows={orders.data ?? []} empty="No orders." columns={[

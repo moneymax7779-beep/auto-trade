@@ -57,7 +57,8 @@ export function TimelineChart({ date, lines, markers = [], height = 280 }: {
         const items: SeriesMarker<Time>[] = markers
           .map((m) => ({
             time: toTime(m.t),
-            position: m.tone === "down" ? ("aboveBar" as const) : ("belowBar" as const),
+            // entries: calls below the line, puts above; exits (info) above so they never cover an entry
+            position: m.tone === "up" ? ("belowBar" as const) : ("aboveBar" as const),
             color: colors[m.tone],
             shape: m.tone === "down" ? ("arrowDown" as const) : m.tone === "up" ? ("arrowUp" as const) : ("circle" as const),
             text: m.text,

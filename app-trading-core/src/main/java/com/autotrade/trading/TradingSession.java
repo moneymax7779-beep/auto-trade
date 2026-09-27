@@ -103,6 +103,9 @@ public final class TradingSession {
     private final ContractResolver contracts;
     private final Map<String, FeatureEngine> engines = new LinkedHashMap<>();
     private final Map<String, List<Slot>> strategies = new HashMap<>();
+    /** Per strategy and underlying: the budget scale fixed at the position's entry (its adds use it too). */
+    private final Map<String, BudgetSizing> sizings = new HashMap<>();
+    private static final BudgetSizing NO_BUDGET = new BudgetSizing(Double.NaN);
     private final Map<String, Decision> lastDecisions = new LinkedHashMap<>();
     private final Map<String, Double> lastSpot = new HashMap<>();
     private final List<String> recentRejections = new ArrayList<>();
@@ -290,9 +293,14 @@ public final class TradingSession {
                     rejected(strategyId, underlying, "ENTER " + intent.side(), "no quotes for the chosen strike yet");
                     return;
                 }
-                RiskDecision result = oms.enter(strategyId, underlying, intent.side(), contract.get(), intent.lots(),
+                // with a premium budget the strategy's lots are units of its plan, scaled at this entry
+                BudgetSizing sizing = BudgetSizing.at(slot.factory().premiumBudget(), slot.factory().intendedLots(),
+                        contract.get().lotSize(), oms.ask(contract.get()));
+                sizings.put(strategyId + "|" + underlying, sizing);
+                int lots = sizing.lots(intent.lots());
+                RiskDecision result = oms.enter(strategyId, underlying, intent.side(), contract.get(), lots,
                         intent.stage().name(), market, intent.stopPctOr(slot.factory().premiumStopPct()));
-                logDecision(strategyId, underlying, intent, result, contract.get());
+                logDecision(strategyId, underlying, intent, lots, result, contract.get());
             }
             case ENTER_STRADDLE -> {
                 double atm = snapshot.options().atmStrike();
@@ -310,8 +318,11 @@ public final class TradingSession {
                         call.get().symbol(), put.get().symbol(), Math.round(intent.premiumBudget()),
                         result.approved() ? "APPROVED" : "REJECTED: " + result.reason());
             }
-            case ADD -> logDecision(strategyId, underlying, intent,
-                    oms.add(strategyId, underlying, intent.lots(), intent.stage().name(), market), null);
+            case ADD -> {
+                int lots = sizings.getOrDefault(strategyId + "|" + underlying, NO_BUDGET).lots(intent.lots());
+                logDecision(strategyId, underlying, intent, lots,
+                        oms.add(strategyId, underlying, lots, intent.stage().name(), market), null);
+            }
             case EXIT -> {
                 oms.exit(strategyId, underlying, intent.reason());
                 log.info("{} {} {} EXIT {} ({})", time, underlying, strategyId, intent.side(), intent.reason());
@@ -324,10 +335,10 @@ public final class TradingSession {
         return settings.strategies().size() == 1 ? underlying : underlying + " · " + strategyId;
     }
 
-    private void logDecision(String strategyId, String underlying, OrderIntent intent, RiskDecision result,
+    private void logDecision(String strategyId, String underlying, OrderIntent intent, int lots, RiskDecision result,
                              Contract contract) {
         log.info("{} {} {} {} {} {} lots {}{}", clock.get().atZone(MarketTime.IST).toLocalTime().withNano(0), underlying,
-                strategyId, intent.action(), intent.side(), intent.lots(), result.approved() ? "APPROVED" : "REJECTED: " + result.reason(),
+                strategyId, intent.action(), intent.side(), lots, result.approved() ? "APPROVED" : "REJECTED: " + result.reason(),
                 contract == null ? "" : " " + contract.symbol());
     }
 
@@ -481,15 +492,31 @@ public final class TradingSession {
                 + (Double.isNaN(view.casScore()) ? "" : " cas " + Math.round(view.casScore()));
     }
 
-    private static Map<String, Object> position(ManagedPosition p) {
+    private Map<String, Object> position(ManagedPosition p) {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("underlying", p.underlying());
         m.put("strategy", p.strategy());
+        m.put("leg", p.leg());
         m.put("side", p.side());
         m.put("symbol", p.contract().symbol());
         m.put("state", p.state());
         m.put("quantity", p.quantity());
+        m.put("boughtQuantity", p.boughtQuantity());
+        m.put("lotSize", p.contract().lotSize());
         m.put("averageCost", Math.round(p.averageCost() * 100) / 100.0);
+        m.put("premiumPaid", Math.round(p.averageCost() * p.boughtQuantity()));
+        double bid = p.lastBid();
+        m.put("bid", Double.isFinite(bid) ? bid : null);
+        m.put("value", p.quantity() > 0 && Double.isFinite(bid) ? Math.round(bid * p.quantity()) : null);
+        m.put("unrealised", Math.round(p.unrealised()));
+        m.put("realised", Math.round(p.realised()));
+        m.put("costs", Math.round(p.costs()));
+        // closed: the average exit from the realised P&L over everything bought
+        m.put("exitPrice", p.quantity() == 0 && p.boughtQuantity() > 0
+                ? Math.round((p.averageCost() + p.realised() / p.boughtQuantity()) * 100) / 100.0 : null);
+        double[] bracket = p.leg().isEmpty() ? null : oms.bracket(p.strategy(), p.underlying());
+        m.put("targetPct", bracket == null ? null : bracket[0]);
+        m.put("stopPct", bracket == null ? null : bracket[1]);
         m.put("stages", p.stages());
         m.put("net", Math.round(p.net()));
         m.put("exitReason", p.exitReason());
