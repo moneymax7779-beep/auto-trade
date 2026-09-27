@@ -136,6 +136,8 @@ public final class LifecycleReplay {
                             campaign.simulator.exitAll(snapshot.time(), order.reason());
                         }
                     }
+                    case ENTER_STRADDLE -> throw new UnsupportedOperationException(strategies.get(underlying).id()
+                            + " trades two legs; replay it through trading-core --mode=replay (the live path)");
                 }
             }
         }

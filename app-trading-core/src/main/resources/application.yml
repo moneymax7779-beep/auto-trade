@@ -37,13 +37,15 @@ autotrade:
     strategy-file: config/strategy/early-confirm-runner.v6.yaml   # used only when strategy-files is empty
     # Every strategy runs side by side on the same feed (positions per strategy, risk limits shared).
     # egb-v2 trades expiry days only (user's decision 2026-09-26: forward PAPER from 29 Sep).
+    # ebs-v1: expiry-day breakout straddle with the full capital after 12:30 (user's decision 2026-09-27).
     strategy-files:
       - config/strategy/early-confirm-runner.v6.yaml
       - config/strategy/expiry-gamma-breakout.v2.yaml
+      - config/strategy/expiry-breakout-straddle.v1.yaml
     features-file: config/features/features.v6.yaml   # v6 = v5 + compression, gamma, retest (ecr-v6 decisions unchanged)
     exchange-file: config/exchange/nse-bse-sessions.v3.yaml
     costs-file: config/costs/india-index-options-costs.v1.yaml
-    risk-file: config/risk/paper-risk.v3.yaml
+    risk-file: config/risk/paper-risk.v4.yaml   # v4: capital enforced, loss limit for the full-capital straddle
     poll-interval-ms: 250
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days

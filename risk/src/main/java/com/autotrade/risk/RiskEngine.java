@@ -44,6 +44,10 @@ public final class RiskEngine {
         if (c.lotsAlreadyHeldInUnderlying() + c.lots() > limits.maxLotsPerUnderlying()) {
             return RiskDecision.rejected("max lots per underlying " + limits.maxLotsPerUnderlying());
         }
+        if (c.premium() > 0 && c.premiumInUse() + c.premium() > limits.capital()) {
+            return RiskDecision.rejected(String.format("capital: premium %.0f + in use %.0f over %.0f", c.premium(),
+                    c.premiumInUse(), limits.capital()));
+        }
         if (c.ordersLastMinute() >= limits.maxOrdersPerMinute()) {
             return RiskDecision.rejected("order rate");
         }

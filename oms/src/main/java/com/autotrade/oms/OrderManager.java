@@ -35,7 +35,8 @@ import com.autotrade.strategy.OptionSide;
 import com.autotrade.strategy.PositionView;
 
 /**
- * Runs one account's positions (one per strategy and underlying) on a broker.
+ * Runs one account's positions (one per strategy and underlying, or a call and a put for a
+ * straddle) on a broker.
  *
  * <ul>
  *   <li>Entries and adds are risk-checked, priced as marketable limits (ask + buffer ticks), sliced
@@ -47,6 +48,10 @@ import com.autotrade.strategy.PositionView;
  *       the new bid and finally priced well through it.</li>
  *   <li>{@link #reconcile()} compares positions with the broker; a mismatch engages the global
  *       kill switch.</li>
+ *   <li>A straddle's two legs carry no resting stops; on every quote their combined bid is compared
+ *       with the combined premium paid, and both legs are closed at the target or the stop. A leg
+ *       whose entry does not fill is re-priced at the new ask every exit-chase interval (up to the
+ *       exit-chase limit); a leg that never fills closes the other leg, so no naked leg is kept.</li>
  * </ul>
  */
 public final class OrderManager implements Consumer<OrderUpdate> {
@@ -56,6 +61,10 @@ public final class OrderManager implements Consumer<OrderUpdate> {
     private static final Map<String, String> ROLE_CODES = Map.of("ENTRY", "B", "STOP", "S", "EXIT", "X");
 
     private record Role(ManagedPosition position, String role) {
+    }
+
+    /** A straddle's combined exit: fractions above / below the combined premium paid. */
+    private record Bracket(double target, double stop) {
     }
 
     private final String account;
@@ -76,6 +85,7 @@ public final class OrderManager implements Consumer<OrderUpdate> {
     private final Deque<Instant> recentOrders = new ArrayDeque<>();
     private final Set<String> terminal = new HashSet<>();
     private final Map<Long, double[]> lastQuotes = new HashMap<>();
+    private final Map<String, Bracket> brackets = new HashMap<>();
     private int sequence;
 
     /**
@@ -108,10 +118,11 @@ public final class OrderManager implements Consumer<OrderUpdate> {
 
     /** What {@code strategyId} holds in {@code underlying} (never another strategy's position). */
     public synchronized PositionView view(String strategyId, String underlying) {
-        ManagedPosition position = live.get(key(strategyId, underlying));
-        if (position == null) {
+        List<ManagedPosition> held = positionsOf(strategyId, underlying);
+        if (held.isEmpty()) {
             return PositionView.FLAT;
         }
+        ManagedPosition position = held.getFirst();
         return new PositionView(true, position.side, position.lots(), position.averageCost, position.openedAt);
     }
 
@@ -133,18 +144,63 @@ public final class OrderManager implements Consumer<OrderUpdate> {
      */
     public synchronized RiskDecision enter(String strategyId, String underlying, OptionSide side, Contract contract,
                                            int lots, String stage, MarketContext market, double stopPct) {
-        String key = key(strategyId, underlying);
-        if (live.containsKey(key)) {
+        if (!positionsOf(strategyId, underlying).isEmpty()) {
             return reject(strategyId, underlying, "ENTER", strategyId + " already holds a position in " + underlying);
         }
-        RiskDecision decision = riskCheck(strategyId, underlying, false, lots, lotsHeld(underlying), contract, market, null);
+        RiskDecision decision = riskCheck(strategyId, underlying, false, lots, lotsHeld(underlying), contract, market, null,
+                lots * contract.lotSize() * askOf(contract), live.size());
         if (!decision.approved()) {
             return reject(strategyId, underlying, "ENTER " + side, decision.reason());
         }
         ManagedPosition position = new ManagedPosition(strategyId, underlying, side, contract, clock.get());
         position.stopFraction = Double.isNaN(stopPct) ? stopFraction : stopPct / 100.0;
-        live.put(key, position);
+        live.put(position.key(), position);
         buy(position, lots, stage);
+        return decision;
+    }
+
+    /**
+     * Buys a call and a put together for {@code strategyId}: as many lots of each as {@code premiumBudget}
+     * pays for at the current asks, capped by the capital not already in use. Neither leg gets a
+     * resting stop; the pair is closed when its combined bid reaches {@code targetPct} above or
+     * {@code stopPct} below the combined premium paid (checked on every quote).
+     */
+    public synchronized RiskDecision enterStraddle(String strategyId, String underlying, Contract call, Contract put,
+                                                   double premiumBudget, String stage, MarketContext market,
+                                                   double targetPct, double stopPct) {
+        if (!positionsOf(strategyId, underlying).isEmpty()) {
+            return reject(strategyId, underlying, "ENTER STRADDLE", strategyId + " already holds a position in "
+                    + underlying);
+        }
+        double callAsk = askOf(call);
+        double putAsk = askOf(put);
+        if (!(callAsk > 0) || !(putAsk > 0)) {
+            return reject(strategyId, underlying, "ENTER STRADDLE", "no ask for " + call.symbol() + " / " + put.symbol());
+        }
+        double perLot = (callAsk + putAsk) * call.lotSize();
+        double free = limits.capital() - premiumInUse();
+        int lots = (int) Math.floor(Math.min(premiumBudget, free) / perLot);
+        if (lots < 1) {
+            return reject(strategyId, underlying, "ENTER STRADDLE", String.format(
+                    "capital: %.0f free, one lot of each leg costs %.0f", free, perLot));
+        }
+        int held = lotsHeld(underlying);
+        RiskDecision decision = riskCheck(strategyId, underlying, false, lots, held, call, market, null,
+                lots * perLot, live.size());
+        if (decision.approved()) {
+            decision = riskCheck(strategyId, underlying, false, lots, held + lots, put, market, null, 0, live.size() + 1);
+        }
+        if (!decision.approved()) {
+            return reject(strategyId, underlying, "ENTER STRADDLE", decision.reason());
+        }
+        for (Contract contract : List.of(call, put)) {
+            OptionSide side = contract == call ? OptionSide.CE : OptionSide.PE;
+            ManagedPosition leg = new ManagedPosition(strategyId, underlying, side, contract, clock.get(), side.name());
+            leg.stopFraction = 0;
+            live.put(leg.key(), leg);
+            buy(leg, lots, stage);
+        }
+        brackets.put(key(strategyId, underlying), new Bracket(targetPct / 100.0, stopPct / 100.0));
         return decision;
     }
 
@@ -154,13 +210,13 @@ public final class OrderManager implements Consumer<OrderUpdate> {
 
     public synchronized RiskDecision add(String strategyId, String underlying, int lots, String stage,
                                          MarketContext market) {
-        ManagedPosition position = live.get(key(strategyId, underlying));
+        ManagedPosition position = live.get(key(strategyId, underlying) + "|");
         if (position == null || (position.state != ManagedPosition.State.OPEN
                 && position.state != ManagedPosition.State.OPENING)) {
             return reject(strategyId, underlying, "ADD", "no open position to add to");
         }
         RiskDecision decision = riskCheck(strategyId, underlying, true, lots, lotsHeld(underlying), position.contract, market,
-                position);
+                position, lots * position.contract.lotSize() * askOf(position.contract), live.size());
         if (!decision.approved()) {
             return reject(strategyId, underlying, "ADD", decision.reason());
         }
@@ -173,11 +229,16 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         exit(strategy, underlying, reason);
     }
 
-    /** Closes {@code strategyId}'s position in {@code underlying}; always allowed. */
+    /** Closes {@code strategyId}'s position in {@code underlying} (both legs of a straddle); always allowed. */
     public synchronized void exit(String strategyId, String underlying, String reason) {
-        ManagedPosition position = live.get(key(strategyId, underlying));
-        if (position == null || position.state == ManagedPosition.State.CANCELLING_FOR_EXIT
-                || position.state == ManagedPosition.State.EXITING) {
+        for (ManagedPosition position : positionsOf(strategyId, underlying)) {
+            exit(position, reason);
+        }
+    }
+
+    private void exit(ManagedPosition position, String reason) {
+        if (position.state == ManagedPosition.State.CANCELLING_FOR_EXIT
+                || position.state == ManagedPosition.State.EXITING || position.state == ManagedPosition.State.CLOSED) {
             return;
         }
         position.exitReason = reason;
@@ -197,8 +258,36 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         }
     }
 
+    /** The strategy-and-underlying part of a position key (a straddle's legs share it). */
     private static String key(String strategyId, String underlying) {
         return strategyId + "|" + underlying;
+    }
+
+    /** Every live position of {@code strategyId} in {@code underlying}: one, or a straddle's two legs. */
+    private List<ManagedPosition> positionsOf(String strategyId, String underlying) {
+        List<ManagedPosition> held = new ArrayList<>();
+        for (ManagedPosition position : live.values()) {
+            if (position.strategy.equals(strategyId) && position.underlying.equals(underlying)) {
+                held.add(position);
+            }
+        }
+        return held;
+    }
+
+    /** Capital tied up by every live position (the capital check counts all strategies). */
+    private double premiumInUse() {
+        double total = 0;
+        for (ManagedPosition position : live.values()) {
+            // while entries work, what they asked for; afterwards what was actually paid
+            total += working(position.entryOrders).isEmpty() ? position.averageCost * position.quantity
+                    : position.premiumInUse();
+        }
+        return total;
+    }
+
+    private double askOf(Contract contract) {
+        double[] quote = lastQuotes.get(contract.token());
+        return quote != null ? quote[1] : Double.NaN;
     }
 
     /** Lots every strategy holds in {@code underlying} (the per-underlying risk limit is shared). */
@@ -227,22 +316,108 @@ public final class OrderManager implements Consumer<OrderUpdate> {
                 position.lastPrice = tick.lastPrice();
             }
         }
+        checkBrackets();
         onTimer(tick.receivedAt());
+    }
+
+    /**
+     * Closes a straddle once its legs' combined bid reaches the target or the stop against the
+     * combined premium paid. Checked only when no entry order is still working (the size is final).
+     */
+    private void checkBrackets() {
+        for (Map.Entry<String, Bracket> entry : List.copyOf(brackets.entrySet())) {
+            String[] parts = entry.getKey().split("\\|", 2);
+            List<ManagedPosition> legs = positionsOf(parts[0], parts[1]);
+            if (legs.isEmpty()) {
+                brackets.remove(entry.getKey());
+                continue;
+            }
+            double paid = 0;
+            double value = 0;
+            for (ManagedPosition leg : legs) {
+                if (leg.state != ManagedPosition.State.OPEN || !working(leg.entryOrders).isEmpty()) {
+                    paid = Double.NaN;
+                    break;
+                }
+                double[] quote = lastQuotes.get(leg.contract.token());
+                double bid = quote != null ? quote[0] : leg.lastBid;
+                paid += leg.averageCost * leg.quantity;
+                value += bid * leg.quantity;
+            }
+            if (!(paid > 0) || Double.isNaN(value)) {
+                continue;
+            }
+            Bracket bracket = entry.getValue();
+            String reason = value >= paid * (1 + bracket.target()) ? "TARGET_" + Math.round(bracket.target() * 100)
+                    : value <= paid * (1 - bracket.stop()) ? "STOP_" + Math.round(bracket.stop() * 100) : null;
+            if (reason != null) {
+                brackets.remove(entry.getKey());
+                for (ManagedPosition leg : legs) {
+                    exit(leg, reason);
+                }
+            }
+        }
     }
 
     public synchronized void onTimer(Instant now) {
         for (ManagedPosition position : List.copyOf(live.values())) {
-            for (String id : working(position.entryOrders)) {
-                Instant sent = position.orderSentAt.get(id);
-                if (sent != null && Duration.between(sent, now).toSeconds() >= limits.entryTimeoutSec()) {
-                    broker.cancel(id);
-                    position.orderSentAt.remove(id);
+            if (!position.leg.isEmpty()) {
+                chaseLegEntry(position, now);
+            } else {
+                for (String id : working(position.entryOrders)) {
+                    Instant sent = position.orderSentAt.get(id);
+                    if (sent != null && Duration.between(sent, now).toSeconds() >= limits.entryTimeoutSec()) {
+                        broker.cancel(id);
+                        position.orderSentAt.remove(id);
+                    }
                 }
             }
             if (position.state == ManagedPosition.State.EXITING && position.exitPricedAt != null
                     && Duration.between(position.exitPricedAt, now).toSeconds() >= limits.exitChaseSec()) {
                 chaseExit(position);
             }
+        }
+    }
+
+    /**
+     * A straddle leg must fill or the pair is not a straddle: its unfilled entries are re-priced at
+     * the current ask (the last attempt 2 % through it) every exit-chase interval, and cancelled after
+     * the exit-chase limit; a leg left with nothing bought then closes its partner (see close()).
+     */
+    private void chaseLegEntry(ManagedPosition position, Instant now) {
+        if (position.state != ManagedPosition.State.OPENING && position.state != ManagedPosition.State.OPEN) {
+            return;
+        }
+        List<String> entries = working(position.entryOrders);
+        if (entries.isEmpty()) {
+            return;
+        }
+        Instant sent = null;
+        for (String id : entries) {
+            Instant at = position.orderSentAt.get(id);
+            sent = sent == null || (at != null && at.isAfter(sent)) ? at : sent;
+        }
+        if (sent == null || Duration.between(sent, now).toSeconds() < limits.exitChaseSec()) {
+            return;
+        }
+        if (position.entryChases >= limits.exitChaseMax()) {
+            for (String id : entries) {
+                broker.cancel(id);
+                position.orderSentAt.remove(id);
+            }
+            return;
+        }
+        double ask = askOf(position.contract);
+        if (!(ask > 0)) {
+            return;
+        }
+        position.entryChases++;
+        double limit = position.entryChases == limits.exitChaseMax() ? ask * 1.02
+                : ask + limits.entryBufferTicks() * position.contract.tickSize();
+        limit = position.contract.roundUp(limit);
+        for (String id : entries) {
+            broker.modify(id, position.orderQuantity.getOrDefault(id, 0L), limit, 0);
+            position.orderSentAt.put(id, now);
         }
     }
 
@@ -353,7 +528,8 @@ public final class OrderManager implements Consumer<OrderUpdate> {
     // ---------------------------------------------------------------- internals
 
     private RiskDecision riskCheck(String strategyId, String underlying, boolean add, int lots, int held,
-                                   Contract contract, MarketContext market, ManagedPosition existing) {
+                                   Contract contract, MarketContext market, ManagedPosition existing, double premium,
+                                   int openPositions) {
         Instant now = clock.get();
         while (!recentOrders.isEmpty() && Duration.between(recentOrders.peekFirst(), now).toSeconds() >= 60) {
             recentOrders.removeFirst();
@@ -371,9 +547,9 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         if (bid > 0 && ask > 0) {
             spreadPct = (ask - bid) / ((ask + bid) / 2) * 100;
         }
-        return risk.checkEntry(new RiskCheck(account, strategyId, underlying, add, lots, held, live.size(), dayPnl(),
-                market.secondsSinceSpot(), market.secondsSinceOption(), spreadPct, market.time(), recentOrders.size()),
-                now);
+        return risk.checkEntry(new RiskCheck(account, strategyId, underlying, add, lots, held, openPositions, dayPnl(),
+                market.secondsSinceSpot(), market.secondsSinceOption(), spreadPct, market.time(), recentOrders.size(),
+                Double.isNaN(premium) ? 0 : premium, premiumInUse()), now);
     }
 
 
@@ -395,6 +571,7 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         }
         double limit = position.contract.roundUp(ask + limits.entryBufferTicks() * position.contract.tickSize());
         long remaining = (long) lots * position.contract.lotSize();
+        position.committedPremium += remaining * ask;
         long slice = (long) position.contract.maxLotsPerOrder() * position.contract.lotSize();
         while (remaining > 0) {
             long quantity = Math.min(remaining, slice);
@@ -408,6 +585,9 @@ public final class OrderManager implements Consumer<OrderUpdate> {
      * modified in place (never two live stops); only above the freeze quantity is it replaced.
      */
     private void protect(ManagedPosition position) {
+        if (position.stopFraction <= 0) {
+            return; // a straddle leg: the pair's combined bracket protects it
+        }
         double trigger = position.contract.roundDown(position.averageCost * (1 - position.stopFraction));
         double limit = position.contract.roundDown(trigger * (1 - limits.stopLimitOffsetPct() / 100));
         long slice = (long) position.contract.maxLotsPerOrder() * position.contract.lotSize();
@@ -484,6 +664,7 @@ public final class OrderManager implements Consumer<OrderUpdate> {
                 position.strategy);
         roles.put(id, new Role(position, role));
         bucket.add(id);
+        position.orderQuantity.put(id, quantity);
         position.orderSentAt.put(id, clock.get());
         recentOrders.addLast(clock.get());
         listener.orderSent(position, role, request);
@@ -515,9 +696,16 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         }
         position.state = ManagedPosition.State.CLOSED;
         position.closedAt = clock.get();
-        live.remove(key(position.strategy, position.underlying));
+        live.remove(position.key());
         closed.add(position);
         listener.closed(position);
+        if (!position.leg.isEmpty() && "ENTRY_NOT_FILLED".equals(position.exitReason)) {
+            // one leg of a straddle never filled: never keep the other as a naked position
+            brackets.remove(key(position.strategy, position.underlying));
+            for (ManagedPosition partner : positionsOf(position.strategy, position.underlying)) {
+                exit(partner, "LEG_NOT_FILLED");
+            }
+        }
     }
 
     private RiskDecision reject(String strategyId, String underlying, String intent, String reason) {

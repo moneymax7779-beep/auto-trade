@@ -27,6 +27,7 @@ public final class ManagedPosition {
     final Set<String> exitOrders = new LinkedHashSet<>();
     final Map<String, Instant> orderSentAt = new HashMap<>();
     final Map<String, Long> orderFilled = new HashMap<>();
+    final Map<String, Long> orderQuantity = new HashMap<>();
 
     State state = State.OPENING;
     long quantity;
@@ -38,18 +39,45 @@ public final class ManagedPosition {
     double lastAsk = Double.NaN;
     double lastPrice = Double.NaN;
     String exitReason;
-    /** This position's resting premium stop as a fraction below average cost. */
+    /** This position's resting premium stop as a fraction below average cost; 0 = none (a straddle leg). */
     double stopFraction;
+    /** Premium asked for by entries so far (ask × quantity at sending), for the capital check. */
+    double committedPremium;
     Instant closedAt;
     Instant exitPricedAt;
     int exitChases;
+    /** Times a straddle leg's unfilled entries were re-priced at the new ask. */
+    int entryChases;
+
+    /** "" for a single-leg position; the leg's side for one leg of a straddle. */
+    final String leg;
 
     ManagedPosition(String strategy, String underlying, OptionSide side, Contract contract, Instant openedAt) {
+        this(strategy, underlying, side, contract, openedAt, "");
+    }
+
+    ManagedPosition(String strategy, String underlying, OptionSide side, Contract contract, Instant openedAt,
+                    String leg) {
+        this.leg = leg;
         this.strategy = strategy;
         this.underlying = underlying;
         this.side = side;
         this.contract = contract;
         this.openedAt = openedAt;
+    }
+
+    /** The OMS key: strategy, underlying and leg. */
+    String key() {
+        return strategy + "|" + underlying + "|" + leg;
+    }
+
+    /** Capital this position ties up: what it paid, or what its entries asked for while they work. */
+    double premiumInUse() {
+        return Math.max(committedPremium, averageCost * quantity);
+    }
+
+    public String leg() {
+        return leg;
     }
 
     public String underlying() {

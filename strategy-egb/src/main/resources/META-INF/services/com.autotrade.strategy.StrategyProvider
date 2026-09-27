@@ -1,1 +1,2 @@
 com.autotrade.strategy.egb.ExpiryGammaProvider
+com.autotrade.strategy.egb.ExpiryBreakoutStraddleProvider

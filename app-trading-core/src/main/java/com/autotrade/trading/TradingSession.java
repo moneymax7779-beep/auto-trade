@@ -43,6 +43,7 @@ import com.autotrade.risk.RiskLimits;
 import com.autotrade.sim.CostModel;
 import com.autotrade.sim.FillModel;
 import com.autotrade.strategy.Decision;
+import com.autotrade.strategy.OptionSide;
 import com.autotrade.strategy.OrderIntent;
 import com.autotrade.strategy.Strategy;
 import com.autotrade.strategy.StrategyFactory;
@@ -277,7 +278,7 @@ public final class TradingSession {
                      boolean stale, LocalTime time) {
         String strategyId = slot.factory().id();
         if (stale && intent.action() != OrderIntent.Action.EXIT) {
-            rejected(strategyId, underlying, intent.action() + " " + intent.side(), "snapshot "
+            rejected(strategyId, underlying, intent.action() + (intent.side() == null ? "" : " " + intent.side()), "snapshot "
                     + Duration.between(snapshot.time(), Instant.now()).toSeconds() + " s old (catching up)");
             return;
         }
@@ -292,6 +293,22 @@ public final class TradingSession {
                 RiskDecision result = oms.enter(strategyId, underlying, intent.side(), contract.get(), intent.lots(),
                         intent.stage().name(), market, intent.stopPctOr(slot.factory().premiumStopPct()));
                 logDecision(strategyId, underlying, intent, result, contract.get());
+            }
+            case ENTER_STRADDLE -> {
+                double atm = snapshot.options().atmStrike();
+                double step = snapshot.options().strikeStep();
+                var call = contracts.find(underlying, intent.legStrike(OptionSide.CE, atm, step), OptionSide.CE);
+                var put = contracts.find(underlying, intent.legStrike(OptionSide.PE, atm, step), OptionSide.PE);
+                if (call.isEmpty() || put.isEmpty()) {
+                    rejected(strategyId, underlying, "ENTER STRADDLE", "no quotes for the chosen strikes yet");
+                    return;
+                }
+                RiskDecision result = oms.enterStraddle(strategyId, underlying, call.get(), put.get(),
+                        intent.premiumBudget(), intent.stage().name(), market, intent.targetPct(),
+                        intent.stopPctOr(slot.factory().premiumStopPct()));
+                log.info("{} {} {} ENTER STRADDLE {} + {} budget {} {}", time, underlying, strategyId,
+                        call.get().symbol(), put.get().symbol(), Math.round(intent.premiumBudget()),
+                        result.approved() ? "APPROVED" : "REJECTED: " + result.reason());
             }
             case ADD -> logDecision(strategyId, underlying, intent,
                     oms.add(strategyId, underlying, intent.lots(), intent.stage().name(), market), null);

@@ -97,7 +97,8 @@ final class TradeStore {
     void decision(long session, String strategyId, Decision decision, double spot) {
         StringBuilder orders = new StringBuilder();
         for (OrderIntent order : decision.orders()) {
-            orders.append(orders.isEmpty() ? "" : " ").append(order.action()).append(':').append(order.side())
+            orders.append(orders.isEmpty() ? "" : " ").append(order.action()).append(':')
+                    .append(order.side() == null ? "CE+PE" : order.side())
                     .append(':').append(order.lots()).append(':').append(order.reason());
         }
         jdbc.update("insert into trade.decision (session_id, underlying, snap_time, spot, ce_stage, pe_stage, ce_scores, "
