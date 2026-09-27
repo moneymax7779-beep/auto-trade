@@ -252,6 +252,7 @@ function LastSession() {
   const summary = session.summary ?? {};
   const statusTone = session.status === "DONE" ? "muted" : session.status === "RUNNING" ? "up" : "warn";
   const closed = positions.data ?? [];
+  const trades = groupTrades(closed);
 
   return (
     <div className="space-y-4">
@@ -263,8 +264,9 @@ function LastSession() {
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
           <Stat label="Status" value={session.status} tone={statusTone} />
           <Stat label="Net P&L (after costs)" value={<Pnl value={summary.net ?? null} />} />
-          <Stat label="Trades" value={groupTrades(closed).length} />
-          <Stat label="Wins" value={summary.wins ?? "–"} />
+          {/* a straddle is one trade: count trades and wins over grouped legs, not positions */}
+          <Stat label="Trades" value={trades.length} />
+          <Stat label="Wins" value={positions.isLoading ? "–" : trades.filter((t) => t.net > 0).length} />
           <Stat label="Costs" value={rupees(summary.costs)} tone="muted" />
           <Stat label="Market events" value={summary.events != null ? summary.events.toLocaleString("en-IN") : "–"} tone="muted" />
         </div>
