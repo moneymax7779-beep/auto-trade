@@ -5,6 +5,7 @@ import { fixed, get, type DecisionRow, type OrderRow, type SessionRow, type Trad
 import { TimelineChart } from "../components/TimelineChart";
 import { ErrorNote, Loading, Panel, Pnl, StageBadge, Table } from "../components/ui";
 import { markersFromOrders } from "./markers";
+import { exitMarkers, TradesTable } from "../components/TradesTable";
 
 export function SessionsPage() {
   const sessions = useQuery({ queryKey: ["sessions"], queryFn: () => get<SessionRow[]>("/api/sessions") });
@@ -57,13 +58,19 @@ export function SessionDetailPage() {
   const rows = decisions.data ?? [];
 
   const price = useMemo(() => [{ name: underlying, color: "--color-text", points: rows.map((r) => ({ t: r.t, value: r.spot })) }], [rows, underlying]);
+  // Stored scores use −1 for "not computed" (e.g. the straddle has none): a gap, not a value.
+  const score = (v: number | undefined) => (v == null || v < 0 ? null : v);
   const scores = useMemo(() => [
-    { name: "CE confirm", color: "#22c55e", points: rows.map((r) => ({ t: r.t, value: r.ce_scores?.confirm ?? null })) },
-    { name: "PE confirm", color: "#ef4444", points: rows.map((r) => ({ t: r.t, value: r.pe_scores?.confirm ?? null })) },
-    { name: "CE runner", color: "#86efac", width: 1, dashed: true, points: rows.map((r) => ({ t: r.t, value: r.ce_scores?.runner ?? null })) },
-    { name: "PE runner", color: "#fca5a5", width: 1, dashed: true, points: rows.map((r) => ({ t: r.t, value: r.pe_scores?.runner ?? null })) },
+    { name: "CE confirm", color: "#22c55e", points: rows.map((r) => ({ t: r.t, value: score(r.ce_scores?.confirm) })) },
+    { name: "PE confirm", color: "#ef4444", points: rows.map((r) => ({ t: r.t, value: score(r.pe_scores?.confirm) })) },
+    { name: "CE runner", color: "#86efac", width: 1, dashed: true, points: rows.map((r) => ({ t: r.t, value: score(r.ce_scores?.runner) })) },
+    { name: "PE runner", color: "#fca5a5", width: 1, dashed: true, points: rows.map((r) => ({ t: r.t, value: score(r.pe_scores?.runner) })) },
   ], [rows]);
-  const markers = useMemo(() => markersFromOrders(rows), [rows]);
+  const hasScores = scores.some((line) => line.points.some((p) => p.value != null));
+  // Entries from the strategy's orders; exits from the positions (they include the executor's stops
+  // and a straddle's combined target or stop, which no strategy order announces).
+  const markers = useMemo(() => [...markersFromOrders(rows, false),
+    ...exitMarkers(positions.data ?? [], underlying, strategy)], [rows, positions.data, underlying, strategy]);
   const changes = useMemo(() => rows.filter((r, i) => i === 0 || r.ce_stage !== rows[i - 1].ce_stage || r.pe_stage !== rows[i - 1].pe_stage), [rows]);
 
   return (
@@ -87,8 +94,14 @@ export function SessionDetailPage() {
           rows.length === 0 ? <p className="text-sm text-muted">No decisions for {underlying}.</p> : (
             <>
               <TimelineChart date={session?.session_date ?? "2026-01-01"} lines={price} markers={markers} height={300} />
-              <div className="mt-3 text-xs text-muted">Confirm and runner scores (0–100) over the day</div>
-              <TimelineChart date={session?.session_date ?? "2026-01-01"} lines={scores} height={180} />
+              {hasScores ? (
+                <>
+                  <div className="mt-3 text-xs text-muted">Confirm and runner scores (0–100) over the day</div>
+                  <TimelineChart date={session?.session_date ?? "2026-01-01"} lines={scores} height={180} />
+                </>
+              ) : (
+                <p className="mt-3 text-xs text-muted">{strategy} has no confirm or runner scores; its conditions are in the stage changes below.</p>
+              )}
             </>
           )}
       </Panel>
@@ -103,17 +116,8 @@ export function SessionDetailPage() {
             { key: "o", label: "Orders", render: (r) => <span className="num text-xs">{r.orders ?? ""}</span> },
           ]} />
         </Panel>
-        <Panel title="Positions">
-          <Table rows={positions.data ?? []} empty="No positions." columns={[
-            { key: "u", label: "Index", render: (r) => r.underlying },
-            { key: "s", label: "Contract", render: (r) => r.symbol },
-            { key: "st", label: "Stages", render: (r) => r.stages.join(" → ") },
-            { key: "o", label: "Opened", render: (r) => r.opened_at?.slice(11) },
-            { key: "c", label: "Closed", render: (r) => r.closed_at?.slice(11) ?? "–" },
-            { key: "x", label: "Exit", render: (r) => r.exit_reason ?? "–" },
-            { key: "k", label: "Costs", align: "right", render: (r) => fixed(r.costs, 0) },
-            { key: "n", label: "Net", align: "right", render: (r) => <Pnl value={r.net} /> },
-          ]} />
+        <Panel title="Trades">
+          <TradesTable rows={positions.data ?? []} showStrategy={strategyIds.length > 1} empty="No trades." />
         </Panel>
       </div>
 

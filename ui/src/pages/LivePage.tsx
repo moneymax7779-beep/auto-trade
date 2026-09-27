@@ -6,6 +6,7 @@ import {
   type SessionRow, type Status, type TradePositionRow,
 } from "../api";
 import { ConfirmButton, ErrorNote, Loading, Panel, Pnl, ScoreBar, SignedGauge, StageBadge, Stat, Table } from "../components/ui";
+import { groupTrades, TradesTable } from "../components/TradesTable";
 
 export function LivePage() {
   const queryClient = useQueryClient();
@@ -262,7 +263,7 @@ function LastSession() {
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
           <Stat label="Status" value={session.status} tone={statusTone} />
           <Stat label="Net P&L (after costs)" value={<Pnl value={summary.net ?? null} />} />
-          <Stat label="Trades" value={summary.positions ?? closed.length} />
+          <Stat label="Trades" value={groupTrades(closed).length} />
           <Stat label="Wins" value={summary.wins ?? "–"} />
           <Stat label="Costs" value={rupees(summary.costs)} tone="muted" />
           <Stat label="Market events" value={summary.events != null ? summary.events.toLocaleString("en-IN") : "–"} tone="muted" />
@@ -297,21 +298,7 @@ function LastSession() {
       )}
 
       <Panel title="Trades">
-        <Table
-          rows={closed}
-          empty="No trades in this session."
-          columns={[
-            ...(several ? [{ key: "st", label: "Strategy", render: (r: TradePositionRow) => r.strategy_id ?? "–" }] : []),
-            { key: "u", label: "Index", render: (r: TradePositionRow) => r.underlying },
-            { key: "s", label: "Contract", render: (r: TradePositionRow) => r.symbol },
-            { key: "g", label: "Stages", render: (r: TradePositionRow) => r.stages.join(" → ") },
-            { key: "o", label: "Opened", render: (r: TradePositionRow) => r.opened_at.slice(11, 16) },
-            { key: "c", label: "Closed", render: (r: TradePositionRow) => r.closed_at?.slice(11, 16) ?? "open" },
-            { key: "x", label: "Exit", render: (r: TradePositionRow) => r.exit_reason ?? "–" },
-            { key: "k", label: "Costs", align: "right", render: (r: TradePositionRow) => rupees(r.costs) },
-            { key: "n", label: "Net", align: "right", render: (r: TradePositionRow) => <Pnl value={r.net} /> },
-          ]}
-        />
+        <TradesTable rows={closed} showStrategy={several} empty="No trades in this session." />
       </Panel>
       {(rejections.data ?? []).length > 0 && (
         <Panel title={`Refusals (${rejections.data!.length})`}>

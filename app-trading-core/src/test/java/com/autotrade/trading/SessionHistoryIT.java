@@ -112,4 +112,16 @@ class SessionHistoryIT {
                 "SENSEX/early-confirm-runner/15:10/IDLE");
         assertThat(rows.getFirst().get("ce_scores").toString()).contains("\"early\"").contains("near_level");
     }
+
+    @Test
+    void aStraddleEntryIsLoggedWithItsBudget() {
+        TradeStore store = new TradeStore(dataSource);
+        long id = session(store, "PAPER-4", "PAPER_REPLAY");
+        Decision base = decision("NIFTY", "08:24", Stage.CONFIRMED);
+        store.decision(id, "expiry-breakout-straddle", new Decision(base.time(), base.underlying(), base.state(),
+                base.ce(), base.pe(), List.of(com.autotrade.strategy.OrderIntent.straddle(0, 500_000, 30, 20,
+                        Stage.CONFIRMED, "BREAKOUT_DOWN"))), 23307.8);
+        assertThat(new JdbcTemplate(dataSource).queryForObject("select orders from trade.decision where session_id = ?",
+                String.class, id)).isEqualTo("ENTER_STRADDLE:CE+PE:500000:BREAKOUT_DOWN");
+    }
 }

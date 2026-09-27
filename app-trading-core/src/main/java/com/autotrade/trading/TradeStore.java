@@ -99,7 +99,10 @@ final class TradeStore {
         for (OrderIntent order : decision.orders()) {
             orders.append(orders.isEmpty() ? "" : " ").append(order.action()).append(':')
                     .append(order.side() == null ? "CE+PE" : order.side())
-                    .append(':').append(order.lots()).append(':').append(order.reason());
+                    // a straddle is sized by its premium budget (rupees), not in lots
+                    .append(':').append(order.action() == OrderIntent.Action.ENTER_STRADDLE
+                            ? Math.round(order.premiumBudget()) : order.lots())
+                    .append(':').append(order.reason());
         }
         jdbc.update("insert into trade.decision (session_id, underlying, snap_time, spot, ce_stage, pe_stage, ce_scores, "
                         + "pe_scores, state, orders, strategy_id) values (?,?,?,?,?,?,?::jsonb,?::jsonb,?::jsonb,?,?) "
