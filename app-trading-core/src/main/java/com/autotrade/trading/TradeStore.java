@@ -56,6 +56,18 @@ final class TradeStore {
                 status, JSON.writeValueAsString(summary), error, id);
     }
 
+    /**
+     * Live sessions a crash or restart left RUNNING (no process will ever end them): marked STOPPED,
+     * ended at their last recorded decision (or their start), so nothing shows them as live.
+     * Replay sessions run in their own processes and are left alone.
+     */
+    int closeOrphanedLiveSessions(String account) {
+        return jdbc.update("update trade.session s set status = 'STOPPED', ended_at = coalesce((select max(d.snap_time) "
+                + "from trade.decision d where d.session_id = s.id), s.started_at), error = coalesce(s.error, "
+                + "'not closed by its process (service restarted or crashed); closed at the next service start') "
+                + "where s.mode = 'PAPER_LIVE' and s.status = 'RUNNING' and s.account = ?", account);
+    }
+
     void order(long session, ManagedPosition position, String role, OrderRequest request, Instant at) {
         jdbc.update("insert into trade.orders (client_order_id, session_id, underlying, option_side, role, order_side, "
                         + "order_type, symbol, quantity, limit_price, trigger_price, sent_at, strategy_id) "

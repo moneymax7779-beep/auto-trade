@@ -96,6 +96,20 @@ export interface DecisionRow {
   orders: string | null;
 }
 
+/** The last decision of one underlying and strategy in a session (the Live page's last-session view). */
+export interface LastDecisionRow extends DecisionRow {
+  underlying: string;
+  strategy_id: string;
+}
+
+export interface RejectionRow {
+  strategy_id: string | null;
+  underlying: string;
+  intent: string;
+  reason: string;
+  at: string;
+}
+
 export interface OrderRow {
   client_order_id: string;
   underlying: string;
@@ -114,6 +128,7 @@ export interface OrderRow {
 }
 
 export interface TradePositionRow {
+  strategy_id?: string | null;
   underlying: string;
   option_side: string;
   symbol: string;

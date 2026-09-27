@@ -117,7 +117,10 @@ class SessionRunner implements ApplicationRunner {
         switch (mode) {
             case "serve" -> log.info("serving the UI and history API only (no trading session); open http://127.0.0.1:{}",
                     context.getEnvironment().getProperty("server.port", "8095"));
-            case "auto" -> startScheduler();
+            case "auto" -> {
+                closeOrphanedLiveSessions();
+                startScheduler();
+            }
             case "replay" -> {
                 LocalDate session = LocalDate.parse(first(args, "session", LocalDate.now(MarketTime.IST).toString()));
                 Running replay = start(session, true);
@@ -130,8 +133,17 @@ class SessionRunner implements ApplicationRunner {
             }
             default -> {
                 LocalDate session = LocalDate.parse(first(args, "session", LocalDate.now(MarketTime.IST).toString()));
+                closeOrphanedLiveSessions();
                 start(session, false);
             }
+        }
+    }
+
+    /** This process is the only live one for the account: any live session still RUNNING was orphaned. */
+    private void closeOrphanedLiveSessions() {
+        int closed = new TradeStore(target).closeOrphanedLiveSessions(properties.trading().account());
+        if (closed > 0) {
+            log.warn("marked {} live session(s) left RUNNING by an earlier crash or restart as STOPPED", closed);
         }
     }
 

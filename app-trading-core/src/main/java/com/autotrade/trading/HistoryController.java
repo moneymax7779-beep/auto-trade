@@ -60,6 +60,15 @@ class HistoryController {
                 + "order by snap_time, strategy_id", id, underlying, strategy, strategy);
     }
 
+    /** The last decision of every underlying and strategy in the session: where each ended the day. */
+    @GetMapping("/sessions/{id}/last-decisions")
+    List<Map<String, Object>> lastDecisions(@PathVariable long id) {
+        return query("select distinct on (underlying, strategy_id) underlying, strategy_id, to_char(snap_time at time zone '"
+                + IST + "', 'HH24:MI') t, spot, ce_stage, pe_stage, ce_scores::text ce_scores, pe_scores::text pe_scores, "
+                + "state::text state, orders from trade.decision where session_id = ? "
+                + "order by underlying, strategy_id, snap_time desc", id);
+    }
+
     @GetMapping("/sessions/{id}/orders")
     List<Map<String, Object>> orders(@PathVariable long id) {
         return query("select o.client_order_id, o.strategy_id, o.underlying, o.option_side, o.role, o.order_side, "
