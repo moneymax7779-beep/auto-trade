@@ -71,7 +71,9 @@ public record FeatureConfig(
         FeatureExtensions extensions,
         Map<LocalDate, String> marketEvents,
         String casSettlementMethod,
-        Boolean indexIepAvailable) {
+        Boolean indexIepAvailable,
+        /** v7: seed the 1- and 3-minute ATR from the previous session's bars (ready at 09:15, not ~09:57). */
+        boolean atrSeedPreviousSession) {
 
     public static FeatureConfig from(ThresholdConfig features, ThresholdConfig exchange) {
         Map<String, LocalTime[]> windows = new LinkedHashMap<>();
@@ -143,7 +145,8 @@ public record FeatureConfig(
                 FeatureExtensions.from(features),
                 events(exchange),
                 exchange.has("cas.settlement_method") ? exchange.getString("cas.settlement_method") : null,
-                exchange.has("cas.index_iep_available") ? exchange.getBoolean("cas.index_iep_available") : null);
+                exchange.has("cas.index_iep_available") ? exchange.getBoolean("cas.index_iep_available") : null,
+                features.has("structure.atr_seed_previous_session") && features.getBoolean("structure.atr_seed_previous_session"));
     }
 
     /** True when the file defines the v3 feature sections. */

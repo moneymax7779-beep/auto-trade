@@ -86,6 +86,13 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
         Instant open = clock.sessionOpen(session);
         this.structure = new StructureState(config, open, history.previousSession(underlying, session,
                 config.pdhPdlUntil()));
+        java.util.List<java.util.List<com.autotrade.core.history.MinuteBar>> previous = history.spotMinuteBars(underlying, session, 1);
+        if (!previous.isEmpty()) {
+            structure.previousSessionBars(previous.getFirst());   // prior-day opening range (opening-drive)
+            if (config.atrSeedPreviousSession()) {
+                structure.seedAtr(previous.getFirst());
+            }
+        }
         this.futures = new FuturesState(config, underlying, session, open, new VolumeProfile(
                 history.futuresMinuteVolumes(underlying, session, config.rvolLookbackSessions())));
         this.options = new OptionChainState(config, clock, session);

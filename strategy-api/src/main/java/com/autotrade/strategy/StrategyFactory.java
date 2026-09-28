@@ -28,6 +28,14 @@ public interface StrategyFactory {
         return Double.NaN;
     }
 
+    /**
+     * The budget on a day when any traded underlying expires (the executor decides that from the
+     * option quotes); NaN = {@link #premiumBudget()} every day.
+     */
+    default double expiryDayPremiumBudget() {
+        return Double.NaN;
+    }
+
     /** The lots a full position of this strategy adds up to (the unit of {@link #premiumBudget()}). */
     default int intendedLots() {
         return 0;

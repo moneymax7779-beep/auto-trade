@@ -81,6 +81,10 @@ public final class StructureState {
     private final java.util.List<Double> earlierRangesSorted = new java.util.ArrayList<>();
     private double latestRange = Double.NaN;
     private final Deque<Long> vwapCrossings = new ArrayDeque<>();
+    private final java.time.LocalDate previousSessionDate;
+    private double prevOrHigh = Double.NaN;
+    private double prevOrLow = Double.NaN;
+    private int prevSessionMinutes;
 
     public StructureState(FeatureConfig config, Instant sessionOpen, Optional<DailyBar> previousSession) {
         this.config = config;
@@ -95,12 +99,72 @@ public final class StructureState {
         this.swings = new SwingTracker(config.swingStrength());
         this.pdh = previousSession.map(DailyBar::high).orElse(Double.NaN);
         this.pdl = previousSession.map(DailyBar::low).orElse(Double.NaN);
+        this.previousSessionDate = previousSession.map(DailyBar::session).orElse(null);
         this.pdhAcceptance = Double.isNaN(pdh) ? null : new LevelAcceptance(pdh);
         this.pdlAcceptance = Double.isNaN(pdl) ? null : new LevelAcceptance(pdl);
         this.pdhRetest = Double.isNaN(pdh) ? null : new RetestTracker(pdh, true);
         this.pdlRetest = Double.isNaN(pdl) ? null : new RetestTracker(pdl, false);
         oneMinute.onClose(this::onOneMinuteClose);
         threeMinute.onClose(this::onThreeMinuteClose);
+    }
+
+    /**
+     * Seeds the ATRs with the previous session's spot bars (features v7), so distances in ATR exist from
+     * the opening range on. 3-minute bars are built from the 1-minute bars aligned to 09:15; today's
+     * first true range then spans the overnight gap from the previous close, as Wilder's ATR does.
+     */
+    public void seedAtr(List<com.autotrade.core.history.MinuteBar> previousSession) {
+        if (previousSession.isEmpty()) {
+            return;
+        }
+        Instant first = previousSession.getFirst().start();
+        Instant open = first.atZone(com.autotrade.core.time.MarketTime.IST).toLocalDate()
+                .atTime(sessionOpen.atZone(com.autotrade.core.time.MarketTime.IST).toLocalTime())
+                .atZone(com.autotrade.core.time.MarketTime.IST).toInstant();
+        Bar three = null;
+        for (com.autotrade.core.history.MinuteBar m : previousSession) {
+            atr1m.update(new Bar(m.start(), m.end(), m.open(), m.high(), m.low(), m.close(), 0, 1));
+            long slot = Math.floorDiv(Duration.between(open, m.start()).toMinutes(), 3);
+            Instant start = open.plus(Duration.ofMinutes(3 * slot));
+            if (three != null && !three.start().equals(start)) {
+                atr3m.update(three);
+                three = null;
+            }
+            three = three == null ? new Bar(start, start.plus(Duration.ofMinutes(3)), m.open(), m.high(), m.low(), m.close(), 0, 1)
+                    : new Bar(three.start(), three.end(), three.open(), Math.max(three.high(), m.high()),
+                            Math.min(three.low(), m.low()), m.close(), 0, three.ticks() + 1);
+        }
+        if (three != null) {
+            atr3m.update(three);
+        }
+    }
+
+    /**
+     * The previous session's 1-minute spot bars: its opening range (the same length as today's) and how
+     * many bars it has. Bars of a different session than the one PDH/PDL came from are not used.
+     */
+    public void previousSessionBars(List<com.autotrade.core.history.MinuteBar> bars) {
+        if (bars.isEmpty()) {
+            return;
+        }
+        java.time.LocalDate day = bars.getFirst().start().atZone(com.autotrade.core.time.MarketTime.IST).toLocalDate();
+        if (previousSessionDate != null && !previousSessionDate.equals(day)) {
+            return;
+        }
+        Instant open = day.atTime(sessionOpen.atZone(com.autotrade.core.time.MarketTime.IST).toLocalTime())
+                .atZone(com.autotrade.core.time.MarketTime.IST).toInstant();
+        Instant rangeEnd = open.plus(Duration.ofMinutes(config.openingRangeMinutes()));
+        double high = Double.NEGATIVE_INFINITY;
+        double low = Double.POSITIVE_INFINITY;
+        for (com.autotrade.core.history.MinuteBar m : bars) {
+            if (!m.start().isBefore(open) && m.start().isBefore(rangeEnd)) {
+                high = Math.max(high, m.high());
+                low = Math.min(low, m.low());
+            }
+        }
+        prevOrHigh = Double.isFinite(high) ? high : Double.NaN;
+        prevOrLow = Double.isFinite(low) ? low : Double.NaN;
+        prevSessionMinutes = bars.size();
     }
 
     /** A continuous-trading spot observation. */
@@ -477,7 +541,8 @@ public final class StructureState {
                 spotSeries.change(time, Duration.ofMinutes(1)),
                 spotSeries.change(time, Duration.ofMinutes(3)),
                 Double.isFinite(dayHigh) ? dayHigh : Double.NaN,
-                Double.isFinite(dayLow) ? dayLow : Double.NaN);
+                Double.isFinite(dayLow) ? dayLow : Double.NaN,
+                prevOrHigh, prevOrLow, prevSessionMinutes);
     }
 
     /** Signed (spot − level) / ATR. */

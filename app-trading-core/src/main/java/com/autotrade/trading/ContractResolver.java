@@ -49,6 +49,11 @@ final class ContractResolver {
         }
     }
 
+    /** True once option quotes show {@code underlying}'s nearest expiry is this session. */
+    boolean expiresToday(String underlying) {
+        return session.equals(nearestExpiry.get(underlying));
+    }
+
     Optional<Contract> find(String underlying, double strike, OptionSide side) {
         Seen quote = seen.get(key(underlying, strike, side.name()));
         if (quote == null) {

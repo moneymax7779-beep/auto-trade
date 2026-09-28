@@ -1,0 +1,32 @@
+# Opening drive through prior-day levels (user's decision, 2026-09-28: "create as strategy, let it
+# trigger and trade as we are running in PAPER mode", "trade with sufficient quantity of 5,00,000").
+# From the 28 Sep NIFTY open (PDL and prior ORL broken in the first minute, −157 points by 09:21).
+# Rules as studied in docs/studies/2026-09-28-opening-drive.md, WITHOUT its volume filter (the
+# registered ≥ 1.5× filter passed on no day, the design day included). Evidence is thin: 2 test-day
+# trades in 24 usable index-days (both small wins, one day) — this is a forward PAPER test.
+# Every trading day, NIFTY and SENSEX (trade-underlyings). Risk: paper-risk v4 (capital enforced; its
+# ₹1,10,000 daily loss limit engages the kill switch before the −25 % stop on a full ₹5L position).
+version: odb-v1
+strategy: opening-drive
+status: UNCALIBRATED
+source: user-decision-2026-09-28
+
+scope:
+  trigger_from: "09:16"                # snapshot times: the 09:16:00 snapshot carries the 09:15 bar's close
+  trigger_until: "09:26"               # exclusive: the last trigger is the 09:25:00 snapshot (bar 09:24)
+  time_exit: "10:00"                   # flat at the first snapshot at or after this
+  levels:                              # a level counts only if the day opened on its untouched side
+    CE: [PDH, PRIOR_ORH]
+    PE: [PDL, PRIOR_ORL]
+  min_previous_session_minutes: 355    # prior-day levels need a (nearly) complete previous session of bars
+  max_entry_attempts: 2                # an entry refused or unfilled may be sent once more, still in the window
+
+position:
+  strike_offset: 0                     # ATM
+  premium_budget: 500000               # user: sufficient quantity for ₹5,00,000 of premium (capped by free capital)
+
+exits:
+  premium_stop_pct: 25                 # resting stop in the executor, 25 % below average cost
+  structure_stop: true                 # snapshot spot back at or beyond the broken level → exit
+  trail_activate_pct: 20               # once the best bid reaches 1.20 × average cost …
+  trail_giveback_pct: 20               # … exit when the bid falls to 0.80 × that best bid

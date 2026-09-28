@@ -123,7 +123,9 @@ public final class OrderManager implements Consumer<OrderUpdate> {
             return PositionView.FLAT;
         }
         ManagedPosition position = held.getFirst();
-        return new PositionView(true, position.side, position.lots(), position.averageCost, position.openedAt);
+        double[] quote = lastQuotes.get(position.contract.token());
+        double bid = quote == null || !(quote[0] > 0) ? Double.NaN : quote[0];
+        return new PositionView(true, position.side, position.lots(), position.averageCost, position.openedAt, bid);
     }
 
     /** Buys {@code lots} to open a position with the default premium stop; returns the risk decision. */
@@ -276,8 +278,16 @@ public final class OrderManager implements Consumer<OrderUpdate> {
 
     /** Capital tied up by every live position (the capital check counts all strategies). */
     private double premiumInUse() {
+        return premiumInUse(null);
+    }
+
+    /** Capital tied up by {@code strategyId}'s live positions across underlyings (null = every strategy). */
+    public synchronized double premiumInUse(String strategyId) {
         double total = 0;
         for (ManagedPosition position : live.values()) {
+            if (strategyId != null && !strategyId.equals(position.strategy)) {
+                continue;
+            }
             // while entries work, what they asked for; afterwards what was actually paid
             total += working(position.entryOrders).isEmpty() ? position.averageCost * position.quantity
                     : position.premiumInUse();

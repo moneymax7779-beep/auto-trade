@@ -309,8 +309,15 @@ public final class TradingSession {
                     return;
                 }
                 // with a premium budget the strategy's lots are units of its plan, scaled at this entry
-                BudgetSizing sizing = BudgetSizing.at(slot.factory().premiumBudget(), slot.factory().intendedLots(),
-                        contract.get().lotSize(), oms.ask(contract.get()));
+                double budget = budget(slot.factory());
+                double ask = oms.ask(contract.get());
+                if (budget < contract.get().lotSize() * ask) {        // an expiry-day budget already used
+                    rejected(strategyId, underlying, "ENTER " + intent.side(), String.format(
+                            "expiry-day budget: %.0f left, one lot costs %.0f", budget, contract.get().lotSize() * ask));
+                    return;
+                }
+                BudgetSizing sizing = BudgetSizing.at(budget, slot.factory().intendedLots(),
+                        contract.get().lotSize(), ask);
                 sizings.put(strategyId + "|" + underlying, sizing);
                 int lots = sizing.lots(intent.lots());
                 RiskDecision result = oms.enter(strategyId, underlying, intent.side(), contract.get(), lots,
@@ -343,6 +350,20 @@ public final class TradingSession {
                 log.info("{} {} {} EXIT {} ({})", time, underlying, strategyId, intent.side(), intent.reason());
             }
         }
+    }
+
+    /**
+     * A strategy's premium budget for this entry. When any traded underlying expires today (e.g. NIFTY on
+     * a Tuesday also counts for a SENSEX entry, since the capital is shared) a strategy with an expiry-day
+     * budget gets what is left of it across all underlyings, so the rest of the capital stays free.
+     */
+    private double budget(StrategyFactory factory) {
+        double expiryBudget = factory.expiryDayPremiumBudget();
+        boolean expiryDay = settings.tradeUnderlyings().stream().anyMatch(contracts::expiresToday);
+        if (!expiryDay || Double.isNaN(expiryBudget)) {
+            return factory.premiumBudget();
+        }
+        return expiryBudget - oms.premiumInUse(factory.id());
     }
 
     /** Status key: the underlying alone with one strategy, "underlying · strategy" with several. */

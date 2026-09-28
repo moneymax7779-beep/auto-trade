@@ -2,7 +2,9 @@ package com.autotrade.features.snapshot;
 
 /**
  * Price structure of the spot index over continuous trading. Distances are signed
- * (price − level) in units of {@code atr3m}; NaN means not yet available.
+ * (price − level) in units of {@code atr3m}; NaN means not yet available. {@code prevOrHigh} /
+ * {@code prevOrLow} are the previous session's opening-range high / low from its 1-minute spot bars and
+ * {@code prevSessionMinutes} is how many such bars that session has (0 when none were found).
  */
 public record StructureFeatures(
         double dayOpen,
@@ -49,5 +51,8 @@ public record StructureFeatures(
         double spotChange1m,
         double spotChange3m,
         double dayHigh,
-        double dayLow) {
+        double dayLow,
+        double prevOrHigh,
+        double prevOrLow,
+        int prevSessionMinutes) {
 }
