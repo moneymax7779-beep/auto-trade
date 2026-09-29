@@ -85,9 +85,23 @@ public final class StructureState {
     private double prevOrHigh = Double.NaN;
     private double prevOrLow = Double.NaN;
     private int prevSessionMinutes;
+    // features v8: the trailing box (the box_minutes bars before the latest closed bar)
+    private double boxHigh = Double.NaN;
+    private double boxLow = Double.NaN;
+    private double lastMinuteClose = Double.NaN;
+    // features v9: the tested zone over zone_minutes bars before the latest
+    private final Deque<Bar> zoneBars = new ArrayDeque<>();
+    private double zoneLow = Double.NaN;
+    private double zoneHigh = Double.NaN;
+    private int zoneLowTouches;
+    private int zoneHighTouches;
 
     public StructureState(FeatureConfig config, Instant sessionOpen, Optional<DailyBar> previousSession) {
         this.config = config;
+        if (config.boxMinutes() > CLOSES_KEPT) {
+            throw new IllegalArgumentException("structure.box_minutes " + config.boxMinutes() + " over the " + CLOSES_KEPT
+                    + " one-minute bars kept");
+        }
         this.sessionOpen = sessionOpen;
         this.openingRangeEnd = sessionOpen.plus(Duration.ofMinutes(config.openingRangeMinutes()));
         this.oneMinute = new BarSeries(Duration.ofMinutes(1), sessionOpen, 400);
@@ -167,6 +181,49 @@ public final class StructureState {
         prevSessionMinutes = bars.size();
     }
 
+    /**
+     * v9: the zone of the zone_minutes bars before {@code latest} (which is excluded, so a close beyond
+     * the zone is a break): its low and high and how many separate touches each had.
+     */
+    private void zone(Bar latest) {
+        int size = config.zoneMinutes();
+        if (zoneBars.size() >= size) {
+            double low = Double.POSITIVE_INFINITY;
+            double high = Double.NEGATIVE_INFINITY;
+            for (Bar b : zoneBars) {
+                low = Math.min(low, b.low());
+                high = Math.max(high, b.high());
+            }
+            double tolerance = config.zoneToleranceAtr() * atr3m.value();
+            double floor = low;
+            double ceiling = high;
+            zoneLow = floor;
+            zoneHigh = ceiling;
+            zoneLowTouches = Double.isFinite(tolerance) ? touches(b -> b.low() <= floor + tolerance) : 0;
+            zoneHighTouches = Double.isFinite(tolerance) ? touches(b -> b.high() >= ceiling - tolerance) : 0;
+        }
+        zoneBars.addLast(latest);
+        lastMinuteClose = latest.close();
+        while (zoneBars.size() > size) {
+            zoneBars.removeFirst();
+        }
+    }
+
+    /** Separate touches: touching bars more than zone_touch_gap_min minutes after the previous touching bar. */
+    private int touches(java.util.function.Predicate<Bar> touching) {
+        int count = 0;
+        Instant last = null;
+        for (Bar b : zoneBars) {
+            if (touching.test(b)) {
+                if (last == null || Duration.between(last, b.start()).toMinutes() > config.zoneTouchGapMin()) {
+                    count++;
+                }
+                last = b.start();
+            }
+        }
+        return count;
+    }
+
     /** A continuous-trading spot observation. */
     public void onSpot(Instant time, double price, Double feedPreviousClose) {
         if (feedPreviousClose != null && feedPreviousClose > 0) {
@@ -240,6 +297,26 @@ public final class StructureState {
             vwapCrossings.addLast(bar.end().toEpochMilli());
         }
         previousOneMinuteClose = bar.close();
+        int box = config.boxMinutes();
+        if (box > 0) {
+            // the box excludes this bar: the bars before it, so a close beyond it is a break
+            if (oneMinuteBars.size() >= box) {
+                double high = Double.NEGATIVE_INFINITY;
+                double low = Double.POSITIVE_INFINITY;
+                java.util.Iterator<Bar> recent = oneMinuteBars.descendingIterator();
+                for (int i = 0; i < box; i++) {
+                    Bar b = recent.next();
+                    high = Math.max(high, b.high());
+                    low = Math.min(low, b.low());
+                }
+                boxHigh = high;
+                boxLow = low;
+            }
+            lastMinuteClose = bar.close();
+        }
+        if (config.zoneMinutes() > 0) {
+            zone(bar);
+        }
         oneMinuteBars.addLast(bar);
         if (oneMinuteBars.size() > CLOSES_KEPT) {
             oneMinuteBars.removeFirst();
@@ -542,7 +619,8 @@ public final class StructureState {
                 spotSeries.change(time, Duration.ofMinutes(3)),
                 Double.isFinite(dayHigh) ? dayHigh : Double.NaN,
                 Double.isFinite(dayLow) ? dayLow : Double.NaN,
-                prevOrHigh, prevOrLow, prevSessionMinutes);
+                prevOrHigh, prevOrLow, prevSessionMinutes, boxHigh, boxLow, lastMinuteClose,
+                zoneLow, zoneLowTouches, zoneHigh, zoneHighTouches);
     }
 
     /** Signed (spot − level) / ATR. */

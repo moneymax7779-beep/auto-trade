@@ -26,7 +26,7 @@ services:
       - -c
       - maintenance_work_mem=256MB
       - -c
-      - max_wal_size=4GB
+      - max_wal_size=1GB             # was 4GB: replay batches filled it and it stayed allocated (2026-09-29)
       - -c
       - timescaledb.telemetry_level=off
     ports:

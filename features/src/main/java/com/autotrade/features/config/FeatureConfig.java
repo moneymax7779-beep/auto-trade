@@ -73,7 +73,17 @@ public record FeatureConfig(
         String casSettlementMethod,
         Boolean indexIepAvailable,
         /** v7: seed the 1- and 3-minute ATR from the previous session's bars (ready at 09:15, not ~09:57). */
-        boolean atrSeedPreviousSession) {
+        boolean atrSeedPreviousSession,
+        /** v8: the trailing box is the high / low of this many 1-minute bars before the latest (0 = off). */
+        int boxMinutes,
+        /**
+         * v9: the tested zone: the low / high of this many 1-minute bars before the latest (0 = off), and
+         * how many separate touches it had (bars within zoneToleranceAtr x ATR3m of it, a new touch when
+         * more than zoneTouchGapMin minutes after the previous touching bar).
+         */
+        int zoneMinutes,
+        double zoneToleranceAtr,
+        int zoneTouchGapMin) {
 
     public static FeatureConfig from(ThresholdConfig features, ThresholdConfig exchange) {
         Map<String, LocalTime[]> windows = new LinkedHashMap<>();
@@ -146,7 +156,11 @@ public record FeatureConfig(
                 events(exchange),
                 exchange.has("cas.settlement_method") ? exchange.getString("cas.settlement_method") : null,
                 exchange.has("cas.index_iep_available") ? exchange.getBoolean("cas.index_iep_available") : null,
-                features.has("structure.atr_seed_previous_session") && features.getBoolean("structure.atr_seed_previous_session"));
+                features.has("structure.atr_seed_previous_session") && features.getBoolean("structure.atr_seed_previous_session"),
+                features.has("structure.box_minutes") ? features.getInt("structure.box_minutes") : 0,
+                features.has("structure.zone_minutes") ? features.getInt("structure.zone_minutes") : 0,
+                features.has("structure.zone_tolerance_atr") ? features.getDouble("structure.zone_tolerance_atr") : Double.NaN,
+                features.has("structure.zone_touch_gap_min") ? features.getInt("structure.zone_touch_gap_min") : 0);
     }
 
     /** True when the file defines the v3 feature sections. */

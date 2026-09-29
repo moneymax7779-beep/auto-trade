@@ -64,6 +64,13 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
     private final Map<OptionSide, Integer> casCampaigns = new EnumMap<>(OptionSide.class);
     private final Map<OptionSide, Boolean> casManaged = new EnumMap<>(OptionSide.class);
     private Instant stageSince;
+    // v9: a box break per side, frozen at the break; whether the open position was entered on it alone
+    private final Map<OptionSide, Double> boxLevel = new EnumMap<>(OptionSide.class);
+    private final Map<OptionSide, Instant> boxBreakAt = new EnumMap<>(OptionSide.class);
+    private final Map<OptionSide, Boolean> boxOnlyNow = new EnumMap<>(OptionSide.class);
+    private final Map<OptionSide, Boolean> enteredOnBox = new EnumMap<>(OptionSide.class);
+    // v10: a level that opened a position cannot trigger again until a 1-minute close back inside it
+    private final Map<OptionSide, Double> usedLevel = new EnumMap<>(OptionSide.class);
     private double bestSpotInRunner = Double.NaN;
     private Instant bestSpotTime;
 
@@ -116,6 +123,9 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
             Map<String, Double> sub = scorer.subScores(f);
             subs.put(side, sub);
             Map<String, Boolean> conditions = conditions(f, dteRegime);
+            if (config.boxLevels() || config.zoneLevels()) {
+                boxBreak(side, snapshot, conditions);
+            }
             double early = earlyScore(conditions);
             double confirm = scorer.confirmScore(sub, dteRegime);
             double required = config.requiredConfirmScore(time);
@@ -188,10 +198,14 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
             return;
         }
         if (stage == Stage.EXITED) {
-            return;
+            if (config.maxCampaignsPerSide() != 0 && campaigns.get(side) >= config.maxCampaignsPerSide()) {
+                return;
+            }
+            stages.put(side, Stage.IDLE);                     // v10: flat again, a new campaign may start
         }
+        boolean campaignsLeft = config.maxCampaignsPerSide() == 0 || campaigns.get(side) < config.maxCampaignsPerSide();
         boolean entryWindow = ctx.continuous() && !ctx.time().isBefore(config.earliestEntry())
-                && ctx.time().isBefore(config.lastNewEntry()) && snapshot.structure().orComplete() && campaigns.get(side) < 1
+                && ctx.time().isBefore(config.lastNewEntry()) && snapshot.structure().orComplete() && campaignsLeft
                 && conditions.getOrDefault("liquidity_ok", true)
                 && (!config.expiryDaysOnly() || ctx.expiry());       // v8: expiry days only
         Stage next = watchStage(conditions);
@@ -208,6 +222,10 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
             next = Stage.CONFIRMED;
         }
         if (next.holdsPosition()) {
+            enteredOnBox.put(side, next == Stage.CONFIRMED && boxOnlyNow.getOrDefault(side, false));
+            if (enteredOnBox.get(side) && config.maxCampaignsPerSide() == 0) {   // v10 only: v9 trades once a side
+                usedLevel.put(side, boxLevel.get(side));
+            }
             campaigns.merge(side, 1, Integer::sum);
             stageSince = snapshot.time();
         }
@@ -296,7 +314,7 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
                 }
             }
             case CONFIRMED -> {
-                if (invalidated(f, ctx)) {
+                if (invalidated(side, f, snapshot, ctx)) {
                     exit(side, stage, "INVALIDATED", orders);
                 } else if (runner >= config.runnerScoreMin() && runnerGates(conditions, expiry)) {
                     if (config.scaling(intendedLots(ctx)) && tranches[2] > 0) {
@@ -315,7 +333,7 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
                 }
                 Map<OptionSide, Set<String>> exitStates = Map.of(
                         OptionSide.CE, config.ceRunnerExitStates(), OptionSide.PE, config.peRunnerExitStates());
-                if (invalidated(f, ctx)) {
+                if (invalidated(side, f, snapshot, ctx)) {
                     exit(side, stage, "INVALIDATED", orders);
                 } else if (!f.trailHolds()) {
                     exit(side, stage, "RUNNER_TRAIL", orders);
@@ -387,12 +405,68 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
      * A 3-minute close back through the level by more than the invalidation band: the structure stop.
      * v6 widens it per volatility regime (the design's "wide structure SL" on high-volatility days).
      */
-    private boolean invalidated(SideFeatures f, Context ctx) {
+    private boolean invalidated(OptionSide side, SideFeatures f, FeatureSnapshot snapshot, Context ctx) {
         double band = config.invalidationAtr();
         if (ctx.adjustment() != null && Double.isFinite(ctx.adjustment().structureStopAtr())) {
             band = ctx.adjustment().structureStopAtr();
         }
+        Double box = boxLevel.get(side);
+        if (enteredOnBox.getOrDefault(side, false) && box != null) {
+            // v9, entered on a box break: a 1-minute close back inside the box by more than the band
+            double close = snapshot.structure().lastMinuteClose();
+            double atr = snapshot.structure().atr3m();
+            return Double.isFinite(close) && atr > 0 && side.sign() * (close - box) / atr < -band;
+        }
         return f.closesBeyond() == 0 && f.levelDistance() < -band;
+    }
+
+    /**
+     * v9: a 1-minute close beyond a compressed trailing box freezes that edge as this side's box level
+     * for {@code break_window_min}; while it holds (spot still beyond it) {@code broke_level} is also true.
+     * Only when the side holds nothing, so an open position keeps the level it was entered on.
+     */
+    private void boxBreak(OptionSide side, FeatureSnapshot snapshot, Map<String, Boolean> conditions) {
+        var st = snapshot.structure();
+        Instant now = snapshot.time();
+        boolean zone = config.zoneLevels();
+        boolean compressed;
+        double edge;
+        int window;
+        if (zone) {
+            // v10: the tested zone (its low for PE, high for CE) with enough separate touches
+            edge = side == OptionSide.CE ? st.zoneHigh() : st.zoneLow();
+            int touches = side == OptionSide.CE ? st.zoneHighTouches() : st.zoneLowTouches();
+            compressed = Double.isFinite(edge) && touches >= config.zoneMinTouches();
+            window = config.zoneBreakWindowMin();
+        } else {
+            compressed = Double.isFinite(st.boxHigh()) && Double.isFinite(st.boxLow()) && st.atr3m() > 0
+                    && st.boxHigh() - st.boxLow() <= config.boxMaxRangeAtr() * st.atr3m();
+            edge = side == OptionSide.CE ? st.boxHigh() : st.boxLow();
+            window = config.boxBreakWindowMin();
+        }
+        boolean closedBeyond = Double.isFinite(st.lastMinuteClose()) && side.sign() * (st.lastMinuteClose() - edge) > 0;
+        Double used = usedLevel.get(side);
+        if (used != null && Double.isFinite(st.lastMinuteClose()) && side.sign() * (st.lastMinuteClose() - used) <= 0) {
+            usedLevel.remove(side);                            // reclaimed: that level may trigger again
+            used = null;
+        }
+        boolean fresh = used == null || edge != used;
+        Instant at = boxBreakAt.get(side);
+        boolean windowOpen = at != null && Duration.between(at, now).toMinutes() <= window;
+        if (!stages.get(side).holdsPosition() && !windowOpen && compressed && closedBeyond && fresh) {
+            boxLevel.put(side, edge);
+            boxBreakAt.put(side, now);
+            windowOpen = true;
+        }
+        Double level = boxLevel.get(side);
+        // a level that already opened a position counts again only after it was reclaimed (v10)
+        boolean broke = windowOpen && level != null && !level.equals(usedLevel.get(side))
+                && side.sign() * (snapshot.spot() - level) > 0;
+        conditions.put(zone ? "zone_tested" : "box_compressed", compressed);
+        conditions.put(zone ? "zone_broke" : "box_broke", broke);
+        boolean orhOrl = conditions.get("broke_level");
+        boxOnlyNow.put(side, broke && !orhOrl);
+        conditions.put("broke_level", orhOrl || broke);
     }
 
     private void exit(OptionSide side, Stage stage, String reason, List<OrderIntent> orders) {

@@ -1,0 +1,263 @@
+# Early → Confirm → Runner strategy thresholds.
+#
+# Starting defaults taken from the ChatGPT design conversation (2026-09-25). NOT calibrated.
+# v2 keeps every v1 value and adds what the design left unspecified: how a signal moves between
+# lifecycle stages, which level it trades (ORH/ORL), option choice, and exits (section "rules").
+# v3 (2026-09-25): NO threshold changes from v2 (user decision: stay with the ChatGPT values, no
+# tuning). The only addition is `evaluation`: replays use market data from the week of
+# 21 Sep 2026 onward, including new sessions as they are captured, and no older sessions.
+# v4 (2026-09-26): implements the rest of the design without changing any ChatGPT value:
+#   - volatility regime engine (vol_regime): LOW/NORMAL/HIGH/EXTREME from the VIX or IV percentile
+#     with the design's buckets; changes size, confirmation threshold, premium stop and early probes;
+#   - order-book imbalance persistence as a small confirmation (order_book);
+#   - breakout-bar volume, level acceptance travel and volume after the break, the level ladder,
+#     option premium confirmation, straddle compression ending, room to the next level;
+#   - runner gates: premium_response_ratio_min, and on expiry no opposite wall forming and RVOL
+#     elevated (expiry_runner); futures_state_score (+2..-2) now drives the futures state sub-score;
+#   - closing-auction mode (cas_mode): CAS_RUNNER management from 15:15, CAS entries by score band,
+#     CAS_EXPIRY_MODE, exit by the auction end. Needs features-v3 and paper-risk-v3.
+# v5 (2026-09-26): same as v4 except placeholders set by the pre-registered rules in
+#   docs/CALIBRATION-v5.md (feature distributions of 11-18 Sep, never trade results): min_travel_atr,
+#   opposite_wall_score_min, HIGH/EXTREME stops, and index-level CAS components only while the
+#   indicative index is moving. Needs features-v4 and paper-risk-v3.
+# v6 (2026-09-26): the design items v4/v5 had simplified: the remaining VOL_REGIME inputs (ATR
+#   percentile, VIX and IV moves, futures RVOL, expiry final hour), the high-volatility event-day
+#   floor, strike selection and a wider structure stop per regime, order-book bid/ask changes and
+#   the liquidity-drop guard, named market states, the exchange's index-IEP flag, and the design's
+#   mover breadth for early entry. Needs features-v5, nse-bse-sessions-v3 and paper-risk-v3.
+#   New values follow docs/CALIBRATION-v5.md (v6 section).
+# Values marked "placeholder" were not given there and were chosen to make the file complete.
+# Any change is a new file version (v2, v3 ...); the content hash is stamped on every signal
+# and replay run. Comments are not part of the hash.
+# v7 (2026-09-27, user's request): identical to v6 except sizing.premium_budget: the 4-lot plan is scaled
+# so the full plan costs ₹5,00,000 at the entry ask (tranches keep their proportions). Rupee P&L scales;
+# the signals, exits and R are v6's.
+# v10 (2026-09-28, user's request after v9 took the 13:08 retest of the 28 Sep NIFTY support zone as a
+# break and then could not trade the real 14:17 break): ecr-v7 (every day) with two changes.
+#  1. Intraday support / resistance: a 1-minute close beyond a tested zone also counts as a level
+#     break. The zone is the low (PE) / high (CE) of the 180 one-minute bars before the latest,
+#     touched at least twice (features v9); the break is frozen and counts for 6 minutes. A position
+#     entered on it alone is invalidated by a 1-minute close back inside the zone by more than the
+#     invalidation band. (v9's 90-minute box is not used.)
+#  2. No limit on campaigns per side (user: "there shouldn't be any limitations on no. of trades"); a
+#     zone level that opened a position triggers again only after a 1-minute close back inside it.
+#     The account's daily loss limit (paper-risk) still applies.
+# Parameters (180 minutes, 2 touches, 0.25 ATR) are round numbers chosen with 28 Sep in view.
+# Needs features v9.
+version: ecr-v10
+strategy: early-confirm-runner
+status: UNCALIBRATED
+source: chatgpt-design-2026-09-25
+
+lifecycle: [WATCH, ARMED, EARLY_ENTRY, CONFIRMED, RUNNER, EXIT]
+
+sizing:
+  premium_budget: 500000             # v7/v3: rupees of premium for the full plan at the entry ask
+  profile: standard                  # standard | conservative
+  standard:     { early: 0.30, confirm: 0.40, runner: 0.30 }
+  conservative: { early: 0.25, confirm: 0.50, runner: 0.25 }
+  expiry_early_fraction: 0.25        # ChatGPT: 20–30%
+  min_lots_for_scaling: 4            # placeholder; below this, single entry at CONFIRMED
+
+early_entry:                         # CE shown; PE is mirrored
+  distance_to_orh_atr_max: { normal: 0.15, expiry: 0.10 }
+  price_above_vwap: true
+  ema_fast: 9
+  ema_slow: 20
+  ema9_above_ema20: true
+  ema9_slope_positive: true
+  higher_lows: true
+  last_swing_low_intact: true
+  fut_momentum_positive: true
+  fut_acceleration_positive: true
+  rvol_slope_positive: true
+  weighted_breadth_min: 50           # scale −100..+100
+  breadth_measure: MOVER             # v6: design's weighted bullish minus bearish stocks (features v5 moverBreadth)
+
+confirmation:
+  orh_break_required: true
+  tod_rvol_min: 1.25                 # "meaningful"
+  breakout_candle:
+    body_to_range_min: 0.60
+    close_location_top_pct: 0.25
+    upper_wick_max_pct: 0.20         # placeholder ("small upper wick")
+    range_vs_avg_min: 1.2
+    volume_ratio_min: 1.2            # v4 placeholder: breakout-bar futures volume vs the previous bars ("volume ratio")
+  required_confirm_score_by_window:
+    "09:15-09:25": 75                # placeholder ("very selective")
+    "09:25-11:15": 62
+    "11:15-13:15": 70
+    "13:15-14:30": 62                # "normal"
+    "14:30-15:15": 66                # placeholder ("faster management")
+
+level_acceptance:
+  closes_above_min: 2
+  retest_required: true
+  min_travel_atr: 0.8                # calibrated (v5): median travel at the 2nd close beyond, 11-18 Sep
+  min_volume_after_break: 1.0        # v4: "volume after break" at least time-of-day normal (the design's 1.0x band)
+  ladder: [ORH, ORL, PDH, PDL, PREV_CLOSE, DAY_OPEN, VWAP, EMA20, SESSION_MEAN, SWING]
+
+runner:
+  score_min: 70
+  weights: { structure: 25, futures: 25, volume: 20, option_oi: 15, breadth: 10, premium: 5 }
+  futures_state_score: { FRESH_LONG: 2, SHORT_COVERING: 1, NEUTRAL: 0, LONG_UNWIND: -1, FRESH_SHORT: -2 }
+  premium_response_ratio_min: 0.6    # placeholder (IV-crush detector); v4: a runner needs at least this
+
+rvol:
+  method: TIME_OF_DAY_MEDIAN         # same 3-minute slot over previous sessions
+  lookback_sessions: 20              # placeholder
+  bands: { normal: 1.0, meaningful: 1.25, strong: 1.5, expansion: 2.0 }
+
+futures:
+  momentum_windows_sec: [30, 60, 180]
+  normalise_by: ATR_1M
+  basis_tracking: true               # Δbasis = Δ(futures − spot)
+
+options_chain:
+  near_atm_strikes: 3                # ATM ± 3
+  heavy_weight_strikes: 2            # ATM ± 2 weighted most
+  oi_delta_windows_min: [1, 3, 5, 10]
+  wall_weakening_lookback_min: [10, 5, 3, 1]
+  order_book_imbalance_persistence_sec: [10, 20]   # confirmation only
+
+regime:
+  dte_buckets: { NORMAL: ">=3", NEAR: "1-2", EXPIRY: "0" }
+  weights:
+    NORMAL: { structure: 25, futures: 20, volume: 15, oi: 15, breadth: 10, iv_options: 15 }
+    EXPIRY: { structure: 25, momentum: 25, fut_volume: 20, breadth: 10, oi: 8, iv_greeks: 12 }
+  vix_percentile_windows_days: [60, 252]
+  vix_buckets: { LOW: "<20", NORMAL: "20-70", HIGH: "70-90", EXTREME: ">90" }
+  vix_change_windows: [5m, 15m, day]
+  iv_change_windows_min: [1, 3, 5]
+  expected_move:
+    daily: "S*IV/sqrt(252)"
+    remaining: "S*IV*sqrt(min_left/(252*375))"
+
+cas:
+  timings:
+    cas_start: "15:15"
+    reference_calc_end: "15:20"
+    market_and_limit_end: "15:25"
+    random_close_window_min: 2
+    cas_end: "15:35"
+    derivatives_close: "15:40"
+  reference_price: VWAP_15_00_15_15
+  price_band_pct: 3.0
+  iep_windows_sec: [20, 60, 180]
+  weights:
+    iep_direction: 15
+    iep_velocity: 10
+    weighted_buy_imbalance: 15
+    cas_breadth: 15
+    low_concentration: 5
+    fut_direction: 10
+    fut_acceleration: 10
+    fut_cas_alignment: 10
+    option_response: 5
+    iv_response: 5
+  # Components that need per-constituent auction data (Upstox feed only; zt-tiger-v2 does not
+  # capture it). Without it they are left out and the score renormalises over the rest.
+  # v4: IEP direction and velocity use the indicative index when per-stock data is missing, because
+  # the indicative index is the index computed from the constituents' IEPs.
+  requires_constituent_auction_feed: [weighted_buy_imbalance, cas_breadth, low_concentration]
+  bands: { NO_TRADE: "<55", WATCH: "55-65", EARLY_SMALL: "65-75", CONFIRMED: "75-85", HIGH_CONVICTION: ">85" }
+  exclude_from_normal_stats: true
+
+# ---------------------------------------------------------------------------------------------
+# v2 additions. Everything below is a placeholder chosen so the lifecycle can run end to end.
+rules:
+  level: OPENING_RANGE                 # CE trades the ORH break, PE the ORL break
+  earliest_entry: "09:30"              # after the opening range completes
+  last_new_entry: "14:45"
+  flat_by: "15:15"                     # close everything before the closing auction
+  watch_distance_atr: 1.0              # WATCH when spot is within 1 ATR3m of the level
+  early_max_beyond_level_atr: 0.15     # EARLY is anticipation: at most this far through the level
+  higher_lows_swings: 3                # "higher lows" = last 3 confirmed swing lows rising
+  intended_lots: 4                     # research sizing; tranches follow `sizing`
+  option: { strike: ATM, expiry: NEAREST }
+  max_entries_per_level_per_day: 1     # (design text; v10 enforces max_campaigns_per_side instead)
+  max_campaigns_per_side: 0            # v10: no limit (v2-v9: one campaign per direction per session)
+
+scores:
+  # Sub-scores are 0..1; a score is 100 × Σ weight × sub-score using the regime's weights.
+  early_min: 100                       # EARLY needs every early_entry condition (the design's AND list)
+  confirm_score_weights_by_regime: true
+  futures_state_map: { FRESH_LONG: 1.0, SHORT_COVERING: 0.75, NEUTRAL: 0.5, LONG_UNWIND: 0.25, FRESH_SHORT: 0.0 }
+  volume_full_at_rvol: 1.5             # the design's "strong" band
+  premium_response_good: 0.8
+  premium_response_poor: 0.6
+  max_spread_pct: 1.0
+
+exits:
+  premium_stop_pct: 25                 # resting stop on the option, % below average entry premium
+  early_probe_max_minutes: 9           # an EARLY probe not CONFIRMED within this is closed...
+  early_probe_fail_atr: 0.25           # ...or at once if spot falls this far back through the level
+  invalidation_close_atr: 0.10         # CONFIRMED: a 3-minute close this far back through the level exits
+  runner_trail: EMA9_CLOSE             # RUNNER: exit on a 3-minute close through EMA9
+  runner_exit_futures_states: { CE: [FRESH_SHORT, LONG_UNWIND], PE: [FRESH_LONG, SHORT_COVERING] }
+  expiry_runner_stall_minutes: 6       # DTE 0: exit a runner if no new extreme for this long
+
+# ---------------------------------------------------------------------------------------------
+# v3 addition: which market data this version is evaluated on.
+evaluation:
+  sessions_from: "2026-09-21"          # this week onward; older sessions are not used
+
+# ---------------------------------------------------------------------------------------------
+# v4 additions.
+order_book:
+  imbalance_min: 0.15                # design example: +0.15 .. +0.41 held for 10-20 s (persistence windows in features);
+                                     # futures book absolute, options as ATM call minus ATM put (option books are bid-biased)
+  flow_edge_pct: 4.5                 # v6 calibrated: 75th percentile of |bid% change - ask% change| over 20 s (4.47)
+  liquidity_drop_pct: 49             # v6 calibrated: 5th percentile of 1-minute ATM depth change (-49.2%) blocks entries
+  confirm_points: 3                  # placeholder: "a small confirmation, not a primary signal" (+/- points on confirm)
+
+expiry_runner:                       # design: "a good expiry runner requires ..."
+  opposite_wall_score_min: 70        # calibrated (v5): 75th percentile of expiry-day barrier scores while OI builds
+  rvol_min: 1.25                     # "RVOL remains elevated": the design's "meaningful" band
+
+vol_regime:
+  primary: { NIFTY: VIX, SENSEX: IV, BANKNIFTY: IV }   # design: VIX is NIFTY-derived; IV leads for the others
+  realized_escalation_pct: 90        # placeholder: realised vol this extreme for the time of day raises the regime one level
+  escalation:                        # v6: the design's other VOL_REGIME inputs; any one raises the regime one level (max one)
+    atr_percentile: 90               # principle: same boundary as realised vol / EXTREME
+    vix_change_15m_abs: 0.18         # calibrated: 95th percentile of |VIX change 15m| on 11-18 Sep (0.1805)
+    iv_change_5m_abs: 0.011          # calibrated: 95th percentile of |ATM IV change 5m| (0.0113 = 1.1 IV points)
+    futures_rvol: 2.0                # design: RVOL 2x = "expansion"
+    expiry_final_minutes: 60         # principle: last hour before expiry close on DTE 0
+  event_day_floor: HIGH              # design: "high-volatility event day" (exchange file v3 events)
+  adjustments:                       # design: high-vol day = smaller initial size, strong confirmation, wide structure SL
+    LOW:     { size_factor: 1.0, confirm_add: 0,  premium_stop_pct: 25, allow_early: true,  strike_offset: 0, structure_stop_atr: 0.10 }
+    NORMAL:  { size_factor: 1.0, confirm_add: 0,  premium_stop_pct: 25, allow_early: true,  strike_offset: 0, structure_stop_atr: 0.10 }
+    HIGH:    { size_factor: 0.5, confirm_add: 5,  premium_stop_pct: 40, allow_early: true,  strike_offset: 1, structure_stop_atr: 0.15 }    # v5 stop: RV 1.63x NORMAL; v6: 1 ITM, structure stop 0.10 x 1.63
+    EXTREME: { size_factor: 0.5, confirm_add: 10, premium_stop_pct: 35, allow_early: false, strike_offset: 1, structure_stop_atr: 0.15 }   # v5 stop: RV 1.49x NORMAL; v6: 1 ITM, 0.10 x 1.49
+
+cas_mode:
+  enabled: true
+  runner_hold_min_score: 55          # design: below 55 = NO_TRADE; "if CAS disagrees, tighten immediately" -> exit
+  entry_window: "15:20-15:30"        # design: 3:20-3:25 market+limit, 3:25-~3:30 the highest-value CAS period
+  entry_bands: { EARLY_SMALL: 65, CONFIRMED: 75, HIGH_CONVICTION: 85 }   # design's CAS bands
+  entries_require_constituent_data: true   # design: require CAS breadth + imbalance + futures agreement before trusting a CAS cross
+  min_constituent_coverage_pct: 60   # placeholder: index weight with per-stock auction data
+  min_futures_alignment: 0.5         # placeholder: futures matched at least half the indicative move
+  exit_by: "15:35"                   # cas_end; positions close before the 15:40 derivatives close
+  use_exchange_index_iep_flag: true  # v6: exchange file cas.index_iep_available=false disables the index-level IEP components
+  index_fallback_needs_moving_indicative: true   # v5: zt's indicative index is frozen 15:15-~15:29; without per-stock data
+                                                 # the index IEP components count only if it moved in the last 180 s
+  expiry:                            # design: CAS_EXPIRY_MODE, "completely separate"
+    band_add: 5                      # placeholder: entry bands 5 points stricter
+    runner_hold_min_score: 60        # placeholder: a CAS runner exits sooner on expiry
+  scales:                            # placeholders (not calibratable: the recorded indicative index is frozen)
+    iep_return_pct: 0.20             # IEP return vs reference, percent
+    move_atr: 0.5                    # indicative / futures one-minute move, in ATR1m
+    imbalance_change: 0.10           # change of weighted imbalance per velocity window
+
+market_state:                        # v6: the design's named states (TREND_UP / TREND_DOWN / RANGE / TRANSITION)
+  trend_min: 50                      # principle: direction and structure both >= 50 on one side
+  range_max: 20                      # principle: |direction| < 20
+
+# ---------------------------------------------------------------------------------------------
+# v10 addition: tested intraday zones as extra levels (features v9 structure.zone_*).
+zone_levels:
+  enabled: true
+  min_touches: 2                       # the zone low / high touched at least twice (separate touches)
+  break_window_min: 6                  # a zone break counts for 6 minutes after the 1-minute close beyond it

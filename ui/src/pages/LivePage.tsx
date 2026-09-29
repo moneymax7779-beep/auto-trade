@@ -187,13 +187,16 @@ const SESSION_KINDS = [
 ] as const;
 
 /**
- * The most recent finished session of the chosen kind, read-only from the database: how it ended
- * (P&L, trades, the last stage of every index and strategy), never mistaken for a running session.
+ * A finished session of the chosen kind (the most recent unless another is picked), read-only from the
+ * database: how it ended (P&L, trades, the last stage of every index and strategy), never mistaken for
+ * a running session.
  */
 function LastSession() {
   const [mode, setMode] = useState<string>("PAPER_LIVE");
+  const [picked, setPicked] = useState<number | null>(null);
   const sessions = useQuery({ queryKey: ["sessions"], queryFn: () => get<SessionRow[]>("/api/sessions") });
-  const session = sessions.data?.find((row) => row.mode === mode);
+  const ofMode = (sessions.data ?? []).filter((row) => row.mode === mode);
+  const session = ofMode.find((row) => row.id === picked) ?? ofMode[0];
   const id = session?.id;
   const last = useQuery({
     queryKey: ["last-decisions", id], enabled: id != null,
@@ -211,11 +214,21 @@ function LastSession() {
   const toggle = (
     <div className="flex gap-1 text-xs">
       {SESSION_KINDS.map((kind) => (
-        <button key={kind.mode} type="button" onClick={() => setMode(kind.mode)}
+        <button key={kind.mode} type="button" onClick={() => { setMode(kind.mode); setPicked(null); }}
           className={`rounded border px-2 py-1 ${mode === kind.mode ? "border-accent bg-accent/10 font-semibold" : "border-line text-muted"}`}>
           {kind.label}
         </button>
       ))}
+      {ofMode.length > 1 && (
+        <select aria-label="Session" value={session?.id ?? ""} onChange={(e) => setPicked(Number(e.target.value))}
+          className="num rounded border border-line bg-panel px-1 py-1">
+          {ofMode.slice(0, 60).map((row) => (
+            <option key={row.id} value={row.id}>
+              #{row.id} · {row.session_date} · {row.code_version}
+            </option>
+          ))}
+        </select>
+      )}
     </div>
   );
   if (sessions.isLoading) return <Loading what="last session" />;
@@ -237,7 +250,7 @@ function LastSession() {
   return (
     <div className="space-y-4">
       <Panel
-        title={<>Last {mode === "PAPER_LIVE" ? "live" : "replay"} session · #{session.id} · {session.session_date}{" "}
+        title={<>{session.id === ofMode[0]?.id ? "Last" : "Earlier"} {mode === "PAPER_LIVE" ? "live" : "replay"} session · #{session.id} · {session.session_date}{" "}
           <span className="ml-1 rounded bg-panel-2 px-1.5 py-0.5 text-xs font-normal text-muted">finished · not live</span></>}
         right={toggle}
       >

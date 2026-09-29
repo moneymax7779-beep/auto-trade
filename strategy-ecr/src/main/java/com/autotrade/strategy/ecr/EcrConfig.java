@@ -52,7 +52,17 @@ record EcrConfig(
         int expiryStallMinutes,
         EcrExtensions ext,
         /** v8: open new campaigns only when the index expires today (DTE bucket EXPIRY); v7 and earlier: every day. */
-        boolean expiryDaysOnly) {
+        boolean expiryDaysOnly,
+        /** v9: a close beyond a compressed trailing box (features v8) also counts as a level break. */
+        boolean boxLevels,
+        double boxMaxRangeAtr,
+        int boxBreakWindowMin,
+        /** v10: a 1-minute close beyond a tested zone (features v9, at least zoneMinTouches touches) is a break. */
+        boolean zoneLevels,
+        int zoneMinTouches,
+        int zoneBreakWindowMin,
+        /** v10: campaigns per side per session (v2-v9: 1, the design's one per direction); 0 = no limit. */
+        int maxCampaignsPerSide) {
 
     record Window(LocalTime from, LocalTime to, double score) {
     }
@@ -96,7 +106,14 @@ record EcrConfig(
                 strings(c, "exits.runner_exit_futures_states.CE"), strings(c, "exits.runner_exit_futures_states.PE"),
                 c.getInt("exits.expiry_runner_stall_minutes"),
                 EcrExtensions.from(c),
-                c.has("rules.expiry_days_only") && c.getBoolean("rules.expiry_days_only"));
+                c.has("rules.expiry_days_only") && c.getBoolean("rules.expiry_days_only"),
+                c.has("box_levels.enabled") && c.getBoolean("box_levels.enabled"),
+                c.has("box_levels.max_range_atr") ? c.getDouble("box_levels.max_range_atr") : Double.NaN,
+                c.has("box_levels.break_window_min") ? c.getInt("box_levels.break_window_min") : 0,
+                c.has("zone_levels.enabled") && c.getBoolean("zone_levels.enabled"),
+                c.has("zone_levels.min_touches") ? c.getInt("zone_levels.min_touches") : 0,
+                c.has("zone_levels.break_window_min") ? c.getInt("zone_levels.break_window_min") : 0,
+                c.has("rules.max_campaigns_per_side") ? c.getInt("rules.max_campaigns_per_side") : 1);
     }
 
     /** Minimum confirm score for the window containing {@code time}; the last window's if none. */
