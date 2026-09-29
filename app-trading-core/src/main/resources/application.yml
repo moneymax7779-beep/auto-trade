@@ -50,6 +50,7 @@ autotrade:
       - config/strategy/expiry-breakout-straddle.v1.yaml
       - config/strategy/early-confirm-runner.v8.yaml   # v8: v7 on expiry days only (user, 2026-09-27)
       - config/strategy/opening-drive.v2.yaml          # odb-v2: every day 09:16-10:00, ₹5L; ₹1L when NIFTY/SENSEX expires (user, 2026-09-28)
+      - config/strategy/expiry-gamma-breakout.v3.yaml  # egb-v3 back in live PAPER (user, 2026-09-29); last in order, so it gets what capital is left
     features-file: config/features/features.v7.yaml   # v7 = v6 + ATR seeded from the previous session (ORH/ORL visible from 09:30; 7 expiry-day replays unchanged)
     exchange-file: config/exchange/nse-bse-sessions.v3.yaml
     costs-file: config/costs/india-index-options-costs.v1.yaml
