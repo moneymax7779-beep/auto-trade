@@ -8,6 +8,7 @@ import {
 import { ConfirmButton, ErrorNote, Loading, Panel, Pnl, ScoreBar, SignedGauge, StageBadge, Stat } from "../components/ui";
 import { groupTrades, TradesTable } from "../components/TradesTable";
 import { LivePositions } from "../components/LivePositions";
+import { SurgePanel } from "../components/SurgePanel";
 
 export function LivePage() {
   const queryClient = useQueryClient();
@@ -42,6 +43,7 @@ export function LivePage() {
         </p>
       </Panel>
       <LastSession />
+      <SurgePanel />
       </div>
     );
   }
@@ -83,6 +85,8 @@ export function LivePage() {
             ce={parseSide(view.CE)} pe={parseSide(view.PE)} volatility={view.volatility} cas={view.cas} />
         ))}
       </div>
+
+      <SurgePanel live date={s.date} />
 
       <Panel title="Open positions">
         <LivePositions rows={s.openPositions ?? []} closed={false} empty="Flat." />

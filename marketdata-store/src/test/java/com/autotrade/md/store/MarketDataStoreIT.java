@@ -83,6 +83,10 @@ class MarketDataStoreIT {
         assertThat(((IndexTick) events.getFirst()).price()).isEqualTo(200.0);
         OptionTick option = (OptionTick) events.stream().filter(OptionTick.class::isInstance).findFirst().orElseThrow();
         assertThat(option).isEqualTo(option(200.0));
+        FutureTick future = (FutureTick) events.stream().filter(FutureTick.class::isInstance).findFirst().orElseThrow();
+        assertThat(future).isEqualTo(future(200.0));
+        assertThat(future.bids().price(0)).isEqualTo(204.9);
+        assertThat(future.asks().quantity(0)).isEqualTo(975);
         assertThat(events.getLast()).isInstanceOf(SessionPhaseEvent.class);
 
         try (Connection connection = dataSource.getConnection()) {
@@ -102,9 +106,7 @@ class MarketDataStoreIT {
             connection.setAutoCommit(false);
             copy(connection, MdTable.INDEX_TICK, encoder.index(
                     new IndexTick(T0.plusMillis(10), T0, "NIFTY", 11, price, 99.0, 23850), meta(id, 1100)));
-            copy(connection, MdTable.FUTURE_TICK, encoder.future(
-                    new FutureTick(T0.plusMillis(20), null, "NIFTY", 12, 5L, "NIFTY FUT", SESSION.plusDays(27),
-                            price + 5, 1000L, 1.5e7, price + 4), meta(id, 1200)));
+            copy(connection, MdTable.FUTURE_TICK, encoder.future(future(price), meta(id, 1200)));
             copy(connection, MdTable.OPTION_TICK, encoder.option(option(price), meta(id, 1300)));
             copy(connection, MdTable.CONSTITUENT_TICK, encoder.constituent(
                     new ConstituentTick(T0.plusMillis(40), null, "NIFTY", 14, 9L, "HDFCBANK", 950.0, 940.0, 12L,
@@ -119,6 +121,14 @@ class MarketDataStoreIT {
             connection.commit();
         }
         return id;
+    }
+
+    /** A future with its book: V15 keeps the five bid / ask levels. */
+    private static FutureTick future(double price) {
+        return new FutureTick(T0.plusMillis(20), null, "NIFTY", 12, 5L, "NIFTY FUT", SESSION.plusDays(27),
+                price + 5, 1000L, 1.5e7, price + 4, 245700.0, 198250.0,
+                DepthLevels.of(new double[] {price + 4.9, price + 4.8}, new long[] {650, 1300}, new int[] {0, 0}),
+                DepthLevels.of(new double[] {price + 5.1}, new long[] {975}, new int[] {0}));
     }
 
     private static OptionTick option(double price) {

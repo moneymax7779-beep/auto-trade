@@ -12,7 +12,8 @@ public enum MdTable {
     FUTURE_TICK("md.future_tick", true, List.of(
             "manifest_id", "session_date", "underlying", "recv_ts", "exch_ts", "src_seq", "src_hash64",
             "instrument_token", "symbol", "segment", "expiry", "price", "volume", "oi", "session_vwap",
-            "quote_source", "total_buy_qty", "total_sell_qty")),
+            "quote_source", "total_buy_qty", "total_sell_qty", "bid_px", "bid_qty", "bid_orders", "ask_px",
+            "ask_qty", "ask_orders")),
 
     OPTION_TICK("md.option_tick", true, List.of(
             "manifest_id", "session_date", "underlying", "recv_ts", "exch_ts", "src_seq", "src_hash64",

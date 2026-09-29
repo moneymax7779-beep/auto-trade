@@ -72,10 +72,19 @@ public final class UpstoxEventMapper {
                 lastIndex.put(meta.underlying(), ltpc.getLtp());
                 yield List.of(new IndexTick(received, exchange, meta.underlying(), sequence, ltpc.getLtp(), close, null));
             }
-            case FUTURE -> List.of(new FutureTick(received, exchange, meta.underlying(), sequence, meta.token(),
-                    meta.symbol(), meta.expiry(), ltpc.getLtp(), market == null ? null : market.getVtt(),
-                    market == null ? null : market.getOi(), market == null || !(market.getAtp() > 0) ? null : market.getAtp(),
-                    market == null ? null : market.getTbq(), market == null ? null : market.getTsq()));
+            case FUTURE -> {
+                // full mode carries the future's 5-level book as it does an option's
+                List<MarketUpdateV3.Quote> quotes = market == null || market.getMarketLevel() == null ? null
+                        : market.getMarketLevel().getBidAskQuote();
+                if (quotes == null) {
+                    quotes = List.of();
+                }
+                yield List.of(new FutureTick(received, exchange, meta.underlying(), sequence, meta.token(),
+                        meta.symbol(), meta.expiry(), ltpc.getLtp(), market == null ? null : market.getVtt(),
+                        market == null ? null : market.getOi(), market == null || !(market.getAtp() > 0) ? null : market.getAtp(),
+                        market == null ? null : market.getTbq(), market == null ? null : market.getTsq(),
+                        side(quotes, true), side(quotes, false)));
+            }
             case OPTION -> List.of(option(meta, market, ltpc, exchange, received, sequence));
             case EQUITY -> equity(meta, market, ltpc, exchange, close, received, sequence);
         };

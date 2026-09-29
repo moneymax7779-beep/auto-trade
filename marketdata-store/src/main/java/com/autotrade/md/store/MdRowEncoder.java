@@ -26,7 +26,7 @@ public final class MdRowEncoder {
 
     public byte[] future(FutureTick tick, RowMeta meta) {
         tickPrefix(meta, tick.underlying(), tick.receivedAt(), tick.exchangeTime(), tick.sourceSequence());
-        return row.int64(tick.instrumentToken())
+        row.int64(tick.instrumentToken())
                 .text(tick.symbol())
                 .text(meta.segment())
                 .date(tick.expiry())
@@ -36,8 +36,10 @@ public final class MdRowEncoder {
                 .float64(tick.sessionVwap())
                 .text(meta.quoteSource())
                 .float64(tick.totalBuyQuantity())
-                .float64(tick.totalSellQuantity())
-                .endRow();
+                .float64(tick.totalSellQuantity());
+        depth(tick.bids());
+        depth(tick.asks());
+        return row.endRow();
     }
 
     public byte[] option(OptionTick tick, RowMeta meta) {
