@@ -74,7 +74,9 @@ public final class UpstoxInstrumentFile {
     }
 
     /**
-     * Equities in {@code segment} (NSE_EQ or BSE_EQ) whose trading symbol is in {@code symbols}.
+     * Equities in {@code segment} (NSE_EQ or BSE_EQ) whose trading symbol, or exchange token, is in
+     * {@code symbols}: the SENSEX weights list BSE scrip codes (500180 = HDFCBANK), which the BSE file
+     * carries as {@code exchange_token}.
      * NSE equities have instrument type EQ; BSE lists them by group (A, B, ...), so any type is taken.
      */
     public static List<Listing> readEquities(Path file, String segment, Set<String> symbols) throws IOException {
@@ -85,13 +87,14 @@ public final class UpstoxInstrumentFile {
         List<Listing> listings = new ArrayList<>();
         for (JsonNode node : root) {
             String symbol = text(node, "trading_symbol");
-            if (!segment.equals(text(node, "segment")) || !symbols.contains(symbol)) {
+            String token = text(node, "exchange_token");
+            if (!segment.equals(text(node, "segment")) || !(symbols.contains(symbol) || symbols.contains(token))) {
                 continue;
             }
             if (segment.equals("NSE_EQ") && !"EQ".equals(text(node, "instrument_type"))) {
                 continue;
             }
-            listings.add(new Listing(text(node, "instrument_key"), text(node, "exchange_token"), segment, symbol,
+            listings.add(new Listing(text(node, "instrument_key"), token, segment, symbol,
                     number(node, "tick_size") / 100.0));
         }
         return listings;

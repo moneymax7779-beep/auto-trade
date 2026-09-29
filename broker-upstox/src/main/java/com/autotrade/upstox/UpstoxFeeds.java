@@ -42,7 +42,10 @@ public final class UpstoxFeeds {
             Map<String, Double> w = weights.apply(underlying);
             List<UpstoxUniverse.Constituent> list = new ArrayList<>();
             for (UpstoxInstrumentFile.Listing listing : UpstoxInstrumentFile.readEquities(file, segment, w.keySet())) {
-                list.add(new UpstoxUniverse.Constituent(listing, w.get(listing.tradingSymbol())));
+                // NIFTY weights are keyed by trading symbol, SENSEX weights by BSE scrip code (exchange token)
+                Double weight = w.containsKey(listing.tradingSymbol()) ? w.get(listing.tradingSymbol())
+                        : w.get(listing.exchangeToken());
+                list.add(new UpstoxUniverse.Constituent(listing, weight));
             }
             log.info("{}: {} of {} constituents found in {}", underlying, list.size(), w.size(), file.getFileName());
             constituents.put(underlying, list);
