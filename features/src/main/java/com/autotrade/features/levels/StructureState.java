@@ -484,9 +484,11 @@ public final class StructureState {
             double current = futures.volume(last.start(), last.end());
             double sum = 0;
             int bars = 0;
+            // v10: optionally compare only with bars after the opening range
+            Instant earliest = config.breakoutExcludesOpeningRange() ? openingRangeEnd : sessionOpen;
             for (int i = 1; i <= breakoutVolumeAverageBars; i++) {
                 Instant start = last.start().minus(length.multipliedBy(i));
-                if (start.isBefore(sessionOpen)) {
+                if (start.isBefore(earliest)) {
                     break;
                 }
                 double volume = futures.volume(start, start.plus(length));
@@ -557,7 +559,10 @@ public final class StructureState {
         }
         double average = recentRanges.stream().mapToDouble(Double::doubleValue).average().orElse(Double.NaN);
         lastBarRangeVsAvg = average > 0 ? bar.range() / average : Double.NaN;
-        recentRanges.addLast(bar.range());
+        // v10: opening-range bars can be left out of the range average (a gap open's bars dwarf later ones)
+        if (!config.breakoutExcludesOpeningRange() || !bar.start().isBefore(openingRangeEnd)) {
+            recentRanges.addLast(bar.range());
+        }
         if (recentRanges.size() > RANGE_AVERAGE_BARS) {
             recentRanges.removeFirst();
         }
