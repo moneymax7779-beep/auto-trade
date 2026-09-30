@@ -309,7 +309,9 @@ public final class TradingSession {
                     return;
                 }
                 // with a premium budget the strategy's lots are units of its plan, scaled at this entry
-                double budget = budget(slot.factory());
+                double stopPct = intent.stopPctOr(slot.factory().premiumStopPct());
+                // risk v5: no more premium than the per-trade loss cap allows at this position's stop
+                double budget = Math.min(budget(slot.factory()), risk.limits().premiumCapForStop(stopPct));
                 double ask = oms.ask(contract.get());
                 if (budget < contract.get().lotSize() * ask) {        // an expiry-day budget already used
                     rejected(strategyId, underlying, "ENTER " + intent.side(), String.format(
@@ -321,7 +323,7 @@ public final class TradingSession {
                 sizings.put(strategyId + "|" + underlying, sizing);
                 int lots = sizing.lots(intent.lots());
                 RiskDecision result = oms.enter(strategyId, underlying, intent.side(), contract.get(), lots,
-                        intent.stage().name(), market, intent.stopPctOr(slot.factory().premiumStopPct()));
+                        intent.stage().name(), market, stopPct);
                 logDecision(strategyId, underlying, intent, lots, result, contract.get());
             }
             case ENTER_STRADDLE -> {
@@ -333,11 +335,13 @@ public final class TradingSession {
                     rejected(strategyId, underlying, "ENTER STRADDLE", "no quotes for the chosen strikes yet");
                     return;
                 }
+                double straddleStop = intent.stopPctOr(slot.factory().premiumStopPct());
+                // risk v5: the combined premium is capped so the combined stop loses at most the per-trade cap
+                double straddleBudget = Math.min(intent.premiumBudget(), risk.limits().premiumCapForStop(straddleStop));
                 RiskDecision result = oms.enterStraddle(strategyId, underlying, call.get(), put.get(),
-                        intent.premiumBudget(), intent.stage().name(), market, intent.targetPct(),
-                        intent.stopPctOr(slot.factory().premiumStopPct()));
+                        straddleBudget, intent.stage().name(), market, intent.targetPct(), straddleStop);
                 log.info("{} {} {} ENTER STRADDLE {} + {} budget {} {}", time, underlying, strategyId,
-                        call.get().symbol(), put.get().symbol(), Math.round(intent.premiumBudget()),
+                        call.get().symbol(), put.get().symbol(), Math.round(straddleBudget),
                         result.approved() ? "APPROVED" : "REJECTED: " + result.reason());
             }
             case ADD -> {

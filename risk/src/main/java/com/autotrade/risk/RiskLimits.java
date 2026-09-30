@@ -25,7 +25,21 @@ public record RiskLimits(
         double stopLimitOffsetPct,
         int reconcileEverySec,
         LocalTime casEntryFrom,
-        LocalTime casEntryTo) {
+        LocalTime casEntryTo,
+        /** v5: the most one trade may lose at its own stop, in rupees (NaN = no cap, v1-v4). */
+        double maxLossPerTrade) {
+
+    /**
+     * The most premium an entry may buy so that its stop ({@code stopPct} below the price paid) loses
+     * no more than {@link #maxLossPerTrade}; infinite without a cap or a stop.
+     */
+    public double premiumCapForStop(double stopPct) {
+        if (Double.isNaN(maxLossPerTrade) || !(stopPct > 0)) {
+            return Double.POSITIVE_INFINITY;
+        }
+        return maxLossPerTrade / (stopPct / 100.0);
+    }
+
 
     /** True inside the closing-auction entry window (risk v3), where entries after the cutoff are allowed. */
     public boolean inCasEntryWindow(LocalTime time) {
@@ -45,6 +59,7 @@ public record RiskLimits(
                 c.getInt("orders.exit_chase_max"), c.getDouble("orders.stop_limit_offset_pct"),
                 c.getInt("orders.reconcile_every_sec"),
                 c.has("time.cas_entry_window") ? LocalTime.parse(c.getString("time.cas_entry_window").split("-")[0]) : null,
-                c.has("time.cas_entry_window") ? LocalTime.parse(c.getString("time.cas_entry_window").split("-")[1]) : null);
+                c.has("time.cas_entry_window") ? LocalTime.parse(c.getString("time.cas_entry_window").split("-")[1]) : null,
+                c.has("account.max_loss_per_trade") ? c.getDouble("account.max_loss_per_trade") : Double.NaN);
     }
 }

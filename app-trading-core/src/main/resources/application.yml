@@ -54,7 +54,7 @@ autotrade:
     features-file: config/features/features.v7.yaml   # v7 = v6 + ATR seeded from the previous session (ORH/ORL visible from 09:30; 7 expiry-day replays unchanged)
     exchange-file: config/exchange/nse-bse-sessions.v3.yaml
     costs-file: config/costs/india-index-options-costs.v1.yaml
-    risk-file: config/risk/paper-risk.v4.yaml   # v4: capital enforced, loss limit for the full-capital straddle
+    risk-file: config/risk/paper-risk.v5.yaml   # v5: v4 + ₹10,000 per-trade loss cap at each position's own stop (user, 2026-09-30)
     poll-interval-ms: 250
     replay-speed: 0                # --mode=replay only: market seconds per second (e.g. 60); 0 = as fast as possible
     recheck-window-ms: 3000
