@@ -63,6 +63,7 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
     private final Map<OptionSide, Integer> campaigns = new EnumMap<>(OptionSide.class);
     private final Map<OptionSide, Integer> casCampaigns = new EnumMap<>(OptionSide.class);
     private final Map<OptionSide, Boolean> casManaged = new EnumMap<>(OptionSide.class);
+    private final Map<OptionSide, Integer> expiryRunnerFails = new EnumMap<>(OptionSide.class);   // v8h
     private Instant stageSince;
     // v9: a box break per side, frozen at the break; whether the open position was entered on it alone
     private final Map<OptionSide, Double> boxLevel = new EnumMap<>(OptionSide.class);
@@ -323,6 +324,7 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
                         orders.add(intent(OrderIntent.Action.ADD, side, tranches[2], Stage.RUNNER, "RUNNER", ctx));
                     }
                     stages.put(side, Stage.RUNNER);
+                    expiryRunnerFails.put(side, 0);
                     stageSince = snapshot.time();
                     bestSpotInRunner = f.spot();
                     bestSpotTime = snapshot.time();
@@ -365,15 +367,25 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
         return gates;
     }
 
-    /** The design's expiry-runner requirements, checked while holding (v4). */
+    /**
+     * The design's expiry-runner requirements, checked while holding (v4). v8h: the exit is sent only once a
+     * requirement has failed on {@code expiryRunnerExitConfirm} consecutive snapshots (v4-v8: 1).
+     */
     private void expiryRunnerExit(OptionSide side, SideFeatures f, Stage stage, Map<String, Boolean> conditions,
                                   List<OrderIntent> orders) {
+        String reason = null;
         if (conditions.get("opposite_wall")) {
-            exit(side, stage, "OPPOSITE_WALL", orders);
+            reason = "OPPOSITE_WALL";
         } else if (!conditions.get("premium_response_ok")) {
-            exit(side, stage, "PREMIUM_LAGGING", orders);
+            reason = "PREMIUM_LAGGING";
         } else if (!f.futuresMomentum() && !f.futuresAcceleration()) {
-            exit(side, stage, "EXPIRY_MOMENTUM_LOST", orders);
+            reason = "EXPIRY_MOMENTUM_LOST";
+        }
+        int failing = reason == null ? 0 : expiryRunnerFails.merge(side, 1, Integer::sum);
+        if (reason == null) {
+            expiryRunnerFails.put(side, 0);
+        } else if (failing >= config.expiryRunnerExitConfirm()) {
+            exit(side, stage, reason, orders);
         }
     }
 
@@ -483,6 +495,7 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
     }
 
     private void exit(OptionSide side, Stage stage, String reason, List<OrderIntent> orders) {
+        expiryRunnerFails.put(side, 0);
         orders.add(OrderIntent.exit(side, stage, reason));
         stages.put(side, Stage.EXITED);
         casManaged.put(side, false);

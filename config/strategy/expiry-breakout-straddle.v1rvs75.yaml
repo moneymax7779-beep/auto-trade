@@ -1,0 +1,36 @@
+# v1rvs75 (2026-10-01, design-day counterfactual for the 1 Oct post-mortem, NOT deployed, NOT evidence): ebs-v1 with compression range_vs_session_max 0.75 (v1: 0.66)
+# Expiry-day breakout straddle (user's decision, 2026-09-27): on expiry day after 12:30, when the index
+# breaks a key level out of compression ("gamma blast with breakout"), buy the ATM call and put with the
+# full ₹5,00,000 and close both at +30 % or −20 % of the combined premium, else at 15:15.
+# Study and history: docs/studies/2026-09-26-straddle (straddle study) and 2026-09-27-straddle-day-filter;
+# ledger A-009. Needs features v6 (levels, compression). Risk: paper-risk v4 (capital enforced).
+version: ebs-v1rvs75
+strategy: expiry-breakout-straddle
+status: UNCALIBRATED
+source: user-decision-2026-09-27
+
+scope:
+  dte: 0                               # expiry day only
+  entry_from: "12:30"                  # user: after 12:30
+  entry_until: "14:00"                 # user: 12:30-14:00 (from 14:00 +30 % was hit 2 of 21 times)
+  flat_by: "15:15"                     # both legs closed here if neither target nor stop was reached
+  trigger_levels:                      # the breakout: a close through these (either side)
+    CE: [ORH, PDH]
+    PE: [ORL, PDL]
+
+compression:                           # as egb-v1 (calibrated there on 15/17 Sep expiry minutes)
+  range_vs_session_max: 0.75
+  ema_gap_atr_max: 0.30
+  volume_rate_ratio_max: 1.0
+  memory_min: 30                       # a compression counts for 30 minutes after it ends
+
+position:
+  strike_offset: 0                     # 0 = ATM straddle (−1 = one-strike-OTM strangle)
+  premium_budget: 500000               # user: the full ₹5,00,000 (capped by free capital)
+
+exits:
+  target_pct: 30                       # combined bid ≥ 1.30 × premium paid
+  stop_pct: 20                         # combined bid ≤ 0.80 × premium paid
+
+retry:
+  refused_retry_min: 3                 # an entry refused before any position existed may try again after this

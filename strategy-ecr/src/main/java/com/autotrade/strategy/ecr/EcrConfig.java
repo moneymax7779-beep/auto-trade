@@ -62,7 +62,8 @@ record EcrConfig(
         int zoneMinTouches,
         int zoneBreakWindowMin,
         /** v10: campaigns per side per session (v2-v9: 1, the design's one per direction); 0 = no limit. */
-        int maxCampaignsPerSide) {
+        int maxCampaignsPerSide,
+        int expiryRunnerExitConfirm) {
 
     record Window(LocalTime from, LocalTime to, double score) {
     }
@@ -113,7 +114,8 @@ record EcrConfig(
                 c.has("zone_levels.enabled") && c.getBoolean("zone_levels.enabled"),
                 c.has("zone_levels.min_touches") ? c.getInt("zone_levels.min_touches") : 0,
                 c.has("zone_levels.break_window_min") ? c.getInt("zone_levels.break_window_min") : 0,
-                c.has("rules.max_campaigns_per_side") ? c.getInt("rules.max_campaigns_per_side") : 1);
+                c.has("rules.max_campaigns_per_side") ? c.getInt("rules.max_campaigns_per_side") : 1,
+                c.has("exits.expiry_runner_exit_confirm") ? c.getInt("exits.expiry_runner_exit_confirm") : 1);
     }
 
     /** Minimum confirm score for the window containing {@code time}; the last window's if none. */
