@@ -85,6 +85,7 @@ public final class OrderManager implements Consumer<OrderUpdate> {
     private final Deque<Instant> recentOrders = new ArrayDeque<>();
     private final Set<String> terminal = new HashSet<>();
     private final Map<Long, double[]> lastQuotes = new HashMap<>();
+    private final Map<Long, Double> lastDeltas = new HashMap<>();
     private final Map<String, Bracket> brackets = new HashMap<>();
     private int sequence;
 
@@ -307,6 +308,12 @@ public final class OrderManager implements Consumer<OrderUpdate> {
     /** The contract's last ask seen (NaN before any quote). */
     public synchronized double ask(Contract contract) {
         return askOf(contract);
+    }
+
+    /** The contract's last non-zero feed delta (NaN before any). */
+    public synchronized double delta(Contract contract) {
+        Double delta = lastDeltas.get(contract.token());
+        return delta != null ? delta : Double.NaN;
     }
 
     private double askOf(Contract contract) {
@@ -581,6 +588,9 @@ public final class OrderManager implements Consumer<OrderUpdate> {
     public synchronized void observe(OptionTick tick) {
         if (!tick.bids().isEmpty() && !tick.asks().isEmpty()) {
             lastQuotes.put(tick.instrumentToken(), new double[] {tick.bids().price(0), tick.asks().price(0)});
+        }
+        if (tick.delta() != null && tick.delta() != 0 && Double.isFinite(tick.delta())) {
+            lastDeltas.put(tick.instrumentToken(), tick.delta());
         }
         onQuote(tick);
     }

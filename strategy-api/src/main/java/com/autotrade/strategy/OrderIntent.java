@@ -10,9 +10,12 @@ package com.autotrade.strategy;
  * the ATM straddle, −1 the one-strike-OTM strangle; the executor sizes it to {@code premiumBudget}
  * (rupees, capped by free capital) and closes both legs when their combined bid reaches
  * {@code targetPct} above or {@code premiumStopPct} below the combined premium paid.
+ *
+ * <p>{@code stopPoints} is the index-point distance from spot to the strategy's structure stop at entry
+ * (NaN = the strategy has none); risk v6 sizes single-leg entries from it and the option's delta.
  */
 public record OrderIntent(Action action, OptionSide side, int lots, Stage stage, String reason, double premiumStopPct,
-                          int strikeOffset, double targetPct, double premiumBudget) {
+                          int strikeOffset, double targetPct, double premiumBudget, double stopPoints) {
 
     public enum Action {
         ENTER,
@@ -22,8 +25,19 @@ public record OrderIntent(Action action, OptionSide side, int lots, Stage stage,
     }
 
     public OrderIntent(Action action, OptionSide side, int lots, Stage stage, String reason, double premiumStopPct,
+                       int strikeOffset, double targetPct, double premiumBudget) {
+        this(action, side, lots, stage, reason, premiumStopPct, strikeOffset, targetPct, premiumBudget, Double.NaN);
+    }
+
+    public OrderIntent(Action action, OptionSide side, int lots, Stage stage, String reason, double premiumStopPct,
                        int strikeOffset) {
         this(action, side, lots, stage, reason, premiumStopPct, strikeOffset, Double.NaN, Double.NaN);
+    }
+
+    /** This intent with the structure stop's distance from spot, in index points. */
+    public OrderIntent withStopPoints(double points) {
+        return new OrderIntent(action, side, lots, stage, reason, premiumStopPct, strikeOffset, targetPct, premiumBudget,
+                points);
     }
 
     public OrderIntent(Action action, OptionSide side, int lots, Stage stage, String reason) {

@@ -311,8 +311,11 @@ public final class TradingSession {
                 // with a premium budget the strategy's lots are units of its plan, scaled at this entry
                 double stopPct = intent.stopPctOr(slot.factory().premiumStopPct());
                 // risk v5: no more premium than the per-trade loss cap allows at this position's stop
-                double budget = Math.min(budget(slot.factory()), risk.limits().premiumCapForStop(stopPct));
                 double ask = oms.ask(contract.get());
+                double budget = Math.min(budget(slot.factory()), risk.limits().premiumCapForStop(stopPct));
+                // risk v6: the premium whose first stop (structure via delta, or premium) loses the risk per trade
+                budget = Math.min(budget, risk.limits().premiumCapForRisk(stopPct, ask, oms.delta(contract.get()),
+                        intent.stopPoints()));
                 if (budget < contract.get().lotSize() * ask) {        // an expiry-day budget already used
                     rejected(strategyId, underlying, "ENTER " + intent.side(), String.format(
                             "expiry-day budget: %.0f left, one lot costs %.0f", budget, contract.get().lotSize() * ask));

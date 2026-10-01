@@ -175,7 +175,7 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
                 manage(side, f, snapshot, ctx, confirmed, runner, conditions, cas, orders);
             } else if (!position.open()) {
                 if (!casEntry(side, snapshot, ctx, cas, conditions, orders)) {
-                    open(side, snapshot, ctx, conditions, early, confirmed, orders);
+                    open(side, f, snapshot, ctx, conditions, early, confirmed, orders);
                 }
             } else if (!stages.get(side).holdsPosition() && stages.get(side) != Stage.EXITED) {
                 stages.put(side, watchStage(conditions));
@@ -188,8 +188,8 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
                 views.get(OptionSide.CE), views.get(OptionSide.PE), List.copyOf(orders));
     }
 
-    private void open(OptionSide side, FeatureSnapshot snapshot, Context ctx, Map<String, Boolean> conditions,
-                      double early, boolean confirmed, List<OrderIntent> orders) {
+    private void open(OptionSide side, SideFeatures f, FeatureSnapshot snapshot, Context ctx,
+                      Map<String, Boolean> conditions, double early, boolean confirmed, List<OrderIntent> orders) {
         Stage stage = stages.get(side);
         if (stage.holdsPosition()) {
             // The executor reports flat (e.g. the resting premium stop filled): the campaign is over.
@@ -214,11 +214,13 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
         boolean scaling = config.scaling(lots);
         boolean earlyAllowed = ext == null || ctx.adjustment().allowEarly();
         if (entryWindow && scaling && earlyAllowed && early >= config.earlyMin()) {
-            orders.add(intent(OrderIntent.Action.ENTER, side, tranches[0], Stage.EARLY_ENTRY, "EARLY", ctx));
+            orders.add(intent(OrderIntent.Action.ENTER, side, tranches[0], Stage.EARLY_ENTRY, "EARLY", ctx)
+                    .withStopPoints(structureStopPoints(f, snapshot, ctx)));
             next = Stage.EARLY_ENTRY;
         } else if (entryWindow && confirmed) {
             int entryLots = scaling ? tranches[1] + (earlyAllowed ? 0 : tranches[0]) : lots;
-            orders.add(intent(OrderIntent.Action.ENTER, side, entryLots, Stage.CONFIRMED, "CONFIRMED", ctx));
+            orders.add(intent(OrderIntent.Action.ENTER, side, entryLots, Stage.CONFIRMED, "CONFIRMED", ctx)
+                    .withStopPoints(structureStopPoints(f, snapshot, ctx)));
             next = Stage.CONFIRMED;
         }
         if (next.holdsPosition()) {
@@ -399,6 +401,17 @@ final class EarlyConfirmRunnerStrategy implements Strategy {
             return config.intendedLots();
         }
         return Math.max(1, (int) Math.round(config.intendedLots() * ctx.adjustment().sizeFactor()));
+    }
+
+    /** Index points from spot to the structure stop (the level plus the invalidation band); NaN if not positive. */
+    private double structureStopPoints(SideFeatures f, FeatureSnapshot snapshot, Context ctx) {
+        double band = config.invalidationAtr();
+        if (ctx.adjustment() != null && Double.isFinite(ctx.adjustment().structureStopAtr())) {
+            band = ctx.adjustment().structureStopAtr();
+        }
+        double atr = snapshot.structure().atr3m();
+        double points = (f.levelDistance() + band) * atr;
+        return atr > 0 && points > 0 ? points : Double.NaN;
     }
 
     /**

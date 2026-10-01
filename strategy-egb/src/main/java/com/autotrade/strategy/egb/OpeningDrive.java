@@ -109,7 +109,8 @@ final class OpeningDrive implements Strategy {
                 attempts++;
                 asked = true;
                 orders.add(new OrderIntent(OrderIntent.Action.ENTER, level.side(), 1, Stage.CONFIRMED,
-                        "BREAK_" + level.name(), config.premiumStopPct(), config.strikeOffset()));
+                        "BREAK_" + level.name(), config.premiumStopPct(), config.strikeOffset())
+                        .withStopPoints(config.structureStop() ? Math.abs(spot - level.price()) : Double.NaN));
             }
         }
 

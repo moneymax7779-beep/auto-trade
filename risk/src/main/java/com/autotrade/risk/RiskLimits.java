@@ -27,7 +27,9 @@ public record RiskLimits(
         LocalTime casEntryFrom,
         LocalTime casEntryTo,
         /** v5: the most one trade may lose at its own stop, in rupees (NaN = no cap, v1-v4). */
-        double maxLossPerTrade) {
+        double maxLossPerTrade,
+        /** v6: rupee risk per single-leg entry at its first stop, from delta and the structure stop (NaN = off). */
+        double deltaRiskPerTrade) {
 
     /**
      * The most premium an entry may buy so that its stop ({@code stopPct} below the price paid) loses
@@ -38,6 +40,22 @@ public record RiskLimits(
             return Double.POSITIVE_INFINITY;
         }
         return maxLossPerTrade / (stopPct / 100.0);
+    }
+
+    /**
+     * v6: the most premium a single-leg entry may buy so that its first stop loses {@link #deltaRiskPerTrade}.
+     * Risk per unit is the smaller of the premium stop ({@code stopPct} of the ask) and |delta| × the index
+     * points to the structure stop (when both are known); infinite when v6 is off or nothing is known.
+     */
+    public double premiumCapForRisk(double stopPct, double ask, double delta, double stopPoints) {
+        if (Double.isNaN(deltaRiskPerTrade) || !(ask > 0)) {
+            return Double.POSITIVE_INFINITY;
+        }
+        double perUnit = stopPct > 0 ? ask * stopPct / 100.0 : Double.POSITIVE_INFINITY;
+        if (Double.isFinite(delta) && delta != 0 && stopPoints > 0) {
+            perUnit = Math.min(perUnit, Math.abs(delta) * stopPoints);
+        }
+        return Double.isFinite(perUnit) ? deltaRiskPerTrade / perUnit * ask : Double.POSITIVE_INFINITY;
     }
 
 
@@ -60,6 +78,7 @@ public record RiskLimits(
                 c.getInt("orders.reconcile_every_sec"),
                 c.has("time.cas_entry_window") ? LocalTime.parse(c.getString("time.cas_entry_window").split("-")[0]) : null,
                 c.has("time.cas_entry_window") ? LocalTime.parse(c.getString("time.cas_entry_window").split("-")[1]) : null,
-                c.has("account.max_loss_per_trade") ? c.getDouble("account.max_loss_per_trade") : Double.NaN);
+                c.has("account.max_loss_per_trade") ? c.getDouble("account.max_loss_per_trade") : Double.NaN,
+                c.has("sizing.delta_risk_per_trade") ? c.getDouble("sizing.delta_risk_per_trade") : Double.NaN);
     }
 }

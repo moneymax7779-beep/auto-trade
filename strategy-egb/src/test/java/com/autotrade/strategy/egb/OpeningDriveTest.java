@@ -68,6 +68,7 @@ class OpeningDriveTest {
             assertThat(o.strikeOffset()).isZero();
             assertThat(o.premiumStopPct()).isEqualTo(25);
             assertThat(o.reason()).isEqualTo("BREAK_PDL");      // both broken: the stop uses the nearer, PDL
+            assertThat(o.stopPoints()).isCloseTo(23021.20 - 22975.60, org.assertj.core.api.Assertions.within(1e-6));
         });
         assertThat(d.pe().conditions()).containsEntry("pdl_broken", true).containsEntry("prior_orl_broken", true);
         assertThat(d.pe().stage()).isEqualTo(Stage.CONFIRMED);
