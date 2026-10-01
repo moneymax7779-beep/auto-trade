@@ -57,6 +57,7 @@ autotrade:
     risk-file: config/risk/paper-risk.v4.yaml   # v4: full capital, no per-trade cap (user, 2026-09-30: "let it use full capital, we are running in PAPER mode"; v5 deployed and withdrawn the same evening)
     poll-interval-ms: 250
     replay-speed: 0                # --mode=replay only: market seconds per second (e.g. 60); 0 = as fast as possible
+    replay-source: zt              # --mode=replay only: zt (zt-tiger-v2's capture) or own (auto-trade's live capture, md.*; from 28 Sep 2026)
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"
@@ -67,6 +68,12 @@ autotrade:
     instrument-dir: .local/instruments   # NSE-*.json.gz / BSE-*.json.gz contract files (newest used)
     strikes-each-side: 12
     recenter-strikes: 8
+  alerts:                                # --mode=auto only (replays never alert)
+    telegram-file: .local/telegram/bot.env   # TELEGRAM_BOT_TOKEN=... and TELEGRAM_CHAT_ID=... (never logged); absent = log and UI only
+    disk-path: config                    # a bind-mounted host folder: its free space is the Mac's
+    disk-warn-gb: 8
+    disk-critical-gb: 4
+    trades: true                         # a message when a trade opens and closes
   source:
     url: ${ZT_SOURCE_URL:jdbc:postgresql://127.0.0.1:5490/trading}
     username: ${ZT_SOURCE_USER:zerotrade}

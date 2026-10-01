@@ -96,6 +96,11 @@ class SessionRunner implements ApplicationRunner {
         this.context = context;
     }
 
+    /** True on exchange trading days; false when the scheduler is off (not --mode=auto). */
+    boolean tradingDay(LocalDate day) {
+        return calendar != null && calendar.isTradingDay(day);
+    }
+
     TradingSession current() {
         return current;
     }
@@ -249,7 +254,10 @@ class SessionRunner implements ApplicationRunner {
         LiveFeed feed = null;
         if (replay) {
             // replay-speed (market seconds per second; 0 = as fast as possible) lets the UI be watched
-            feed = new ReplayAsLiveFeed(new ZtSessionSource(source, false), session, t.underlyings(), t.replaySpeed());
+            // replay-source own: auto-trade's own live capture, the same ticks the live session saw (zt: zt-tiger-v2's)
+            com.autotrade.core.event.SessionEventSource events = t.replayFromOwnCapture()
+                    ? new OwnCaptureSource(target) : new ZtSessionSource(source, false);
+            feed = new ReplayAsLiveFeed(events, session, t.underlyings(), t.replaySpeed());
         } else if ("upstox".equals(t.feed()) && !upstoxFailed.contains(session)) {
             // Upstox feed (auction data, futures book, VIX) with the token zt-tiger-v2 holds; anything
             // missing or failing falls back to tailing zt-tiger-v2's capture.
@@ -368,7 +376,7 @@ class SessionRunner implements ApplicationRunner {
      * Today's Upstox token: zt-tiger-v2's (token-source zt, read-only, never re-issued by auto-trade),
      * else auto-trade's own token file; checked against the profile API before use.
      */
-    private java.util.Optional<UpstoxToken> upstoxToken(DataSource ztDatabase) throws IOException {
+    java.util.Optional<UpstoxToken> upstoxToken(DataSource ztDatabase) throws IOException {
         TradingProperties.Upstox upstox = properties.upstox();
         java.util.Optional<UpstoxToken> token = java.util.Optional.empty();
         if (!"file".equals(upstox.tokenSource())) {

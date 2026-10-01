@@ -9,6 +9,7 @@ import { ConfirmButton, ErrorNote, Loading, Panel, Pnl, ScoreBar, SignedGauge, S
 import { groupTrades, TradesTable } from "../components/TradesTable";
 import { LivePositions } from "../components/LivePositions";
 import { SurgePanel } from "../components/SurgePanel";
+import { AlertBanner } from "../components/AlertBanner";
 
 export function LivePage() {
   const queryClient = useQueryClient();
@@ -25,6 +26,7 @@ export function LivePage() {
     const next = s.schedule?.nextStart;
     return (
       <div className="space-y-4">
+      <AlertBanner />
       <Panel title={s.schedule?.mode === "auto" ? "Waiting for the next trading session" : "No trading session running"}>
         {s.schedule?.mode === "auto" && next ? (
           <p className="text-sm">
@@ -52,6 +54,7 @@ export function LivePage() {
 
   return (
     <div className="space-y-4">
+      <AlertBanner />
       <Panel
         title={<>Session {s.session} · {s.date} · <span className="text-warn">{s.mode}</span></>}
         right={
