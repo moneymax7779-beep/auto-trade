@@ -90,10 +90,15 @@ class SessionRunner implements ApplicationRunner {
     private final java.util.Set<LocalDate> upstoxFailed = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private Instant lastStart;
 
-    SessionRunner(TradingProperties properties, DataSource target, ConfigurableApplicationContext context) {
+    private final AlertService alerts;
+    private volatile Thread shadowThread;
+
+    SessionRunner(TradingProperties properties, DataSource target, ConfigurableApplicationContext context,
+                  AlertService alerts) {
         this.properties = properties;
         this.target = target;
         this.context = context;
+        this.alerts = alerts;
     }
 
     /** True on exchange trading days; false when the scheduler is off (not --mode=auto). */
@@ -125,6 +130,13 @@ class SessionRunner implements ApplicationRunner {
             case "auto" -> {
                 closeOrphanedLiveSessions();
                 startScheduler();
+            }
+            case "shadow" -> {
+                // the shadow strategies on a captured day, by hand (the scheduler does this after each live session)
+                LocalDate session = LocalDate.parse(first(args, "session", LocalDate.now(MarketTime.IST).toString()));
+                String summary = new ShadowRunner(properties, target).run(session);
+                log.info("{}", summary == null ? "no shadow-strategy-files configured" : summary);
+                exit(0);
             }
             case "replay" -> {
                 LocalDate session = LocalDate.parse(first(args, "session", LocalDate.now(MarketTime.IST).toString()));
@@ -175,6 +187,7 @@ class SessionRunner implements ApplicationRunner {
         LocalTime startAt = LocalTime.parse(properties.trading().startAt());
         LocalTime stopAfter = LocalTime.parse(properties.trading().stopAfter());
         boolean window = calendar.isTradingDay(today) && !time.isBefore(startAt) && time.isBefore(stopAfter);
+        shadowAfterClose(today, time, stopAfter);
         Running active = running;
         boolean alive = active != null && active.worker().isAlive();
         if (!window || alive) {
@@ -195,6 +208,38 @@ class SessionRunner implements ApplicationRunner {
         } catch (Exception e) {
             log.error("scheduler: could not start today's session: {}", e.getMessage(), e);
         }
+    }
+
+    /**
+     * Shadow mode: once today's live session is DONE (5 minutes after stop-after), the shadow strategies replay
+     * the day from own capture on account SHADOW-1, once per day (also after a restart), and the result is sent
+     * with the alerts. Runs on its own thread; never touches the live session.
+     */
+    private void shadowAfterClose(LocalDate today, LocalTime time, LocalTime stopAfter) {
+        List<String> files = properties.trading().shadowStrategyFiles();
+        if (files == null || files.isEmpty() || !calendar.isTradingDay(today) || time.isBefore(stopAfter.plusMinutes(5))
+                || (shadowThread != null && shadowThread.isAlive())) {
+            return;
+        }
+        org.springframework.jdbc.core.JdbcTemplate jdbc = new org.springframework.jdbc.core.JdbcTemplate(target);
+        Integer liveDone = jdbc.queryForObject("select count(*) from trade.session where mode = 'PAPER_LIVE' "
+                + "and session_date = ? and status = 'DONE'", Integer.class, today);
+        Integer shadowed = jdbc.queryForObject("select count(*) from trade.session where account = ? "
+                + "and session_date = ? and status in ('RUNNING', 'DONE')", Integer.class, ShadowRunner.ACCOUNT, today);
+        if (liveDone == null || liveDone == 0 || (shadowed != null && shadowed > 0)) {
+            return;
+        }
+        shadowThread = Thread.ofPlatform().name("shadow-" + today).start(() -> {
+            try {
+                String summary = new ShadowRunner(properties, target).run(today);
+                if (summary != null) {
+                    alerts.info(summary);
+                }
+            } catch (Exception e) {
+                log.warn("shadow run for {} failed: {}", today, e.getMessage(), e);
+                alerts.raise("shadow", AlertService.Level.WARN, "Shadow run for " + today + " failed: " + e.getMessage());
+            }
+        });
     }
 
     /** The next start time: today if still before the window's start, else the next trading day. */

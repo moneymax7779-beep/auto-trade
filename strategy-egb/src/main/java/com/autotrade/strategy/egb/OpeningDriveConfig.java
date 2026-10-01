@@ -23,7 +23,8 @@ record OpeningDriveConfig(
         double premiumStopPct,
         boolean structureStop,
         double trailActivatePct,
-        double trailGivebackPct) {
+        double trailGivebackPct,
+        int maxTrades) {
 
     static OpeningDriveConfig from(ThresholdConfig c) {
         return new OpeningDriveConfig(c.contentHash(), c.version(), c.getTime("scope.trigger_from"),
@@ -33,7 +34,8 @@ record OpeningDriveConfig(
                 c.getInt("position.strike_offset"), c.getDouble("position.premium_budget"),
                 c.has("position.expiry_day_premium_budget") ? c.getDouble("position.expiry_day_premium_budget") : Double.NaN,
                 c.getDouble("exits.premium_stop_pct"), c.getBoolean("exits.structure_stop"),
-                c.getDouble("exits.trail_activate_pct"), c.getDouble("exits.trail_giveback_pct"));
+                c.getDouble("exits.trail_activate_pct"), c.getDouble("exits.trail_giveback_pct"),
+                c.has("scope.max_trades") ? c.getInt("scope.max_trades") : 1);
     }
 
     @SuppressWarnings("unchecked")

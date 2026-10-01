@@ -47,10 +47,10 @@ autotrade:
     # egb-v3 removed 2026-09-27 (user: run the strategies behind the replay results; egb-v3 was refused for
     # capital both times it triggered on the 7 expiry days and made no trade).
     strategy-files:
-      - config/strategy/expiry-breakout-straddle.v1.yaml
-      - config/strategy/early-confirm-runner.v8.yaml   # v8: v7 on expiry days only (user, 2026-09-27)
-      - config/strategy/opening-drive.v2.yaml          # odb-v2: every day 09:16-10:00, ₹5L; ₹1L when NIFTY/SENSEX expires (user, 2026-09-28)
-      - config/strategy/expiry-gamma-breakout.v3.yaml  # egb-v3 back in live PAPER (user, 2026-09-29); last in order, so it gets what capital is left
+      - config/strategy/expiry-breakout-straddle.v2.yaml   # ebs-v2 = v1 with no limit on straddles a day (user, 2026-10-01)
+      - config/strategy/early-confirm-runner.v11.yaml      # ecr-v11 = v8 (expiry days only) with no limit on campaigns per side (user, 2026-10-01)
+      - config/strategy/opening-drive.v3.yaml              # odb-v3 = v2 with no limit on trades; a re-entry needs a fresh break (user, 2026-10-01)
+      - config/strategy/expiry-gamma-breakout.v4.yaml      # egb-v4 = v3 with no limit on campaigns per side (user, 2026-10-01); last in order
     features-file: config/features/features.v7.yaml   # v7 = v6 + ATR seeded from the previous session (ORH/ORL visible from 09:30; 7 expiry-day replays unchanged)
     exchange-file: config/exchange/nse-bse-sessions.v3.yaml
     costs-file: config/costs/india-index-options-costs.v1.yaml
@@ -58,6 +58,10 @@ autotrade:
     poll-interval-ms: 250
     replay-speed: 0                # --mode=replay only: market seconds per second (e.g. 60); 0 = as fast as possible
     replay-source: zt              # --mode=replay only: zt (zt-tiger-v2's capture) or own (auto-trade's live capture, md.*; from 28 Sep 2026)
+    # Shadow mode (--mode=auto): after each live session, these candidates replay the day from own capture on
+    # account SHADOW-1 (no orders anywhere) and the result is sent with the alerts. --mode=shadow --session=D runs it by hand.
+    shadow-strategy-files:
+      - config/strategy/expiry-trend-rider.v1.yaml   # etr-v1 (A-029, user 2026-10-01: "run shadow")
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"

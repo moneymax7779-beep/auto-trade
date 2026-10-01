@@ -35,6 +35,8 @@ final class ExpiryBreakoutStraddle implements Strategy {
     private boolean asked;
     private boolean held;
     private boolean done;
+    private int trades;                 // straddles closed today
+    private boolean rearm;              // v2: after a straddle, the trigger must switch off once before the next
     private Instant retryAfter;
 
     ExpiryBreakoutStraddle(StraddleConfig config) {
@@ -85,17 +87,24 @@ final class ExpiryBreakoutStraddle implements Strategy {
             held = true;
             if (!time.isBefore(config.flatBy())) {
                 orders = List.of(OrderIntent.exit(position.side(), Stage.CONFIRMED, "FLAT_BY"));
-                done = true;
+                done = true;                    // the day's square-off: no new straddle after it
             }
         } else {
             if (held) {
-                done = true;                    // the combined target or stop (or the square-off) closed it
+                // the combined target or stop (or the square-off) closed it; v2 (max_trades 0 = no limit) may trade again
+                held = false;
+                trades++;
+                rearm = true;
+                done = done || (config.maxTrades() != 0 && trades >= config.maxTrades());
             } else if (asked) {
                 asked = false;                  // refused before any position existed: may try again later
                 retryAfter = now.plus(Duration.ofMinutes(config.refusedRetryMin()));
             }
             boolean retryOk = retryAfter == null || !now.isBefore(retryAfter);
-            if (!done && expiryDay && continuous && ce.orComplete() && window && trigger && retryOk) {
+            if (rearm && !trigger) {
+                rearm = false;
+            }
+            if (!done && !rearm && expiryDay && continuous && ce.orComplete() && window && trigger && retryOk) {
                 orders = List.of(OrderIntent.straddle(config.strikeOffset(), config.premiumBudget(), config.targetPct(),
                         config.stopPct(), Stage.CONFIRMED, brokeUp ? "BREAKOUT_UP" : "BREAKOUT_DOWN"));
                 asked = true;

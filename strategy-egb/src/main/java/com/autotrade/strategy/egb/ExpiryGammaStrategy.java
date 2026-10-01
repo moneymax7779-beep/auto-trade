@@ -58,6 +58,7 @@ final class ExpiryGammaStrategy implements Strategy {
 
     private final EgbConfig config;
     private final Map<OptionSide, Side> sides = new EnumMap<>(OptionSide.class);
+    private final Map<OptionSide, Integer> campaigns = new EnumMap<>(OptionSide.class);   // v4: campaigns closed
     private Instant compressionUntil;
 
     ExpiryGammaStrategy(EgbConfig config) {
@@ -135,7 +136,12 @@ final class ExpiryGammaStrategy implements Strategy {
             side.retryAfter = now.plus(REFUSED_RETRY);
         }
         if (side.stage == Stage.EXITED || side.done) {
-            return;
+            int closed = campaigns.getOrDefault(sideKey, 0);
+            if (config.maxCampaignsPerSide() == 0 || closed < config.maxCampaignsPerSide()) {
+                side = fresh(sideKey);          // v4 (max_campaigns_per_side 0 = no limit): a new campaign may start
+            } else {
+                return;
+            }
         }
         boolean window = expiryDay && continuous && f.orComplete() && !time.isBefore(config.earliestEntry())
                 && time.isBefore(config.lastNewEntry()) && (side.retryAfter == null || !now.isBefore(side.retryAfter));
@@ -274,6 +280,18 @@ final class ExpiryGammaStrategy implements Strategy {
     private void finish(Side side) {
         side.stage = Stage.EXITED;
         side.done = true;
+        sides.forEach((key, value) -> {
+            if (value == side) {
+                campaigns.merge(key, 1, Integer::sum);
+            }
+        });
+    }
+
+    /** A clean side state for a new campaign (v4). */
+    private Side fresh(OptionSide sideKey) {
+        Side side = new Side();
+        sides.put(sideKey, side);
+        return side;
     }
 
     // ---------------------------------------------------------------------------------- conditions

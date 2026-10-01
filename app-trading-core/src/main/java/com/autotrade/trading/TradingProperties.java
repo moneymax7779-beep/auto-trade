@@ -14,7 +14,8 @@ public record TradingProperties(Trading trading, Source source, Upstox upstox) {
     public record Trading(String account, List<String> underlyings, String fillModel, String strategyFile,
                           List<String> strategyFiles, String featuresFile, String exchangeFile, String costsFile,
                           String riskFile, long pollIntervalMs, long recheckWindowMs, String startAt, String stopAfter,
-                          String feed, double replaySpeed, List<String> tradeUnderlyings, String replaySource) {
+                          String feed, double replaySpeed, List<String> tradeUnderlyings, String replaySource,
+                          List<String> shadowStrategyFiles) {
 
         /** --mode=replay only: "own" replays auto-trade's own live capture (md.*), anything else zt-tiger-v2. */
         public boolean replayFromOwnCapture() {

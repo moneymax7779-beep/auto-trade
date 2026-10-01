@@ -24,7 +24,8 @@ record StraddleConfig(
         double premiumBudget,
         double targetPct,
         double stopPct,
-        int refusedRetryMin) {
+        int refusedRetryMin,
+        int maxTrades) {
 
     static StraddleConfig from(ThresholdConfig c) {
         return new StraddleConfig(c.contentHash(), c.version(), c.getInt("scope.dte"), c.getTime("scope.entry_from"),
@@ -34,7 +35,8 @@ record StraddleConfig(
                 c.getDouble("compression.range_vs_session_max"), c.getDouble("compression.ema_gap_atr_max"),
                 c.getDouble("compression.volume_rate_ratio_max"), c.getInt("compression.memory_min"),
                 c.getInt("position.strike_offset"), c.getDouble("position.premium_budget"),
-                c.getDouble("exits.target_pct"), c.getDouble("exits.stop_pct"), c.getInt("retry.refused_retry_min"));
+                c.getDouble("exits.target_pct"), c.getDouble("exits.stop_pct"), c.getInt("retry.refused_retry_min"),
+                c.has("retry.max_trades") ? c.getInt("retry.max_trades") : 1);
     }
 
     @SuppressWarnings("unchecked")

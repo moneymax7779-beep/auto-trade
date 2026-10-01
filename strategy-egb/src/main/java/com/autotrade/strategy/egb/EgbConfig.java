@@ -49,7 +49,8 @@ record EgbConfig(
         int vwapCrossesMax,
         double breakoutWickMaxPct,
         double maxSpreadPct,
-        double targetAbsDelta) {
+        double targetAbsDelta,
+        int maxCampaignsPerSide) {
 
     static EgbConfig from(ThresholdConfig c) {
         return new EgbConfig(
@@ -83,7 +84,8 @@ record EgbConfig(
                 c.getDouble("exits.premium_stop_pct"),
                 c.getInt("rejections.vwap_crosses_max"), c.getDouble("rejections.breakout_wick_max_pct"),
                 c.getDouble("rejections.max_spread_pct"),
-                c.getDouble("option.target_abs_delta"));
+                c.getDouble("option.target_abs_delta"),
+                c.has("rules.max_campaigns_per_side") ? c.getInt("rules.max_campaigns_per_side") : 1);
     }
 
     /** Lots per tranche [early, confirm, runner] by largest remainder, summing to the intended lots. */

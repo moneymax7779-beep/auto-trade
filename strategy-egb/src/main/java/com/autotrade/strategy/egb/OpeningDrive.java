@@ -43,7 +43,11 @@ final class OpeningDrive implements Strategy {
     private boolean asked;
     private boolean held;
     private boolean done;
+    private boolean exitSent;                // this position's exit was sent (the executor chases it)
     private double bestBid = Double.NaN;
+    private int trades;                      // positions closed today
+    private final java.util.Set<String> rearm = new java.util.HashSet<>();   // v3: levels waiting for a fresh break
+    private final java.util.Set<String> backWhileHeld = new java.util.HashSet<>();   // v3: levels spot recrossed while held
 
     OpeningDrive(OpeningDriveConfig config) {
         this.config = config;
@@ -76,6 +80,10 @@ final class OpeningDrive implements Strategy {
         String exitReason = null;
         if (position.open()) {
             held = true;
+            if (levels != null) {                // a return to a level's untouched side while held re-arms it
+                levels.stream().filter(l -> l.side() == OptionSide.CE ? spot <= l.price() : spot >= l.price())
+                        .forEach(l -> backWhileHeld.add(l.name()));
+            }
             asked = false;
             double bid = position.bid();
             double cost = position.averagePremium();
@@ -91,13 +99,30 @@ final class OpeningDrive implements Strategy {
             if (Double.isFinite(bid)) {
                 bestBid = Double.isFinite(bestBid) ? Math.max(bestBid, bid) : bid;
             }
-            if (exitReason != null && !done) {       // sent once; the executor chases an unfilled exit
+            if (exitReason != null && !exitSent) {   // sent once; the executor chases an unfilled exit
                 orders.add(OrderIntent.exit(position.side(), Stage.CONFIRMED, exitReason));
-                done = true;
+                exitSent = true;
+                done = config.maxTrades() == 1;      // v1/v2: the day's one trade (v3: may trade again)
             }
         } else {
             if (held) {
-                done = true;                     // the premium stop, an exit or the square-off closed it
+                // the premium stop, an exit or the square-off closed it; v3 (max_trades 0 = no limit) may trade again,
+                // but only on a fresh break: each level re-arms once spot is back on its untouched side
+                held = false;
+                trades++;
+                bestBid = Double.NaN;
+                exitSent = false;
+                if (config.maxTrades() != 0 && trades >= config.maxTrades()) {
+                    done = true;
+                } else if (levels != null) {
+                    levels.stream().filter(l -> !backWhileHeld.contains(l.name())).forEach(l -> rearm.add(l.name()));
+                    attempts = 0;
+                }
+                backWhileHeld.clear();
+            }
+            if (levels != null && !rearm.isEmpty()) {
+                levels.stream().filter(l -> l.side() == OptionSide.CE ? spot <= l.price() : spot >= l.price())
+                        .forEach(l -> rearm.remove(l.name()));
             }
             asked = false;                       // an entry sent last snapshot was refused or not filled
             List<Level> hits = hits(spot);
@@ -146,7 +171,8 @@ final class OpeningDrive implements Strategy {
         if (levels == null || !Double.isFinite(spot)) {
             return List.of();
         }
-        return levels.stream().filter(l -> l.side() == OptionSide.CE ? spot > l.price() : spot < l.price()).toList();
+        return levels.stream().filter(l -> !rearm.contains(l.name()))
+                .filter(l -> l.side() == OptionSide.CE ? spot > l.price() : spot < l.price()).toList();
     }
 
     private static boolean backThrough(Level level, double spot) {

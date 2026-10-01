@@ -134,4 +134,36 @@ class OpeningDriveTest {
         assertThat(strategy.decide(open().set("spot", 22970.0).at("09:17"), PositionView.FLAT).orders()).hasSize(1);
         assertThat(strategy.decide(open().set("spot", 22965.0).at("09:18"), PositionView.FLAT).orders()).isEmpty();
     }
+
+    @Test
+    void v3TradesAgainOnlyAfterAFreshBreakAndV2TradesOnce() {
+        Strategy v3 = Strategies.load(Path.of("..", "config", "strategy", "opening-drive.v3.yaml")).create("NIFTY", Snapshots.SESSION);
+        Strategy v2 = Strategies.load(Path.of("..", "config", "strategy", "opening-drive.v2.yaml")).create("NIFTY", Snapshots.SESSION);
+        for (Strategy s : java.util.List.of(v2, v3)) {
+            assertThat(s.decide(open().set("spot", 22975.60).at("09:16"), PositionView.FLAT).orders()).hasSize(1);
+            s.decide(open().set("spot", 22960.0).at("09:17"), holding(80));                   // held, then stopped out
+        }
+        // flat again, still below PDL: no new entry for either (v3 waits for a fresh break)
+        assertThat(v2.decide(open().set("spot", 22950.0).at("09:18"), PositionView.FLAT).orders()).isEmpty();
+        assertThat(v3.decide(open().set("spot", 22950.0).at("09:18"), PositionView.FLAT).orders()).isEmpty();
+        // back above both put levels: re-armed, no order
+        assertThat(v3.decide(open().set("spot", 23040.0).at("09:19"), PositionView.FLAT).orders()).isEmpty();
+        assertThat(v2.decide(open().set("spot", 23040.0).at("09:19"), PositionView.FLAT).orders()).isEmpty();
+        // broken again inside the window: v3 re-enters, v2 has had its trade
+        assertThat(v3.decide(open().set("spot", 23010.0).at("09:20"), PositionView.FLAT).orders())
+                .singleElement().satisfies(o -> assertThat(o.action()).isEqualTo(OrderIntent.Action.ENTER));
+        assertThat(v2.decide(open().set("spot", 23010.0).at("09:20"), PositionView.FLAT).orders()).isEmpty();
+    }
+
+    @Test
+    void v3ReentersAtOnceWhenTheStructureStopWasTheReturnThroughTheLevel() {
+        Strategy v3 = Strategies.load(Path.of("..", "config", "strategy", "opening-drive.v3.yaml")).create("NIFTY", Snapshots.SESSION);
+        assertThat(v3.decide(open().set("spot", 22975.60).at("09:16"), PositionView.FLAT).orders()).hasSize(1);
+        // held; spot back above PDL and the prior ORL: the structure stop exits (30 Sep 09:23 pattern)
+        assertThat(v3.decide(open().set("spot", 23040.0).at("09:17"), holding(80)).orders())
+                .singleElement().satisfies(o -> assertThat(o.action()).isEqualTo(OrderIntent.Action.EXIT));
+        // flat, and broken again in the next minute: the return happened while held, so it trades again
+        assertThat(v3.decide(open().set("spot", 23010.0).at("09:18"), PositionView.FLAT).orders())
+                .singleElement().satisfies(o -> assertThat(o.action()).isEqualTo(OrderIntent.Action.ENTER));
+    }
 }
