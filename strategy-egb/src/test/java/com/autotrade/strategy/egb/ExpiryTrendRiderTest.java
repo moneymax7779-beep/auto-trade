@@ -86,4 +86,14 @@ class ExpiryTrendRiderTest {
         assertThat(ivFalling.decide(falling(72060, 72050).set("options.atmIvChange3m", -0.01).at("12:41"), PositionView.FLAT)
                 .orders()).isEmpty();
     }
+
+    @Test
+    void v2OnlyAddsPyramidProtection() {
+        StrategyFactory v2 = Strategies.load(Path.of("..", "config", "strategy", "expiry-trend-rider.v2.yaml"));
+        assertThat(v2.pyramidRiskCap()).isTrue();
+        assertThat(FACTORY.pyramidRiskCap()).as("v1").isFalse();
+        assertThat(v2.premiumStopPct()).isEqualTo(FACTORY.premiumStopPct());
+        assertThat(v2.premiumBudget()).isEqualTo(FACTORY.premiumBudget());
+        assertThat(v2.version()).isEqualTo("etr-v2");
+    }
 }

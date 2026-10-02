@@ -227,6 +227,20 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         return decision;
     }
 
+    /**
+     * Pyramid protection: fixes, before the first add, the rupees {@code strategyId}'s position may lose at its
+     * stop to what it risks now (held quantity × average cost × stop fraction). Every later stop is placed so
+     * the whole position still loses no more than that: average cost − cap ÷ quantity, never lower than the
+     * plain stop. Later calls keep the first cap.
+     */
+    public synchronized void capRiskAtFirstEntry(String strategyId, String underlying) {
+        ManagedPosition position = live.get(key(strategyId, underlying) + "|");
+        if (position == null || position.riskCap > 0 || position.stopFraction <= 0 || position.quantity <= 0) {
+            return;
+        }
+        position.riskCap = position.quantity * position.averageCost * position.stopFraction;
+    }
+
     /** Closes the default strategy's position; always allowed. */
     public synchronized void exit(String underlying, String reason) {
         exit(strategy, underlying, reason);
@@ -622,7 +636,11 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         if (position.stopFraction <= 0) {
             return; // a straddle leg: the pair's combined bracket protects it
         }
-        double trigger = position.contract.roundDown(position.averageCost * (1 - position.stopFraction));
+        double plain = position.averageCost * (1 - position.stopFraction);
+        // pyramid protection: after adds, the whole position loses at most what it risked before the first add
+        double capped = position.riskCap > 0 && position.quantity > 0
+                ? position.averageCost - position.riskCap / position.quantity : plain;
+        double trigger = position.contract.roundDown(Math.max(plain, capped));
         double limit = position.contract.roundDown(trigger * (1 - limits.stopLimitOffsetPct() / 100));
         long slice = (long) position.contract.maxLotsPerOrder() * position.contract.lotSize();
         List<String> stops = working(position.stopOrders);

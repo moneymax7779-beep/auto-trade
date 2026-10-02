@@ -165,6 +165,42 @@ class OrderManagerTest {
     }
 
     @Test
+    void pyramidProtectionKeepsTheLossAtTheStopToWhatTheEntryRisked() {
+        // 1 lot at 100 with the default 25 % stop risks 65 x 100 x 0.25 = 1,625; then 2 lots added at 110
+        quote("10:00:00", 99.5, 100, 100);
+        oms.enter("NIFTY", OptionSide.CE, CE, 1, "EARLY", market("10:00"));
+        quote("10:00:01", 99.5, 100, 100);
+        quote("10:03:00", 109.5, 110, 110);
+        oms.capRiskAtFirstEntry("ecr", "NIFTY");
+        oms.add("NIFTY", 2, "CONFIRMED", market("10:03"));
+        quote("10:03:01", 109.5, 110, 110);
+        oms.capRiskAtFirstEntry("ecr", "NIFTY");            // a second add keeps the first cap
+
+        // average 106.67 on 195: stop at 106.67 - 1,625 / 195 = 98.33 (the plain 25 % stop would be 80.00)
+        quote("10:06:00", 98.5, 99, 98.5);                  // above the capped trigger
+        assertThat(oms.livePositions()).hasSize(1);
+        quote("10:07:00", 98.0, 98.4, 98.0);                // through it
+        assertThat(oms.livePositions()).isEmpty();
+        ManagedPosition done = oms.closedPositions().getFirst();
+        assertThat(done.exitReason()).isEqualTo("PREMIUM_STOP");
+        assertThat(done.realised()).isCloseTo((98.0 - (100 * 65 + 110 * 130) / 195.0) * 195, within(1e-6));
+        assertThat(-done.realised()).isLessThanOrEqualTo(1625 + 0.4 * 195);  // the cap, plus at most the gap to the fill
+        assertThat(oms.reconcile()).isTrue();
+    }
+
+    @Test
+    void withoutPyramidProtectionAnAddKeepsThePlainStop() {
+        quote("10:00:00", 99.5, 100, 100);
+        oms.enter("NIFTY", OptionSide.CE, CE, 1, "EARLY", market("10:00"));
+        quote("10:00:01", 99.5, 100, 100);
+        quote("10:03:00", 109.5, 110, 110);
+        oms.add("NIFTY", 2, "CONFIRMED", market("10:03"));
+        quote("10:03:01", 109.5, 110, 110);
+        quote("10:07:00", 98.0, 98.4, 98.0);
+        assertThat(oms.livePositions()).hasSize(1);         // the stop is 25 % below 106.67 = 80.00
+    }
+
+    @Test
     void exitCancelsTheStopBeforeSellingAndNeverOversells() {
         quote("10:00:00", 99.5, 100, 100);
         oms.enter("NIFTY", OptionSide.CE, CE, 1, "EARLY", market("10:00"));

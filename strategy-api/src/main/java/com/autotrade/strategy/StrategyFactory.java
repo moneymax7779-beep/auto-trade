@@ -41,6 +41,14 @@ public interface StrategyFactory {
         return 0;
     }
 
+    /**
+     * Pyramid protection ({@code exits.pyramid_risk_cap}): when true, adding to a position never raises what
+     * it can lose at its resting stop above what it risked before the first add.
+     */
+    default boolean pyramidRiskCap() {
+        return false;
+    }
+
     /** The strategy file's version label (for reports). */
     default String version() {
         return configHash().substring(0, Math.min(19, configHash().length()));

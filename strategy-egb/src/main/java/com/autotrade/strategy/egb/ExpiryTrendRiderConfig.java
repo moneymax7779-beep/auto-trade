@@ -23,7 +23,9 @@ record ExpiryTrendRiderConfig(
         int intendedLots,
         int maxAdds,
         int strikeOffset,
-        double premiumStopPct) {
+        double premiumStopPct,
+        /** v2: adds never raise the loss at the stop above what the entry risked (absent = false). */
+        boolean pyramidRiskCap) {
 
     static ExpiryTrendRiderConfig from(ThresholdConfig c) {
         return new ExpiryTrendRiderConfig(c.contentHash(), c.version(), c.getInt("scope.dte"),
@@ -34,7 +36,8 @@ record ExpiryTrendRiderConfig(
                 c.getDouble("trend.iv_change_3m_min"),
                 c.getDouble("position.premium_budget"), c.getInt("position.intended_lots"),
                 c.getInt("position.max_adds"), c.getInt("position.strike_offset"),
-                c.getDouble("exits.premium_stop_pct"));
+                c.getDouble("exits.premium_stop_pct"),
+                c.has("exits.pyramid_risk_cap") && c.getBoolean("exits.pyramid_risk_cap"));
     }
 
     @SuppressWarnings("unchecked")

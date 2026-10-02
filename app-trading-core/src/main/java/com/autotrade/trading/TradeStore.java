@@ -117,6 +117,15 @@ final class TradeStore {
                 JSON.writeValueAsString(decision.state()), orders.isEmpty() ? null : orders.toString(), strategyId);
     }
 
+    /** A strategy's entry or add request with its context, approved or refused (A-033). */
+    void candidate(long session, String strategyId, String underlying, Instant at, String action, String side,
+                   String reason, boolean approved, String refusal, double spot, Map<String, Object> context) {
+        jdbc.update("insert into trade.candidate (session_id, strategy_id, underlying, at, action, side, reason, approved, "
+                        + "refusal, spot, context) values (?,?,?,?,?,?,?,?,?,?,?::jsonb)",
+                session, strategyId, underlying, ts(at), action, side, reason, approved, refusal,
+                Double.isFinite(spot) ? spot : null, JSON.writeValueAsString(context));
+    }
+
     void rejection(long session, String strategyId, String underlying, String intent, String reason, Instant at) {
         jdbc.update("insert into trade.rejection (session_id, underlying, intent, reason, at, strategy_id) "
                         + "values (?,?,?,?,?,?)",

@@ -45,6 +45,11 @@ public final class ExpiryTrendRiderFactory implements StrategyFactory {
     }
 
     @Override
+    public boolean pyramidRiskCap() {
+        return config.pyramidRiskCap();
+    }
+
+    @Override
     public int intendedLots() {
         return config.intendedLots();
     }

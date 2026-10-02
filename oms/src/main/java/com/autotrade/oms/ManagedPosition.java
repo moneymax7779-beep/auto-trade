@@ -41,6 +41,11 @@ public final class ManagedPosition {
     String exitReason;
     /** This position's resting premium stop as a fraction below average cost; 0 = none (a straddle leg). */
     double stopFraction;
+    /**
+     * Rupees the position may lose at its stop once it has been added to (pyramid protection): fixed at the
+     * first add to what the held position risked then; 0 = no cap (the stop stays a fraction of average cost).
+     */
+    double riskCap;
     /** Premium asked for by entries so far (ask × quantity at sending), for the capital check. */
     double committedPremium;
     Instant closedAt;

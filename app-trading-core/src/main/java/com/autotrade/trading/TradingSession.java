@@ -45,6 +45,7 @@ import com.autotrade.sim.FillModel;
 import com.autotrade.strategy.Decision;
 import com.autotrade.strategy.OptionSide;
 import com.autotrade.strategy.OrderIntent;
+import com.autotrade.strategy.SideView;
 import com.autotrade.strategy.Strategy;
 import com.autotrade.strategy.StrategyFactory;
 
@@ -283,7 +284,7 @@ public final class TradingSession {
                 continue;
             }
             for (OrderIntent intent : decision.orders()) {
-                act(slot, underlying, snapshot, intent, market, stale, time);
+                act(slot, underlying, snapshot, decision, intent, market, stale, time);
             }
         }
         if (squareOff && !oms.livePositions().isEmpty()) {
@@ -292,12 +293,13 @@ public final class TradingSession {
     }
 
     /** One strategy's intent through risk and the OMS, in that strategy's name. */
-    private void act(Slot slot, String underlying, FeatureSnapshot snapshot, OrderIntent intent, MarketContext market,
-                     boolean stale, LocalTime time) {
+    private void act(Slot slot, String underlying, FeatureSnapshot snapshot, Decision decision, OrderIntent intent,
+                     MarketContext market, boolean stale, LocalTime time) {
         String strategyId = slot.factory().id();
         if (stale && intent.action() != OrderIntent.Action.EXIT) {
-            rejected(strategyId, underlying, intent.action() + (intent.side() == null ? "" : " " + intent.side()), "snapshot "
-                    + Duration.between(snapshot.time(), Instant.now()).toSeconds() + " s old (catching up)");
+            String reason = "snapshot " + Duration.between(snapshot.time(), Instant.now()).toSeconds() + " s old (catching up)";
+            rejected(strategyId, underlying, intent.action() + (intent.side() == null ? "" : " " + intent.side()), reason);
+            candidate(strategyId, underlying, snapshot, decision, intent, false, reason);
             return;
         }
         switch (intent.action()) {
@@ -306,6 +308,7 @@ public final class TradingSession {
                         intent.strike(snapshot.options().atmStrike(), snapshot.options().strikeStep()), intent.side());
                 if (contract.isEmpty()) {
                     rejected(strategyId, underlying, "ENTER " + intent.side(), "no quotes for the chosen strike yet");
+                    candidate(strategyId, underlying, snapshot, decision, intent, false, "no quotes for the chosen strike yet");
                     return;
                 }
                 // with a premium budget the strategy's lots are units of its plan, scaled at this entry
@@ -317,8 +320,10 @@ public final class TradingSession {
                 budget = Math.min(budget, risk.limits().premiumCapForRisk(stopPct, ask, oms.delta(contract.get()),
                         intent.stopPoints()));
                 if (budget < contract.get().lotSize() * ask) {        // an expiry-day budget already used
-                    rejected(strategyId, underlying, "ENTER " + intent.side(), String.format(
-                            "expiry-day budget: %.0f left, one lot costs %.0f", budget, contract.get().lotSize() * ask));
+                    String reason = String.format("expiry-day budget: %.0f left, one lot costs %.0f", budget,
+                            contract.get().lotSize() * ask);
+                    rejected(strategyId, underlying, "ENTER " + intent.side(), reason);
+                    candidate(strategyId, underlying, snapshot, decision, intent, false, reason);
                     return;
                 }
                 BudgetSizing sizing = BudgetSizing.at(budget, slot.factory().intendedLots(),
@@ -328,6 +333,7 @@ public final class TradingSession {
                 RiskDecision result = oms.enter(strategyId, underlying, intent.side(), contract.get(), lots,
                         intent.stage().name(), market, stopPct);
                 logDecision(strategyId, underlying, intent, lots, result, contract.get());
+                candidate(strategyId, underlying, snapshot, decision, intent, result.approved(), result.reason());
             }
             case ENTER_STRADDLE -> {
                 double atm = snapshot.options().atmStrike();
@@ -336,6 +342,7 @@ public final class TradingSession {
                 var put = contracts.find(underlying, intent.legStrike(OptionSide.PE, atm, step), OptionSide.PE);
                 if (call.isEmpty() || put.isEmpty()) {
                     rejected(strategyId, underlying, "ENTER STRADDLE", "no quotes for the chosen strikes yet");
+                    candidate(strategyId, underlying, snapshot, decision, intent, false, "no quotes for the chosen strikes yet");
                     return;
                 }
                 double straddleStop = intent.stopPctOr(slot.factory().premiumStopPct());
@@ -346,11 +353,16 @@ public final class TradingSession {
                 log.info("{} {} {} ENTER STRADDLE {} + {} budget {} {}", time, underlying, strategyId,
                         call.get().symbol(), put.get().symbol(), Math.round(straddleBudget),
                         result.approved() ? "APPROVED" : "REJECTED: " + result.reason());
+                candidate(strategyId, underlying, snapshot, decision, intent, result.approved(), result.reason());
             }
             case ADD -> {
                 int lots = sizings.getOrDefault(strategyId + "|" + underlying, NO_BUDGET).lots(intent.lots());
-                logDecision(strategyId, underlying, intent, lots,
-                        oms.add(strategyId, underlying, lots, intent.stage().name(), market), null);
+                if (slot.factory().pyramidRiskCap()) {
+                    oms.capRiskAtFirstEntry(strategyId, underlying);   // the adds never raise the loss at the stop
+                }
+                RiskDecision result = oms.add(strategyId, underlying, lots, intent.stage().name(), market);
+                logDecision(strategyId, underlying, intent, lots, result, null);
+                candidate(strategyId, underlying, snapshot, decision, intent, result.approved(), result.reason());
             }
             case EXIT -> {
                 oms.exit(strategyId, underlying, intent.reason());
@@ -390,6 +402,19 @@ public final class TradingSession {
         if (lastReconcile == null || Duration.between(lastReconcile, now).toSeconds() >= settings.risk().reconcileEverySec()) {
             lastReconcile = now;
             oms.reconcile();
+        }
+    }
+
+    /** Records an entry or add request with its market context (never fails the decision). */
+    private void candidate(String strategyId, String underlying, FeatureSnapshot snapshot, Decision decision,
+                           OrderIntent intent, boolean approved, String refusal) {
+        try {
+            SideView side = intent.side() == null ? null : intent.side() == OptionSide.CE ? decision.ce() : decision.pe();
+            store.candidate(sessionId, strategyId, underlying, snapshot.time(), intent.action().name(),
+                    intent.side() == null ? null : intent.side().name(), intent.reason(), approved,
+                    approved ? null : refusal, snapshot.spot(), CandidateContext.of(snapshot, side));
+        } catch (RuntimeException e) {
+            log.warn("candidate not recorded ({} {} {}): {}", strategyId, underlying, intent.action(), e.getMessage());
         }
     }
 
