@@ -9,7 +9,9 @@ type Flow = "bullish" | "bearish" | "mixed";
 interface Surge {
   t: string; vol: number; x: number; spot: number | null; atm?: number; flow: Flow;
   futures?: { oi: number; pct: number; px: number; label: string; score: number };
-  CE?: SideFlow; PE?: SideFlow; move15: number | null; move30: number | null;
+  CE?: SideFlow; PE?: SideFlow;
+  /** Index points after the flow is known (from the close of t+1): +5 / +15 / +30 min, best / worst close within 15 min. */
+  from?: string; move5?: number | null; move15: number | null; move30: number | null; best15?: number | null; worst15?: number | null;
 }
 interface UnderlyingSurges {
   underlying: string; index: [string, number][]; volume?: [string, number, number | null][]; surges: Surge[];
@@ -122,7 +124,8 @@ function UnderlyingSurgesPanel({ date, data, live, filters, onFilters }:
       <p className="mt-2 text-xs text-muted">
         Surge: futures volume ≥ 5 × the median of the same minute over the previous 10 sessions. Flow compares the last
         quote of minute t−1 with minute t+1: futures OI ≥ 0.2 %; calls / puts: the ATM ± 2 strikes' OI ≥ 1 %, read with
-        the ATM option's mid. OI shows positions opening or closing, not who bought or sold. Trading this signal lost
+        the ATM option's mid. Index moves are measured from the close of t+1, when the flow is first known. OI shows
+        positions opening or closing, not who bought or sold. Trading this signal lost
         money over 18 sessions (docs/studies/2026-09-29-surge-oi-flow.md); today's hit rate is a description, not evidence.
       </p>
     </Panel>
@@ -172,7 +175,7 @@ function HitRate({ surges }: { surges: Surge[] }) {
   if (b.n + r.n === 0) return null;
   return (
     <p className="mb-2 text-xs text-muted">
-      Today, index 15 min after the surge: bullish flow right <span className="num text-text">{b.right}/{b.n}</span>
+      Today, index 15 min after the flow was known (close of t+1): bullish flow right <span className="num text-text">{b.right}/{b.n}</span>
       {" · "}bearish flow right <span className="num text-text">{r.right}/{r.n}</span>
     </p>
   );
@@ -290,7 +293,8 @@ function SurgeChart({ data, shown, groups, selected, onSelect }:
               <div style={{ color: flowColor(tip.surge.flow) }} className="font-semibold">{tip.surge.flow} surge</div>
               <div>futures OI {signed(tip.surge.futures?.pct, 2)} % {short(tip.surge.futures?.label)}</div>
               <div>calls {signed(tip.surge.CE?.pct, 1)} % {short(tip.surge.CE?.label)} · puts {signed(tip.surge.PE?.pct, 1)} % {short(tip.surge.PE?.label)}</div>
-              <div className="num">+15 {signed(tip.surge.move15)} · +30 {signed(tip.surge.move30)}</div>
+              <div className="num">from {tip.surge.from ?? "t+1"}: +5 {signed(tip.surge.move5)} · +15 {signed(tip.surge.move15)} · +30 {signed(tip.surge.move30)}</div>
+              <div className="num text-muted">within 15 min: best {signed(tip.surge.best15)} · worst {signed(tip.surge.worst15)}</div>
             </div>
           )}
         </div>
@@ -300,11 +304,26 @@ function SurgeChart({ data, shown, groups, selected, onSelect }:
 }
 
 function SideCell({ side }: { side?: SideFlow }) {
-  if (!side) return <td className="px-2 py-1.5 text-right text-muted">–</td>;
+  if (!side) return <td className="px-1.5 py-1.5 text-right text-muted">–</td>;
   return (
-    <td className="px-2 py-1.5 text-right" title={`ATM mid ${nf(side.mid0, 2)} → ${nf(side.mid1, 2)} · bid/ask ${nf(side.bid, 2)}/${nf(side.ask, 2)} · OI ${signed(side.oi, 0)}`}>
+    <td className="px-1.5 py-1.5 text-right" title={`ATM mid ${nf(side.mid0, 2)} → ${nf(side.mid1, 2)} · bid/ask ${nf(side.bid, 2)}/${nf(side.ask, 2)} · OI ${signed(side.oi, 0)}`}>
       <span className={tone(side.score)}>{signed(side.pct, 1)}%</span> <span className="text-muted">{short(side.label)}</span>
     </td>
+  );
+}
+
+/** +5 / +15 / +30 and the 15-minute best / worst, all from the close of t+1. */
+function Moves({ s, cell }: { s: Surge; cell: string }) {
+  return (
+    <>
+      <td className={`${cell} text-right ${tone(s.move5)}`}>{signed(s.move5)}</td>
+      <td className={`${cell} text-right ${tone(s.move15)}`}>{signed(s.move15)}</td>
+      <td className={`${cell} text-right ${tone(s.move30)}`}>{signed(s.move30)}</td>
+      <td className={`${cell} text-right`}>
+        <span className={tone(s.best15)}>{signed(s.best15)}</span><span className="text-muted"> / </span>
+        <span className={tone(s.worst15)}>{signed(s.worst15)}</span>
+      </td>
+    </>
   );
 }
 
@@ -319,18 +338,24 @@ function BurstTable({ groups, index, live, selected, onSelect }:
   if (groups.length === 0) return <p className="mt-2 text-sm text-muted">No surge minutes match the filters.</p>;
   const ordered = live ? [...groups].reverse() : groups;
   const toggle = (k: string) => setOpen((s) => { const n = new Set(s); n.has(k) ? n.delete(k) : n.add(k); return n; });
-  const cell = "px-2 py-1.5";
+  const cell = "px-1.5 py-1.5";
   return (
     <div className="mt-3 max-h-[30rem] overflow-auto rounded border border-line">
-      <table className="w-full text-sm">
-        <thead className="sticky top-0 z-10 whitespace-nowrap bg-panel text-xs uppercase text-muted">
+      <table className="w-full text-[13px]">
+        <thead className="sticky top-0 z-10 whitespace-nowrap bg-panel text-[11px] uppercase text-muted">
           <tr>
             <th className={`${cell} sticky left-0 bg-panel text-left`}>Minute</th>
-            <th className={`${cell} text-right`}>Futures vol</th><th className={`${cell} text-right`}>× normal</th>
-            <th className={`${cell} text-right`}>Index</th><th className={`${cell} text-right`}>Futures OI</th>
-            <th className={`${cell} text-right`}>Calls ATM±2</th><th className={`${cell} text-right`}>Puts ATM±2</th>
+            <th className={`${cell} text-right`} title="futures volume in the minute">Fut vol</th>
+            <th className={`${cell} text-right`} title="multiple of the same minute's normal volume">×</th>
+            <th className={`${cell} text-right`}>Index</th>
+            <th className={`${cell} text-right`} title="futures OI change t−1 → t+1">Fut OI</th>
+            <th className={`${cell} text-right`} title="calls, ATM ± 2 strikes: OI change and its reading">Calls ±2</th>
+            <th className={`${cell} text-right`} title="puts, ATM ± 2 strikes: OI change and its reading">Puts ±2</th>
             <th className={`${cell} text-left`}>Flow</th>
-            <th className={`${cell} text-right`}>+15 min</th><th className={`${cell} text-right`}>+30 min</th>
+            <th className={`${cell} text-right`} title="index points 5 minutes after the close of t+1, when the flow is known">+5m</th>
+            <th className={`${cell} text-right`} title="index points 15 minutes after the close of t+1">+15m</th>
+            <th className={`${cell} text-right`} title="index points 30 minutes after the close of t+1">+30m</th>
+            <th className={`${cell} text-right`} title="best / worst minute close within 15 minutes of t+1 (index points)">15m range</th>
           </tr>
         </thead>
         <tbody className="num">
@@ -346,18 +371,17 @@ function BurstTable({ groups, index, live, selected, onSelect }:
                   <tr className="cursor-pointer border-t border-line bg-panel-2 whitespace-nowrap" onClick={() => toggle(g.start)}>
                     <td className={`${cell} sticky left-0 bg-panel-2 font-semibold`}>
                       <span className="mr-1 text-muted">{isOpen ? "▾" : "▸"}</span>{g.start}–{g.end}
-                      <span className="ml-1 text-xs font-normal text-muted">{g.surges.length} min</span>
+                      <span className="ml-1 text-[11px] font-normal text-muted">{g.surges.length}m</span>
                     </td>
                     <td className={`${cell} text-right`} title="total futures volume of the burst's surge minutes">Σ {nf(g.volume)}</td>
-                    <td className={`${cell} text-right`}>peak {nf(g.peak, 1)}×</td>
+                    <td className={`${cell} text-right`} title="the burst's highest multiple of normal volume">{nf(g.peak, 1)}×</td>
                     <td className={`${cell} text-right ${tone(move)}`} title="index change over the burst">{Number.isFinite(move) ? `Δ ${signed(move, 1)}` : "–"}</td>
                     <td className={`${cell} text-right text-muted`} colSpan={3}>
                       <span style={{ color: flowColor("bullish") }}>{g.flows.bullish} bullish</span> ·{" "}
                       <span style={{ color: flowColor("bearish") }}>{g.flows.bearish} bearish</span> · {g.flows.mixed} mixed
                     </td>
                     <td className={cell}><FlowChip flow={dominant(g)} /></td>
-                    <td className={`${cell} text-right ${tone(last.move15)}`}>{signed(last.move15)}</td>
-                    <td className={`${cell} text-right ${tone(last.move30)}`}>{signed(last.move30)}</td>
+                    <Moves s={last} cell={cell} />
                   </tr>
                 )}
                 {isOpen && minutesRows.map((s) => (
@@ -373,8 +397,7 @@ function BurstTable({ groups, index, live, selected, onSelect }:
                     <SideCell side={s.CE} />
                     <SideCell side={s.PE} />
                     <td className={cell}><FlowChip flow={s.flow} /></td>
-                    <td className={`${cell} text-right ${tone(s.move15)}`}>{signed(s.move15)}</td>
-                    <td className={`${cell} text-right ${tone(s.move30)}`}>{signed(s.move30)}</td>
+                    <Moves s={s} cell={cell} />
                   </tr>
                 ))}
               </Fragment>

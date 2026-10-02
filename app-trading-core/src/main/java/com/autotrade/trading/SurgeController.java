@@ -184,8 +184,7 @@ class SurgeController {
             Map<String, Object> fixed = flows.get(flowKey);
             if (fixed != null) {
                 Map<String, Object> s = new LinkedHashMap<>(fixed);
-                s.put("move15", move(index, t, 15));
-                s.put("move30", move(index, t, 30));
+                outcome(s, index, t);
                 surges.add(s);
                 continue;
             }
@@ -218,8 +217,7 @@ class SurgeController {
             }
             s.put("flow", scores.size() < 2 ? "mixed" : SurgeFlow.overall(scores));
             flows.put(flowKey, new LinkedHashMap<>(s));
-            s.put("move15", move(index, t, 15));
-            s.put("move30", move(index, t, 30));
+            outcome(s, index, t);
             surges.add(s);
         }
         out.put("surges", surges);
@@ -275,9 +273,33 @@ class SurgeController {
         return q;
     }
 
-    private static Double move(Map<LocalTime, Double> index, LocalTime t, int minutes) {
-        Double now = index.get(t);
-        Double later = index.get(t.plusMinutes(minutes));
+    /**
+     * What the index did after the flow became known: the flow compares t−1 with t+1, so it can be acted on only
+     * once minute t+1 has closed. Every horizon is measured from that close (index points): +5, +15 and +30
+     * minutes later, and the best and worst minute close within the 15 minutes after it.
+     */
+    private static void outcome(Map<String, Object> s, Map<LocalTime, Double> index, LocalTime t) {
+        LocalTime known = t.plusMinutes(1);
+        s.put("from", known.toString());
+        s.put("move5", move(index, known, 5));
+        s.put("move15", move(index, known, 15));
+        s.put("move30", move(index, known, 30));
+        Double base = index.get(known);
+        Double best = null, worst = null;
+        for (int m = 1; m <= 15 && base != null; m++) {
+            Double p = index.get(known.plusMinutes(m));
+            if (p != null) {
+                best = best == null ? p - base : Math.max(best, p - base);
+                worst = worst == null ? p - base : Math.min(worst, p - base);
+            }
+        }
+        s.put("best15", best == null ? null : round(best, 2));
+        s.put("worst15", worst == null ? null : round(worst, 2));
+    }
+
+    private static Double move(Map<LocalTime, Double> index, LocalTime from, int minutes) {
+        Double now = index.get(from);
+        Double later = index.get(from.plusMinutes(minutes));
         return now == null || later == null ? null : round(later - now, 2);
     }
 
