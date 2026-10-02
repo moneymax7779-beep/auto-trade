@@ -56,11 +56,16 @@ class SurgeAlertRulesTest {
     @Test
     void messageCarriesTheContextAndTheFollowUpTheOutcome() {
         Map<String, Object> s = surge("12:59", "bearish", 13.6, 52065);
-        String text = SurgeAlertRules.message("NIFTY", s,
-                new SurgeAlertRules.Levels(22589.05, 22508.40, 22809.30, 22595.40, 22610.55, 22301.60), "Today so far: bearish flow right 3/5 at +15m");
+        String text = SurgeAlertRules.message("NIFTY", s, new SurgeAlertRules.Levels(List.of(
+                        new SurgeAlertRules.Mark("ORL", 22508.40, 22508.40), new SurgeAlertRules.Mark("PDL", 22595.40, 22595.40),
+                        new SurgeAlertRules.Mark("ORH", 22589.05, 22589.05),
+                        new SurgeAlertRules.Mark("support zone (2×)", 22280.0, 22290.0)), 22459.19, 22610.55, 22301.60),
+                "Today so far: bearish flow right 3/5 at +15m");
         assertThat(text).contains("NIFTY BEARISH surge · 12:59 (flow known 13:00)", "Futures 52,065 = 13.6× normal",
-                "OI +0.12% flat", "Calls ±2 +7.3% buying", "Puts ±2 −2.9% long unwinding", "ORL −183", "PDL −270",
-                "ATM 22,300: CE 186.15/186.45 · PE 123.10/123.25", "right 3/5", "not a trade signal");
+                "OI +0.12% flat", "Calls ±2 +7.3% buying", "Puts ±2 −2.9% long unwinding",
+                "Above: ORL 22,508 (+183), ORH 22,589 (+263)", "Below: support zone (2×) 22,280–22,290 (−36)",
+                "VWAP 22,459 (−133) · day 22,302–22,611", "ATM 22,300: CE 186.15/186.45 · PE 123.10/123.25", "right 3/5",
+                "not a trade signal");
         s.put("move5", -23.0);
         s.put("move15", 12.6);
         s.put("best15", 30.4);

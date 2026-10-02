@@ -37,6 +37,7 @@ class SurgeAlerter implements ApplicationRunner {
     private static final Logger log = LoggerFactory.getLogger(SurgeAlerter.class);
 
     private final SurgeController surges;
+    private final LevelsService levelsService;
     private final SessionRunner runner;
     private final AlertService alerts;
     private final AlertProperties properties;
@@ -49,9 +50,10 @@ class SurgeAlerter implements ApplicationRunner {
     private final Map<String, String> pending = new LinkedHashMap<>();   // underlying|t -> underlying
     private boolean primed;
 
-    SurgeAlerter(SurgeController surges, SessionRunner runner, AlertService alerts, AlertProperties properties,
-                 TradingProperties trading, DataSource target) {
+    SurgeAlerter(SurgeController surges, LevelsService levelsService, SessionRunner runner, AlertService alerts,
+                 AlertProperties properties, TradingProperties trading, DataSource target) {
         this.surges = surges;
+        this.levelsService = levelsService;
         this.runner = runner;
         this.alerts = alerts;
         this.properties = properties;
@@ -156,7 +158,7 @@ class SurgeAlerter implements ApplicationRunner {
         log.info("PREVIEW {}: {} alerts", day, count);
     }
 
-    /** Opening range and previous-day levels from the live features; the day's range from the index series. */
+    /** The levels known at {@code asOf} (LevelsService), VWAP at that minute and the day's range so far. */
     @SuppressWarnings("unchecked")
     private SurgeAlertRules.Levels levels(LocalDate today, String underlying, Map<String, Object> report, LocalTime asOf) {
         Double dayHigh = null, dayLow = null;
@@ -168,13 +170,26 @@ class SurgeAlerter implements ApplicationRunner {
             dayHigh = dayHigh == null ? p : Math.max(dayHigh, p);
             dayLow = dayLow == null ? p : Math.min(dayLow, p);
         }
-        List<SurgeAlertRules.Levels> rows = jdbc.query("select (features->>'structure.orHigh')::float8, "
-                        + "(features->>'structure.orLow')::float8, (features->>'structure.pdh')::float8, "
-                        + "(features->>'structure.pdl')::float8 from feat.snapshot where session_date = ? and underlying = ? "
-                        + "order by snap_time desc limit 1",
-                (rs, i) -> new SurgeAlertRules.Levels((Double) rs.getObject(1), (Double) rs.getObject(2),
-                        (Double) rs.getObject(3), (Double) rs.getObject(4), null, null), today, underlying);
-        SurgeAlertRules.Levels l = rows.isEmpty() ? new SurgeAlertRules.Levels(null, null, null, null, null, null) : rows.getFirst();
-        return new SurgeAlertRules.Levels(l.orHigh(), l.orLow(), l.pdh(), l.pdl(), dayHigh, dayLow);
+        Map<String, Object> data = levelsService.levels(today, underlying);
+        List<SurgeAlertRules.Mark> marks = new java.util.ArrayList<>();
+        for (LevelsService.Level l : (List<LevelsService.Level>) data.get("levels")) {
+            if (!LocalTime.parse(l.from()).isAfter(asOf)) {
+                marks.add(new SurgeAlertRules.Mark(l.name(), l.price(), l.price()));
+            }
+        }
+        for (LevelsService.Zone z : (List<LevelsService.Zone>) data.get("zones")) {
+            boolean active = !LocalTime.parse(z.from()).isAfter(asOf) && (z.until() == null || LocalTime.parse(z.until()).isAfter(asOf));
+            if (active) {
+                marks.add(new SurgeAlertRules.Mark(z.kind() + " zone (" + z.touches() + "×)", z.lo(), z.hi()));
+            }
+        }
+        Double vwap = null;
+        for (Object o : (List<Object>) ((Map<String, Object>) data.get("lines")).get("vwap")) {
+            List<Object> row = (List<Object>) o;
+            if (!LocalTime.parse((String) row.get(0)).isAfter(asOf)) {
+                vwap = ((Number) row.get(1)).doubleValue();
+            }
+        }
+        return new SurgeAlertRules.Levels(marks, vwap, dayHigh, dayLow);
     }
 }

@@ -18,8 +18,15 @@ final class SurgeAlertRules {
     record Settings(double minX, Map<String, Long> minVolume, int cooldownMin, LocalTime from, LocalTime until) {
     }
 
-    /** Levels for context, index points (null when unknown). */
-    record Levels(Double orHigh, Double orLow, Double pdh, Double pdl, Double dayHigh, Double dayLow) {
+    /** A level known at the alert's time: a price line, or a tested zone (lo..hi). */
+    record Mark(String name, double lo, double hi) {
+        double mid() {
+            return (lo + hi) / 2;
+        }
+    }
+
+    /** Context known at the alert's time (null when unknown). */
+    record Levels(List<Mark> marks, Double vwap, Double dayHigh, Double dayLow) {
     }
 
     private final Settings settings;
@@ -106,25 +113,44 @@ final class SurgeAlertRules {
         return n == 0 ? null : "Today so far: " + flow + " flow right " + right + "/" + n + " at +15m";
     }
 
+    /** The two nearest levels above and below spot, VWAP and the day's range so far. */
     private static String distances(double spot, Levels l) {
         if (l == null) {
             return "";
         }
         StringBuilder b = new StringBuilder();
-        level(b, "ORH", spot, l.orHigh());
-        level(b, "ORL", spot, l.orLow());
-        level(b, "PDH", spot, l.pdh());
-        level(b, "PDL", spot, l.pdl());
+        List<Mark> marks = l.marks() == null ? List.of() : l.marks();
+        List<Mark> above = marks.stream().filter(m -> m.lo() > spot)
+                .sorted(java.util.Comparator.comparingDouble(Mark::lo)).limit(2).toList();
+        List<Mark> below = marks.stream().filter(m -> m.hi() < spot)
+                .sorted(java.util.Comparator.comparingDouble(Mark::hi).reversed()).limit(2).toList();
+        List<Mark> inside = marks.stream().filter(m -> m.lo() <= spot && spot <= m.hi()).toList();
+        if (!inside.isEmpty()) {
+            b.append("\nAt: ").append(String.join(", ", inside.stream().map(m -> mark(m, spot)).toList()));
+        }
+        if (!above.isEmpty()) {
+            b.append("\nAbove: ").append(String.join(", ", above.stream().map(m -> mark(m, spot)).toList()));
+        }
+        if (!below.isEmpty()) {
+            b.append("\nBelow: ").append(String.join(", ", below.stream().map(m -> mark(m, spot)).toList()));
+        }
+        StringBuilder tail = new StringBuilder();
+        if (l.vwap() != null) {
+            tail.append("VWAP ").append(fmt(l.vwap(), 0)).append(" (").append(signed(spot - l.vwap(), 0)).append(")");
+        }
         if (l.dayLow() != null && l.dayHigh() != null) {
-            b.append(" · day ").append(fmt(l.dayLow(), 0)).append("–").append(fmt(l.dayHigh(), 0));
+            tail.append(tail.isEmpty() ? "" : " · ").append("day ").append(fmt(l.dayLow(), 0)).append("–").append(fmt(l.dayHigh(), 0));
+        }
+        if (!tail.isEmpty()) {
+            b.append("\n").append(tail);
         }
         return b.toString();
     }
 
-    private static void level(StringBuilder b, String name, double spot, Double level) {
-        if (level != null && Double.isFinite(level) && level > 0) {
-            b.append(" · ").append(name).append(' ').append(signed(spot - level, 0));
-        }
+    private static String mark(Mark m, double spot) {
+        String where = m.lo() == m.hi() ? fmt(m.lo(), 0) : fmt(m.lo(), 0) + "–" + fmt(m.hi(), 0);
+        double edge = m.lo() > spot ? m.lo() : m.hi() < spot ? m.hi() : spot;
+        return m.name() + " " + where + (edge == spot ? "" : " (" + signed(edge - spot, 0) + ")");
     }
 
     private static String side(Map<String, Object> side) {

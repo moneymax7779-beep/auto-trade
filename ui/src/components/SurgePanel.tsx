@@ -2,6 +2,10 @@ import { Fragment, useMemo, useRef, useState, type MouseEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { get } from "../api";
 import { ErrorNote, Loading, Panel } from "./ui";
+import {
+  LEVEL_COLORS, LevelTogglesBar, mergeLevels, useLevels, useLevelToggles, visibleLevels, visibleZones,
+  type LevelToggles, type LevelsData,
+} from "./levels";
 
 /** One option side's flow around a surge: ATM ± 2 total OI change and the ATM mid before / after. */
 interface SideFlow { oi: number; pct: number; mid0: number; mid1: number; bid: number; ask: number; label: string; score: number }
@@ -106,6 +110,8 @@ function UnderlyingSurgesPanel({ date, data, live, filters, onFilters }:
   );
   const groups = useMemo(() => bursts(shown), [shown]);
   const [selected, setSelected] = useState<string | null>(null);
+  const levels = useLevels(date, data.underlying, live);
+  const [toggles, setToggles] = useLevelToggles();
   const count = (f: Flow) => data.surges.filter((s) => s.flow === f).length;
   return (
     <Panel
@@ -115,11 +121,13 @@ function UnderlyingSurgesPanel({ date, data, live, filters, onFilters }:
     >
       {!data.historyAvailable && <p className="mb-2 text-xs text-warn">Volume history from zt-tiger-v2 is unavailable, so surges cannot be ranked.</p>}
       <Toolbar filters={filters} onFilters={onFilters} data={data} />
+      <div className="mb-2"><LevelTogglesBar toggles={toggles} onChange={setToggles} /></div>
       <HitRate surges={data.surges} />
       {data.underlying === "SENSEX" && (
         <p className="mb-2 text-xs text-warn">SENSEX futures trade thinly (hundreds to a few thousand contracts a minute), so its surges rest on small volumes.</p>
       )}
-      <SurgeChart data={data} shown={shown} groups={groups} selected={selected} onSelect={setSelected} />
+      <SurgeChart data={data} shown={shown} groups={groups} selected={selected} onSelect={setSelected}
+        levels={levels.data} toggles={toggles} />
       <BurstTable groups={groups} index={data.index} live={live} selected={selected} onSelect={setSelected} />
       <p className="mt-2 text-xs text-muted">
         Surge: futures volume ≥ 5 × the median of the same minute over the previous 10 sessions. Flow compares the last
@@ -186,8 +194,9 @@ const H = T + PRICE_H + GAP + VOL_H + AXIS;
 const X0 = minutes("09:15"), X1 = minutes("15:30");
 const X_CAP = 30;                                     // the volume pane tops out at 30 × normal
 
-function SurgeChart({ data, shown, groups, selected, onSelect }:
-  { data: UnderlyingSurges; shown: Surge[]; groups: Burst[]; selected: string | null; onSelect: (t: string | null) => void }) {
+function SurgeChart({ data, shown, groups, selected, onSelect, levels, toggles }:
+  { data: UnderlyingSurges; shown: Surge[]; groups: Burst[]; selected: string | null; onSelect: (t: string | null) => void;
+    levels?: LevelsData; toggles: LevelToggles }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [hover, setHover] = useState<number | null>(null);
   const pts = data.index;
@@ -198,8 +207,17 @@ function SurgeChart({ data, shown, groups, selected, onSelect }:
 
   const X = (m: number) => L + ((m - X0) / (X1 - X0)) * (W - L - R);
   const ys = pts.map((p) => p[1]);
-  const lo = Math.min(...ys), hi = Math.max(...ys), pad = Math.max((hi - lo) * 0.08, 1);
+  const pLo = Math.min(...ys), pHi = Math.max(...ys), near = (pHi - pLo) * 0.15;
+  // levels near the day's range widen it a little; far ones (e.g. a PDH 300 points away) stay off the chart
+  const lv = levels ? mergeLevels(visibleLevels(levels.levels, toggles), levels.tolerancePct) : [];
+  const zs = levels ? visibleZones(levels.zones, toggles) : [];
+  const inRange = (v: number) => v >= pLo - near && v <= pHi + near;
+  const drawnLevels = lv.filter((l) => inRange(l.price));
+  const drawnZones = zs.filter((z) => inRange(z.lo) || inRange(z.hi));
+  const all = [pLo, pHi, ...drawnLevels.map((l) => l.price), ...drawnZones.flatMap((z) => [z.lo, z.hi])];
+  const lo = Math.min(...all), hi = Math.max(...all), pad = Math.max((hi - lo) * 0.06, 1);
   const y0 = lo - pad, y1 = hi + pad;
+  const offChart = lv.filter((l) => !inRange(l.price));
   const Y = (v: number) => T + ((y1 - v) / (y1 - y0)) * PRICE_H;
   const VY0 = T + PRICE_H + GAP;
   const VY = (x: number) => VY0 + VOL_H - (Math.min(x, X_CAP) / X_CAP) * VOL_H;
@@ -241,6 +259,30 @@ function SurgeChart({ data, shown, groups, selected, onSelect }:
             <text x={X(minutes(t))} y={H - 7} textAnchor="middle" fontSize="11" fill="var(--color-muted)" className="num">{t}</text>
           </g>
         ))}
+        {/* tested zones, from their second touch until broken */}
+        {drawnZones.map((z) => {
+          const x0 = X(minutes(z.from)), x1 = z.until ? X(minutes(z.until)) : W - R;
+          const top = Y(z.hi), h = Math.max(3, Y(z.lo) - Y(z.hi));
+          const c = z.kind === "support" ? LEVEL_COLORS.support : LEVEL_COLORS.resistance;
+          return (
+            <g key={`${z.kind}-${z.from}-${z.lo}`}>
+              <rect x={x0} width={Math.max(1, x1 - x0)} y={top} height={h} fill={c} opacity={0.14} />
+              <text x={x0 + 3} y={top - 2} fontSize="9" fill={c} opacity={0.9}>{z.kind === "support" ? "S" : "R"} {z.touches}×</text>
+            </g>
+          );
+        })}
+        {/* prior-day and today levels, each from the minute it was known */}
+        {drawnLevels.map((l) => (
+          <line key={`${l.name}-${l.price}`} x1={X(minutes(l.from))} x2={W - R} y1={Y(l.price)} y2={Y(l.price)}
+            stroke={l.group === "prior" ? LEVEL_COLORS.prior : LEVEL_COLORS.today} strokeWidth="1" strokeDasharray="5 4" opacity={0.85} />
+        ))}
+        {toggles.lines && levels && (["vwap", "ema20"] as const).map((k) => {
+          const line = levels.lines[k].filter(([, v]) => v >= y0 && v <= y1);
+          return line.length > 1 && (
+            <polyline key={k} fill="none" stroke={LEVEL_COLORS[k]} strokeWidth="1.1" opacity={0.85}
+              points={line.map(([t, v]) => `${X(minutes(t)).toFixed(1)},${Y(v).toFixed(1)}`).join(" ")} />
+          );
+        })}
         <polyline fill="none" stroke="var(--color-accent)" strokeWidth="1.6"
           points={pts.map((p) => `${X(minutes(p[0])).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(" ")} />
         {shown.filter((s) => s.spot != null).map((s) => {
@@ -257,6 +299,19 @@ function SurgeChart({ data, shown, groups, selected, onSelect }:
           );
         })}
 
+        {/* level labels at the right edge, nudged apart */}
+        {nudge(drawnLevels.map((l) => ({ l, y: Y(l.price) }))).map(({ l, y }) => (
+          <text key={`label-${l.name}`} x={W - R - 4} y={y - 3} textAnchor="end" fontSize="10"
+            fill={l.group === "prior" ? LEVEL_COLORS.prior : LEVEL_COLORS.today}
+            stroke="var(--color-panel)" strokeWidth="3" style={{ paintOrder: "stroke" }} className="num">
+            {l.name} {nf(l.price, 0)}
+          </text>
+        ))}
+        {offChart.length > 0 && (
+          <text x={L + 4} y={T + 10} fontSize="9" fill="var(--color-muted)">
+            off chart: {offChart.map((l) => `${l.name} ${nf(l.price, 0)}`).join(" · ")}
+          </text>
+        )}
         {/* volume pane: futures volume as a multiple of the minute's normal, surge threshold dashed */}
         <line x1={L} x2={W - R} y1={VY0 + VOL_H} y2={VY0 + VOL_H} stroke="var(--color-line)" />
         {[5, 15, 30].map((x) => (
@@ -301,6 +356,15 @@ function SurgeChart({ data, shown, groups, selected, onSelect }:
       )}
     </div>
   );
+}
+
+/** Label positions at least 11 px apart (sorted top to bottom). */
+function nudge<T extends { y: number }>(items: T[]): T[] {
+  const sorted = [...items].sort((a, b) => a.y - b.y);
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i].y - sorted[i - 1].y < 11) sorted[i] = { ...sorted[i], y: sorted[i - 1].y + 11 };
+  }
+  return sorted;
 }
 
 function SideCell({ side }: { side?: SideFlow }) {

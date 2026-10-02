@@ -13,7 +13,9 @@ import {
 export interface LinePoint { t: string; value: number | null }
 export interface ChartMarker { t: string; text: string; tone: "up" | "down" | "info" }
 /** {@code color} may be a CSS colour or a theme token name such as "--color-text". */
-export interface ChartLine { name: string; color: string; points: LinePoint[]; width?: number; dashed?: boolean }
+export interface ChartLine { name: string; color: string; points: LinePoint[]; width?: number; dashed?: boolean;
+  /** show the line's name and value on the price axis (levels) */
+  label?: boolean }
 
 /**
  * Minute series for one session. Times are IST "HH:mm"; they are placed on the session date as if
@@ -48,7 +50,7 @@ export function TimelineChart({ date, lines, markers = [], height = 280 }: {
         lineWidth: (line.width ?? 2) as 1 | 2 | 3 | 4,
         lineStyle: line.dashed ? 2 : 0,
         priceLineVisible: false,
-        lastValueVisible: index === 0,
+        lastValueVisible: index === 0 || !!line.label,
         title: line.name,
       });
       series.setData(line.points.filter((p) => p.value != null).map((p) => ({ time: toTime(p.t), value: p.value as number })));
