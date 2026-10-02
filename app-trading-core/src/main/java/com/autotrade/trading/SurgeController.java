@@ -146,6 +146,19 @@ class SurgeController {
         }
         Map<LocalTime, Double> median = median(day, underlying);
         out.put("historyAvailable", !median.isEmpty());
+        // futures volume per minute with the same minute's normal (median of the previous sessions), for the volume pane
+        List<Object> volumes = new ArrayList<>();
+        volume.forEach((t, v) -> {
+            if (!t.isBefore(FIRST) && !t.isAfter(LAST)) {
+                Double normal = median.get(t);
+                List<Object> row = new ArrayList<>(3);
+                row.add(t.toString());
+                row.add(Math.round(Math.max(0, v)));
+                row.add(normal == null || !(normal > 0) ? null : Math.round(normal));
+                volumes.add(row);
+            }
+        });
+        out.put("volume", volumes);
 
         List<LocalDate> optionExpiries = jdbc.query("select min(expiry) from md.option_tick where underlying = ? "
                 + "and recv_ts >= ? and recv_ts < ? and expiry >= ?", (rs, i) -> rs.getObject(1, LocalDate.class),
