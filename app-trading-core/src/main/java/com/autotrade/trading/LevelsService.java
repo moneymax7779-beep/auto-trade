@@ -23,7 +23,7 @@ import com.autotrade.core.time.MarketTime;
  * <li>prior day: PDH, PDL, previous close, prior opening-range high / low (the live features at the open), and
  *     the 2-day high / low when both previous sessions are in the own capture — known from 09:15;</li>
  * <li>today: the day open (09:15), ORH / ORL (09:30);</li>
- * <li>lines: the session VWAP proxy the strategies use, and a 20-period EMA of minute closes;</li>
+ * <li>lines: the spot VWAP (futures VWAP minus the 15-minute mean basis), and a 20-period EMA of minute closes;</li>
  * <li>tested zones: swing highs (lows) on minute bars, confirmed 3 minutes later, clustered within a tolerance;
  *     a cluster is a zone from its second touch's confirmation, and ends at a minute close beyond it.</li>
  * </ul>

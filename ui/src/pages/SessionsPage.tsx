@@ -69,9 +69,16 @@ export function SessionDetailPage() {
     const inRange = (v: number) => v >= lo - near && v <= hi + near;
     const end = rows[rows.length - 1].t;
     // every level starts at the minute it was knowable (no hindsight lines)
-    const flat = mergeLevels(visibleLevels(lv.levels, toggles), lv.tolerancePct).filter((l) => inRange(l.price) && l.from <= end)
-      .map((l) => ({ name: l.name, color: l.group === "prior" ? LEVEL_COLORS.prior : LEVEL_COLORS.today, width: 1 as const, dashed: true,
-        label: true, points: [{ t: l.from, value: l.price }, { t: end, value: l.price }] }));
+    const shownLevels = mergeLevels(visibleLevels(lv.levels, toggles), lv.tolerancePct).filter((l) => inRange(l.price) && l.from <= end);
+    // only the nearest two above and below the last price get an axis tag; a tag for every level piles up
+    const last = spots[spots.length - 1];
+    const tagged = new Set([
+      ...shownLevels.filter((l) => l.price >= last).sort((p, q) => p.price - q.price).slice(0, 2),
+      ...shownLevels.filter((l) => l.price < last).sort((p, q) => q.price - p.price).slice(0, 2),
+    ]);
+    const flat = shownLevels
+      .map((l) => ({ name: tagged.has(l) ? l.name : "", color: l.group === "prior" ? LEVEL_COLORS.prior : LEVEL_COLORS.today, width: 1 as const,
+        dashed: true, label: tagged.has(l), points: [{ t: l.from, value: l.price }, { t: end, value: l.price }] }));
     const zones = visibleZones(lv.zones, toggles).filter((z) => inRange(z.lo) && z.from <= end).flatMap((z) => {
       const color = z.kind === "support" ? LEVEL_COLORS.support : LEVEL_COLORS.resistance;
       const until = z.until && z.until < end ? z.until : end;

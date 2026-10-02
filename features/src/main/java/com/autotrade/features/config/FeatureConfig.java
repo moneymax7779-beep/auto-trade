@@ -88,7 +88,12 @@ public record FeatureConfig(
          * v10: the breakout bar's range and futures volume are compared only with 3-minute bars after the
          * opening range (the 09:15-09:29 bars are left out of both averages).
          */
-        boolean breakoutExcludesOpeningRange) {
+        boolean breakoutExcludesOpeningRange,
+        /**
+         * v11: the spot VWAP proxy subtracts the basis averaged over this many minutes instead of the
+         * latest tick's basis (0 = latest tick, as before). Thin futures make the tick basis jump.
+         */
+        int vwapBasisMinutes) {
 
     public static FeatureConfig from(ThresholdConfig features, ThresholdConfig exchange) {
         Map<String, LocalTime[]> windows = new LinkedHashMap<>();
@@ -167,7 +172,8 @@ public record FeatureConfig(
                 features.has("structure.zone_tolerance_atr") ? features.getDouble("structure.zone_tolerance_atr") : Double.NaN,
                 features.has("structure.zone_touch_gap_min") ? features.getInt("structure.zone_touch_gap_min") : 0,
                 features.has("structure.breakout_excludes_opening_range")
-                        && features.getBoolean("structure.breakout_excludes_opening_range"));
+                        && features.getBoolean("structure.breakout_excludes_opening_range"),
+                features.has("structure.vwap_basis_minutes") ? features.getInt("structure.vwap_basis_minutes") : 0);
     }
 
     /** True when the file defines the v3 feature sections. */

@@ -7,7 +7,8 @@ import org.springframework.web.bind.annotation.GetMapping;
 @Controller
 class UiController {
 
-    @GetMapping({"/", "/live", "/sessions", "/sessions/{id}", "/research", "/research/{id}", "/replay", "/config"})
+    @GetMapping({"/", "/live", "/index/{underlying}", "/strategies", "/sessions", "/sessions/{id}", "/research", "/research/{id}",
+        "/replay", "/config"})
     String index() {
         return "forward:/index.html";
     }

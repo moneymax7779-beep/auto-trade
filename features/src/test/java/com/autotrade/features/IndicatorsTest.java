@@ -101,4 +101,18 @@ class IndicatorsTest {
         Instant start = OPEN.plusSeconds(180L * index);
         return new Bar(start, start.plusSeconds(180), open, high, low, close, 0, 1);
     }
+
+    @Test
+    void meanIsTimeWeightedOverTheWindow() {
+        TimedSeries series = new TimedSeries(Duration.ofMinutes(15));
+        Instant t0 = Instant.parse("2026-10-01T04:00:00Z");
+        series.add(t0, 50);                                 // 50 for 4 minutes,
+        series.add(t0.plusSeconds(240), 90);                // a 90 tick for 1 minute,
+        series.add(t0.plusSeconds(300), 50);                // then 50 again
+        assertThat(series.mean(t0.plusSeconds(600), Duration.ofMinutes(10))).isCloseTo(54.0, within(1e-9));
+        assertThat(series.mean(t0.plusSeconds(600), Duration.ofMinutes(5))).isCloseTo(50.0, within(1e-9));
+        // shorter history than the window: averaged over what there is
+        assertThat(series.mean(t0.plusSeconds(300), Duration.ofMinutes(15))).isCloseTo(58.0, within(1e-9));
+        assertThat(new TimedSeries(Duration.ofMinutes(1)).mean(t0, Duration.ofMinutes(1))).isNaN();
+    }
 }

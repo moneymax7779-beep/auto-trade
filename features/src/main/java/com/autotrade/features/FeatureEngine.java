@@ -186,7 +186,7 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
 
     /** The snapshot at {@code time} from the current state (no event at or after {@code time} applied yet). */
     public FeatureSnapshot snapshot(Instant time) {
-        double vwapProxy = futures.vwap() - futures.latestBasis();
+        double vwapProxy = futures.vwap() - futures.basis(time, config.vwapBasisMinutes());
         structure.setVwapProxy(vwapProxy);
         structure.advanceTo(time);
         SessionPhase phase = clock.phase(time);

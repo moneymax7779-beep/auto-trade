@@ -48,6 +48,9 @@ class OpeningRangeExclusionTest {
     void theGapOpenBarsNoLongerDwarfTheBreakout() {
         assertThat(config("features.v10.yaml").breakoutExcludesOpeningRange()).isTrue();
         assertThat(config("features.v7.yaml").breakoutExcludesOpeningRange()).isFalse();
+        assertThat(config("features.v7.yaml").vwapBasisMinutes()).isZero();
+        assertThat(config("features.v11.yaml").vwapBasisMinutes()).isEqualTo(15);
+        assertThat(config("features.v11.yaml").breakoutExcludesOpeningRange()).isFalse();
         assertThat(rangeVsAvg("features.v7.yaml")).isCloseTo(20.0 / ((5 * 60 + 10) / 6.0), within(1e-9));   // 0.39
         assertThat(rangeVsAvg("features.v10.yaml")).isCloseTo(2.0, within(1e-9));                          // 20 / 10
     }

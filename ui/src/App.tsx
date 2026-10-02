@@ -1,12 +1,17 @@
 import { NavLink, Route, Routes } from "react-router";
 import { ConfigPage } from "./pages/ConfigPage";
+import { IndexPage } from "./pages/IndexPage";
 import { LivePage } from "./pages/LivePage";
 import { ReplayPage } from "./pages/ReplayPage";
 import { ResearchPage, RunDetailPage } from "./pages/ResearchPage";
 import { SessionDetailPage, SessionsPage } from "./pages/SessionsPage";
+import { StrategiesPage } from "./pages/StrategiesPage";
 
 const NAV = [
-  ["/live", "Live"],
+  ["/live", "Overview"],
+  ["/index/NIFTY", "NIFTY"],
+  ["/index/SENSEX", "SENSEX"],
+  ["/strategies", "Strategies"],
   ["/sessions", "Sessions"],
   ["/research", "Research"],
   ["/replay", "Replay"],
@@ -36,6 +41,8 @@ export function App() {
         <Routes>
           <Route path="/" element={<LivePage />} />
           <Route path="/live" element={<LivePage />} />
+          <Route path="/index/:underlying" element={<IndexPage />} />
+          <Route path="/strategies" element={<StrategiesPage />} />
           <Route path="/sessions" element={<SessionsPage />} />
           <Route path="/sessions/:id" element={<SessionDetailPage />} />
           <Route path="/research" element={<ResearchPage />} />

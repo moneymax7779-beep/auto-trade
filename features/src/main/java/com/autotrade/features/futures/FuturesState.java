@@ -135,6 +135,14 @@ public final class FuturesState implements StructureState.FuturesVolume {
         return basis == null ? Double.NaN : basis.latest();
     }
 
+    /** The basis averaged over the last {@code minutes} (time-weighted); the latest tick's when 0. */
+    public double basis(Instant now, int minutes) {
+        if (minutes <= 0 || basis == null) {
+            return latestBasis();
+        }
+        return basis.mean(now, Duration.ofMinutes(minutes));
+    }
+
     public double vwap() {
         return vwap;
     }

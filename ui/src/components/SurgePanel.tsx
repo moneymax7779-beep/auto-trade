@@ -6,6 +6,7 @@ import {
   LEVEL_COLORS, LevelTogglesBar, mergeLevels, tagName, useLevels, useLevelToggles, visibleLevels, visibleZones,
   type LevelToggles, type LevelsData,
 } from "./levels";
+import { useChartView, useLinkedTime, type View } from "./chartView";
 
 /** One option side's flow around a surge: ATM ± 2 total OI change and the ATM mid before / after. */
 interface SideFlow { oi: number; pct: number; mid0: number; mid1: number; bid: number; ask: number; label: string; score: number }
@@ -81,7 +82,7 @@ const dominant = (b: Burst): Flow =>
  * Futures-volume surges (≥ 5 × the same minute's normal) with futures and ATM ± 2 options OI flow, refreshed
  * while a session runs. Display only: no strategy uses it.
  */
-export function SurgePanel({ live, date }: { live?: boolean; date?: string }) {
+export function SurgePanel({ live, date, underlying }: { live?: boolean; date?: string; underlying?: string }) {
   const q = useQuery({
     queryKey: ["surges", date ?? "latest"],
     queryFn: () => get<SurgeReport>(`/api/surges${date ? `?date=${date}` : ""}`),
@@ -93,9 +94,12 @@ export function SurgePanel({ live, date }: { live?: boolean; date?: string }) {
   if (q.error) return <ErrorNote error={q.error} />;
   const r = q.data!;
   if (!r.date) return null;
+  if (underlying && !r.underlyings.some((u) => u.underlying === underlying)) {
+    return <Panel title={`${underlying} · futures surges`}><p className="text-sm text-muted">No {underlying} surge data for {r.date}.</p></Panel>;
+  }
   return (
     <div className="space-y-4">
-      {r.underlyings.map((u) => (
+      {r.underlyings.filter((u) => !underlying || u.underlying === underlying).map((u) => (
         <UnderlyingSurgesPanel key={u.underlying} date={r.date!} data={u} live={live} filters={filters} onFilters={update} />
       ))}
     </div>
@@ -126,7 +130,7 @@ function UnderlyingSurgesPanel({ date, data, live, filters, onFilters }:
       {data.underlying === "SENSEX" && (
         <p className="mb-2 text-xs text-warn">SENSEX futures trade thinly (hundreds to a few thousand contracts a minute), so its surges rest on small volumes.</p>
       )}
-      <SurgeChart data={data} shown={shown} groups={groups} selected={selected} onSelect={setSelected}
+      <SurgeChart date={date} live={live} data={data} shown={shown} groups={groups} selected={selected} onSelect={setSelected}
         levels={levels.data} toggles={toggles} />
       <BurstTable groups={groups} index={data.index} live={live} selected={selected} onSelect={setSelected} />
       <p className="mt-2 text-xs text-muted">
@@ -189,19 +193,31 @@ function HitRate({ surges }: { surges: Surge[] }) {
   );
 }
 
-const W = 1000, L = 60, R = 104, T = 10, GAP = 10, AXIS = 24;
-const PW = W - L - R;                                 // plot width; the right gutter holds the price tags
+const T = 10, GAP = 10, AXIS = 24;
+const FULL_W = 1000;                                  // the viewBox width on a wide screen (scaled to fit)
+/** Layout for a width: below FULL_W the chart is drawn 1:1 in pixels so text stays readable on a phone. */
+function layout(boxWidth: number | null) {
+  const W = boxWidth && boxWidth < FULL_W ? Math.max(280, Math.round(boxWidth)) : FULL_W;
+  const narrow = W < 600;
+  const L = narrow ? 48 : 60, R = narrow ? 84 : 104;   // the right gutter holds the price tags
+  return { W, L, R, PW: W - L - R, narrow };
+}
 const X0 = minutes("09:15"), X1 = minutes("15:30");
+const FULL: View = { a: X0, b: X1 };
 const X_CAP = 30;                                     // the volume pane tops out at 30 × normal
 const MIN_SPAN = 10;                                  // zoomed in no further than 10 minutes
-const SIZES = { S: { price: 200, vol: 70 }, M: { price: 320, vol: 90 }, L: { price: 480, vol: 110 } } as const;
+const SIZES = { S: { price: 200, prem: 70, vol: 70 }, M: { price: 320, prem: 100, vol: 90 }, L: { price: 480, prem: 140, vol: 110 } } as const;
 type Size = keyof typeof SIZES;
 const SIZE_KEY = "surge-chart-size";
 const PRESETS: { label: string; span: number | null }[] = [{ label: "day", span: null }, { label: "2h", span: 120 }, { label: "1h", span: 60 }, { label: "30m", span: 30 }];
 
-interface View { a: number; b: number }               // visible minutes
 interface YRange { lo: number; hi: number }           // a stretched price axis; null = fit the visible minutes
 interface Drag { kind: "pan" | "yscale" | "xscale"; x: number; y: number; view: View; yr: YRange; manualY: boolean; moved: boolean; id: number }
+interface Pinch { dist: number; mid: number; view: View }
+interface Premium { strike: number; expiry: string; CE: [string, number, number][]; PE: [string, number, number][] }
+const PREMIUM_KEY = "surge-chart-premium";
+const PREMIUM_COLORS = { CE: "#22c55e", PE: "#ef4444" } as const;
+const strikeStep = (u: string) => (u === "SENSEX" ? 100 : u === "BANKNIFTY" ? 100 : 50);
 
 function clampView(a: number, b: number): View {
   const span = Math.min(X1 - X0, Math.max(MIN_SPAN, b - a));
@@ -221,17 +237,25 @@ function loadSize(): Size {
   return "S";
 }
 
-function SurgeChart({ data, shown, groups, selected, onSelect, levels, toggles }:
-  { data: UnderlyingSurges; shown: Surge[]; groups: Burst[]; selected: string | null; onSelect: (t: string | null) => void;
-    levels?: LevelsData; toggles: LevelToggles }) {
+function SurgeChart({ date, live, data, shown, groups, selected, onSelect, levels, toggles }:
+  { date: string; live?: boolean; data: UnderlyingSurges; shown: Surge[]; groups: Burst[]; selected: string | null;
+    onSelect: (t: string | null) => void; levels?: LevelsData; toggles: LevelToggles }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const clipId = `plot-${useId().replace(/:/g, "")}`;
   const [hover, setHover] = useState<{ m: number; y: number } | null>(null);
-  const [view, setView] = useState<View>({ a: X0, b: X1 });
+  const [view, setView] = useChartView(date, data.underlying, FULL);
+  const [linked, setLinked] = useLinkedTime();
+  const [showPremium, setShowPremium] = useState(() => { try { return localStorage.getItem(PREMIUM_KEY) !== "false"; } catch { return true; } });
+  const [pickedStrike, setPickedStrike] = useState<number | null>(null);
+  const pointers = useRef(new Map<number, number>());
+  const pinch = useRef<Pinch | null>(null);
   const [manualY, setManualY] = useState<YRange | null>(null);
   const [size, setSizeState] = useState<Size>(loadSize);
   const drag = useRef<Drag | null>(null);
-  const geo = useRef({ view, y0: 0, y1: 1, priceH: 200 });
+  const boxRef = useRef<HTMLDivElement>(null);
+  const [boxWidth, setBoxWidth] = useState<number | null>(null);
+  const { W, L, R, PW, narrow } = layout(boxWidth);
+  const geo = useRef({ view, y0: 0, y1: 1, priceH: 200, W, L, PW });
   const pts = data.index;
   const prices = useMemo(() => new Map(pts.map(([t, p]) => [minutes(t), p])), [pts]);
   const vols = useMemo(() => new Map((data.volume ?? []).map(([t, v, n]) => [minutes(t), { v, n }])), [data.volume]);
@@ -242,6 +266,23 @@ function SurgeChart({ data, shown, groups, selected, onSelect, levels, toggles }
   }), [levels]);
   const lastMinute = pts.length ? minutes(pts[pts.length - 1][0]) : X1;
   const hasChart = pts.length >= 2;
+  // the premium pane's strike: picked, else the selected surge's ATM, else the latest ATM
+  const step = strikeStep(data.underlying);
+  const selectedSurge = selected ? shown.find((s) => s.t === selected) : undefined;
+  const lastSpot = pts.length ? pts[pts.length - 1][1] : null;
+  const strike = pickedStrike ?? selectedSurge?.atm ?? (lastSpot != null ? Math.round(lastSpot / step) * step : null);
+  const premium = useQuery({
+    queryKey: ["premium", date, data.underlying, data.optionsExpiry, strike],
+    queryFn: () => get<Premium>(`/api/premium?date=${date}&underlying=${data.underlying}&expiry=${data.optionsExpiry}&strike=${strike}`),
+    enabled: showPremium && strike != null && !!data.optionsExpiry,
+    refetchInterval: live ? 30_000 : false,
+    placeholderData: (prev) => prev,
+  });
+  const prem = showPremium ? premium.data : undefined;
+  const premMaps = useMemo(() => ({
+    CE: new Map((prem?.CE ?? []).map(([t, mid]) => [minutes(t), mid])),
+    PE: new Map((prem?.PE ?? []).map(([t, mid]) => [minutes(t), mid])),
+  }), [prem]);
 
   const setSize = (s: Size) => { setSizeState(s); try { localStorage.setItem(SIZE_KEY, s); } catch { /* not kept */ } };
   const reset = () => { setView({ a: X0, b: X1 }); setManualY(null); };
@@ -267,9 +308,10 @@ function SurgeChart({ data, shown, groups, selected, onSelect, levels, toggles }
     if (!svg) return;
     const onWheel = (e: WheelEvent) => {
       const box = svg.getBoundingClientRect();
+      const g = geo.current;
+      const { W, L, PW } = g;
       const k = W / box.width;                          // the viewBox scales uniformly
       const x = (e.clientX - box.left) * k, y = (e.clientY - box.top) * k;
-      const g = geo.current;
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
         const f = Math.exp(Math.max(-1, Math.min(1, e.deltaY * 0.01)));
@@ -290,11 +332,21 @@ function SurgeChart({ data, shown, groups, selected, onSelect, levels, toggles }
     return () => svg.removeEventListener("wheel", onWheel);
   }, [hasChart]);
 
+  useEffect(() => {
+    const box = boxRef.current;
+    if (!box) return;
+    const observer = new ResizeObserver(([entry]) => setBoxWidth(entry.contentRect.width));
+    observer.observe(box);
+    return () => observer.disconnect();
+  }, [hasChart]);
+
   if (!hasChart) return <p className="text-sm text-muted">No index data yet.</p>;
 
-  const { price: PRICE_H, vol: VOL_H } = SIZES[size];
-  const H = T + PRICE_H + GAP + VOL_H + AXIS;
-  const VY0 = T + PRICE_H + GAP;
+  const { price: PRICE_H, prem: PREM_SIZE, vol: VOL_H } = SIZES[size];
+  const PREM_H = showPremium ? PREM_SIZE : 0;
+  const PY0 = T + PRICE_H + GAP;                       // premium pane top
+  const VY0 = PY0 + (PREM_H ? PREM_H + GAP : 0);       // volume pane top
+  const H = VY0 + VOL_H + AXIS;
   const { a, b } = view;
   const span = b - a;
   const X = (m: number) => L + ((m - a) / span) * PW;
@@ -309,19 +361,25 @@ function SurgeChart({ data, shown, groups, selected, onSelect, levels, toggles }
     ...zs.filter((z) => inBand(z.lo) || inBand(z.hi)).flatMap((z) => [z.lo, z.hi])];
   const fLo = Math.min(...fitted), fHi = Math.max(...fitted), pad = Math.max((fHi - fLo) * 0.06, 1);
   const y0 = manualY?.lo ?? fLo - pad, y1 = manualY?.hi ?? fHi + pad;
-  geo.current = { view, y0, y1, priceH: PRICE_H };
+  geo.current = { view, y0, y1, priceH: PRICE_H, W, L, PW };
   const Y = (v: number) => T + ((y1 - v) / (y1 - y0)) * PRICE_H;
   const inY = (v: number) => v >= y0 && v <= y1;
   const drawnLevels = lv.filter((l) => inY(l.price));
   const drawnZones = zs.filter((z) => z.hi >= y0 && z.lo <= y1);
-  const above = lv.filter((l) => l.price > y1).sort((p, q) => p.price - q.price).slice(0, 2);
-  const below = lv.filter((l) => l.price < y0).sort((p, q) => q.price - p.price).slice(0, 2);
+  const above = lv.filter((l) => l.price > y1).sort((p, q) => p.price - q.price).slice(0, narrow ? 1 : 2);
+  const below = lv.filter((l) => l.price < y0).sort((p, q) => q.price - p.price).slice(0, narrow ? 1 : 2);
   const VY = (x: number) => VY0 + VOL_H - (Math.min(x, X_CAP) / X_CAP) * VOL_H;
-  const step = niceStep(y1 - y0, PRICE_H / 40);
+  const gridStep = niceStep(y1 - y0, PRICE_H / 40);
   const grid: number[] = [];
-  for (let v = Math.ceil(y0 / step) * step; v <= y1; v += step) grid.push(v);
-  const tStep = [1, 2, 5, 10, 15, 30, 60].find((s) => span / s <= 8) ?? 60;
-  const tOffset = tStep === 60 ? 30 : 0;
+  for (let v = Math.ceil(y0 / gridStep) * gridStep; v <= y1; v += gridStep) grid.push(v);
+  // premium pane: the strike's call and put mid, scaled to the visible minutes
+  const premVisible = (["CE", "PE"] as const).flatMap((k) => (prem?.[k] ?? []).filter(([t]) => { const m = minutes(t); return m >= a && m <= b; }).map((r) => r[1]));
+  const pmLo = premVisible.length ? Math.min(...premVisible) : 0, pmHi = premVisible.length ? Math.max(...premVisible) : 1;
+  const pmPad = Math.max((pmHi - pmLo) * 0.08, 0.5);
+  const PYv = (v: number) => PY0 + ((pmHi + pmPad - v) / (pmHi - pmLo + 2 * pmPad)) * PREM_H;
+  const premAt = (k: "CE" | "PE", m: number) => { const map = premMaps[k]; for (let i = m; i >= m - 5; i--) { const v = map.get(i); if (v != null) return v; } return null; };
+  const tStep = [1, 2, 5, 10, 15, 30, 60, 120].find((s) => span / s <= (narrow ? 4 : 8)) ?? 120;
+  const tOffset = tStep >= 60 ? minutes("09:30") % tStep : 0;   // hourly ticks on the half hour: 09:30, 10:30 …
   const ticks: number[] = [];
   for (let m = Math.ceil((a - tOffset) / tStep) * tStep + tOffset; m <= b; m += tStep) ticks.push(m);
   const barW = Math.max(1, (PW / span) * 0.7);
@@ -335,11 +393,27 @@ function SurgeChart({ data, shown, groups, selected, onSelect, levels, toggles }
   const onPointerDown = (e: PointerEvent<SVGSVGElement>) => {
     if (e.button !== 0) return;
     const p = toSvg(e);
+    pointers.current.set(e.pointerId, p.x);
+    if (pointers.current.size === 2) {                  // two fingers: pinch to zoom time
+      const [x1, x2] = [...pointers.current.values()];
+      pinch.current = { dist: Math.max(10, Math.abs(x2 - x1)), mid: a + (((x1 + x2) / 2 - L) / PW) * span, view };
+      drag.current = null;
+      return;
+    }
     const kind = p.x < L && p.y <= T + PRICE_H ? "yscale" : p.y > VY0 + VOL_H ? "xscale" : "pan";
     drag.current = { kind, x: p.x, y: p.y, view, yr: { lo: y0, hi: y1 }, manualY: manualY != null, moved: false, id: e.pointerId };
   };
   const onPointerMove = (e: PointerEvent<SVGSVGElement>) => {
     const p = toSvg(e);
+    if (pointers.current.has(e.pointerId)) pointers.current.set(e.pointerId, p.x);
+    const pz = pinch.current;
+    if (pz && pointers.current.size === 2) {
+      const [x1, x2] = [...pointers.current.values()];
+      const f = pz.dist / Math.max(10, Math.abs(x2 - x1));
+      setView(clampView(pz.mid - (pz.mid - pz.view.a) * f, pz.mid + (pz.view.b - pz.mid) * f));
+      setHover(null);
+      return;
+    }
     const d = drag.current;
     if (d) {
       const dx = p.x - d.x, dy = p.y - d.y;
@@ -370,7 +444,11 @@ function SurgeChart({ data, shown, groups, selected, onSelect, levels, toggles }
     const m = Math.round(a + ((p.x - L) / PW) * span);
     setHover(p.x >= L && p.x <= W - R && m >= X0 && m <= X1 ? { m, y: p.y } : null);
   };
-  const onPointerUp = () => { drag.current = null; };
+  const onPointerUp = (e: PointerEvent<SVGSVGElement>) => {
+    pointers.current.delete(e.pointerId);
+    if (pointers.current.size < 2) pinch.current = null;
+    drag.current = null;
+  };
 
   const tip = hover == null ? null : (() => {
     const price = at(hover.m);
@@ -384,7 +462,8 @@ function SurgeChart({ data, shown, groups, selected, onSelect, levels, toggles }
     const up = price == null ? undefined : known.filter((k) => k.lo > price).sort((p, q) => p.lo - q.lo)[0];
     const down = price == null ? undefined : known.filter((k) => k.hi < price).sort((p, q) => q.hi - p.hi)[0];
     return { m: hover.m, price, vol: vols.get(hover.m), surge: byMinute.get(hover.m), inside, up, down,
-      vwap: lineMaps.vwap.get(hover.m), ema: lineMaps.ema20.get(hover.m) };
+      vwap: lineMaps.vwap.get(hover.m), ema: lineMaps.ema20.get(hover.m),
+      ce: prem ? premAt("CE", hover.m) : null, pe: prem ? premAt("PE", hover.m) : null };
   })();
   const tipLeft = hover == null ? 0 : (X(hover.m) / W) * 100;
   const crossY = hover && hover.y >= T && hover.y <= T + PRICE_H ? hover.y : null;
@@ -410,17 +489,34 @@ function SurgeChart({ data, shown, groups, selected, onSelect, levels, toggles }
             <button key={s} type="button" className={btn(size === s)} aria-pressed={size === s} onClick={() => setSize(s)}>{s}</button>
           ))}
         </div>
+        <div className="flex items-center gap-0.5" role="group" aria-label="Premium pane">
+          <button type="button" className={btn(showPremium)} aria-pressed={showPremium}
+            onClick={() => { setShowPremium(!showPremium); try { localStorage.setItem(PREMIUM_KEY, String(!showPremium)); } catch { /* not kept */ } }}
+            title="the call and put of one strike, by minute">premium</button>
+          {showPremium && strike != null && (
+            <>
+              <button type="button" className={btn(false)} aria-label="Lower strike" onClick={() => setPickedStrike(strike - step)}>‹</button>
+              <span className="num">{nf(strike)}</span>
+              <button type="button" className={btn(false)} aria-label="Higher strike" onClick={() => setPickedStrike(strike + step)}>›</button>
+              {pickedStrike != null && <button type="button" className="text-accent hover:underline" onClick={() => setPickedStrike(null)}
+                title="back to the selected surge's ATM, or the latest ATM">ATM</button>}
+            </>
+          )}
+        </div>
+        <button type="button" className={btn(linked)} aria-pressed={linked} onClick={() => setLinked(!linked)}
+          title="NIFTY and SENSEX show the same minutes">link time</button>
         {zoomed && <button type="button" className="text-accent hover:underline" onClick={reset}>reset</button>}
-        <span className="ml-auto text-muted">pinch or ⌘/ctrl + scroll to zoom · drag to pan · drag the price or time axis to stretch · double-click resets</span>
+        <span className="ml-auto hidden text-muted sm:inline">pinch or ⌘/ctrl + scroll to zoom · drag to pan · drag the price or time axis to stretch · double-click resets</span>
+        <span className="text-muted sm:hidden">pinch to zoom · drag to pan · double-tap resets</span>
       </div>
-      <div className="relative overflow-x-auto rounded border border-line">
-        <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} className="block w-full min-w-[640px] select-none" role="img"
+      <div ref={boxRef} className="relative overflow-hidden rounded border border-line">
+        <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} className="block w-full select-none" role="img"
           style={{ touchAction: "pan-y", cursor: drag.current?.moved ? "grabbing" : "crosshair" }}
           aria-label={`${data.underlying} index and futures volume by minute with surges`}
           onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}
           onPointerLeave={() => { if (!drag.current?.moved) setHover(null); }} onDoubleClick={reset}>
           <defs>
-            <clipPath id={clipId}><rect x={L} y={T} width={PW} height={PRICE_H + GAP + VOL_H} /></clipPath>
+            <clipPath id={clipId}><rect x={L} y={T} width={PW} height={VY0 + VOL_H - T} /></clipPath>
             <clipPath id={`${clipId}-price`}><rect x={L} y={T} width={PW} height={PRICE_H} /></clipPath>
           </defs>
           {/* axis strips: drag them to stretch */}
@@ -429,7 +525,7 @@ function SurgeChart({ data, shown, groups, selected, onSelect, levels, toggles }
           {grid.map((v) => (
             <g key={v}>
               <line x1={L} x2={W - R} y1={Y(v)} y2={Y(v)} stroke="var(--color-line)" />
-              <text x={L - 8} y={Y(v) + 4} textAnchor="end" fontSize="11" fill="var(--color-muted)" className="num">{nf(v, step < 1 ? 1 : 0)}</text>
+              <text x={L - (narrow ? 4 : 8)} y={Y(v) + 4} textAnchor="end" fontSize={narrow ? 9.5 : 11} fill="var(--color-muted)" className="num">{nf(v, gridStep < 1 ? 1 : 0)}</text>
             </g>
           ))}
           {ticks.map((m) => (
@@ -442,7 +538,7 @@ function SurgeChart({ data, shown, groups, selected, onSelect, levels, toggles }
             {/* bursts: consecutive surge minutes shaded as one */}
             {groups.filter((g) => g.surges.length > 1).map((g) => (
               <rect key={g.start} x={X(minutes(g.start)) - 3} width={X(minutes(g.end)) - X(minutes(g.start)) + 6}
-                y={T} height={PRICE_H + GAP + VOL_H} fill={flowColor(dominant(g))} opacity={0.08} />
+                y={T} height={VY0 + VOL_H - T} fill={flowColor(dominant(g))} opacity={0.08} />
             ))}
           </g>
           <g clipPath={`url(#${clipId}-price)`}>
@@ -501,7 +597,7 @@ function SurgeChart({ data, shown, groups, selected, onSelect, levels, toggles }
             <g key={t.key}>
               <title>{t.full}</title>
               {t.fill && <rect x={W - R + 2} y={t.y - 12} width={R - 4} height={14} rx={2} fill={t.color} />}
-              <text x={W - R + 6} y={t.y - 1.5} fontSize="10" fill={t.fill ? "var(--color-panel)" : t.color} className="num">{t.text}</text>
+              <text x={W - R + 6} y={t.y - 1.5} fontSize={narrow ? 9 : 10} fill={t.fill ? "var(--color-panel)" : t.color} className="num">{t.text}</text>
             </g>
           ))}
           {above.length > 0 && (
@@ -513,6 +609,36 @@ function SurgeChart({ data, shown, groups, selected, onSelect, levels, toggles }
             <text x={L + 4} y={T + PRICE_H - 4} fontSize="9" fill="var(--color-muted)">
               ↓ {below.map((l) => `${l.name} ${nf(l.price, 0)}`).join(" · ")}
             </text>
+          )}
+          {/* premium pane: one strike's call and put mid by minute (own capture) */}
+          {PREM_H > 0 && (
+            <g>
+              <line x1={L} x2={W - R} y1={PY0 + PREM_H} y2={PY0 + PREM_H} stroke="var(--color-line)" />
+              {prem && premVisible.length > 0 ? (
+                <>
+                  {[pmLo, pmHi].map((v, i) => (
+                    <text key={i} x={L - 8} y={PYv(v) + 4} textAnchor="end" fontSize="10" fill="var(--color-muted)" className="num">{nf(v, v < 100 ? 1 : 0)}</text>
+                  ))}
+                  <g clipPath={`url(#${clipId})`}>
+                    {(["CE", "PE"] as const).map((k) => (
+                      <polyline key={k} fill="none" stroke={k === "CE" ? PREMIUM_COLORS.CE : PREMIUM_COLORS.PE} strokeWidth="1.3"
+                        points={prem[k].map(([t, v]) => `${X(minutes(t)).toFixed(1)},${PYv(v).toFixed(1)}`).join(" ")} />
+                    ))}
+                  </g>
+                  {nudge((["CE", "PE"] as const).flatMap((k) => {
+                    const v = premAt(k, Math.min(b, lastMinute));
+                    return v == null ? [] : [{ k, y: PYv(v), v }];
+                  })).map(({ k, y, v }) => (
+                    <text key={k} x={W - R + 6} y={y + 3} fontSize="10" fill={PREMIUM_COLORS[k]} className="num">{k} {nf(v, 1)}</text>
+                  ))}
+                  <text x={L + 4} y={PY0 + 10} fontSize="9" fill="var(--color-muted)">{nf(prem.strike)} CE / PE mid · expiry {prem.expiry}</text>
+                </>
+              ) : (
+                <text x={L + 4} y={PY0 + PREM_H / 2} fontSize="10" fill="var(--color-muted)">
+                  {premium.isFetching ? "loading premium…" : `no ${strike != null ? nf(strike) + " " : ""}option quotes in the own capture for this day (it began 28 Sep)`}
+                </text>
+              )}
+            </g>
           )}
           {/* volume pane: futures volume as a multiple of the minute's normal, surge threshold dashed */}
           <line x1={L} x2={W - R} y1={VY0 + VOL_H} y2={VY0 + VOL_H} stroke="var(--color-line)" />
@@ -562,6 +688,9 @@ function SurgeChart({ data, shown, groups, selected, onSelect, levels, toggles }
                 {tip.vwap != null && tip.ema != null && " · "}
                 {tip.ema != null && <>EMA20 {nf(tip.ema, 0)} ({signed(tip.price - tip.ema, 0)})</>}
               </div>
+            )}
+            {(tip.ce != null || tip.pe != null) && prem && (
+              <div className="num text-muted">{nf(prem.strike)} CE {nf(tip.ce, 1)} · PE {nf(tip.pe, 1)}</div>
             )}
             {tip.price != null && (tip.up || tip.down || tip.inside.length > 0) && (
               <div className="num text-muted">

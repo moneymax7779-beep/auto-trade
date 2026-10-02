@@ -1,14 +1,15 @@
-import { type ReactNode, useState } from "react";
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router";
 import {
-  get, parseSide, post, rupees, type LastDecisionRow, type MarketState, type RejectionRow, type Scores,
-  type SessionRow, type Status, type TradePositionRow,
+  get, parseSide, post, rupees, type LastDecisionRow, type MarketState, type RejectionRow,
+  type SessionRow, type Status, type StrategyView, type TradePositionRow,
 } from "../api";
-import { ConfirmButton, ErrorNote, Loading, Panel, Pnl, ScoreBar, SignedGauge, StageBadge, Stat } from "../components/ui";
+import { ConfirmButton, ErrorNote, Loading, Panel, Pnl, Stat } from "../components/ui";
 import { groupTrades, TradesTable } from "../components/TradesTable";
 import { LivePositions } from "../components/LivePositions";
-import { SurgePanel } from "../components/SurgePanel";
+import { MarketCard } from "../components/MarketCard";
+import { splitDecisionKey, storedScores, StrategyMatrix, type MatrixCell } from "../components/strategies";
 import { AlertBanner } from "../components/AlertBanner";
 
 export function LivePage() {
@@ -45,7 +46,6 @@ export function LivePage() {
         </p>
       </Panel>
       <LastSession />
-      <SurgePanel />
       </div>
     );
   }
@@ -82,14 +82,7 @@ export function LivePage() {
         {action.error && <div className="mt-3"><ErrorNote error={action.error} /></div>}
       </Panel>
 
-      <div className="grid gap-4 lg:grid-cols-2">
-        {Object.entries(s.strategy ?? {}).map(([underlying, view]) => (
-          <UnderlyingCard key={underlying} title={underlying} spot={view.spot} time={view.time} state={view.state}
-            ce={parseSide(view.CE)} pe={parseSide(view.PE)} volatility={view.volatility} cas={view.cas} />
-        ))}
-      </div>
-
-      <SurgePanel live date={s.date} />
+      <LiveOverview views={s.strategy ?? {}} positions={s.openPositions ?? []} />
 
       <Panel title="Open positions">
         <LivePositions rows={s.openPositions ?? []} closed={false} empty="Flat." />
@@ -108,85 +101,44 @@ export function LivePage() {
   );
 }
 
-function UnderlyingCard({ title, spot, time, state, ce, pe, volatility, cas }: {
-  title: ReactNode;
-  spot: number | null;
-  time: string;
-  state: MarketState;
-  ce: Scores;
-  pe: Scores;
-  volatility?: Record<string, number | string>;
-  cas?: Record<string, number | string>;
-}) {
-  const st = state;
+const ORDER = ["NIFTY", "SENSEX", "BANKNIFTY"];
+const rank = (u: string) => (ORDER.includes(u) ? ORDER.indexOf(u) : ORDER.length);
+const byOrder = (a: string, b: string) => rank(a) - rank(b) || a.localeCompare(b);
+
+/** Each index's market (one tile, linked to its dashboard) and every strategy's stage on it. */
+function LiveOverview({ views, positions }: { views: Record<string, StrategyView>; positions: Status["openPositions"] }) {
+  const entries = Object.entries(views).map(([key, view]) => ({ ...splitDecisionKey(key), view }));
+  const underlyings = [...new Set(entries.map((e) => e.underlying))].sort(byOrder);
+  const cells: MatrixCell[] = entries.map((e) => ({ strategy: e.strategy, underlying: e.underlying, time: e.view.time,
+    ce: parseSide(e.view.CE), pe: parseSide(e.view.PE) }));
   return (
-    <Panel
-      title={<>{title} <span className="num ml-2 text-base">{spot != null && Number.isFinite(spot) ? spot.toFixed(2) : "–"}</span></>}
-      right={<span className="text-xs text-muted">{time} IST · {st?.label ? st.label + " · " : ""}{st?.regime}</span>}
-    >
-      <div className="grid grid-cols-2 gap-x-6 gap-y-3">
-        <SignedGauge label="Direction" value={st?.direction} />
-        <SignedGauge label="Structure" value={st?.structure} />
-        <SignedGauge label="Participation" value={st?.participation} signed={false} />
-        <SignedGauge label="Continuation" value={st?.continuation} />
-      </div>
-      <div className="mt-4 grid gap-4 sm:grid-cols-2">
-        {[["CE (bullish)", ce], ["PE (bearish)", pe]].map(([label, side]) => {
-          const scores = side as ReturnType<typeof parseSide>;
-          return (
-            <div key={label as string} className="rounded border border-line p-3">
-              <div className="mb-2 flex items-center justify-between">
-                <span className="text-xs font-semibold">{label as string}</span>
-                <StageBadge stage={scores.stage} />
-              </div>
-              <div className="space-y-1.5">
-                <ScoreBar label="Early" value={scores.early} threshold={100} />
-                <ScoreBar label="Confirm" value={scores.confirm} />
-                <ScoreBar label="Runner" value={scores.runner} threshold={70} />
-              </div>
-            </div>
-          );
-        })}
-      </div>
-      <FactPanel title="Volatility regime" facts={volatility} />
-      {cas && (cas.indicative !== undefined || cas.iepPressurePct !== undefined)
-        ? <FactPanel title="Closing auction" facts={cas} /> : null}
-    </Panel>
+    <>
+      <IndexTiles items={underlyings.map((u) => {
+        const v = entries.find((e) => e.underlying === u)!.view;
+        return { underlying: u, spot: v.spot, time: v.time, state: v.state };
+      })} />
+      <Panel title="Strategies" right={<Link to="/strategies" className="text-xs text-accent hover:underline">what each one does, and its record →</Link>}>
+        <StrategyMatrix cells={cells} positions={positions ?? []} underlyings={underlyings} />
+      </Panel>
+    </>
   );
 }
 
-const FACT_LABELS: Record<string, string> = {
-  dte: "DTE", minutesToExpiry: "Min to expiry", atmIvPct: "ATM IV %", ivPercentile: "IV pctl", ivTrend: "IV trend",
-  vix: "India VIX", vixPercentile252d: "VIX pctl 252d", vixChange15m: "VIX Δ15m", realizedVolPct: "Realised vol %",
-  realizedVolPercentile: "RV pctl", atrPercentile: "ATR pctl", futuresRvol: "Futures RVOL",
-  expectedMoveRemaining: "Exp. move left", event: "Event", phase: "Phase", indicative: "Indicative",
-  reference: "Reference", iepPressurePct: "IEP pressure %", imbalance: "Imbalance", breadthPct: "CAS breadth %",
-  top3: "Top-3 share", futuresVsIndicative: "Fut − indicative", liquidityPercentile: "Liquidity pctl",
-  coveragePct: "Coverage %",
-};
-
-function FactPanel({ title, facts }: { title: string; facts?: Record<string, number | string> }) {
-  if (!facts || Object.keys(facts).length === 0) return null;
+function IndexTiles({ items, note }: { items: { underlying: string; spot: number | null; time: string; state: MarketState }[]; note?: string }) {
   return (
-    <div className="mt-4 rounded border border-line p-3">
-      <div className="mb-2 text-xs font-semibold">{title}</div>
-      <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs sm:grid-cols-3">
-        {Object.entries(facts).map(([key, value]) => (
-          <div key={key} className="flex min-w-0 justify-between gap-2">
-            <dt className="truncate text-muted">{FACT_LABELS[key] ?? key}</dt>
-            <dd className="num">{String(value)}</dd>
-          </div>
-        ))}
-      </dl>
+    <div className="grid gap-4 lg:grid-cols-2">
+      {items.map((i) => (
+        <MarketCard key={i.underlying} spot={i.spot} time={i.time} state={i.state}
+          title={<Link to={`/index/${i.underlying}`} className="hover:underline">{i.underlying}{note && <span className="ml-2 text-xs font-normal text-muted">{note}</span>}</Link>}
+          right={<span className="flex items-center gap-3 text-xs text-muted">
+            <span>{i.time} IST · {i.state?.label ? i.state.label + " · " : ""}{i.state?.regime}</span>
+            <Link to={`/index/${i.underlying}`} className="text-accent hover:underline">chart, surges →</Link>
+          </span>} />
+      ))}
     </div>
   );
 }
 
-/** Stored scores use −1 for "not computed"; the bars show that as blank. */
-function storedScores(scores: Scores | undefined, stage: string): Scores {
-  const value = (v: number | undefined) => (v == null || v < 0 ? NaN : v);
-  return { stage, early: value(scores?.early), confirm: value(scores?.confirm), runner: value(scores?.runner) };
-}
 
 const SESSION_KINDS = [
   { mode: "PAPER_LIVE", label: "Live" },
@@ -286,17 +238,22 @@ function LastSession() {
       {last.isLoading ? <Loading what="final stages" /> : last.error ? <ErrorNote error={last.error} /> : (
         (last.data ?? []).length === 0 ? (
           <Panel title="How each index ended"><p className="text-sm text-muted">No decisions were recorded.</p></Panel>
-        ) : (
-          <div className="grid gap-4 lg:grid-cols-2">
-            {last.data!.map((row) => (
-              <UnderlyingCard key={row.underlying + row.strategy_id}
-                title={<>{row.underlying}{several && <span className="ml-2 text-xs font-normal text-muted">{row.strategy_id}</span>}
-                  <span className="ml-2 text-xs font-normal text-muted">at close</span></>}
-                spot={row.spot} time={row.t} state={row.state}
-                ce={storedScores(row.ce_scores, row.ce_stage)} pe={storedScores(row.pe_scores, row.pe_stage)} />
-            ))}
-          </div>
-        )
+        ) : (() => {
+          const rows = last.data!;
+          const underlyings = [...new Set(rows.map((r) => r.underlying))].sort(byOrder);
+          return (
+            <>
+              <IndexTiles note="at close" items={underlyings.map((u) => {
+                const r = rows.find((x) => x.underlying === u)!;
+                return { underlying: u, spot: r.spot, time: r.t, state: r.state };
+              })} />
+              <Panel title="How each strategy ended">
+                <StrategyMatrix underlyings={underlyings} cells={rows.map((r) => ({ strategy: r.strategy_id, underlying: r.underlying,
+                  time: r.t, ce: storedScores(r.ce_scores, r.ce_stage), pe: storedScores(r.pe_scores, r.pe_stage) }))} />
+              </Panel>
+            </>
+          );
+        })()
       )}
 
       <Panel title="Trades">

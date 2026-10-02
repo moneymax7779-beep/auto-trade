@@ -87,6 +87,41 @@ public final class TimedSeries {
         return result;
     }
 
+    /**
+     * Time-weighted mean of the value in force over ({@code now − window}, {@code now}]; over the
+     * retained span when the series does not reach back that far. NaN when empty.
+     */
+    public double mean(Instant now, Duration window) {
+        long start = now.minus(window).toEpochMilli();
+        long end = now.toEpochMilli();
+        double sum = 0;
+        long total = 0;
+        Sample prev = null;
+        for (Sample sample : samples) {
+            if (sample.millis() > end) {
+                break;
+            }
+            if (prev != null) {
+                long a = Math.max(prev.millis(), start);
+                long b = Math.min(sample.millis(), end);
+                if (b > a) {
+                    sum += prev.value() * (b - a);
+                    total += b - a;
+                }
+            }
+            prev = sample;
+        }
+        if (prev == null) {
+            return Double.NaN;
+        }
+        long a = Math.max(prev.millis(), start);
+        if (end > a) {
+            sum += prev.value() * (end - a);
+            total += end - a;
+        }
+        return total == 0 ? prev.value() : sum / total;
+    }
+
     /** latest − value {@code ago} before {@code now}; NaN when either is missing. */
     public double change(Instant now, Duration ago) {
         double past = valueAt(now.minus(ago));
