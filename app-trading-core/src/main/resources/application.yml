@@ -50,7 +50,8 @@ autotrade:
       - config/strategy/expiry-breakout-straddle.v2.yaml   # ebs-v2 = v1 with no limit on straddles a day (user, 2026-10-01)
       - config/strategy/early-confirm-runner.v11.yaml      # ecr-v11 = v8 (expiry days only) with no limit on campaigns per side (user, 2026-10-01)
       - config/strategy/opening-drive.v3.yaml              # odb-v3 = v2 with no limit on trades; a re-entry needs a fresh break (user, 2026-10-01)
-      - config/strategy/expiry-gamma-breakout.v4.yaml      # egb-v4 = v3 with no limit on campaigns per side (user, 2026-10-01); last in order
+      - config/strategy/expiry-gamma-breakout.v4.yaml      # egb-v4 = v3 with no limit on campaigns per side (user, 2026-10-01)
+      - config/strategy/expiry-trend-rider.v1.yaml         # etr-v1 live (user, 2026-10-02: "keep it live, no need to run in shadow"; A-031; failed A-029's criterion); last in order
     features-file: config/features/features.v11.yaml   # v11 = v7 with the VWAP proxy using the 15-minute mean basis (A-030, user 2026-10-02: "yes switch to v11"); v7 = v6 + ATR seeded from the previous session
     exchange-file: config/exchange/nse-bse-sessions.v3.yaml
     costs-file: config/costs/india-index-options-costs.v1.yaml
@@ -60,8 +61,7 @@ autotrade:
     replay-source: zt              # --mode=replay only: zt (zt-tiger-v2's capture) or own (auto-trade's live capture, md.*; from 28 Sep 2026)
     # Shadow mode (--mode=auto): after each live session, these candidates replay the day from own capture on
     # account SHADOW-1 (no orders anywhere) and the result is sent with the alerts. --mode=shadow --session=D runs it by hand.
-    shadow-strategy-files:
-      - config/strategy/expiry-trend-rider.v1.yaml   # etr-v1 (A-029, user 2026-10-01: "run shadow")
+    shadow-strategy-files: []        # etr-v1 moved to the live set 2026-10-02 (A-031); none in shadow
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"
