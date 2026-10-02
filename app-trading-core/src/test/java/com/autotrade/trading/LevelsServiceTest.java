@@ -37,6 +37,17 @@ class LevelsServiceTest {
     }
 
     @Test
+    void vwapSubtractsTheTrailingMeanBasisNotTheLatestTick() {
+        // futures VWAP 1,000 throughout; the tick basis jumps 50 → 90 → 50
+        List<Object> v = LevelsService.smoothVwap(List.of("09:16", "09:17", "09:18"),
+                List.of(950.0, 910.0, 950.0), List.of(50.0, 90.0, 50.0), 15);
+        assertThat(v).containsExactly(List.of("09:16", 950.0), List.of("09:17", 930.0), List.of("09:18", 936.67));
+        // only the last `window` basis values count; a missing basis falls back to the proxy
+        assertThat(LevelsService.smoothVwap(List.of("a", "b", "c"), List.of(950.0, 910.0, 900.0),
+                java.util.Arrays.asList(50.0, 90.0, null), 1)).containsExactly(List.of("a", 950.0), List.of("b", 910.0), List.of("c", 900.0));
+    }
+
+    @Test
     void emaStartsAfterAFullPeriod() {
         assertThat(LevelsService.ema(bars(1, 2, 3, 4, 5), 5)).hasSize(1);
         assertThat(LevelsService.ema(bars(1, 2, 3, 4), 5)).isEmpty();

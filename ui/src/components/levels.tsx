@@ -15,10 +15,17 @@ export interface LevelToggles { prior: boolean; today: boolean; lines: boolean; 
 const KEY = "chart-level-toggles";
 const DEFAULT: LevelToggles = { prior: true, today: true, lines: true, zones: "strong" };
 
+/** Distinct from the price line (blue) and from each other; plain hex so both chart kinds can use them. */
 export const LEVEL_COLORS = {
-  prior: "var(--color-warn)", today: "var(--color-accent)", vwap: "#f59e0b", ema20: "#a78bfa",
-  support: "var(--color-up)", resistance: "var(--color-down)",
+  prior: "#f59e0b", today: "#14b8a6", vwap: "#ec4899", ema20: "#a78bfa",
+  support: "#22c55e", resistance: "#ef4444",
 };
+
+/** Short names for the price-axis tags: "ORH / Prior ORL" → "ORH/pORL". */
+export function tagName(name: string) {
+  return name.replace(/Prior /g, "p").replace("Prev close", "PC").replace("Day open", "Open")
+    .replace("2-day high", "2dH").replace("2-day low", "2dL").replace(/ \/ /g, "/");
+}
 
 export function useLevels(date: string | undefined, underlying: string, live?: boolean) {
   return useQuery({

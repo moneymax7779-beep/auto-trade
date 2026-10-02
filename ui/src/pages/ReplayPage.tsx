@@ -32,7 +32,8 @@ export function ReplayPage() {
       { name: "Spot", color: "--color-text", points: rows.map((r) => ({ t: r.t, value: r.spot })) },
       { name: "ORH", color: "#22c55e", width: 1, dashed: true, points: rows.map((r) => ({ t: r.t, value: r.or_high })) },
       { name: "ORL", color: "#ef4444", width: 1, dashed: true, points: rows.map((r) => ({ t: r.t, value: r.or_low })) },
-      { name: "VWAP", color: "#f59e0b", width: 1, points: rows.map((r) => ({ t: r.t, value: r.vwap })) },
+      // the feature as strategies read it: futures VWAP − the latest tick basis (noisy on SENSEX)
+      { name: "VWAP proxy", color: "#ec4899", width: 1, points: rows.map((r) => ({ t: r.t, value: r.vwap })) },
       { name: "EMA20", color: "#a78bfa", width: 1, points: rows.map((r) => ({ t: r.t, value: r.ema20 })) },
     ];
   }, [points.data]);

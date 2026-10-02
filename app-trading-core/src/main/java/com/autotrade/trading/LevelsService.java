@@ -35,6 +35,7 @@ class LevelsService {
     static final double TOLERANCE = 0.0004;          // 0.04 % of price: about 9 NIFTY / 29 SENSEX points
     static final int PIVOT = 3;                      // a swing needs 3 minutes either side
     static final int TOUCH_GAP_MIN = 5;              // touches closer than this are one touch
+    static final int BASIS_WINDOW = 15;              // minutes of basis averaged for the chart's VWAP
     static final LocalTime ZONES_UNTIL = LocalTime.of(15, 15);   // no new zones in the closing minutes
     private static final String IST = "Asia/Kolkata";
 
@@ -158,19 +159,50 @@ class LevelsService {
         add(levels, "2-day low", "prior", Math.min(pdl, prior.get(1)[1]), "09:15");
     }
 
+    /**
+     * The spot VWAP for the chart. The feature's proxy is the futures VWAP minus the latest tick basis,
+     * and that basis jumps (SENSEX futures trade thinly: about 18 points a minute, median), so the chart
+     * subtracts the basis averaged over the last {@link #BASIS_WINDOW} minutes instead. Strategies keep
+     * reading the feature unchanged.
+     */
     private List<Object> vwap(LocalDate day, String underlying) {
-        List<Object> out = new ArrayList<>();
+        List<String> times = new ArrayList<>();
+        List<Double> proxy = new ArrayList<>();
+        List<Double> basis = new ArrayList<>();
         jdbc.query("select to_char(s.snap_time at time zone '" + IST + "', 'HH24:MI'), "
-                        + "s.features->>'structure.vwapSpotProxy' from feat.snapshot s join research.run r on r.id = s.run_id "
+                        + "s.features->>'structure.vwapSpotProxy', s.features->>'futures.basis' "
+                        + "from feat.snapshot s join research.run r on r.id = s.run_id "
                         + "where r.kind = 'LIVE_FEATURES' and s.session_date = ? and s.underlying = ? "
                         + "and s.run_id = (select max(s2.run_id) from feat.snapshot s2 join research.run r2 on r2.id = s2.run_id "
                         + "where r2.kind = 'LIVE_FEATURES' and s2.session_date = ? and s2.underlying = ?) order by s.snap_time",
                 rs -> {
-                    Double v = parse(rs.getString(2));
-                    if (v != null) {
-                        out.add(List.of(rs.getString(1), round(v)));
-                    }
+                    times.add(rs.getString(1));
+                    proxy.add(parse(rs.getString(2)));
+                    basis.add(parse(rs.getString(3)));
                 }, day, underlying, day, underlying);
+        return smoothVwap(times, proxy, basis, BASIS_WINDOW);
+    }
+
+    /** Futures VWAP (proxy + its basis) minus the trailing mean basis; causal: only minutes up to t. */
+    static List<Object> smoothVwap(List<String> times, List<Double> proxy, List<Double> basis, int window) {
+        List<Object> out = new ArrayList<>();
+        java.util.ArrayDeque<Double> recent = new java.util.ArrayDeque<>();
+        double sum = 0;
+        for (int i = 0; i < times.size(); i++) {
+            Double p = proxy.get(i), b = basis.get(i);
+            if (b != null) {
+                recent.addLast(b);
+                sum += b;
+                if (recent.size() > window) {
+                    sum -= recent.removeFirst();
+                }
+            }
+            if (p == null) {
+                continue;
+            }
+            double v = b == null || recent.isEmpty() ? p : p + b - sum / recent.size();
+            out.add(List.of(times.get(i), round(v)));
+        }
         return out;
     }
 

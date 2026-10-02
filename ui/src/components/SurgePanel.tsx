@@ -1,9 +1,9 @@
-import { Fragment, useMemo, useRef, useState, type MouseEvent } from "react";
+import { Fragment, useEffect, useId, useMemo, useRef, useState, type PointerEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { get } from "../api";
 import { ErrorNote, Loading, Panel } from "./ui";
 import {
-  LEVEL_COLORS, LevelTogglesBar, mergeLevels, useLevels, useLevelToggles, visibleLevels, visibleZones,
+  LEVEL_COLORS, LevelTogglesBar, mergeLevels, tagName, useLevels, useLevelToggles, visibleLevels, visibleZones,
   type LevelToggles, type LevelsData,
 } from "./levels";
 
@@ -189,180 +189,408 @@ function HitRate({ surges }: { surges: Surge[] }) {
   );
 }
 
-const W = 1000, L = 60, R = 14, T = 10, PRICE_H = 200, GAP = 10, VOL_H = 70, AXIS = 24;
-const H = T + PRICE_H + GAP + VOL_H + AXIS;
+const W = 1000, L = 60, R = 104, T = 10, GAP = 10, AXIS = 24;
+const PW = W - L - R;                                 // plot width; the right gutter holds the price tags
 const X0 = minutes("09:15"), X1 = minutes("15:30");
 const X_CAP = 30;                                     // the volume pane tops out at 30 × normal
+const MIN_SPAN = 10;                                  // zoomed in no further than 10 minutes
+const SIZES = { S: { price: 200, vol: 70 }, M: { price: 320, vol: 90 }, L: { price: 480, vol: 110 } } as const;
+type Size = keyof typeof SIZES;
+const SIZE_KEY = "surge-chart-size";
+const PRESETS: { label: string; span: number | null }[] = [{ label: "day", span: null }, { label: "2h", span: 120 }, { label: "1h", span: 60 }, { label: "30m", span: 30 }];
+
+interface View { a: number; b: number }               // visible minutes
+interface YRange { lo: number; hi: number }           // a stretched price axis; null = fit the visible minutes
+interface Drag { kind: "pan" | "yscale" | "xscale"; x: number; y: number; view: View; yr: YRange; manualY: boolean; moved: boolean; id: number }
+
+function clampView(a: number, b: number): View {
+  const span = Math.min(X1 - X0, Math.max(MIN_SPAN, b - a));
+  if (a < X0) return { a: X0, b: X0 + span };
+  if (a + span > X1) return { a: X1 - span, b: X1 };
+  return { a, b: a + span };
+}
+
+/** A round grid step giving at most about `n` lines over `range`. */
+function niceStep(range: number, n: number) {
+  const raw = range / n, p = 10 ** Math.floor(Math.log10(raw));
+  return [1, 2, 2.5, 5, 10].map((k) => k * p).find((s) => s >= raw) ?? 10 * p;
+}
+
+function loadSize(): Size {
+  try { const s = localStorage.getItem(SIZE_KEY); if (s && s in SIZES) return s as Size; } catch { /* default */ }
+  return "S";
+}
 
 function SurgeChart({ data, shown, groups, selected, onSelect, levels, toggles }:
   { data: UnderlyingSurges; shown: Surge[]; groups: Burst[]; selected: string | null; onSelect: (t: string | null) => void;
     levels?: LevelsData; toggles: LevelToggles }) {
   const svgRef = useRef<SVGSVGElement>(null);
-  const [hover, setHover] = useState<number | null>(null);
+  const clipId = `plot-${useId().replace(/:/g, "")}`;
+  const [hover, setHover] = useState<{ m: number; y: number } | null>(null);
+  const [view, setView] = useState<View>({ a: X0, b: X1 });
+  const [manualY, setManualY] = useState<YRange | null>(null);
+  const [size, setSizeState] = useState<Size>(loadSize);
+  const drag = useRef<Drag | null>(null);
+  const geo = useRef({ view, y0: 0, y1: 1, priceH: 200 });
   const pts = data.index;
   const prices = useMemo(() => new Map(pts.map(([t, p]) => [minutes(t), p])), [pts]);
   const vols = useMemo(() => new Map((data.volume ?? []).map(([t, v, n]) => [minutes(t), { v, n }])), [data.volume]);
   const byMinute = useMemo(() => new Map(shown.map((s) => [minutes(s.t), s])), [shown]);
-  if (pts.length < 2) return <p className="text-sm text-muted">No index data yet.</p>;
+  const lineMaps = useMemo(() => ({
+    vwap: new Map((levels?.lines.vwap ?? []).map(([t, v]) => [minutes(t), v])),
+    ema20: new Map((levels?.lines.ema20 ?? []).map(([t, v]) => [minutes(t), v])),
+  }), [levels]);
+  const lastMinute = pts.length ? minutes(pts[pts.length - 1][0]) : X1;
+  const hasChart = pts.length >= 2;
 
-  const X = (m: number) => L + ((m - X0) / (X1 - X0)) * (W - L - R);
-  const ys = pts.map((p) => p[1]);
-  const pLo = Math.min(...ys), pHi = Math.max(...ys), near = (pHi - pLo) * 0.15;
-  // levels near the day's range widen it a little; far ones (e.g. a PDH 300 points away) stay off the chart
-  const lv = levels ? mergeLevels(visibleLevels(levels.levels, toggles), levels.tolerancePct) : [];
-  const zs = levels ? visibleZones(levels.zones, toggles) : [];
-  const inRange = (v: number) => v >= pLo - near && v <= pHi + near;
-  const drawnLevels = lv.filter((l) => inRange(l.price));
-  const drawnZones = zs.filter((z) => inRange(z.lo) || inRange(z.hi));
-  const all = [pLo, pHi, ...drawnLevels.map((l) => l.price), ...drawnZones.flatMap((z) => [z.lo, z.hi])];
-  const lo = Math.min(...all), hi = Math.max(...all), pad = Math.max((hi - lo) * 0.06, 1);
-  const y0 = lo - pad, y1 = hi + pad;
-  const offChart = lv.filter((l) => !inRange(l.price));
-  const Y = (v: number) => T + ((y1 - v) / (y1 - y0)) * PRICE_H;
-  const VY0 = T + PRICE_H + GAP;
-  const VY = (x: number) => VY0 + VOL_H - (Math.min(x, X_CAP) / X_CAP) * VOL_H;
-  const step = data.underlying === "NIFTY" ? 50 : 200;
-  const grid: number[] = [];
-  for (let v = Math.ceil(y0 / step) * step; v <= y1; v += step) grid.push(v);
-  const barW = Math.max(1, ((W - L - R) / (X1 - X0)) * 0.7);
+  const setSize = (s: Size) => { setSizeState(s); try { localStorage.setItem(SIZE_KEY, s); } catch { /* not kept */ } };
+  const reset = () => { setView({ a: X0, b: X1 }); setManualY(null); };
+  const preset = (span: number | null) => {
+    setManualY(null);
+    setView(span == null ? { a: X0, b: X1 } : clampView(Math.min(lastMinute, X1) - span + 5, Math.min(lastMinute, X1) + 5));
+  };
+  const zoomX = (f: number, at?: number) => setView((v) => {
+    const m = at ?? (v.a + v.b) / 2;
+    return clampView(m - (m - v.a) * f, m + (v.b - m) * f);
+  });
 
-  const onMove = (e: MouseEvent<SVGSVGElement>) => {
+  // a surge picked in the table is brought into view
+  useEffect(() => {
+    if (!selected) return;
+    const m = minutes(selected);
+    setView((v) => (m >= v.a && m <= v.b ? v : clampView(m - (v.b - v.a) / 2, m + (v.b - v.a) / 2)));
+  }, [selected]);
+
+  // pinch (trackpad) or ⌘/ctrl + scroll zooms; a sideways scroll pans; a plain scroll still scrolls the page
+  useEffect(() => {
     const svg = svgRef.current;
     if (!svg) return;
-    const box = svg.getBoundingClientRect();
-    const x = ((e.clientX - box.left) / box.width) * W;
-    const m = Math.round(X0 + ((x - L) / (W - L - R)) * (X1 - X0));
-    setHover(m >= X0 && m <= X1 ? m : null);
+    const onWheel = (e: WheelEvent) => {
+      const box = svg.getBoundingClientRect();
+      const k = W / box.width;                          // the viewBox scales uniformly
+      const x = (e.clientX - box.left) * k, y = (e.clientY - box.top) * k;
+      const g = geo.current;
+      if (e.ctrlKey || e.metaKey) {
+        e.preventDefault();
+        const f = Math.exp(Math.max(-1, Math.min(1, e.deltaY * 0.01)));
+        if (x < L && y <= T + g.priceH) {
+          const v = g.y1 - ((y - T) / g.priceH) * (g.y1 - g.y0);
+          setManualY({ lo: v - (v - g.y0) * f, hi: v + (g.y1 - v) * f });
+        } else {
+          const m = g.view.a + ((x - L) / PW) * (g.view.b - g.view.a);
+          zoomX(f, Math.max(X0, Math.min(X1, m)));
+        }
+      } else if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+        e.preventDefault();
+        const shift = (e.deltaX / PW) * (g.view.b - g.view.a);
+        setView((v) => clampView(v.a + shift, v.b + shift));
+      }
+    };
+    svg.addEventListener("wheel", onWheel, { passive: false });
+    return () => svg.removeEventListener("wheel", onWheel);
+  }, [hasChart]);
+
+  if (!hasChart) return <p className="text-sm text-muted">No index data yet.</p>;
+
+  const { price: PRICE_H, vol: VOL_H } = SIZES[size];
+  const H = T + PRICE_H + GAP + VOL_H + AXIS;
+  const VY0 = T + PRICE_H + GAP;
+  const { a, b } = view;
+  const span = b - a;
+  const X = (m: number) => L + ((m - a) / span) * PW;
+  const visible = pts.filter(([t]) => { const m = minutes(t); return m >= a && m <= b; });
+  const ys = (visible.length ? visible : pts).map((p) => p[1]);
+  const pLo = Math.min(...ys), pHi = Math.max(...ys), near = Math.max((pHi - pLo) * 0.15, 1);
+  const lv = levels ? mergeLevels(visibleLevels(levels.levels, toggles), levels.tolerancePct).filter((l) => minutes(l.from) <= b) : [];
+  const zs = levels ? visibleZones(levels.zones, toggles).filter((z) => minutes(z.from) <= b && (!z.until || minutes(z.until) >= a)) : [];
+  // auto-fit: the visible prices, widened a little for levels just outside them
+  const inBand = (v: number) => v >= pLo - near && v <= pHi + near;
+  const fitted = [pLo, pHi, ...lv.filter((l) => inBand(l.price)).map((l) => l.price),
+    ...zs.filter((z) => inBand(z.lo) || inBand(z.hi)).flatMap((z) => [z.lo, z.hi])];
+  const fLo = Math.min(...fitted), fHi = Math.max(...fitted), pad = Math.max((fHi - fLo) * 0.06, 1);
+  const y0 = manualY?.lo ?? fLo - pad, y1 = manualY?.hi ?? fHi + pad;
+  geo.current = { view, y0, y1, priceH: PRICE_H };
+  const Y = (v: number) => T + ((y1 - v) / (y1 - y0)) * PRICE_H;
+  const inY = (v: number) => v >= y0 && v <= y1;
+  const drawnLevels = lv.filter((l) => inY(l.price));
+  const drawnZones = zs.filter((z) => z.hi >= y0 && z.lo <= y1);
+  const above = lv.filter((l) => l.price > y1).sort((p, q) => p.price - q.price).slice(0, 2);
+  const below = lv.filter((l) => l.price < y0).sort((p, q) => q.price - p.price).slice(0, 2);
+  const VY = (x: number) => VY0 + VOL_H - (Math.min(x, X_CAP) / X_CAP) * VOL_H;
+  const step = niceStep(y1 - y0, PRICE_H / 40);
+  const grid: number[] = [];
+  for (let v = Math.ceil(y0 / step) * step; v <= y1; v += step) grid.push(v);
+  const tStep = [1, 2, 5, 10, 15, 30, 60].find((s) => span / s <= 8) ?? 60;
+  const tOffset = tStep === 60 ? 30 : 0;
+  const ticks: number[] = [];
+  for (let m = Math.ceil((a - tOffset) / tStep) * tStep + tOffset; m <= b; m += tStep) ticks.push(m);
+  const barW = Math.max(1, (PW / span) * 0.7);
+  const lastShown = visible.length ? visible[visible.length - 1] : pts[pts.length - 1];
+  const at = (m: number) => { for (let k = m; k >= m - 5; k--) { const v = prices.get(k); if (v != null) return v; } return null; };
+
+  const toSvg = (e: { clientX: number; clientY: number }) => {
+    const box = svgRef.current!.getBoundingClientRect();
+    return { x: ((e.clientX - box.left) / box.width) * W, y: ((e.clientY - box.top) / box.height) * H };
   };
-  const tip = hover == null ? null : { m: hover, price: prices.get(hover), vol: vols.get(hover), surge: byMinute.get(hover) };
-  const tipLeft = hover == null ? 0 : (X(hover) / W) * 100;
+  const onPointerDown = (e: PointerEvent<SVGSVGElement>) => {
+    if (e.button !== 0) return;
+    const p = toSvg(e);
+    const kind = p.x < L && p.y <= T + PRICE_H ? "yscale" : p.y > VY0 + VOL_H ? "xscale" : "pan";
+    drag.current = { kind, x: p.x, y: p.y, view, yr: { lo: y0, hi: y1 }, manualY: manualY != null, moved: false, id: e.pointerId };
+  };
+  const onPointerMove = (e: PointerEvent<SVGSVGElement>) => {
+    const p = toSvg(e);
+    const d = drag.current;
+    if (d) {
+      const dx = p.x - d.x, dy = p.y - d.y;
+      if (!d.moved && Math.abs(dx) + Math.abs(dy) > 3) {
+        d.moved = true;
+        svgRef.current?.setPointerCapture(d.id);         // only once it is a drag, so clicks still reach the markers
+      }
+      if (d.moved) {
+        const s0 = d.view.b - d.view.a, r0 = d.yr.hi - d.yr.lo;
+        if (d.kind === "pan") {
+          const shift = (-dx / PW) * s0;
+          setView(clampView(d.view.a + shift, d.view.b + shift));
+          if (d.manualY) {
+            const dv = (dy / PRICE_H) * r0;
+            setManualY({ lo: d.yr.lo + dv, hi: d.yr.hi + dv });
+          }
+        } else if (d.kind === "yscale") {                // drag down compresses, up stretches
+          const r = r0 * Math.exp(dy / 120), mid = (d.yr.lo + d.yr.hi) / 2;
+          setManualY({ lo: mid - r / 2, hi: mid + r / 2 });
+        } else {                                         // drag right zooms in about the middle
+          const s = s0 * Math.exp(-dx / 200), mid = (d.view.a + d.view.b) / 2;
+          setView(clampView(mid - s / 2, mid + s / 2));
+        }
+        setHover(null);
+        return;
+      }
+    }
+    const m = Math.round(a + ((p.x - L) / PW) * span);
+    setHover(p.x >= L && p.x <= W - R && m >= X0 && m <= X1 ? { m, y: p.y } : null);
+  };
+  const onPointerUp = () => { drag.current = null; };
 
+  const tip = hover == null ? null : (() => {
+    const price = at(hover.m);
+    // levels and zones known at that minute, nearest above and below
+    const known = [
+      ...lv.filter((l) => minutes(l.from) <= hover.m).map((l) => ({ name: l.name, lo: l.price, hi: l.price })),
+      ...zs.filter((z) => minutes(z.from) <= hover.m && (!z.until || minutes(z.until) > hover.m))
+        .map((z) => ({ name: `${z.kind === "support" ? "S" : "R"} ${z.touches}×`, lo: z.lo, hi: z.hi })),
+    ];
+    const inside = price == null ? [] : known.filter((k) => price >= k.lo - 0.01 && price <= k.hi + 0.01 && k.hi > k.lo);
+    const up = price == null ? undefined : known.filter((k) => k.lo > price).sort((p, q) => p.lo - q.lo)[0];
+    const down = price == null ? undefined : known.filter((k) => k.hi < price).sort((p, q) => q.hi - p.hi)[0];
+    return { m: hover.m, price, vol: vols.get(hover.m), surge: byMinute.get(hover.m), inside, up, down,
+      vwap: lineMaps.vwap.get(hover.m), ema: lineMaps.ema20.get(hover.m) };
+  })();
+  const tipLeft = hover == null ? 0 : (X(hover.m) / W) * 100;
+  const crossY = hover && hover.y >= T && hover.y <= T + PRICE_H ? hover.y : null;
+  const zoomed = span < X1 - X0 || manualY != null;
+
+  const btn = (on: boolean) => `rounded px-2 py-0.5 ${on ? "bg-panel-2 font-semibold" : "text-muted hover:text-text"}`;
   return (
-    <div className="relative overflow-x-auto rounded border border-line">
-      <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} className="block w-full min-w-[640px]" role="img"
-        aria-label={`${data.underlying} index and futures volume by minute with surges`}
-        onMouseMove={onMove} onMouseLeave={() => setHover(null)}>
-        {/* bursts: consecutive surge minutes shaded as one */}
-        {groups.filter((g) => g.surges.length > 1).map((g) => (
-          <rect key={g.start} x={X(minutes(g.start)) - 3} width={X(minutes(g.end)) - X(minutes(g.start)) + 6}
-            y={T} height={PRICE_H + GAP + VOL_H} fill={flowColor(dominant(g))} opacity={0.08} />
-        ))}
-        {grid.map((v) => (
-          <g key={v}>
-            <line x1={L} x2={W - R} y1={Y(v)} y2={Y(v)} stroke="var(--color-line)" />
-            <text x={L - 8} y={Y(v) + 4} textAnchor="end" fontSize="11" fill="var(--color-muted)" className="num">{nf(v)}</text>
-          </g>
-        ))}
-        {["09:30", "10:30", "11:30", "12:30", "13:30", "14:30", "15:30"].map((t) => (
-          <g key={t}>
-            <line x1={X(minutes(t))} x2={X(minutes(t))} y1={T} y2={VY0 + VOL_H} stroke="var(--color-line)" strokeDasharray="2 4" />
-            <text x={X(minutes(t))} y={H - 7} textAnchor="middle" fontSize="11" fill="var(--color-muted)" className="num">{t}</text>
-          </g>
-        ))}
-        {/* tested zones, from their second touch until broken */}
-        {drawnZones.map((z) => {
-          const x0 = X(minutes(z.from)), x1 = z.until ? X(minutes(z.until)) : W - R;
-          const top = Y(z.hi), h = Math.max(3, Y(z.lo) - Y(z.hi));
-          const c = z.kind === "support" ? LEVEL_COLORS.support : LEVEL_COLORS.resistance;
-          return (
-            <g key={`${z.kind}-${z.from}-${z.lo}`}>
-              <rect x={x0} width={Math.max(1, x1 - x0)} y={top} height={h} fill={c} opacity={0.14} />
-              <text x={x0 + 3} y={top - 2} fontSize="9" fill={c} opacity={0.9}>{z.kind === "support" ? "S" : "R"} {z.touches}×</text>
-            </g>
-          );
-        })}
-        {/* prior-day and today levels, each from the minute it was known */}
-        {drawnLevels.map((l) => (
-          <line key={`${l.name}-${l.price}`} x1={X(minutes(l.from))} x2={W - R} y1={Y(l.price)} y2={Y(l.price)}
-            stroke={l.group === "prior" ? LEVEL_COLORS.prior : LEVEL_COLORS.today} strokeWidth="1" strokeDasharray="5 4" opacity={0.85} />
-        ))}
-        {toggles.lines && levels && (["vwap", "ema20"] as const).map((k) => {
-          const line = levels.lines[k].filter(([, v]) => v >= y0 && v <= y1);
-          return line.length > 1 && (
-            <polyline key={k} fill="none" stroke={LEVEL_COLORS[k]} strokeWidth="1.1" opacity={0.85}
-              points={line.map(([t, v]) => `${X(minutes(t)).toFixed(1)},${Y(v).toFixed(1)}`).join(" ")} />
-          );
-        })}
-        <polyline fill="none" stroke="var(--color-accent)" strokeWidth="1.6"
-          points={pts.map((p) => `${X(minutes(p[0])).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(" ")} />
-        {shown.filter((s) => s.spot != null).map((s) => {
-          const r = Math.min(6.5, 2.5 + Math.sqrt(s.x) * 0.8);
-          const on = selected === s.t;
-          return s.flow === "mixed" ? (
-            <circle key={s.t} cx={X(minutes(s.t))} cy={Y(s.spot!)} r={on ? r + 2 : r} fill="none"
-              stroke="var(--color-muted)" strokeWidth={on ? 2.5 : 1.2} opacity={0.8}
-              className="cursor-pointer" onClick={() => onSelect(on ? null : s.t)} />
-          ) : (
-            <circle key={s.t} cx={X(minutes(s.t))} cy={Y(s.spot!)} r={on ? r + 2 : r} fill={flowColor(s.flow)}
-              stroke={on ? "var(--color-text)" : "var(--color-panel)"} strokeWidth={on ? 2 : 1}
-              className="cursor-pointer" onClick={() => onSelect(on ? null : s.t)} />
-          );
-        })}
-
-        {/* level labels at the right edge, nudged apart */}
-        {nudge(drawnLevels.map((l) => ({ l, y: Y(l.price) }))).map(({ l, y }) => (
-          <text key={`label-${l.name}`} x={W - R - 4} y={y - 3} textAnchor="end" fontSize="10"
-            fill={l.group === "prior" ? LEVEL_COLORS.prior : LEVEL_COLORS.today}
-            stroke="var(--color-panel)" strokeWidth="3" style={{ paintOrder: "stroke" }} className="num">
-            {l.name} {nf(l.price, 0)}
-          </text>
-        ))}
-        {offChart.length > 0 && (
-          <text x={L + 4} y={T + 10} fontSize="9" fill="var(--color-muted)">
-            off chart: {offChart.map((l) => `${l.name} ${nf(l.price, 0)}`).join(" · ")}
-          </text>
-        )}
-        {/* volume pane: futures volume as a multiple of the minute's normal, surge threshold dashed */}
-        <line x1={L} x2={W - R} y1={VY0 + VOL_H} y2={VY0 + VOL_H} stroke="var(--color-line)" />
-        {[5, 15, 30].map((x) => (
-          <g key={x}>
-            <line x1={L} x2={W - R} y1={VY(x)} y2={VY(x)} stroke={x === 5 ? "var(--color-warn)" : "var(--color-line)"}
-              strokeDasharray={x === 5 ? "4 3" : "2 4"} opacity={x === 5 ? 0.8 : 1} />
-            <text x={L - 8} y={VY(x) + 4} textAnchor="end" fontSize="10" fill="var(--color-muted)" className="num">{x === 30 ? "30×+" : `${x}×`}</text>
-          </g>
-        ))}
-        {[...vols.entries()].map(([m, { v, n }]) => {
-          if (n == null || n <= 0) return null;
-          const x = v / n;
-          const s = byMinute.get(m);
-          return (
-            <rect key={m} x={X(m) - barW / 2} width={barW} y={VY(x)} height={VY0 + VOL_H - VY(x)}
-              fill={s ? flowColor(s.flow) : "var(--color-muted)"} opacity={s ? 0.9 : 0.35} />
-          );
-        })}
-        <text x={W - R} y={VY0 + 9} textAnchor="end" fontSize="10" fill="var(--color-muted)">futures volume × normal</text>
-
-        {hover != null && (
-          <line x1={X(hover)} x2={X(hover)} y1={T} y2={VY0 + VOL_H} stroke="var(--color-text)" strokeOpacity={0.35} />
-        )}
-      </svg>
-      {tip && (
-        <div className="pointer-events-none absolute top-2 z-10 w-60 rounded border border-line bg-panel px-3 py-2 text-xs shadow-lg"
-          style={{ left: `calc(${tipLeft}% + ${tipLeft > 60 ? "-15.5rem" : "0.75rem"})` }}>
-          <div className="num font-semibold">{hhmm(tip.m)} · {nf(tip.price, 2)}</div>
-          {tip.vol && (
-            <div className="num text-muted">futures {nf(tip.vol.v)}{tip.vol.n ? ` · ${nf(tip.vol.v / tip.vol.n, 1)}× normal` : ""}</div>
-          )}
-          {tip.surge && (
-            <div className="mt-1 space-y-0.5">
-              <div style={{ color: flowColor(tip.surge.flow) }} className="font-semibold">{tip.surge.flow} surge</div>
-              <div>futures OI {signed(tip.surge.futures?.pct, 2)} % {short(tip.surge.futures?.label)}</div>
-              <div>calls {signed(tip.surge.CE?.pct, 1)} % {short(tip.surge.CE?.label)} · puts {signed(tip.surge.PE?.pct, 1)} % {short(tip.surge.PE?.label)}</div>
-              <div className="num">from {tip.surge.from ?? "t+1"}: +5 {signed(tip.surge.move5)} · +15 {signed(tip.surge.move15)} · +30 {signed(tip.surge.move30)}</div>
-              <div className="num text-muted">within 15 min: best {signed(tip.surge.best15)} · worst {signed(tip.surge.worst15)}</div>
-            </div>
-          )}
+    <div>
+      <div className="mb-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+        <div className="flex items-center gap-0.5" role="group" aria-label="Time zoom">
+          <button type="button" className={btn(false)} aria-label="Zoom out" onClick={() => zoomX(1.5)}>−</button>
+          <button type="button" className={btn(false)} aria-label="Zoom in" onClick={() => zoomX(1 / 1.5)}>+</button>
+          {PRESETS.map((p) => (
+            <button key={p.label} type="button" className={btn(p.span == null ? span >= X1 - X0 : Math.abs(span - p.span) < 1)}
+              onClick={() => preset(p.span)} title={p.span ? `the last ${p.label} of data` : "the whole session"}>{p.label}</button>
+          ))}
         </div>
-      )}
+        <button type="button" className={btn(manualY == null)} aria-pressed={manualY == null} onClick={() => setManualY(null)}
+          title="fit the price axis to the visible minutes">price auto</button>
+        <div className="flex items-center gap-0.5" role="group" aria-label="Chart height">
+          <span className="text-muted">height</span>
+          {(Object.keys(SIZES) as Size[]).map((s) => (
+            <button key={s} type="button" className={btn(size === s)} aria-pressed={size === s} onClick={() => setSize(s)}>{s}</button>
+          ))}
+        </div>
+        {zoomed && <button type="button" className="text-accent hover:underline" onClick={reset}>reset</button>}
+        <span className="ml-auto text-muted">pinch or ⌘/ctrl + scroll to zoom · drag to pan · drag the price or time axis to stretch · double-click resets</span>
+      </div>
+      <div className="relative overflow-x-auto rounded border border-line">
+        <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} className="block w-full min-w-[640px] select-none" role="img"
+          style={{ touchAction: "pan-y", cursor: drag.current?.moved ? "grabbing" : "crosshair" }}
+          aria-label={`${data.underlying} index and futures volume by minute with surges`}
+          onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}
+          onPointerLeave={() => { if (!drag.current?.moved) setHover(null); }} onDoubleClick={reset}>
+          <defs>
+            <clipPath id={clipId}><rect x={L} y={T} width={PW} height={PRICE_H + GAP + VOL_H} /></clipPath>
+            <clipPath id={`${clipId}-price`}><rect x={L} y={T} width={PW} height={PRICE_H} /></clipPath>
+          </defs>
+          {/* axis strips: drag them to stretch */}
+          <rect x={0} y={T} width={L} height={PRICE_H} fill="transparent" style={{ cursor: "ns-resize" }} />
+          <rect x={L} y={VY0 + VOL_H} width={PW} height={AXIS} fill="transparent" style={{ cursor: "ew-resize" }} />
+          {grid.map((v) => (
+            <g key={v}>
+              <line x1={L} x2={W - R} y1={Y(v)} y2={Y(v)} stroke="var(--color-line)" />
+              <text x={L - 8} y={Y(v) + 4} textAnchor="end" fontSize="11" fill="var(--color-muted)" className="num">{nf(v, step < 1 ? 1 : 0)}</text>
+            </g>
+          ))}
+          {ticks.map((m) => (
+            <g key={m}>
+              <line x1={X(m)} x2={X(m)} y1={T} y2={VY0 + VOL_H} stroke="var(--color-line)" strokeDasharray="2 4" />
+              <text x={X(m)} y={H - 7} textAnchor="middle" fontSize="11" fill="var(--color-muted)" className="num">{hhmm(m)}</text>
+            </g>
+          ))}
+          <g clipPath={`url(#${clipId})`}>
+            {/* bursts: consecutive surge minutes shaded as one */}
+            {groups.filter((g) => g.surges.length > 1).map((g) => (
+              <rect key={g.start} x={X(minutes(g.start)) - 3} width={X(minutes(g.end)) - X(minutes(g.start)) + 6}
+                y={T} height={PRICE_H + GAP + VOL_H} fill={flowColor(dominant(g))} opacity={0.08} />
+            ))}
+          </g>
+          <g clipPath={`url(#${clipId}-price)`}>
+            {/* tested zones, from their second touch until broken; named only when zoomed in (the tooltip names them always) */}
+            {drawnZones.map((z) => {
+              const x0 = X(minutes(z.from)), x1 = z.until ? X(minutes(z.until)) : W - R;
+              const top = Y(z.hi), h = Math.max(3, Y(z.lo) - Y(z.hi));
+              const c = z.kind === "support" ? LEVEL_COLORS.support : LEVEL_COLORS.resistance;
+              return (
+                <g key={`${z.kind}-${z.from}-${z.lo}`}>
+                  <rect x={x0} width={Math.max(1, x1 - x0)} y={top} height={h} fill={c} opacity={0.14} />
+                  {span <= 120 && <text x={Math.max(x0, L) + 3} y={top - 2} fontSize="9" fill={c} opacity={0.9}>
+                    {z.kind === "support" ? "support" : "resistance"} {z.touches}×</text>}
+                </g>
+              );
+            })}
+            {/* prior-day and today levels, each from the minute it was known */}
+            {drawnLevels.map((l) => (
+              <line key={`${l.name}-${l.price}`} x1={X(minutes(l.from))} x2={W - R} y1={Y(l.price)} y2={Y(l.price)}
+                stroke={l.group === "prior" ? LEVEL_COLORS.prior : LEVEL_COLORS.today} strokeWidth="1" strokeDasharray="5 4" opacity={0.85} />
+            ))}
+            {toggles.lines && levels && (["vwap", "ema20"] as const).map((k) => {
+              const line = levels.lines[k];
+              return line.length > 1 && (
+                <polyline key={k} fill="none" stroke={LEVEL_COLORS[k]} strokeWidth="1.2" opacity={0.85}
+                  points={line.map(([t, v]) => `${X(minutes(t)).toFixed(1)},${Y(v).toFixed(1)}`).join(" ")} />
+              );
+            })}
+            <polyline fill="none" stroke="var(--color-accent)" strokeWidth="1.6"
+              points={pts.map((p) => `${X(minutes(p[0])).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(" ")} />
+            {shown.filter((s) => s.spot != null && minutes(s.t) >= a - 1 && minutes(s.t) <= b + 1).map((s) => {
+              const r = Math.min(6.5, 2.5 + Math.sqrt(s.x) * 0.8);
+              const on = selected === s.t;
+              return s.flow === "mixed" ? (
+                <circle key={s.t} cx={X(minutes(s.t))} cy={Y(s.spot!)} r={on ? r + 2 : r} fill="none"
+                  stroke="var(--color-muted)" strokeWidth={on ? 2.5 : 1.2} opacity={0.8}
+                  className="cursor-pointer" onClick={() => onSelect(on ? null : s.t)} />
+              ) : (
+                <circle key={s.t} cx={X(minutes(s.t))} cy={Y(s.spot!)} r={on ? r + 2 : r} fill={flowColor(s.flow)}
+                  stroke={on ? "var(--color-text)" : "var(--color-panel)"} strokeWidth={on ? 2 : 1}
+                  className="cursor-pointer" onClick={() => onSelect(on ? null : s.t)} />
+              );
+            })}
+          </g>
+
+          {/* price-axis tags in the right gutter, nudged apart: levels, VWAP / EMA20 and the last visible price */}
+          {nudge([
+            ...drawnLevels.map((l) => ({ key: `l-${l.name}`, y: Y(l.price), text: `${tagName(l.name)} ${nf(l.price, 0)}`, full: l.name,
+              color: l.group === "prior" ? LEVEL_COLORS.prior : LEVEL_COLORS.today, fill: false })),
+            ...(toggles.lines ? (["vwap", "ema20"] as const).flatMap((k) => {
+              const v = lineMaps[k].get(minutes(lastShown[0]));
+              return v != null && inY(v) ? [{ key: k, y: Y(v), text: `${k === "vwap" ? "VWAP" : "EMA"} ${nf(v, 0)}`, full: k, color: LEVEL_COLORS[k], fill: false }] : [];
+            }) : []),
+            { key: "last", y: Y(lastShown[1]), text: nf(lastShown[1], 1), full: `${data.underlying} at ${lastShown[0]}`, color: "var(--color-accent)", fill: true },
+          ]).map((t) => (
+            <g key={t.key}>
+              <title>{t.full}</title>
+              {t.fill && <rect x={W - R + 2} y={t.y - 12} width={R - 4} height={14} rx={2} fill={t.color} />}
+              <text x={W - R + 6} y={t.y - 1.5} fontSize="10" fill={t.fill ? "var(--color-panel)" : t.color} className="num">{t.text}</text>
+            </g>
+          ))}
+          {above.length > 0 && (
+            <text x={L + 4} y={T + 10} fontSize="9" fill="var(--color-muted)">
+              ↑ {above.map((l) => `${l.name} ${nf(l.price, 0)}`).join(" · ")}
+            </text>
+          )}
+          {below.length > 0 && (
+            <text x={L + 4} y={T + PRICE_H - 4} fontSize="9" fill="var(--color-muted)">
+              ↓ {below.map((l) => `${l.name} ${nf(l.price, 0)}`).join(" · ")}
+            </text>
+          )}
+          {/* volume pane: futures volume as a multiple of the minute's normal, surge threshold dashed */}
+          <line x1={L} x2={W - R} y1={VY0 + VOL_H} y2={VY0 + VOL_H} stroke="var(--color-line)" />
+          {[5, 15, 30].map((x) => (
+            <g key={x}>
+              <line x1={L} x2={W - R} y1={VY(x)} y2={VY(x)} stroke={x === 5 ? "var(--color-muted)" : "var(--color-line)"}
+                strokeDasharray={x === 5 ? "4 3" : "2 4"} opacity={x === 5 ? 0.7 : 1} />
+              <text x={L - 8} y={VY(x) + 4} textAnchor="end" fontSize="10" fill="var(--color-muted)" className="num">{x === 30 ? "30×+" : `${x}×`}</text>
+            </g>
+          ))}
+          <g clipPath={`url(#${clipId})`}>
+            {[...vols.entries()].map(([m, { v, n }]) => {
+              if (n == null || n <= 0 || m < a - 1 || m > b + 1) return null;
+              const x = v / n;
+              const s = byMinute.get(m);
+              return (
+                <rect key={m} x={X(m) - barW / 2} width={barW} y={VY(x)} height={VY0 + VOL_H - VY(x)}
+                  fill={s ? flowColor(s.flow) : "var(--color-muted)"} opacity={s ? 0.9 : 0.35} />
+              );
+            })}
+          </g>
+          <text x={W - R - 4} y={VY0 + 9} textAnchor="end" fontSize="10" fill="var(--color-muted)">futures volume × normal</text>
+
+          {hover != null && (
+            <line x1={X(hover.m)} x2={X(hover.m)} y1={T} y2={VY0 + VOL_H} stroke="var(--color-text)" strokeOpacity={0.35} pointerEvents="none" />
+          )}
+          {crossY != null && (
+            <g pointerEvents="none">
+              <line x1={L} x2={W - R} y1={crossY} y2={crossY} stroke="var(--color-text)" strokeOpacity={0.25} strokeDasharray="3 3" />
+              <rect x={2} y={crossY - 8} width={L - 6} height={16} rx={2} fill="var(--color-text)" />
+              <text x={L - 8} y={crossY + 4} textAnchor="end" fontSize="10" fill="var(--color-panel)" className="num">
+                {nf(y1 - ((crossY - T) / PRICE_H) * (y1 - y0), 0)}
+              </text>
+            </g>
+          )}
+        </svg>
+        {tip && (
+          <div className="pointer-events-none absolute top-2 z-10 w-72 rounded border border-line bg-panel px-3 py-2 text-xs shadow-lg"
+            style={{ left: `calc(${tipLeft}% + ${tipLeft > 55 ? "-18.5rem" : "0.75rem"})` }}>
+            <div className="num font-semibold">{hhmm(tip.m)} · {nf(tip.price, 2)}</div>
+            {tip.vol && (
+              <div className="num text-muted">futures {nf(tip.vol.v)}{tip.vol.n ? ` · ${nf(tip.vol.v / tip.vol.n, 1)}× normal` : ""}</div>
+            )}
+            {(tip.vwap != null || tip.ema != null) && tip.price != null && (
+              <div className="num text-muted">
+                {tip.vwap != null && <>VWAP {nf(tip.vwap, 0)} ({signed(tip.price - tip.vwap, 0)})</>}
+                {tip.vwap != null && tip.ema != null && " · "}
+                {tip.ema != null && <>EMA20 {nf(tip.ema, 0)} ({signed(tip.price - tip.ema, 0)})</>}
+              </div>
+            )}
+            {tip.price != null && (tip.up || tip.down || tip.inside.length > 0) && (
+              <div className="num text-muted">
+                {tip.inside.length > 0 && <div>in {tip.inside.map((k) => `${k.name} ${nf(k.lo, 0)}–${nf(k.hi, 0)}`).join(", ")}</div>}
+                {tip.up && <div>above: {tip.up.name} {nf(tip.up.lo, 0)} ({signed(tip.up.lo - tip.price, 0)})</div>}
+                {tip.down && <div>below: {tip.down.name} {nf(tip.down.hi, 0)} ({signed(tip.down.hi - tip.price, 0)})</div>}
+              </div>
+            )}
+            {tip.surge && (
+              <div className="mt-1 space-y-0.5 border-t border-line pt-1">
+                <div style={{ color: flowColor(tip.surge.flow) }} className="font-semibold">{tip.surge.flow} surge · {nf(tip.surge.x, 1)}×</div>
+                <div>futures OI {signed(tip.surge.futures?.pct, 2)} % {short(tip.surge.futures?.label)}</div>
+                <div>calls {signed(tip.surge.CE?.pct, 1)} % {short(tip.surge.CE?.label)} · puts {signed(tip.surge.PE?.pct, 1)} % {short(tip.surge.PE?.label)}</div>
+                <div className="num">from {tip.surge.from ?? "t+1"}: +5 {signed(tip.surge.move5)} · +15 {signed(tip.surge.move15)} · +30 {signed(tip.surge.move30)}</div>
+                <div className="num text-muted">within 15 min: best {signed(tip.surge.best15)} · worst {signed(tip.surge.worst15)}</div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
-/** Label positions at least 11 px apart (sorted top to bottom). */
+/** Label positions at least 12 px apart (sorted top to bottom). */
 function nudge<T extends { y: number }>(items: T[]): T[] {
   const sorted = [...items].sort((a, b) => a.y - b.y);
   for (let i = 1; i < sorted.length; i++) {
-    if (sorted[i].y - sorted[i - 1].y < 11) sorted[i] = { ...sorted[i], y: sorted[i - 1].y + 11 };
+    if (sorted[i].y - sorted[i - 1].y < 12) sorted[i] = { ...sorted[i], y: sorted[i - 1].y + 12 };
   }
   return sorted;
 }

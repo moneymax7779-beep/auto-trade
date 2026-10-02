@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { LevelTogglesBar, mergeLevels, useLevels, useLevelToggles, visibleLevels, visibleZones } from "../components/levels";
+import { LEVEL_COLORS, LevelTogglesBar, mergeLevels, useLevels, useLevelToggles, visibleLevels, visibleZones } from "../components/levels";
 import { Link, useParams } from "react-router";
 import { fixed, get, type DecisionRow, type OrderRow, type SessionRow, type TradePositionRow } from "../api";
 import { TimelineChart } from "../components/TimelineChart";
@@ -70,18 +70,18 @@ export function SessionDetailPage() {
     const end = rows[rows.length - 1].t;
     // every level starts at the minute it was knowable (no hindsight lines)
     const flat = mergeLevels(visibleLevels(lv.levels, toggles), lv.tolerancePct).filter((l) => inRange(l.price) && l.from <= end)
-      .map((l) => ({ name: l.name, color: l.group === "prior" ? "--color-warn" : "--color-accent", width: 1 as const, dashed: true,
+      .map((l) => ({ name: l.name, color: l.group === "prior" ? LEVEL_COLORS.prior : LEVEL_COLORS.today, width: 1 as const, dashed: true,
         label: true, points: [{ t: l.from, value: l.price }, { t: end, value: l.price }] }));
     const zones = visibleZones(lv.zones, toggles).filter((z) => inRange(z.lo) && z.from <= end).flatMap((z) => {
-      const color = z.kind === "support" ? "--color-up" : "--color-down";
+      const color = z.kind === "support" ? LEVEL_COLORS.support : LEVEL_COLORS.resistance;
       const until = z.until && z.until < end ? z.until : end;
       const name = `${z.kind === "support" ? "S" : "R"} ${z.touches}×`;
       return [z.lo, z.hi].map((v, i) => ({ name: i === 0 ? name : "", color, width: 1 as const, dashed: true,
         points: [{ t: z.from, value: v }, { t: until, value: v }] }));
     });
     const lines = toggles.lines ? [
-      { name: "VWAP", color: "#f59e0b", width: 1 as const, points: lv.lines.vwap.filter(([t]) => t <= end).map(([t, v]) => ({ t, value: v })) },
-      { name: "EMA20", color: "#a78bfa", width: 1 as const, points: lv.lines.ema20.filter(([t]) => t <= end).map(([t, v]) => ({ t, value: v })) },
+      { name: "VWAP", color: LEVEL_COLORS.vwap, width: 1 as const, points: lv.lines.vwap.filter(([t]) => t <= end).map(([t, v]) => ({ t, value: v })) },
+      { name: "EMA20", color: LEVEL_COLORS.ema20, width: 1 as const, points: lv.lines.ema20.filter(([t]) => t <= end).map(([t, v]) => ({ t, value: v })) },
     ] : [];
     return [main, ...zones, ...flat, ...lines];
   }, [rows, underlying, levels.data, toggles]);
