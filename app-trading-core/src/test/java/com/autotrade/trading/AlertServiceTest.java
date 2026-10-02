@@ -15,7 +15,7 @@ class AlertServiceTest {
     Path dir;
 
     private AlertService service(Path telegramFile) {
-        return new AlertService(new AlertProperties(telegramFile.toString(), ".", 8, 4, true));
+        return new AlertService(new AlertProperties(telegramFile.toString(), ".", 8, 4, true, false, 10, java.util.Map.of(), 10, true));
     }
 
     @Test

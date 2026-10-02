@@ -26,7 +26,7 @@ import com.autotrade.core.time.MarketTime;
 @Component
 class AlertService {
 
-    enum Level { CRITICAL, WARN, INFO, RESOLVED }
+    enum Level { CRITICAL, WARN, INFO, RESOLVED, SIGNAL }
 
     record Alert(String key, Level level, String message, Instant since, Instant lastSent) {
     }
@@ -71,6 +71,11 @@ class AlertService {
         deliver(Level.INFO, message);
     }
 
+    /** A market signal for a manual call (surge alerts): sent once, never kept as an active alert. */
+    synchronized void signal(String message) {
+        deliver(Level.SIGNAL, message);
+    }
+
     synchronized List<Alert> active() {
         return List.copyOf(active.values());
     }
@@ -84,7 +89,7 @@ class AlertService {
     }
 
     private void deliver(Level level, String message) {
-        String text = "auto-trade PAPER · " + level + "\n" + message;
+        String text = level == Level.SIGNAL ? message : "auto-trade PAPER · " + level + "\n" + message;
         switch (level) {
             case CRITICAL -> log.error("ALERT {}", message);
             case WARN -> log.warn("ALERT {}", message);

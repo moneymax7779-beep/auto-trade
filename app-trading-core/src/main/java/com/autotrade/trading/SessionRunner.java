@@ -131,6 +131,18 @@ class SessionRunner implements ApplicationRunner {
                 closeOrphanedLiveSessions();
                 startScheduler();
             }
+            case "surge-preview" -> {
+                // SurgeAlerter prints the day's surge alerts; no session here
+                log.info("surge alert preview (nothing is sent)");
+                Thread.ofPlatform().start(() -> {
+                    try {
+                        Thread.sleep(2000);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                    exit(0);
+                });
+            }
             case "shadow" -> {
                 // the shadow strategies on a captured day, by hand (the scheduler does this after each live session)
                 LocalDate session = LocalDate.parse(first(args, "session", LocalDate.now(MarketTime.IST).toString()));

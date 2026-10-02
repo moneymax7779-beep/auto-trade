@@ -78,6 +78,14 @@ autotrade:
     disk-warn-gb: 8
     disk-critical-gb: 4
     trades: true                         # a message when a trade opens and closes
+    # Surge alerts for manual calls (user, 2026-10-02): futures volume >= surge-min-x × normal with bullish /
+    # bearish OI flow (never mixed), 09:20-15:15, one per index and direction per cooldown unless the flow flips or
+    # the multiple doubles; a follow-up 15 min later. Defaults from the 28 Sep-1 Oct check: about 4 a day.
+    surge-alerts: true
+    surge-min-x: 10
+    surge-min-volume: { NIFTY: 0, SENSEX: 1000 }   # SENSEX futures are thin: ignore surges on tiny volumes
+    surge-cooldown-min: 10
+    surge-follow-up: true
   source:
     url: ${ZT_SOURCE_URL:jdbc:postgresql://127.0.0.1:5490/trading}
     username: ${ZT_SOURCE_USER:zerotrade}

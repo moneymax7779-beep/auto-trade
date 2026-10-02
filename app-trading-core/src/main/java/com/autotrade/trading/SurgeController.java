@@ -90,7 +90,7 @@ class SurgeController {
     }
 
     /** A finished day is computed once; today is recomputed at most every 20 seconds. */
-    private Map<String, Object> cached(LocalDate day, String underlying) {
+    Map<String, Object> cached(LocalDate day, String underlying) {
         String key = day + "|" + underlying;
         boolean today = day.equals(LocalDate.now(MarketTime.IST));
         Cached hit = cache.get(key);

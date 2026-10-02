@@ -9,5 +9,6 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  */
 @ConfigurationProperties("autotrade.alerts")
 public record AlertProperties(String telegramFile, String diskPath, double diskWarnGb, double diskCriticalGb,
-                              boolean trades) {
+                              boolean trades, boolean surgeAlerts, double surgeMinX,
+                              java.util.Map<String, Long> surgeMinVolume, int surgeCooldownMin, boolean surgeFollowUp) {
 }
