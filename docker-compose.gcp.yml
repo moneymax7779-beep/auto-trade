@@ -1,0 +1,16 @@
+# GCP host (zt-autotrade VM) overrides, used with: docker compose -f docker-compose.yml -f docker-compose.gcp.yml ...
+# The Mac setup (docker-compose.yml alone) is unchanged.
+# - zt-tiger-v2 runs on the zt-v2 VM: read it over the private network as the read-only autotrade_reader role
+#   (password from Secret Manager v2-autotrade-reader, written to .local/zt-source.env as V2_DB_PASSWORD=...).
+# - The Upstox token is read from zt-tiger-v2 (token-source zt, the default): autotrade_reader has SELECT on only the
+#   seven trading_accounts columns ZtTigerTokenSource queries (granted 3 Oct 2026 by the operator).
+# - trading-core stays on 127.0.0.1:8095; host nginx (:8081, password gate) is the only way in, via the HTTPS
+#   load balancer.
+services:
+  trading-core:
+    environment:
+      ZT_SOURCE_URL: jdbc:postgresql://10.20.0.10:5490/trading
+      ZT_SOURCE_USER: autotrade_reader
+      ZT_SOURCE_PASSWORD_FILE: /run/zt/runtime.env
+    volumes:
+      - ./.local/zt-source.env:/run/zt/runtime.env:ro
