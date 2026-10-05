@@ -6,7 +6,7 @@ import {
   LEVEL_COLORS, LevelTogglesBar, mergeLevels, tagName, useLevels, useLevelToggles, visibleLevels, visibleZones,
   type LevelToggles, type LevelsData,
 } from "./levels";
-import { useChartView, useLinkedTime, type View } from "./chartView";
+import { presetView, useChartView, useLinkedTime, type View } from "./chartView";
 
 /** One option side's flow around a surge: ATM ± 2 total OI change and the ATM mid before / after. */
 interface SideFlow { oi: number; pct: number; mid0: number; mid1: number; bid: number; ask: number; label: string; score: number }
@@ -94,7 +94,11 @@ const dominant = (b: Burst): Flow =>
  * Futures-volume surges (≥ 5 × the same minute's normal) with futures and ATM ± 2 options OI flow, refreshed
  * while a session runs. Display only: no strategy uses it.
  */
-export function SurgePanel({ live, date, underlying }: { live?: boolean; date?: string; underlying?: string }) {
+/** Stepping between days from the chart: the neighbouring days with data, and how to open one. */
+export interface DayNav { prev?: string; next?: string; go: (day: string) => void }
+const shortDay = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString("en-IN", { day: "numeric", month: "short", timeZone: "UTC" });
+
+export function SurgePanel({ live, date, underlying, nav }: { live?: boolean; date?: string; underlying?: string; nav?: DayNav }) {
   const q = useQuery({
     queryKey: ["surges", date ?? "latest"],
     queryFn: () => get<SurgeReport>(`/api/surges${date ? `?date=${date}` : ""}`),
@@ -112,14 +116,14 @@ export function SurgePanel({ live, date, underlying }: { live?: boolean; date?: 
   return (
     <div className="space-y-4">
       {r.underlyings.filter((u) => !underlying || u.underlying === underlying).map((u) => (
-        <UnderlyingSurgesPanel key={u.underlying} date={r.date!} data={u} live={live} filters={filters} onFilters={update} />
+        <UnderlyingSurgesPanel key={u.underlying} date={r.date!} data={u} live={live} filters={filters} onFilters={update} nav={nav} />
       ))}
     </div>
   );
 }
 
-function UnderlyingSurgesPanel({ date, data, live, filters, onFilters }:
-  { date: string; data: UnderlyingSurges; live?: boolean; filters: Filters; onFilters: (f: Filters) => void }) {
+function UnderlyingSurgesPanel({ date, data, live, filters, onFilters, nav }:
+  { date: string; data: UnderlyingSurges; live?: boolean; filters: Filters; onFilters: (f: Filters) => void; nav?: DayNav }) {
   const shown = useMemo(
     () => data.surges.filter((s) => filters.flows.includes(s.flow) && s.x >= filters.minX),
     [data.surges, filters],
@@ -142,7 +146,7 @@ function UnderlyingSurgesPanel({ date, data, live, filters, onFilters }:
       {data.underlying === "SENSEX" && (
         <p className="mb-2 text-xs text-warn">SENSEX futures trade thinly (hundreds to a few thousand contracts a minute), so its surges rest on small volumes.</p>
       )}
-      <SurgeChart date={date} live={live} data={data} shown={shown} groups={groups} selected={selected} onSelect={setSelected}
+      <SurgeChart date={date} live={live} nav={nav} data={data} shown={shown} groups={groups} selected={selected} onSelect={setSelected}
         levels={levels.data} toggles={toggles} />
       <BurstTable groups={groups} index={data.index} live={live} selected={selected} onSelect={setSelected} />
       <p className="mt-2 text-xs text-muted">
@@ -249,8 +253,8 @@ function loadSize(): Size {
   return "S";
 }
 
-function SurgeChart({ date, live, data, shown, groups, selected, onSelect, levels, toggles }:
-  { date: string; live?: boolean; data: UnderlyingSurges; shown: Surge[]; groups: Burst[]; selected: string | null;
+function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, levels, toggles }:
+  { date: string; live?: boolean; nav?: DayNav; data: UnderlyingSurges; shown: Surge[]; groups: Burst[]; selected: string | null;
     onSelect: (t: string | null) => void; levels?: LevelsData; toggles: LevelToggles }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const clipId = `plot-${useId().replace(/:/g, "")}`;
@@ -484,6 +488,13 @@ function SurgeChart({ date, live, data, shown, groups, selected, onSelect, level
   const tipLeft = hover == null ? 0 : (X(hover.m) / W) * 100;
   const crossY = hover && hover.y >= T && hover.y <= T + PRICE_H ? hover.y : null;
   const zoomed = span < X1 - X0 || manualY != null;
+  // to the previous day's close / the next day's open, keeping the zoom, so the two days read as one strip
+  const stepDay = (dir: "prev" | "next") => {
+    const target = dir === "prev" ? nav?.prev : nav?.next;
+    if (!nav || !target) return;
+    presetView(target, data.underlying, dir === "prev" ? { a: X1 - span, b: X1 } : { a: X0, b: X0 + span });
+    nav.go(target);
+  };
 
   const btn = (on: boolean) => `rounded px-2 py-0.5 ${on ? "bg-panel-2 font-semibold" : "text-muted hover:text-text"}`;
   return (
@@ -522,10 +533,30 @@ function SurgeChart({ date, live, data, shown, groups, selected, onSelect, level
         <button type="button" className={btn(linked)} aria-pressed={linked} onClick={() => setLinked(!linked)}
           title="NIFTY and SENSEX show the same minutes">link time</button>
         {zoomed && <button type="button" className="text-accent hover:underline" onClick={reset}>reset</button>}
+        {nav && (nav.prev || nav.next) && (
+          <div className="flex items-center gap-0.5" role="group" aria-label="Day">
+            <button type="button" className={btn(false)} disabled={!nav.prev} onClick={() => stepDay("prev")}
+              title="the previous day, at the same zoom (its close when zoomed in)">‹ {nav.prev ? shortDay(nav.prev) : ""}</button>
+            <span className="num font-semibold">{shortDay(date)}</span>
+            <button type="button" className={btn(false)} disabled={!nav.next} onClick={() => stepDay("next")}
+              title="the next day, at the same zoom (its open when zoomed in)">{nav.next ? shortDay(nav.next) : ""} ›</button>
+          </div>
+        )}
         <span className="ml-auto hidden text-muted sm:inline">pinch or ⌘/ctrl + scroll to zoom · drag to pan · drag the price or time axis to stretch · double-click resets</span>
         <span className="text-muted sm:hidden">pinch to zoom · drag to pan · double-tap resets</span>
       </div>
       <div ref={boxRef} className="relative overflow-hidden rounded border border-line">
+        {/* panned to the open (close): the previous (next) day is one click away */}
+        {nav?.prev && a <= X0 + 0.5 && (
+          <button type="button" onClick={() => stepDay("prev")}
+            className="absolute left-1 top-1/3 z-10 rounded border border-line bg-panel/90 px-1.5 py-1 text-xs shadow hover:border-accent"
+            title={`${shortDay(nav.prev)}: its close, at this zoom`}>‹ {shortDay(nav.prev)}</button>
+        )}
+        {nav?.next && b >= X1 - 0.5 && (
+          <button type="button" onClick={() => stepDay("next")}
+            className="absolute right-1 top-1/3 z-10 rounded border border-line bg-panel/90 px-1.5 py-1 text-xs shadow hover:border-accent"
+            title={`${shortDay(nav.next)}: its open, at this zoom`}>{shortDay(nav.next)} ›</button>
+        )}
         <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} className="block w-full select-none" role="img"
           style={{ touchAction: "pan-y", cursor: drag.current?.moved ? "grabbing" : "crosshair" }}
           aria-label={`${data.underlying} index and futures volume by minute with surges`}

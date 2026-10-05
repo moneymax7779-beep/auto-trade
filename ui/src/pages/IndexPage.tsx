@@ -5,7 +5,7 @@ import { AlertBanner } from "../components/AlertBanner";
 import { LivePositions } from "../components/LivePositions";
 import { MarketCard } from "../components/MarketCard";
 import { splitDecisionKey, storedScores, StrategyMatrix } from "../components/strategies";
-import { SurgePanel } from "../components/SurgePanel";
+import { SurgePanel, type DayNav } from "../components/SurgePanel";
 import { TradesTable } from "../components/TradesTable";
 import { ErrorNote, Loading, Panel, Pnl } from "../components/ui";
 
@@ -33,6 +33,10 @@ export function IndexPage() {
   const day = showLive ? s.date! : picked ?? days[0];
   const go = (d: string | null) => setParams(d && !(running && d === s.date) ? { date: d } : {});
   const i = day ? days.indexOf(day) : -1;
+  // the chart's own ‹ › steps: every live day, today's running session first
+  const chartDays = running && !days.includes(s.date!) ? [s.date!, ...days] : days;
+  const ci = day ? chartDays.indexOf(day) : -1;
+  const nav: DayNav = { prev: ci >= 0 ? chartDays[ci + 1] : undefined, next: ci > 0 ? chartDays[ci - 1] : undefined, go };
 
   return (
     <div className="space-y-4">
@@ -61,8 +65,8 @@ export function IndexPage() {
         <Link to="/live" className="ml-auto text-xs text-accent hover:underline">← overview</Link>
       </div>
 
-      {showLive ? <LiveDay underlying={underlying} s={s} /> : day
-        ? <PastDay key={day} underlying={underlying} day={day}
+      {showLive ? <LiveDay underlying={underlying} s={s} nav={nav} /> : day
+        ? <PastDay key={day} underlying={underlying} day={day} nav={nav}
             sessionId={liveSessions.filter((r) => r.session_date === day).map((r) => r.id).sort((a, b) => b - a)[0]} />
         : <p className="text-sm text-muted">No live session recorded yet.</p>}
     </div>
@@ -70,7 +74,7 @@ export function IndexPage() {
 }
 
 /** The running session on this index. */
-function LiveDay({ underlying, s }: { underlying: string; s: Status }) {
+function LiveDay({ underlying, s, nav }: { underlying: string; s: Status; nav: DayNav }) {
   const entries = Object.entries(s.strategy ?? {}).map(([key, view]) => ({ ...splitDecisionKey(key), view }))
     .filter((e) => e.underlying === underlying);
   const market = entries[0]?.view;
@@ -84,7 +88,7 @@ function LiveDay({ underlying, s }: { underlying: string; s: Status }) {
         <MarketCard title={underlying} spot={market.spot} time={market.time} state={market.state}
           volatility={market.volatility} cas={market.cas} />
       )}
-      <SurgePanel live date={s.date} underlying={underlying} />
+      <SurgePanel live date={s.date} underlying={underlying} nav={nav} />
       {entries.length > 0 && (
         <Panel title={`Strategies on ${underlying}`}>
           <StrategyMatrix underlyings={[underlying]} positions={open}
@@ -100,7 +104,7 @@ function LiveDay({ underlying, s }: { underlying: string; s: Status }) {
 }
 
 /** An earlier live day on this index, from the database: how it closed, the chart, every strategy's end state, the trades. */
-function PastDay({ underlying, day, sessionId }: { underlying: string; day: string; sessionId?: number }) {
+function PastDay({ underlying, day, sessionId, nav }: { underlying: string; day: string; sessionId?: number; nav: DayNav }) {
   const last = useQuery({
     queryKey: ["last-decisions", sessionId], enabled: sessionId != null,
     queryFn: () => get<LastDecisionRow[]>(`/api/sessions/${sessionId}/last-decisions`),
@@ -119,7 +123,7 @@ function PastDay({ underlying, day, sessionId }: { underlying: string; day: stri
           title={<>{underlying} <span className="ml-1 text-xs font-normal text-muted">{day} at close ·{" "}
             <Link to={`/sessions/${sessionId}`} className="hover:underline">session #{sessionId}</Link></span></>} />
       )}
-      <SurgePanel date={day} underlying={underlying} />
+      <SurgePanel date={day} underlying={underlying} nav={nav} />
       {rows.length > 0 && (
         <Panel title={`How each strategy ended on ${underlying}`}>
           <StrategyMatrix underlyings={[underlying]} cells={rows.map((x) => ({ strategy: x.strategy_id, underlying, time: x.t,

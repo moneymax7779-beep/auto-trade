@@ -30,6 +30,13 @@ export function useChartView(date: string, underlying: string, full: View): [Vie
   return [view, set];
 }
 
+/** Sets the window another day's chart opens with (stepping to the previous day lands on its close, and so on). */
+export function presetView(date: string, underlying: string, view: View) {
+  views.set(linked ? date : `${date}|${underlying}`, view);
+  views.set(`${date}|${underlying}`, view);
+  notify();
+}
+
 export function useLinkedTime(): [boolean, (on: boolean) => void] {
   const on = useSyncExternalStore(subscribe, () => linked);
   const set = (value: boolean) => {
