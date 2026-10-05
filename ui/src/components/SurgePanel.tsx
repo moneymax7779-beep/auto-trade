@@ -60,7 +60,9 @@ function saveFilters(f: Filters) {
 }
 
 /** Consecutive surge minutes (gaps of at most 2 minutes) read as one burst. */
-interface Burst { start: string; end: string; surges: Surge[]; peak: number; volume: number; flows: Record<Flow, number> }
+/** A change of direction inside a burst: one directional minute's flow, then the next directional minute's opposite. */
+interface Flip { from: Flow; to: Flow; fromT: string; toT: string }
+interface Burst { start: string; end: string; surges: Surge[]; peak: number; volume: number; flows: Record<Flow, number>; flips: Flip[] }
 function bursts(surges: Surge[]): Burst[] {
   const out: Burst[] = [];
   for (const s of [...surges].sort((a, b) => minutes(a.t) - minutes(b.t))) {
@@ -68,8 +70,18 @@ function bursts(surges: Surge[]): Burst[] {
     if (last && minutes(s.t) - minutes(last.end) <= 2) {
       last.end = s.t; last.surges.push(s); last.peak = Math.max(last.peak, s.x); last.volume += s.vol; last.flows[s.flow]++;
     } else {
-      out.push({ start: s.t, end: s.t, surges: [s], peak: s.x, volume: s.vol,
+      out.push({ start: s.t, end: s.t, surges: [s], peak: s.x, volume: s.vol, flips: [],
         flows: { bullish: s.flow === "bullish" ? 1 : 0, bearish: s.flow === "bearish" ? 1 : 0, mixed: s.flow === "mixed" ? 1 : 0 } });
+    }
+  }
+  // consecutive minutes read with overlapping t-1 -> t+1 windows: a bearish minute then a bullish one is the turn
+  // between them (e.g. put sellers covering into the low, then put holders selling out of it), not a contradiction
+  for (const b of out) {
+    let previous: Surge | undefined;
+    for (const s of b.surges) {
+      if (s.flow === "mixed") continue;
+      if (previous && previous.flow !== s.flow) b.flips.push({ from: previous.flow, to: s.flow, fromT: previous.t, toT: s.t });
+      previous = s;
     }
   }
   return out;
@@ -340,7 +352,10 @@ function SurgeChart({ date, live, data, shown, groups, selected, onSelect, level
     return () => observer.disconnect();
   }, [hasChart]);
 
-  if (!hasChart) return <p className="text-sm text-muted">No index data yet.</p>;
+  if (!hasChart) {
+    return <p className="text-sm text-muted">{live ? "No index data yet."
+      : `No index data for ${date}: neither auto-trade's own capture (from 28 Sep 2026) nor zt-tiger-v2 has this day's ticks.`}</p>;
+  }
 
   const { price: PRICE_H, prem: PREM_SIZE, vol: VOL_H } = SIZES[size];
   const PREM_H = showPremium ? PREM_SIZE : 0;
@@ -461,7 +476,8 @@ function SurgeChart({ date, live, data, shown, groups, selected, onSelect, level
     const inside = price == null ? [] : known.filter((k) => price >= k.lo - 0.01 && price <= k.hi + 0.01 && k.hi > k.lo);
     const up = price == null ? undefined : known.filter((k) => k.lo > price).sort((p, q) => p.lo - q.lo)[0];
     const down = price == null ? undefined : known.filter((k) => k.hi < price).sort((p, q) => q.hi - p.hi)[0];
-    return { m: hover.m, price, vol: vols.get(hover.m), surge: byMinute.get(hover.m), inside, up, down,
+    const burst = groups.find((g) => minutes(g.start) <= hover.m && hover.m <= minutes(g.end) && g.flips.length > 0);
+    return { m: hover.m, price, vol: vols.get(hover.m), surge: byMinute.get(hover.m), inside, up, down, flips: burst?.flips ?? [],
       vwap: lineMaps.vwap.get(hover.m), ema: lineMaps.ema20.get(hover.m),
       ce: prem ? premAt("CE", hover.m) : null, pe: prem ? premAt("PE", hover.m) : null };
   })();
@@ -538,7 +554,7 @@ function SurgeChart({ date, live, data, shown, groups, selected, onSelect, level
             {/* bursts: consecutive surge minutes shaded as one */}
             {groups.filter((g) => g.surges.length > 1).map((g) => (
               <rect key={g.start} x={X(minutes(g.start)) - 3} width={X(minutes(g.end)) - X(minutes(g.start)) + 6}
-                y={T} height={VY0 + VOL_H - T} fill={flowColor(dominant(g))} opacity={0.08} />
+                y={T} height={VY0 + VOL_H - T} fill={g.flips.length ? "var(--color-muted)" : flowColor(dominant(g))} opacity={0.08} />
             ))}
           </g>
           <g clipPath={`url(#${clipId}-price)`}>
@@ -640,6 +656,15 @@ function SurgeChart({ date, live, data, shown, groups, selected, onSelect, level
               )}
             </g>
           )}
+          {/* bursts whose flow changed direction: named above the volume pane */}
+          <g clipPath={`url(#${clipId})`}>
+            {groups.filter((g) => g.flips.length > 0).map((g) => (
+              <text key={`flip-${g.start}`} x={X(minutes(g.start)) - 3} y={VY0 - 3} fontSize={narrow ? 9 : 10}
+                fill="var(--color-text)" stroke="var(--color-panel)" strokeWidth="3" style={{ paintOrder: "stroke" }}>
+                ⇄ flow flipped {g.flips.map((f) => `${f.from === "bullish" ? "▲" : "▼"}→${f.to === "bullish" ? "▲" : "▼"}`).join(" ")}
+              </text>
+            ))}
+          </g>
           {/* volume pane: futures volume as a multiple of the minute's normal, surge threshold dashed */}
           <line x1={L} x2={W - R} y1={VY0 + VOL_H} y2={VY0 + VOL_H} stroke="var(--color-line)" />
           {[5, 15, 30].map((x) => (
@@ -708,6 +733,15 @@ function SurgeChart({ date, live, data, shown, groups, selected, onSelect, level
                 <div className="num text-muted">within 15 min: best {signed(tip.surge.best15)} · worst {signed(tip.surge.worst15)}</div>
               </div>
             )}
+            {tip.flips.length > 0 && (
+              <div className="mt-1 border-t border-line pt-1">
+                {tip.flips.map((f) => (
+                  <div key={f.toT}>⇄ flow flipped: <span style={{ color: flowColor(f.from) }}>{f.from} {f.fromT}</span> →{" "}
+                    <span style={{ color: flowColor(f.to) }}>{f.to} {f.toT}</span></div>
+                ))}
+                <div className="text-muted">windows t−1 → t+1 overlap: the turn falls between the two minutes</div>
+              </div>
+            )}
           </div>
         )}
       </div>
@@ -745,6 +779,18 @@ function Moves({ s, cell }: { s: Surge; cell: string }) {
         <span className={tone(s.worst15)}>{signed(s.worst15)}</span>
       </td>
     </>
+  );
+}
+
+/** A burst whose flow changed direction (bearish then bullish, or the reverse). */
+function FlipChip({ flips }: { flips: Flip[] }) {
+  const title = flips.map((f) => `${f.from} ${f.fromT} → ${f.to} ${f.toT}`).join("; ");
+  return (
+    <span title={title} className="inline-flex items-center gap-1 rounded-full border border-line px-2 py-0.5 text-[11px] font-sans">
+      ⇄ <span style={{ color: flowColor(flips[0].from) }}>{flips[0].from === "bullish" ? "bull" : "bear"}</span>→
+      <span style={{ color: flowColor(flips[flips.length - 1].to) }}>{flips[flips.length - 1].to === "bullish" ? "bull" : "bear"}</span>
+      {flips.length > 1 && <span className="text-muted">×{flips.length}</span>}
+    </span>
   );
 }
 
@@ -801,7 +847,7 @@ function BurstTable({ groups, index, live, selected, onSelect }:
                       <span style={{ color: flowColor("bullish") }}>{g.flows.bullish} bullish</span> ·{" "}
                       <span style={{ color: flowColor("bearish") }}>{g.flows.bearish} bearish</span> · {g.flows.mixed} mixed
                     </td>
-                    <td className={cell}><FlowChip flow={dominant(g)} /></td>
+                    <td className={cell}>{g.flips.length > 0 ? <FlipChip flips={g.flips} /> : <FlowChip flow={dominant(g)} />}</td>
                     <Moves s={last} cell={cell} />
                   </tr>
                 )}

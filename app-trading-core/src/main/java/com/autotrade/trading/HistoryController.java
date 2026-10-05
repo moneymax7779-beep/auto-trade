@@ -47,7 +47,9 @@ class HistoryController {
     List<Map<String, Object>> sessions() {
         return query("select id, account, mode, session_date::text, feed, strategy_id, left(strategy_hash, 19) strategy_hash, "
                 + "code_version, " + ist("started_at") + ", " + ist("ended_at") + ", status, summary::text summary, error "
-                + "from trade.session order by id desc limit 200");
+                // every live session (the charts' day list) plus the newest 200 of any kind (replays pile up)
+                + "from trade.session where mode = 'PAPER_LIVE' or id > (select coalesce(max(id), 0) - 200 from trade.session) "
+                + "order by id desc");
     }
 
     /** One underlying's decisions; {@code strategy} selects one strategy when several traded (default: all). */
