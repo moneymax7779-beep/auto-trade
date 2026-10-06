@@ -8,3 +8,4 @@ com.autotrade.strategy.egb.SetupProviders$BreakRetestProvider
 com.autotrade.strategy.egb.SetupProviders$FailedBreakoutProvider
 com.autotrade.strategy.egb.SetupProviders$RangeFadeProvider
 com.autotrade.strategy.egb.SetupProviders$AuctionPressureProvider
+com.autotrade.strategy.egb.ExpirySwingRiderProvider

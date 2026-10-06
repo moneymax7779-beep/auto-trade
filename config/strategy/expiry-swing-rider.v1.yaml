@@ -1,0 +1,27 @@
+# Expiry swing rider, v1 (user 2026-10-07: "try all the best combinations, and derive the new strategies"; ledger
+# A-050). From the combination search on Upstox bars (docs/studies/2026-10-07-signal-audit-and-two-candidates.md):
+# on the index that expires today, always hold the ATM option in the direction of the last 0.25 % swing reversal of
+# one-minute closes; on the opposite reversal exit and take the other side; flat at 15:15. No filters (every filter
+# made expiry days worse). Bars: train PF 1.74, test PF 2.32, held-out (22-25 Sep, read once) PF 1.73, 28 trades in all.
+version: esr-v1
+strategy: expiry-swing-rider
+status: UNCALIBRATED
+source: "user-request-2026-10-07 (A-050; values fixed at registration, not tuned)"
+
+scope:
+  dte: 0                               # only the index that expires today
+  entry_from: "09:16"
+  last_new_entry: "15:10"
+  flat_by: "15:15"
+
+swing:
+  reversal_pct: 0.25                   # a one-minute close 0.25 % beyond the current swing's extreme reverses it
+
+position:
+  premium_budget: 500000               # one entry at a time, the whole budget (risk v9 scales it with equity)
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+  entry_grace_minutes: 2               # an entry not sent within 2 minutes of its reversal is dropped
+
+exits:
+  premium_stop_pct: 50                 # emergency only; the reversal exit comes first
