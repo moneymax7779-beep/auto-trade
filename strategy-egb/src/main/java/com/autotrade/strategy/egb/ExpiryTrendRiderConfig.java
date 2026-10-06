@@ -25,7 +25,11 @@ record ExpiryTrendRiderConfig(
         int strikeOffset,
         double premiumStopPct,
         /** v2: adds never raise the loss at the stop above what the entry risked (absent = false). */
-        boolean pyramidRiskCap) {
+        boolean pyramidRiskCap,
+        /** v4: exit when no new extreme in the trade's direction for this many minutes (0 / absent = off). */
+        int noNewExtremeMin,
+        /** v5: after a time-stop exit, no new entry for the rest of that index's day (absent = false). */
+        boolean noReentryAfterTimeStop) {
 
     static ExpiryTrendRiderConfig from(ThresholdConfig c) {
         return new ExpiryTrendRiderConfig(c.contentHash(), c.version(), c.getInt("scope.dte"),
@@ -37,7 +41,9 @@ record ExpiryTrendRiderConfig(
                 c.getDouble("position.premium_budget"), c.getInt("position.intended_lots"),
                 c.getInt("position.max_adds"), c.getInt("position.strike_offset"),
                 c.getDouble("exits.premium_stop_pct"),
-                c.has("exits.pyramid_risk_cap") && c.getBoolean("exits.pyramid_risk_cap"));
+                c.has("exits.pyramid_risk_cap") && c.getBoolean("exits.pyramid_risk_cap"),
+                c.has("exits.no_new_extreme_min") ? c.getInt("exits.no_new_extreme_min") : 0,
+                c.has("exits.no_reentry_after_time_stop") && c.getBoolean("exits.no_reentry_after_time_stop"));
     }
 
     @SuppressWarnings("unchecked")

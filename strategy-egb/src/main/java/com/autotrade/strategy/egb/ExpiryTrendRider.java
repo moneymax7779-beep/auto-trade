@@ -37,6 +37,8 @@ final class ExpiryTrendRider implements Strategy {
     private double previousHigh = Double.NaN;
     private int adds;
     private boolean exitSent;
+    private Instant lastExtremeAt;          // v4: the later of the entry and the last new extreme in the trade's direction
+    private boolean timeStopped;            // v5: a time-stop exit happened today: no new entry
 
     ExpiryTrendRider(ExpiryTrendRiderConfig config) {
         this.config = config;
@@ -76,11 +78,18 @@ final class ExpiryTrendRider implements Strategy {
         List<OrderIntent> orders = new ArrayList<>();
         if (position.open()) {
             OptionSide side = position.side();
+            if (lastExtremeAt == null || (side == OptionSide.PE ? newLow : newHigh)) {
+                lastExtremeAt = now;
+            }
             String exit = null;
             if (!time.isBefore(config.flatBy())) {
                 exit = "FLAT_BY";
             } else if (side == OptionSide.PE ? st.lastBarClose() > st.lastSwingHigh() : st.lastBarClose() < st.lastSwingLow()) {
                 exit = side == OptionSide.PE ? "SWING_HIGH_RECLAIMED" : "SWING_LOW_LOST";     // NaN compares false
+            } else if (config.noNewExtremeMin() > 0
+                    && java.time.Duration.between(lastExtremeAt, now).toMinutes() >= config.noNewExtremeMin()) {
+                exit = "NO_NEW_EXTREME_" + config.noNewExtremeMin();     // v4: a stalled trend bleeds premium
+                timeStopped = config.noReentryAfterTimeStop();
             }
             if (exit != null && !exitSent) {
                 orders.add(OrderIntent.exit(side, Stage.RUNNER, exit));
@@ -95,10 +104,11 @@ final class ExpiryTrendRider implements Strategy {
             exitSent = false;
             adds = 0;
             for (OptionSide side : List.of(OptionSide.PE, OptionSide.CE)) {
-                if (conditions.get(side).get("trigger")) {
+                if (conditions.get(side).get("trigger") && !timeStopped) {
                     orders.add(new OrderIntent(OrderIntent.Action.ENTER, side, 1, Stage.CONFIRMED,
                             side == OptionSide.PE ? "NEW_DAY_LOW" : "NEW_DAY_HIGH", config.premiumStopPct(),
                             config.strikeOffset()));
+                    lastExtremeAt = now;                 // the entry is on a new extreme: the time stop counts from here
                     break;
                 }
             }

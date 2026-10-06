@@ -1,0 +1,35 @@
+# Expiry trend rider, v1 (user's request 2026-10-01: "build it, test on archive and run shadow"). Rules registered
+# before any code or result in docs/studies/2026-10-01-expiry-trend-rider.md (ledger A-029). Designed from the
+# 1 Oct SENSEX expiry fall, so 1 Oct is not evidence. On the day the index expires, ride new day lows (highs)
+# beyond the opening range while breadth, futures OI and ATM IV agree; add on each new extreme; exit on a
+# 3-minute close back beyond the last swing. No limit on trades.
+# v4 (2026-10-06, user's request "test the time stop"; ledger A-042, a test, not live): identical to v1 except
+# exits.no_new_extreme_min. On 6 Oct v1 held NIFTY 22700 CE through 1 h 48 min of a flat index and lost 37 %; v4 exits
+# when the index has made no new extreme in the trade's direction for 30 minutes. Built on v1 (live), not v2 / v3.
+version: etr-v4
+strategy: expiry-trend-rider
+status: UNCALIBRATED
+source: "user-request-2026-10-01 (A-029; values fixed at registration, not tuned)"
+
+scope:
+  dte: 0                               # only the index that expires today
+  entry_from: "11:00"                  # new entries and adds from …
+  last_new_entry: "14:30"              # … until (exclusive)
+  flat_by: "15:15"                     # whole position closed
+
+trend:
+  breadth_min: 50                      # weighted mover breadth <= -50 for puts, >= +50 for calls
+  reject_futures_states:               # futures OI must not oppose the move
+    PE: [FRESH_LONG, SHORT_COVERING]
+    CE: [FRESH_SHORT, LONG_UNWIND]
+  iv_change_3m_min: 0                  # ATM IV rising over 3 minutes (> 0)
+
+position:
+  premium_budget: 500000               # the full plan (entry + adds) at the entry ask
+  intended_lots: 4                     # 1 plan lot per entry or add (about ₹1,25,000 each)
+  max_adds: 3
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 40                 # resting emergency stop; the swing exit comes first
+  no_new_extreme_min: 30               # v4: exit after 30 minutes without a new extreme in the trade's direction

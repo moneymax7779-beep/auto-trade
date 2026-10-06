@@ -96,4 +96,39 @@ class ExpiryTrendRiderTest {
         assertThat(v2.premiumBudget()).isEqualTo(FACTORY.premiumBudget());
         assertThat(v2.version()).isEqualTo("etr-v2");
     }
+
+    @Test
+    void v4ExitsAfterThirtyMinutesWithoutANewExtremeAndANewLowRestartsTheClock() {
+        Strategy v4 = Strategies.load(Path.of("..", "config", "strategy", "expiry-trend-rider.v4.yaml")).create("SENSEX", Snapshots.SESSION);
+        v4.decide(falling(72110, 72100).at("12:40"), PositionView.FLAT);
+        assertThat(v4.decide(falling(72060, 72050).at("12:41"), PositionView.FLAT).orders()).hasSize(1);   // entry on a new low
+        assertThat(v4.decide(falling(72070, 72050).at("13:10"), holdingPuts()).orders()).as("29 minutes").isEmpty();
+        assertThat(v4.decide(falling(72040, 72030).at("13:11"), holdingPuts()).orders())
+                .as("a new low at 13:11 restarts the clock (and adds)").allMatch(o -> o.action() == OrderIntent.Action.ADD);
+        assertThat(v4.decide(falling(72045, 72030).at("13:40"), holdingPuts()).orders()).isEmpty();
+        assertThat(v4.decide(falling(72045, 72030).at("13:41"), holdingPuts()).orders()).singleElement()
+                .satisfies(o -> assertThat(o.reason()).isEqualTo("NO_NEW_EXTREME_30"));
+
+        Strategy v1 = FACTORY.create("SENSEX", Snapshots.SESSION);
+        v1.decide(falling(72110, 72100).at("12:40"), PositionView.FLAT);
+        v1.decide(falling(72060, 72050).at("12:41"), PositionView.FLAT);
+        assertThat(v1.decide(falling(72070, 72050).at("13:41"), holdingPuts()).orders()).as("v1 has no time stop").isEmpty();
+    }
+
+    @Test
+    void v5MakesNoNewEntryAfterATimeStopExit() {
+        Strategy v5 = Strategies.load(Path.of("..", "config", "strategy", "expiry-trend-rider.v5.yaml")).create("SENSEX", Snapshots.SESSION);
+        v5.decide(falling(72110, 72100).at("12:40"), PositionView.FLAT);
+        assertThat(v5.decide(falling(72060, 72050).at("12:41"), PositionView.FLAT).orders()).hasSize(1);
+        assertThat(v5.decide(falling(72060, 72050).at("13:11"), holdingPuts()).orders()).singleElement()
+                .satisfies(o -> assertThat(o.reason()).isEqualTo("NO_NEW_EXTREME_30"));
+        assertThat(v5.decide(falling(71990, 71980).at("13:24"), PositionView.FLAT).orders())
+                .as("a new low after the time stop: no re-entry").isEmpty();
+
+        Strategy v4 = Strategies.load(Path.of("..", "config", "strategy", "expiry-trend-rider.v4.yaml")).create("SENSEX", Snapshots.SESSION);
+        v4.decide(falling(72110, 72100).at("12:40"), PositionView.FLAT);
+        v4.decide(falling(72060, 72050).at("12:41"), PositionView.FLAT);
+        v4.decide(falling(72060, 72050).at("13:11"), holdingPuts());
+        assertThat(v4.decide(falling(71990, 71980).at("13:24"), PositionView.FLAT).orders()).as("v4 re-enters").hasSize(1);
+    }
 }

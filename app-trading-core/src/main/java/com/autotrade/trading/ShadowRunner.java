@@ -50,13 +50,24 @@ final class ShadowRunner {
         this.target = target;
     }
 
-    /** Runs the shadow strategies on {@code session}; returns the summary text, or null when there is nothing to run. */
+    /**
+     * Runs the shadow strategies on {@code session}, each in its own session on the shadow account (so two versions of
+     * one strategy can be compared, and none takes another's capital); returns the summaries, or null when none.
+     */
     String run(LocalDate session) throws Exception {
-        TradingProperties.Trading t = properties.trading();
-        List<String> files = t.shadowStrategyFiles();
+        List<String> files = properties.trading().shadowStrategyFiles();
         if (files == null || files.isEmpty()) {
             return null;
         }
+        List<String> summaries = new ArrayList<>();
+        for (String file : files) {
+            summaries.add(runOne(session, List.of(file)));
+        }
+        return String.join("\n\n", summaries);
+    }
+
+    private String runOne(LocalDate session, List<String> files) throws Exception {
+        TradingProperties.Trading t = properties.trading();
         List<ThresholdConfig> strategyFiles = files.stream().map(file -> ThresholdConfig.load(Path.of(file))).toList();
         ThresholdConfig featuresFile = ThresholdConfig.load(Path.of(t.featuresFile()));
         ThresholdConfig exchangeFile = ThresholdConfig.load(Path.of(t.exchangeFile()));
