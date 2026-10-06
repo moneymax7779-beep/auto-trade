@@ -57,42 +57,139 @@ final class SurgeAlertRules {
         return true;
     }
 
+    /**
+     * The trade a surge suggests: buy the ATM call (bullish) or put (bearish); the stop and the target are the nearest
+     * known levels (lines, tested zones, VWAP) at least {@link #MIN_GAP} of the index away on either side, else the
+     * day's extreme. Distances are from the index at the surge minute.
+     */
+    record Plan(boolean call, double spot, double strike, String expiry, boolean expiresToday, double premium, double bid,
+                double stop, String stopName, double target, String targetName) {
+
+        double risk() {
+            return Math.abs(stop - spot);
+        }
+
+        double reward() {
+            return Math.abs(target - spot);
+        }
+    }
+
+    /** A stop or target closer than this share of the index is noise, not a level (about 11 NIFTY / 36 SENSEX points). */
+    static final double MIN_GAP = 0.0005;
+    /** Contract size per lot (NSE NIFTY 65, BSE SENSEX 20 since Sep 2026); unknown underlyings show no lot cost. */
+    static final Map<String, Integer> LOT = Map.of("NIFTY", 65, "SENSEX", 20, "BANKNIFTY", 30);
+
     @SuppressWarnings("unchecked")
-    static String message(String underlying, Map<String, Object> s, Levels levels, String hitRate) {
-        String flow = (String) s.get("flow");
-        boolean bull = "bullish".equals(flow);
+    static Plan plan(Map<String, Object> s, Levels levels, String expiry, java.time.LocalDate today) {
+        boolean call = "bullish".equals(s.get("flow"));
+        double spot = num(s.get("spot"));
+        Map<String, Object> side = (Map<String, Object>) s.get(call ? "CE" : "PE");
+        List<Mark> marks = new java.util.ArrayList<>(levels == null || levels.marks() == null ? List.of() : levels.marks());
+        if (levels != null && levels.vwap() != null) {
+            marks.add(new Mark("VWAP", levels.vwap(), levels.vwap()));
+        }
+        double gap = MIN_GAP * spot;
+        // a stop sits just beyond the nearest level on the wrong side (a zone's far edge: the market must break through
+        // it); a target is the near edge of the nearest level ahead (where the move first meets it). Puts mirrored.
+        Mark stopMark = call
+                ? marks.stream().filter(m -> m.hi() < spot && spot - m.lo() >= gap).max(java.util.Comparator.comparingDouble(Mark::lo)).orElse(null)
+                : marks.stream().filter(m -> m.lo() > spot && m.hi() - spot >= gap).min(java.util.Comparator.comparingDouble(Mark::hi)).orElse(null);
+        Mark targetMark = call
+                ? marks.stream().filter(m -> m.lo() - spot >= gap).min(java.util.Comparator.comparingDouble(Mark::lo)).orElse(null)
+                : marks.stream().filter(m -> spot - m.hi() >= gap).max(java.util.Comparator.comparingDouble(Mark::hi)).orElse(null);
+        Double dayLow = levels == null ? null : levels.dayLow(), dayHigh = levels == null ? null : levels.dayHigh();
+        Double wrongExtreme = call ? dayLow : dayHigh, rightExtreme = call ? dayHigh : dayLow;
+        double stop = stopMark != null ? (call ? stopMark.lo() : stopMark.hi())
+                : wrongExtreme != null && Math.abs(spot - wrongExtreme) >= gap ? wrongExtreme : Double.NaN;
+        String stopName = stopMark != null ? stopMark.name() : Double.isFinite(stop) ? (call ? "day low" : "day high") : null;
+        double target = targetMark != null ? (call ? targetMark.lo() : targetMark.hi())
+                : rightExtreme != null && Math.abs(rightExtreme - spot) >= gap ? rightExtreme : Double.NaN;
+        String targetName = targetMark != null ? targetMark.name() : Double.isFinite(target) ? (call ? "day high" : "day low") : null;
+        return new Plan(call, spot, num(s.get("atm")), expiry, expiry != null && expiry.equals(today.toString()),
+                side == null ? Double.NaN : num(side.get("ask")), side == null ? Double.NaN : num(side.get("bid")),
+                stop, stopName, target, targetName);
+    }
+
+    @SuppressWarnings("unchecked")
+    static String message(String underlying, Map<String, Object> s, Levels levels, String hitRate, Plan p) {
         Map<String, Object> fut = (Map<String, Object>) s.get("futures");
         Map<String, Object> ce = (Map<String, Object>) s.get("CE");
         Map<String, Object> pe = (Map<String, Object>) s.get("PE");
+        String kind = p.call() ? "CALL" : "PUT";
         StringBuilder m = new StringBuilder();
-        m.append(bull ? "🟢 " : "🔴 ").append(underlying).append(' ').append(flow.toUpperCase(Locale.ROOT))
-                .append(" surge · ").append(s.get("t")).append(" (flow known ").append(s.getOrDefault("from", "t+1")).append(")\n");
-        m.append("Futures ").append(fmt(num(s.get("vol")), 0)).append(" = ").append(fmt(num(s.get("x")), 1)).append("× normal");
-        if (fut != null) {
-            m.append(" · OI ").append(signed(num(fut.get("pct")), 2)).append("% ").append(fut.get("label"))
-                    .append(" · px ").append(signed(num(fut.get("px")), 1));
+        m.append(p.call() ? "🟢 BUY " : "🔴 BUY ").append(kind).append(" · ").append(underlying).append(' ')
+                .append(fmt(p.strike(), 0)).append(p.call() ? " CE" : " PE");
+        if (p.expiry() != null) {
+            m.append(" · exp ").append(shortDate(p.expiry()));
         }
         m.append('\n');
-        m.append("Calls ±2 ").append(side(ce)).append(" · Puts ±2 ").append(side(pe)).append('\n');
-        double spot = num(s.get("spot"));
-        m.append("Index ").append(fmt(spot, 2)).append(distances(spot, levels)).append('\n');
-        if (s.get("atm") != null) {
-            m.append("ATM ").append(fmt(num(s.get("atm")), 0)).append(": CE ").append(quote(ce)).append(" · PE ").append(quote(pe)).append('\n');
+        if (Double.isFinite(p.premium())) {
+            m.append("Pay ≈ ₹").append(fmt(p.premium(), 2)).append(" (ask; bid ").append(fmt(p.bid(), 2)).append(")");
+            Integer lot = LOT.get(underlying);
+            if (lot != null) {
+                m.append(" · 1 lot (").append(lot).append(") ≈ ₹").append(fmt(p.premium() * lot, 0));
+            }
+            m.append('\n');
         }
+        m.append("Index ").append(fmt(p.spot(), 2)).append(" at ").append(s.get("t")).append(" · flow known ")
+                .append(s.getOrDefault("from", "t+1")).append('\n');
+        String against = p.call() ? "falls below " : "rises above ";
+        if (Double.isFinite(p.stop())) {
+            m.append("Stop: exit if index ").append(against).append(fmt(p.stop(), 0)).append(" (").append(p.stopName())
+                    .append(") · ").append(signed(p.stop() - p.spot(), 0)).append(" pts\n");
+        } else {
+            m.append("Stop: no known level on the wrong side; set one before entering\n");
+        }
+        if (Double.isFinite(p.target())) {
+            m.append("Target: ").append(fmt(p.target(), 0)).append(" (").append(p.targetName()).append(") · ")
+                    .append(signed(p.target() - p.spot(), 0)).append(" pts");
+            if (Double.isFinite(p.stop()) && p.risk() > 0) {
+                m.append(" · reward:risk ").append(fmt(p.reward() / p.risk(), 1));
+            }
+            m.append('\n');
+        } else {
+            m.append("Target: no known level ahead; trail the index\n");
+        }
+        if (Double.isFinite(p.stop()) && Double.isFinite(p.target()) && p.reward() < p.risk()) {
+            m.append("⚠ Reward smaller than risk: skip, or wait for a better price nearer the stop\n");
+        }
+        if (p.expiresToday()) {
+            m.append("⚠ Expires today: the premium decays fast; take profit quickly or skip\n");
+        }
+        m.append("Why: futures ").append(fmt(num(s.get("x")), 1)).append("× normal volume");
+        if (fut != null) {
+            m.append(" · fut OI ").append(signed(num(fut.get("pct")), 2)).append("% ").append(fut.get("label"));
+        }
+        m.append(" · calls ").append(side(ce)).append(" · puts ").append(side(pe)).append('\n');
+        String more = distances(p.spot(), levels);
+        if (!more.isEmpty()) {
+            m.append("Levels:").append(more.replace("\n", " | ").replaceFirst("^ \\| ", " ")).append('\n');
+        }
+        m.append("Reliability: surge flow right ~50% at 15 min (18 sessions, no edge alone)");
         if (hitRate != null) {
-            m.append(hitRate).append('\n');
+            m.append(" · ").append(hitRate.replace("Today so far: ", "today ").replace(" flow right ", " "));
         }
-        m.append("Context only, not a trade signal (no edge over 18 sessions). Follow-up in 15 min.");
+        m.append(" · PAPER, your call. Follow-up in 15 min.");
         return m.toString();
     }
 
-    static String followUp(String underlying, Map<String, Object> s) {
-        boolean bull = "bullish".equals(s.get("flow"));
-        Double m15 = nullable(s.get("move15"));
-        String verdict = m15 == null ? "" : (m15 > 0) == bull ? " → WITH the flow" : m15 == 0 ? " → flat" : " → AGAINST the flow";
-        return "↳ " + underlying + " " + s.get("t") + " " + s.get("flow") + " surge, from " + s.getOrDefault("from", "t+1")
+    /** The surge's outcome 15 minutes on, read against its plan. */
+    static String followUp(String underlying, Map<String, Object> s, Plan p) {
+        String head = "↳ " + (p == null ? s.get("flow") + " surge" : "BUY " + (p.call() ? "CALL " : "PUT ") + underlying + " "
+                + fmt(p.strike(), 0) + (p.call() ? " CE" : " PE")) + " (" + s.get("t") + "), index from " + s.getOrDefault("from", "t+1")
                 + ": +5m " + signedOrDash(s.get("move5")) + " · +15m " + signedOrDash(s.get("move15"))
-                + " · 15m range " + signedOrDash(s.get("best15")) + " / " + signedOrDash(s.get("worst15")) + verdict;
+                + " · 15m best " + signedOrDash(s.get("best15")) + " / worst " + signedOrDash(s.get("worst15"));
+        Double best = nullable(s.get("best15")), worst = nullable(s.get("worst15")), m15 = nullable(s.get("move15"));
+        if (p == null || best == null || worst == null) {
+            boolean bull = "bullish".equals(s.get("flow"));
+            return head + (m15 == null ? "" : (m15 > 0) == bull ? " → WITH the flow" : m15 == 0 ? " → flat" : " → AGAINST the flow");
+        }
+        double favourable = p.call() ? best : -worst, adverse = p.call() ? -worst : best;
+        boolean target = Double.isFinite(p.target()) && favourable >= p.reward();
+        boolean stop = Double.isFinite(p.stop()) && adverse >= p.risk();
+        String verdict = target && stop ? " → target and stop both touched (order unknown)" : target ? " → ✅ target reached"
+                : stop ? " → ❌ stop hit" : m15 == null ? "" : " → neither yet (" + ((m15 > 0) == p.call() ? "in profit" : "under water") + ")";
+        return head + verdict;
     }
 
     /** Today's surges with the same flow: how often the index moved with it 15 minutes after t+1. */
@@ -151,6 +248,16 @@ final class SurgeAlertRules {
         String where = m.lo() == m.hi() ? fmt(m.lo(), 0) : fmt(m.lo(), 0) + "–" + fmt(m.hi(), 0);
         double edge = m.lo() > spot ? m.lo() : m.hi() < spot ? m.hi() : spot;
         return m.name() + " " + where + (edge == spot ? "" : " (" + signed(edge - spot, 0) + ")");
+    }
+
+    /** "2026-10-13" -> "13 Oct". */
+    static String shortDate(String iso) {
+        try {
+            java.time.LocalDate d = java.time.LocalDate.parse(iso);
+            return d.getDayOfMonth() + " " + d.getMonth().getDisplayName(java.time.format.TextStyle.SHORT, Locale.ENGLISH);
+        } catch (RuntimeException e) {
+            return iso;
+        }
     }
 
     private static String side(Map<String, Object> side) {

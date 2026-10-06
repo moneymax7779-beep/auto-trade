@@ -48,6 +48,7 @@ class SurgeAlerter implements ApplicationRunner {
     private SurgeAlertRules rules;
     private final Set<String> seen = new HashSet<>();
     private final Map<String, String> pending = new LinkedHashMap<>();   // underlying|t -> underlying
+    private final Map<String, SurgeAlertRules.Plan> plans = new LinkedHashMap<>();   // the plan each alert sent
     private boolean primed;
 
     SurgeAlerter(SurgeController surges, LevelsService levelsService, SessionRunner runner, AlertService alerts,
@@ -99,6 +100,7 @@ class SurgeAlerter implements ApplicationRunner {
                         properties.surgeCooldownMin(), LocalTime.of(9, 20), LocalTime.of(15, 15)));
                 seen.clear();
                 pending.clear();
+                plans.clear();
                 primed = false;
             }
             for (String underlying : trading.trading().tradeUnderlyingList()) {
@@ -111,10 +113,13 @@ class SurgeAlerter implements ApplicationRunner {
                         continue;                 // already handled, or on the board before this process started
                     }
                     if (rules.accept(underlying, s)) {
-                        alerts.signal(SurgeAlertRules.message(underlying, s, levels(today, underlying, report, time),
-                                SurgeAlertRules.hitRate(list, (String) s.get("flow"), time)));
+                        SurgeAlertRules.Levels known = levels(today, underlying, report, time);
+                        SurgeAlertRules.Plan plan = SurgeAlertRules.plan(s, known, (String) report.get("optionsExpiry"), today);
+                        alerts.signal(SurgeAlertRules.message(underlying, s, known,
+                                SurgeAlertRules.hitRate(list, (String) s.get("flow"), time), plan));
                         if (properties.surgeFollowUp()) {
                             pending.put(key, underlying);
+                            plans.put(key, plan);
                         }
                     }
                 }
@@ -122,7 +127,7 @@ class SurgeAlerter implements ApplicationRunner {
                     Map<String, Object> s = (Map<String, Object>) o;
                     String key = underlying + "|" + s.get("t");
                     if (pending.containsKey(key) && s.get("move15") != null) {
-                        alerts.signal(SurgeAlertRules.followUp(underlying, s));
+                        alerts.signal(SurgeAlertRules.followUp(underlying, s, plans.remove(key)));
                         pending.remove(key);
                     }
                 }
@@ -149,10 +154,11 @@ class SurgeAlerter implements ApplicationRunner {
                 }
                 LocalTime sentAt = LocalTime.parse((String) s.getOrDefault("from", s.get("t"))).plusMinutes(1);
                 count++;
+                SurgeAlertRules.Levels known = levels(day, underlying, report, sentAt);
+                SurgeAlertRules.Plan plan = SurgeAlertRules.plan(s, known, (String) report.get("optionsExpiry"), day);
                 log.info("PREVIEW alert {} at ~{}:\n{}\n{}", count, sentAt,
-                        SurgeAlertRules.message(underlying, s, levels(day, underlying, report, sentAt),
-                                SurgeAlertRules.hitRate(list, (String) s.get("flow"), sentAt)),
-                        SurgeAlertRules.followUp(underlying, s));
+                        SurgeAlertRules.message(underlying, s, known, SurgeAlertRules.hitRate(list, (String) s.get("flow"), sentAt), plan),
+                        SurgeAlertRules.followUp(underlying, s, plan));
             }
         }
         log.info("PREVIEW {}: {} alerts", day, count);

@@ -267,21 +267,38 @@ class AlertMonitor implements ApplicationRunner {
             Map<String, Object> a = legs.getFirst();
             long qty = ((Number) a.get("quantity")).longValue();
             long lot = a.get("lotSize") instanceof Number n ? n.longValue() : 0;
-            String size = lot > 0 ? (qty / lot) + " lots (" + qty + ")" + (legs.size() > 1 ? " each" : "") : qty + " qty";
+            String size = lot > 0 ? (qty / lot) + " lots (" + SurgeAlertRules.fmt(qty, 0) + ")" + (legs.size() > 1 ? " each" : "")
+                    : SurgeAlertRules.fmt(qty, 0) + " qty";
             String symbols = String.join(" + ", legs.stream().map(l -> String.valueOf(l.get("symbol"))).toList());
-            String prices = String.join(" / ", legs.stream().map(l -> String.format("%.2f", ((Number) l.get("averageCost")).doubleValue())).toList());
+            String prices = String.join(" / ", legs.stream().map(l -> "₹" + SurgeAlertRules.fmt(((Number) l.get("averageCost")).doubleValue(), 2)).toList());
+            double paid = legs.stream().mapToDouble(l -> ((Number) l.get("averageCost")).doubleValue() * ((Number) l.get("quantity")).longValue()).sum();
             String opened = String.valueOf(a.get("opened"));
-            messages.add("Trade opened " + (opened.length() >= 5 ? opened.substring(0, 5) : opened) + ": " + a.get("strategy")
-                    + " · " + symbols + " " + size + " @ " + prices);
+            String action = legs.size() > 1 ? "🟡 BUY STRADDLE" : "CE".equals(String.valueOf(a.get("side"))) || String.valueOf(a.get("symbol")).contains(" CE ")
+                    ? "🟢 BUY CALL" : "🔴 BUY PUT";
+            messages.add(action + " (auto, PAPER) · " + symbols + " · " + size + " @ " + prices + " = ₹" + SurgeAlertRules.fmt(paid, 0)
+                    + " · " + a.get("strategy") + " · " + (opened.length() >= 5 ? opened.substring(0, 5) : opened));
         });
         return messages;
+    }
+
+    /** "⬜ EXIT CALL (auto, PAPER) · NIFTY 22700 CE 06 OCT 26 · 38 lots (2470) · ₹49.45 → ₹31.37 (−36.6%) · swing low lost · net −₹44,913 · 14:27". */
+    static String closeMessage(String strategy, String symbol, String side, String lots, double entry, double exit,
+                               String reason, double net, String closed) {
+        boolean call = "CE".equals(side) || (side == null && symbol != null && symbol.contains(" CE "));
+        double pct = entry > 0 ? 100 * (exit / entry - 1) : Double.NaN;
+        String why = reason == null ? "" : reason.toLowerCase(java.util.Locale.ROOT).replace('_', ' ');
+        return (net >= 0 ? "✅" : "❌") + " EXIT " + (call ? "CALL" : "PUT") + " (auto, PAPER) · " + symbol
+                + (lots.isEmpty() ? "" : " · " + lots) + " · ₹" + SurgeAlertRules.fmt(entry, 2) + " → ₹" + SurgeAlertRules.fmt(exit, 2)
+                + (Double.isFinite(pct) ? String.format(" (%s%.1f%%)", pct >= 0 ? "+" : "−", Math.abs(pct)) : "")
+                + (why.isEmpty() ? "" : " · " + why) + " · net " + (net < 0 ? "−" : "") + "₹" + SurgeAlertRules.fmt(Math.abs(net), 0)
+                + " · " + strategy + " · " + closed;
     }
 
     private void trades(long session, boolean first) {
         if (!properties.trades()) {
             return;
         }
-        jdbc.query("select id, strategy_id, symbol, to_char(opened_at at time zone 'Asia/Kolkata', 'HH24:MI') opened, "
+        jdbc.query("select id, strategy_id, symbol, option_side, to_char(opened_at at time zone 'Asia/Kolkata', 'HH24:MI') opened, "
                         + "to_char(closed_at at time zone 'Asia/Kolkata', 'HH24:MI') closed, closed_at is not null done, "
                         + "exit_reason, quantity, lot_size, average_cost, average_exit, net "
                         + "from trade.position where session_id = ? order by id", rs -> {
@@ -296,9 +313,9 @@ class AlertMonitor implements ApplicationRunner {
             }
             // positions reach the table only when they close: opens are reported from the live session (opened())
             if (rs.getBoolean("done") && seenClosed.add(id) && !first) {
-                alerts.info("Trade closed " + rs.getString("closed") + ": " + what + " " + lots
-                        + String.format(" %.2f → %.2f, %s, net ₹%,.0f", rs.getDouble("average_cost"),
-                        rs.getDouble("average_exit"), rs.getString("exit_reason"), rs.getDouble("net")));
+                alerts.info(closeMessage(rs.getString("strategy_id"), rs.getString("symbol"), rs.getString("option_side"), lots,
+                        rs.getDouble("average_cost"), rs.getDouble("average_exit"), rs.getString("exit_reason"),
+                        rs.getDouble("net"), rs.getString("closed")));
             }
         }, session);
     }
