@@ -29,7 +29,33 @@ public record RiskLimits(
         /** v5: the most one trade may lose at its own stop, in rupees (NaN = no cap, v1-v4). */
         double maxLossPerTrade,
         /** v6: rupee risk per single-leg entry at its first stop, from delta and the structure stop (NaN = off). */
-        double deltaRiskPerTrade) {
+        double deltaRiskPerTrade,
+        /** v8: true when capital follows the account's equity ({@code account.capital_mode: equity}). */
+        boolean equityMode,
+        /** v8: the equity the file's budgets refer to; {@link #capital} / this scales them. */
+        double startingCapital,
+        /** v8: the daily loss limit as a share of equity (NaN = the fixed rupee limit). */
+        double dailyLossPct,
+        /** v8: the share of a strategy's scaled budget it may use (1 = all). */
+        double premiumBudgetFraction) {
+
+    /** v8: these limits with the capital set to {@code equity}; the daily loss limit follows when it is a share. */
+    public RiskLimits withEquity(double equity) {
+        double dailyLoss = Double.isNaN(dailyLossPct) ? dailyLossLimit : equity * dailyLossPct / 100.0;
+        return new RiskLimits(hash, equity, dailyLoss, maxOpenPositions, maxLotsPerUnderlying, maxOrdersPerMinute,
+                noNewEntriesAfter, squareOffAt, maxFeedAgeSec, maxSpreadPct, entryBufferTicks, exitBufferTicks,
+                exitBufferPct, entryTimeoutSec, exitChaseSec, exitChaseMax, stopLimitOffsetPct, reconcileEverySec,
+                casEntryFrom, casEntryTo, maxLossPerTrade, deltaRiskPerTrade, equityMode, startingCapital, dailyLossPct,
+                premiumBudgetFraction);
+    }
+
+    /** v8: what a strategy file's rupee budget is multiplied by: equity / starting capital × the budget fraction. */
+    public double budgetScale() {
+        if (!equityMode || !(startingCapital > 0)) {
+            return 1.0;
+        }
+        return capital / startingCapital * premiumBudgetFraction;
+    }
 
     /**
      * The most premium an entry may buy so that its stop ({@code stopPct} below the price paid) loses
@@ -79,6 +105,10 @@ public record RiskLimits(
                 c.has("time.cas_entry_window") ? LocalTime.parse(c.getString("time.cas_entry_window").split("-")[0]) : null,
                 c.has("time.cas_entry_window") ? LocalTime.parse(c.getString("time.cas_entry_window").split("-")[1]) : null,
                 c.has("account.max_loss_per_trade") ? c.getDouble("account.max_loss_per_trade") : Double.NaN,
-                c.has("sizing.delta_risk_per_trade") ? c.getDouble("sizing.delta_risk_per_trade") : Double.NaN);
+                c.has("sizing.delta_risk_per_trade") ? c.getDouble("sizing.delta_risk_per_trade") : Double.NaN,
+                c.has("account.capital_mode") && "equity".equals(c.getString("account.capital_mode")),
+                c.has("account.starting_capital") ? c.getDouble("account.starting_capital") : c.getDouble("account.capital"),
+                c.has("account.daily_loss_pct") ? c.getDouble("account.daily_loss_pct") : Double.NaN,
+                c.has("sizing.premium_budget_pct") ? c.getDouble("sizing.premium_budget_pct") / 100.0 : 1.0);
     }
 }

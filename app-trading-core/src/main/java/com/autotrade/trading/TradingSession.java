@@ -347,7 +347,8 @@ public final class TradingSession {
                 }
                 double straddleStop = intent.stopPctOr(slot.factory().premiumStopPct());
                 // risk v5: the combined premium is capped so the combined stop loses at most the per-trade cap
-                double straddleBudget = Math.min(intent.premiumBudget(), risk.limits().premiumCapForStop(straddleStop));
+                double straddleBudget = Math.min(intent.premiumBudget() * settings.risk().budgetScale(),   // risk v8 scale
+                        risk.limits().premiumCapForStop(straddleStop));
                 RiskDecision result = oms.enterStraddle(strategyId, underlying, call.get(), put.get(),
                         straddleBudget, intent.stage().name(), market, intent.targetPct(), straddleStop);
                 log.info("{} {} {} ENTER STRADDLE {} + {} budget {} {}", time, underlying, strategyId,
@@ -377,10 +378,11 @@ public final class TradingSession {
      * budget gets what is left of it across all underlyings, so the rest of the capital stays free.
      */
     private double budget(StrategyFactory factory) {
-        double expiryBudget = factory.expiryDayPremiumBudget();
+        double scale = settings.risk().budgetScale();               // risk v8: budgets follow the equity
+        double expiryBudget = factory.expiryDayPremiumBudget() * scale;
         boolean expiryDay = settings.tradeUnderlyings().stream().anyMatch(contracts::expiresToday);
         if (!expiryDay || Double.isNaN(expiryBudget)) {
-            return factory.premiumBudget();
+            return factory.premiumBudget() * scale;
         }
         return expiryBudget - oms.premiumInUse(factory.id());
     }
@@ -474,6 +476,9 @@ public final class TradingSession {
             status.put("feedLagSeconds", last == null || settings.mode() == Mode.PAPER_REPLAY ? null
                     : Duration.between(last, Instant.now()).toMillis() / 1000.0);
             status.put("dayPnl", Math.round(oms.dayPnl()));
+            status.put("capital", Math.round(settings.risk().capital()));
+            status.put("dailyLossLimit", Math.round(settings.risk().dailyLossLimit()));
+            status.put("budgetScale", Math.round(settings.risk().budgetScale() * 100) / 100.0);
             status.put("killSwitches", killSwitch.engaged().keySet());
             List<Map<String, Object>> positions = new ArrayList<>();
             for (ManagedPosition position : oms.livePositions()) {

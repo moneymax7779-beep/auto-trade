@@ -385,10 +385,19 @@ class SessionRunner implements ApplicationRunner {
                 ? new CombinedSessionHistory(new BarSessionHistory(target), new OwnSessionHistory(target), new BarSessionHistory(target))
                 : new CombinedSessionHistory(new ZtSessionHistory(source), new OwnSessionHistory(target),
                         replay ? referenceStore : liveReference);
+        // risk v8: live sizes from the account's equity (starting capital + realised net of finished live sessions);
+        // a replay uses the starting capital, so its results stay comparable day to day
+        RiskLimits risk = EquityLedger.apply(RiskLimits.from(riskFile),
+                replay ? 0 : new EquityLedger(target).realisedNet(t.account()));
+        if (risk.equityMode()) {
+            log.info("sizing from equity: capital {} (starting {}), daily loss limit {}, budget scale {}",
+                    Math.round(risk.capital()), Math.round(risk.startingCapital()), Math.round(risk.dailyLossLimit()),
+                    String.format("%.2f", risk.budgetScale()));
+        }
         TradingSession.Settings settings = new TradingSession.Settings(
                 replay ? TradingSession.Mode.PAPER_REPLAY : TradingSession.Mode.PAPER_LIVE, t.account(), session,
                 t.underlyings(), t.tradeUnderlyingList(), features, history, strategies,
-                RiskLimits.from(riskFile), CostModel.from(costsFile), FillModel.from(costsFile, t.fillModel()),
+                risk, CostModel.from(costsFile), FillModel.from(costsFile, t.fillModel()),
                 instruments, hashes, CodeVersion.current());
         TradingSession trading = new TradingSession(settings, feed, new TradeStore(target));
         current = trading;
