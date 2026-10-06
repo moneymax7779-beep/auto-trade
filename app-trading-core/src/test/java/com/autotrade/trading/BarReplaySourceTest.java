@@ -27,16 +27,18 @@ class BarReplaySourceTest {
     }
 
     @Test
-    void aBarBecomesFourTicksInOrderAndTheCloseIsKnownOnlyJustBeforeTheMinuteEnds() {
+    void aBarBecomesFourPricesEachTwiceInOrderAndTheCloseIsKnownOnlyJustBeforeTheMinuteEnds() {
         List<MarketEvent> e = BarReplaySource.events(List.of(bar("NSE_INDEX|Nifty 50", "INDEX", T0, 22532.4, 22553.95, 22506.35, 22544.5, 0, null)),
                 Map.of("NSE_INDEX|Nifty 50", 22421.95), Map.of());
-        assertThat(e).hasSize(4).allMatch(x -> x instanceof IndexTick);
+        assertThat(e).hasSize(8).allMatch(x -> x instanceof IndexTick);
         List<Double> prices = e.stream().map(x -> ((IndexTick) x).price()).toList();
-        assertThat(prices).containsExactly(22532.4, 22506.35, 22553.95, 22544.5);     // up bar: open, low, high, close
+        // up bar: open, low, high, close; each price twice so an order placed on a tick meets the same price again
+        assertThat(prices).containsExactly(22532.4, 22532.4, 22506.35, 22506.35, 22553.95, 22553.95, 22544.5, 22544.5);
         assertThat(e.get(0).receivedAt()).isEqualTo(T0.plusMillis(1000));
-        assertThat(e.get(3).receivedAt()).isEqualTo(T0.plusMillis(59_500));           // before the 09:16 snapshot
+        assertThat(e.get(1).receivedAt()).as("the repeat comes after the 250 ms fill latency").isEqualTo(T0.plusMillis(2000));
+        assertThat(e.get(7).receivedAt()).isEqualTo(T0.plusMillis(59_500));           // before the 09:16 snapshot
         assertThat(((IndexTick) e.get(0)).previousClose()).isEqualTo(22421.95);
-        assertThat(e.stream().map(MarketEvent::sourceSequence).toList()).containsExactly(1L, 2L, 3L, 4L);
+        assertThat(e.stream().map(MarketEvent::sourceSequence).toList()).containsExactly(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L);
     }
 
     @Test
@@ -50,7 +52,35 @@ class BarReplaySourceTest {
         assertThat(closes.get(1).cumulativeVolume()).isEqualTo(4000);
         assertThat(closes.get(1).openInterest()).isEqualTo(501_000.0);
         assertThat(closes.get(1).sessionVwap()).isCloseTo((22605 * 1000 + 22615 * 3000) / 4000.0, org.assertj.core.api.Assertions.within(0.01));
-        assertThat(e.stream().filter(x -> x instanceof FutureTick f && f.cumulativeVolume() == null)).as("open/high/low ticks carry no totals").hasSize(6);
+        assertThat(e.stream().filter(x -> x instanceof FutureTick f && f.cumulativeVolume() == null)).as("only the last close tick carries totals; the second bar also has its pre-open quote").hasSize(15);
+    }
+
+    @Test
+    void atOneInstantOptionAndFutureTicksComeBeforeTheIndexTick() {
+        List<MarketEvent> e = BarReplaySource.events(List.of(
+                bar("NSE_INDEX|Nifty 50", "INDEX", T0, 22532.4, 22553.95, 22506.35, 22544.5, 0, null),
+                bar("NSE_FO|O", "OPTION", T0, 100, 110, 95, 105, 65, 12_000.0),
+                bar("NSE_FO|F", "FUTURE", T0, 22600, 22610, 22590, 22605, 1000, 500_000.0)), Map.of(), Map.of());
+        assertThat(e.subList(0, 3)).extracting(x -> x.getClass().getSimpleName()).containsExactly("FutureTick", "OptionTick", "IndexTick");
+        assertThat(e.subList(0, 3)).allMatch(x -> x.receivedAt().equals(T0.plusMillis(1000)));
+    }
+
+    @Test
+    void optionsQuoteTheNextBarsOpenJustBeforeTheMinuteBoundaryExceptForTheirFirstBar() {
+        Instant t1 = T0.plusSeconds(60);
+        List<MarketEvent> e = BarReplaySource.events(List.of(
+                bar("NSE_FO|O", "OPTION", T0, 100, 110, 95, 105, 65, 12_000.0),
+                bar("NSE_FO|O", "OPTION", t1, 112, 120, 111, 118, 65, 12_100.0),
+                bar("NSE_INDEX|Nifty 50", "INDEX", t1, 22544.5, 22560, 22540, 22555, 0, null)), Map.of(), Map.of());
+        List<OptionTick> o = e.stream().filter(x -> x instanceof OptionTick).map(x -> (OptionTick) x).toList();
+        assertThat(o).as("8 ticks for the first bar, 9 for the second").hasSize(17);
+        OptionTick pre = o.get(8);
+        assertThat(pre.receivedAt()).isEqualTo(t1.minusMillis(100));
+        assertThat(pre.lastPrice()).isEqualTo(112);
+        assertThat(pre.cumulativeVolume()).isNull();
+        assertThat(e.indexOf(pre)).as("before every tick of the next minute").isLessThan(e.indexOf(e.stream()
+                .filter(x -> x instanceof IndexTick).findFirst().orElseThrow()));
+        assertThat(o.getFirst().receivedAt()).as("no pre-open tick for a key's first bar").isEqualTo(T0.plusMillis(1000));
     }
 
     @Test

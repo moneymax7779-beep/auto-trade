@@ -85,7 +85,8 @@ final class BarFetcher {
                 for (String u : underlyings) {
                     List<LocalDate> expiries = expired.expiries(UpstoxCandles.indexKey(u));
                     if (parts.contains(Part.OPTIONS)) {
-                        counts.put(u + " options", options(expired, u, expiries, from, to, problems));
+                        counts.put(u + " options", options(expired, u, expiries, from, to, problems)
+                                + liveOptions(u, expiries, from, to, master, problems));
                     }
                     if (parts.contains(Part.FUTURES)) {
                         counts.put(u + " futures", futures(expired, u, expiries, from, to, master, problems));
@@ -148,13 +149,73 @@ final class BarFetcher {
                     continue;
                 }
                 kept++;
-                total += store(u, "OPTION", c.expiredKey(), c.tradingSymbol(), c.expiry(), c.strike(), c.optionType(),
-                        c.lotSize(), c.exchange() == null ? exchange(u) : c.exchange(),
-                        expired.minutes(c.expiredKey(), start.isBefore(from) ? from : start, expiry.isAfter(to) ? to : expiry),
-                        "upstox-expired-v2", start, expiry, problems);
+                LocalDate cFrom = start.isBefore(from) ? from : start;
+                LocalDate cTo = expiry.isAfter(to) ? to : expiry;
+                if (alreadyFetched(c.expiredKey(), cFrom, cTo)) {
+                    continue;
+                }
+                try {
+                    total += store(u, "OPTION", c.expiredKey(), c.tradingSymbol(), c.expiry(), c.strike(), c.optionType(),
+                            c.lotSize(), c.exchange() == null ? exchange(u) : c.exchange(),
+                            expired.minutes(c.expiredKey(), cFrom, cTo), "upstox-expired-v2", start, expiry, problems);
+                } catch (Exception e) {
+                    problems.add(u + " OPTION " + c.tradingSymbol() + ": " + e.getMessage());
+                }
             }
             log.info("{} {}: {} of {} option contracts kept (strikes within {} steps of the week's index range {})",
                     u, expiry, kept, contracts.size(), STRIKES_BEYOND_RANGE,
+                    range == null ? "unknown: all strikes kept" : Math.round(range[0]) + "–" + Math.round(range[1]));
+        }
+        return total;
+    }
+
+    /**
+     * Options of expiries the expired-instruments API does not list yet (today's expiry, and the ones still to come)
+     * whose last {@link #OPTION_DAYS_BEFORE_EXPIRY} days reach into [from, to] up to today: the live instrument master
+     * gives the contracts, the public endpoint (intraday for today) the bars.
+     */
+    private int liveOptions(String u, List<LocalDate> expiredExpiries, LocalDate from, LocalDate to, InstrumentMaster master,
+                            List<String> problems) throws Exception {
+        LocalDate today = LocalDate.now(MarketTime.IST);
+        if (master == null || to.isBefore(today)) {
+            return 0;
+        }
+        int total = 0;
+        for (LocalDate expiry : master.optionExpiries(u, today)) {
+            if (expiredExpiries.contains(expiry) || expiry.minusDays(OPTION_DAYS_BEFORE_EXPIRY).isAfter(to)) {
+                continue;
+            }
+            LocalDate start = expiry.minusDays(OPTION_DAYS_BEFORE_EXPIRY);
+            LocalDate end = expiry.isAfter(to) ? to : expiry;
+            double[] range = indexRange(u, start, end);
+            if (range == null) {
+                store(u, "INDEX", UpstoxCandles.indexKey(u), u, null, 0, null, 0, exchange(u),
+                        publicMinutes(UpstoxCandles.indexKey(u), start, end), "upstox-v3", start, end, problems);
+                range = indexRange(u, start, end);
+            }
+            List<Instrument> listed = master.instruments(u).stream()
+                    .filter(i -> i.isOption() && expiry.equals(i.expiry())).toList();
+            Set<Double> strikes = strikesToKeep(listed.stream().map(Instrument::strike).toList(), range, STRIKES_BEYOND_RANGE);
+            int kept = 0;
+            for (Instrument i : listed) {
+                if (!strikes.contains(i.strike())) {
+                    continue;
+                }
+                kept++;
+                LocalDate cFrom = start.isBefore(from) ? from : start;
+                if (alreadyFetched(i.instrumentKey(), cFrom, end)) {
+                    continue;
+                }
+                try {
+                    total += store(u, "OPTION", i.instrumentKey(), i.tradingSymbol(), i.expiry(), i.strike(), i.type(), i.lotSize(),
+                            i.exchange() == null ? exchange(u) : i.exchange(),
+                            publicMinutes(i.instrumentKey(), cFrom, end), "upstox-v3", start, end, problems);
+                } catch (Exception e) {
+                    problems.add(u + " OPTION " + i.tradingSymbol() + ": " + e.getMessage());
+                }
+            }
+            log.info("{} {} (live contracts): {} of {} option contracts kept (strikes within {} steps of the index range {})",
+                    u, expiry, kept, listed.size(), STRIKES_BEYOND_RANGE,
                     range == null ? "unknown: all strikes kept" : Math.round(range[0]) + "–" + Math.round(range[1]));
         }
         return total;
@@ -168,10 +229,18 @@ final class BarFetcher {
             for (UpstoxExpired.Contract c : expired.futureContracts(UpstoxCandles.indexKey(u), expiry)) {
                 any = true;
                 LocalDate start = expiry.minusDays(FUTURE_DAYS_BEFORE_EXPIRY);
-                total += store(u, "FUTURE", c.expiredKey(), c.tradingSymbol(), c.expiry(), 0, null, c.lotSize(),
-                        c.exchange() == null ? exchange(u) : c.exchange(),
-                        expired.minutes(c.expiredKey(), start.isBefore(from) ? from : start, expiry.isAfter(to) ? to : expiry),
-                        "upstox-expired-v2", start, expiry, problems);
+                LocalDate cFrom = start.isBefore(from) ? from : start;
+                LocalDate cTo = expiry.isAfter(to) ? to : expiry;
+                if (alreadyFetched(c.expiredKey(), cFrom, cTo)) {
+                    continue;
+                }
+                try {
+                    total += store(u, "FUTURE", c.expiredKey(), c.tradingSymbol(), c.expiry(), 0, null, c.lotSize(),
+                            c.exchange() == null ? exchange(u) : c.exchange(),
+                            expired.minutes(c.expiredKey(), cFrom, cTo), "upstox-expired-v2", start, expiry, problems);
+                } catch (Exception e) {
+                    problems.add(u + " FUTURE " + c.tradingSymbol() + ": " + e.getMessage());
+                }
             }
         }
         // the contract that has not expired yet: the live candle endpoint with the current instrument master
@@ -264,10 +333,46 @@ final class BarFetcher {
         return bars.size();
     }
 
-    /** The public candle endpoint, paced like the token one (no documented limit; a short pause avoids 429s). */
+    /**
+     * The public candle endpoint, paced like the token one (no documented limit; a short pause avoids 429s). The
+     * historical endpoint serves a session only from the next day; today's bars come from the intraday endpoint
+     * (after the close: the whole day), so a day can be replayed from bars the same evening.
+     */
     private List<UpstoxCandles.Candle> publicMinutes(String key, LocalDate from, LocalDate to) throws Exception {
+        LocalDate today = LocalDate.now(MarketTime.IST);
+        if (to.isBefore(today)) {
+            Thread.sleep(UpstoxExpired.PAUSE_MS);
+            return candles.minutes(key, from, to);
+        }
+        List<UpstoxCandles.Candle> out = new ArrayList<>();
+        if (from.isBefore(today)) {
+            Thread.sleep(UpstoxExpired.PAUSE_MS);
+            out.addAll(candles.minutes(key, from, today.minusDays(1)));
+        }
         Thread.sleep(UpstoxExpired.PAUSE_MS);
-        return candles.minutes(key, from, to);
+        for (UpstoxCandles.Candle c : candles.intradayMinutes(key)) {
+            if (c.session().equals(today)) {
+                out.add(c);
+            }
+        }
+        return out;
+    }
+
+    /**
+     * True when a completed range of this key is already stored (a fetch_log OK row covering [from, to]); a range that
+     * reaches today is never considered complete. Saves the rate-limited expired-instruments calls on a re-run.
+     */
+    private boolean alreadyFetched(String key, LocalDate from, LocalDate to) {
+        if (!to.isBefore(LocalDate.now(MarketTime.IST))) {
+            return false;
+        }
+        Integer n = jdbc.queryForObject("select count(*) from hist.fetch_log where instrument_key = ? and status = 'OK' "
+                + "and from_date <= ? and to_date >= ?", Integer.class, key, from, to);
+        boolean stored = n != null && n > 0;
+        if (stored) {
+            log.debug("{} {}–{}: already stored, skipped", key, from, to);
+        }
+        return stored;
     }
 
     private static Timestamp ts(LocalDate day) {

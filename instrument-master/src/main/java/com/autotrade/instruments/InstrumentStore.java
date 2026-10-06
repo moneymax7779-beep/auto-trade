@@ -88,13 +88,17 @@ public final class InstrumentStore {
         }
     }
 
-    /** The newest snapshot taken on or before {@code date}, across all sources. */
+    /**
+     * The newest snapshot taken on or before {@code date} per exchange file family (the source is
+     * {@code UPSTOX:NSE-<date>.json.gz} or {@code UPSTOX:BSE-<date>.json.gz}; grouping on the whole string returned
+     * every day's snapshot at once, so the master held each contract once per day loaded).
+     */
     public InstrumentMaster latest(LocalDate date) throws SQLException {
         String sql = "select i.instrument_key, i.exchange_token, i.segment, i.exchange, i.type, i.underlying, "
                 + "i.underlying_key, i.trading_symbol, i.expiry, i.strike, i.lot_size, i.tick_size, i.freeze_quantity, "
                 + "i.weekly from ref.instrument i join ref.instrument_snapshot s on s.id = i.snapshot_id "
-                + "where s.id in (select distinct on (source) id from ref.instrument_snapshot where snapshot_date <= ? "
-                + "order by source, snapshot_date desc, id desc)";
+                + "where s.id in (select distinct on (split_part(source, '-', 1)) id from ref.instrument_snapshot "
+                + "where snapshot_date <= ? order by split_part(source, '-', 1), snapshot_date desc, id desc)";
         List<Instrument> instruments = new ArrayList<>();
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {

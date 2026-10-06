@@ -28,8 +28,12 @@ import com.autotrade.core.time.MarketTime;
 
 /**
  * Replays a session from the one-minute bars in {@code hist.candle} (Upstox history) by synthesising ticks: for every
- * bar four ticks (open, then high and low in the bar's direction, then the close just before the minute ends), so the
- * minute bars the features build match the stored bars and nothing is known before the bar closed. Futures carry a
+ * bar the open, then the high and low in the bar's direction, then the close just before the minute ends, so the
+ * minute bars the features build match the stored bars and nothing is known before the bar closed. Each of the four
+ * prices is emitted twice, one second apart: an order placed on a tick then meets the same price again after the fill
+ * latency, so a marketable order fills at the price it was placed on (plus the fill model's adverse move) instead of
+ * at the bar's next extreme or not at all within the entry timeout (the A-045 first-round artefact: half the bar
+ * entries never filled). Futures carry a
  * cumulative volume, open interest and a VWAP built from bar closes; options one depth level at the last price (no
  * spread), no IV or greeks (the features model them); constituents the weight of the day. No order book, no closing
  * auction, no session-phase events: a weaker evidence class than the tick capture (docs/studies/2026-10-06-bar-replay.md).
@@ -39,7 +43,11 @@ final class BarReplaySource implements SessionEventSource {
     private static final Logger log = LoggerFactory.getLogger(BarReplaySource.class);
     static final String VIX = "INDIA_VIX";
     /** Seconds into the minute at which the open, the first and second extreme, and the close are emitted. */
-    static final double[] OFFSETS = {1.0, 20.0, 40.0, 59.5};
+    static final double[] OFFSETS = {1.0, 20.0, 40.0, 58.5};
+    /** Each price is repeated this many seconds after its first tick (longer than the fill latency, 250 ms). */
+    static final double REPEAT_AFTER = 1.0;
+    /** Options and futures also quote a bar's open this long before the bar starts (not for their first bar). */
+    static final long PRE_OPEN_MS = 100;
     /** The one synthetic depth level's quantity: deep enough never to be the binding constraint. */
     static final long DEPTH_QUANTITY = 100_000;
 
@@ -125,23 +133,41 @@ final class BarReplaySource implements SessionEventSource {
 
     /** The synthetic ticks of a day's bars, in time order (pure: tested without a database). */
     static List<MarketEvent> events(List<Bar> bars, Map<String, Double> previousClose, Map<String, Map<String, Double>> weights) {
-        List<MarketEvent> out = new ArrayList<>(bars.size() * 4);
+        List<MarketEvent> out = new ArrayList<>(bars.size() * 8);
         Map<String, long[]> running = new HashMap<>();          // key -> {cumulative volume, cumulative price*volume x100}
         List<Bar> ordered = new ArrayList<>(bars);
-        ordered.sort(Comparator.comparing(Bar::start).thenComparing(Bar::kind).thenComparing(Bar::key));
+        // at each instant the index (and VIX) tick comes last: the strategies decide on index ticks, so the option and
+        // futures quotes they see are this minute's, not the previous bar's close (else a marketable entry limit sits
+        // below a gapped open and never fills; A-045 round 2)
+        ordered.sort(Comparator.comparing(Bar::start).thenComparingInt(BarReplaySource::kindRank).thenComparing(Bar::key));
         long sequence = 0;
         for (Bar b : ordered) {
-            long[] run = running.computeIfAbsent(b.key(), k -> new long[2]);
+            boolean quoted = b.kind().equals("OPTION") || b.kind().equals("FUTURE");
+            long[] run = running.get(b.key());
+            if (quoted && run != null) {
+                // the quote at the minute boundary: the snapshot at :00 is taken from the state before any event at or
+                // after :00, so an option's quote there would be the previous bar's close while the entry fills at this
+                // bar's open; a tick-built stream quotes about the next open at the boundary (A-045 rounds 1-3)
+                double before = run[0] > 0 ? run[1] / 100.0 / run[0] : Double.NaN;
+                out.add(tick(b, b.start().minusMillis(PRE_OPEN_MS), b.open(), null, null, Double.isNaN(before) ? null : before,
+                        previousClose.get(b.key()), weights, ++sequence));
+            }
+            if (run == null) {
+                run = new long[2];
+                running.put(b.key(), run);
+            }
             run[0] += b.volume();
             run[1] += Math.round(b.close() * 100) * b.volume();
             double vwap = run[0] > 0 ? run[1] / 100.0 / run[0] : Double.NaN;
             boolean up = b.close() >= b.open();
             double[] prices = {b.open(), up ? b.low() : b.high(), up ? b.high() : b.low(), b.close()};
             for (int i = 0; i < prices.length; i++) {
-                Instant at = b.start().plusMillis((long) (OFFSETS[i] * 1000));
-                boolean last = i == prices.length - 1;
-                out.add(tick(b, at, prices[i], last ? run[0] : null, last ? b.oi() : null, Double.isNaN(vwap) ? null : vwap,
-                        previousClose.get(b.key()), weights, ++sequence));
+                for (int repeat = 0; repeat < 2; repeat++) {
+                    Instant at = b.start().plusMillis((long) ((OFFSETS[i] + repeat * REPEAT_AFTER) * 1000));
+                    boolean last = i == prices.length - 1 && repeat == 1;
+                    out.add(tick(b, at, prices[i], last ? run[0] : null, last ? b.oi() : null, Double.isNaN(vwap) ? null : vwap,
+                            previousClose.get(b.key()), weights, ++sequence));
+                }
             }
         }
         out.sort(Comparator.comparing(MarketEvent::receivedAt).thenComparingLong(MarketEvent::sourceSequence));
@@ -167,6 +193,17 @@ final class BarReplaySource implements SessionEventSource {
                         cumulativeVolume, vwap, weight);
             }
             default -> throw new IllegalStateException("unknown bar kind " + b.kind());
+        };
+    }
+
+    /** Emission order of the kinds at one instant: quotes before the index tick that triggers decisions. */
+    static int kindRank(Bar b) {
+        return switch (b.kind()) {
+            case "EQUITY" -> 0;
+            case "FUTURE" -> 1;
+            case "OPTION" -> 2;
+            case "INDEX" -> 3;
+            default -> 4;
         };
     }
 
