@@ -39,6 +39,7 @@ final class ExpiryTrendRider implements Strategy {
     private boolean exitSent;
     private Instant lastExtremeAt;          // v4: the later of the entry and the last new extreme in the trade's direction
     private boolean timeStopped;            // v5: a time-stop exit happened today: no new entry
+    private double trailPeak = Double.NaN;  // v6: the held option's highest bid since the trail armed (NaN = not armed)
 
     ExpiryTrendRider(ExpiryTrendRiderConfig config) {
         this.config = config;
@@ -81,11 +82,24 @@ final class ExpiryTrendRider implements Strategy {
             if (lastExtremeAt == null || (side == OptionSide.PE ? newLow : newHigh)) {
                 lastExtremeAt = now;
             }
+            // v6: a peak trail on the option itself, armed once the trade is well in profit (the runner days gave back
+            // a quarter of the peak premium before the swing exit fired); the swing exit stays
+            if (config.trailActivationPct() > 0 && position.bid() > 0 && position.averagePremium() > 0) {
+                if (Double.isNaN(trailPeak) && position.bid() >= position.averagePremium() * (1 + config.trailActivationPct() / 100.0)) {
+                    trailPeak = position.bid();
+                } else if (!Double.isNaN(trailPeak)) {
+                    trailPeak = Math.max(trailPeak, position.bid());
+                }
+            }
+            boolean trailHit = !Double.isNaN(trailPeak) && position.bid() > 0
+                    && position.bid() <= trailPeak * (1 - config.trailGivebackPct() / 100.0);
             String exit = null;
             if (!time.isBefore(config.flatBy())) {
                 exit = "FLAT_BY";
             } else if (side == OptionSide.PE ? st.lastBarClose() > st.lastSwingHigh() : st.lastBarClose() < st.lastSwingLow()) {
                 exit = side == OptionSide.PE ? "SWING_HIGH_RECLAIMED" : "SWING_LOW_LOST";     // NaN compares false
+            } else if (trailHit) {
+                exit = "TRAIL_" + Math.round(config.trailGivebackPct());
             } else if (config.noNewExtremeMin() > 0
                     && java.time.Duration.between(lastExtremeAt, now).toMinutes() >= config.noNewExtremeMin()) {
                 exit = "NO_NEW_EXTREME_" + config.noNewExtremeMin();     // v4: a stalled trend bleeds premium
@@ -103,6 +117,7 @@ final class ExpiryTrendRider implements Strategy {
         } else {
             exitSent = false;
             adds = 0;
+            trailPeak = Double.NaN;
             for (OptionSide side : List.of(OptionSide.PE, OptionSide.CE)) {
                 if (conditions.get(side).get("trigger") && !timeStopped) {
                     orders.add(new OrderIntent(OrderIntent.Action.ENTER, side, 1, Stage.CONFIRMED,
