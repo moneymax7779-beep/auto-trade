@@ -1,0 +1,29 @@
+# Break and retest (B), v1 (user's request 2026-10-06: "work on these ... ignore expiry day"). Rules registered before any code or result in
+# docs/studies/2026-10-06-five-setups.md (ledger A-037). Designed from the 6 Oct charts, so 6 Oct is not evidence. Never trades
+# an index on the day it expires. Every value is a round number fixed at registration, not fitted.
+version: brt-v1
+strategy: break-retest
+status: UNCALIBRATED
+source: "user-request-2026-10-06 (A-037; values fixed at registration, not tuned)"
+
+scope:
+  entry_from: "09:31"
+  last_new_entry: "14:30"
+  flat_by: "15:15"
+  time_stop_min: 30
+  skip_expiring_index: true
+
+setup:
+  retest_within_min: 20                # levels: ORH/ORL (after 09:30), PDH, PDL
+  retest_atr: 0.3                      # back within 0.3 ATR of the level, never a close more than 0.3 ATR through it
+  max_beyond_atr: 1.0                  # the entry close no more than 1 ATR past the level
+  # entry: a close beyond both previous closes after the retest; stop the retest's extreme close; target the next
+  # level >= 0.5 ATR away, else 1.5 ATR
+
+position:
+  premium_budget: 250000               # half the other strategies (A-035: Rs 5L per scalp made three stops a -1.1L day)
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 25                 # emergency only; the index-level stop comes first

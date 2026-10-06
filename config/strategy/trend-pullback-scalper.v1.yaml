@@ -1,0 +1,36 @@
+# Trend pullback scalper, v1 (user's request 2026-10-06: "build the scalper"). Rules registered before any code or
+# result in docs/studies/2026-10-06-trend-pullback-scalper.md (ledger A-035). Designed from the 6 Oct NIFTY and SENSEX
+# charts, so 6 Oct is not evidence. In a trend, buy the ATM option on the turn after a pullback and take a fixed
+# premium target; the stop is the index back beyond the pullback's extreme. Every value is a round number fixed at
+# registration, not fitted. No partial exits (the OMS cannot reduce a position yet).
+version: tps-v1
+strategy: trend-pullback-scalper
+status: UNCALIBRATED
+source: "user-request-2026-10-06 (A-035; values fixed at registration, not tuned)"
+
+scope:
+  entry_from: "09:45"
+  last_new_entry: "14:30"              # exclusive
+  flat_by: "15:15"
+  time_stop_min: 15                    # exit 15 minutes after entry if neither target nor stop came
+
+trend:
+  ema_period: 20                       # EMA of minute closes (the snapshot spot each minute)
+  ema_lookback_min: 10                 # rising: EMA now above EMA 10 minutes ago (falling for puts)
+  extreme_within_min: 45               # a new day high (low for puts) in the last 45 minutes
+
+pullback:
+  min_atr: 0.75                        # depth from the day extreme to the pullback's extreme, in ATR(3m)
+  max_atr: 3.0
+  turn_atr: 0.3                        # the entry close is at least this far off the pullback's extreme
+
+exits:
+  target_pct_expiry: 15                # bid >= 1.15 x average cost on the index that expires today
+  target_pct: 8                        # bid >= 1.08 x average cost otherwise
+  premium_stop_pct_expiry: 10          # resting stop behind the structure stop
+  premium_stop_pct: 6
+
+position:
+  premium_budget: 500000
+  intended_lots: 1
+  strike_offset: 0                     # ATM

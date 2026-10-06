@@ -5,7 +5,9 @@ import java.nio.file.Path;
 import java.time.LocalDate;
 import java.time.LocalTime;
 import java.time.ZonedDateTime;
+import java.util.ArrayList;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -51,7 +53,7 @@ class AlertMonitor implements ApplicationRunner {
     private long lastTokenCheckMinute = -1;
     private Long sessionId;
     private String lastStatus;
-    private final Set<Long> seenOpened = new HashSet<>();
+    private final Set<String> seenOpened = new HashSet<>();
     private final Set<Long> seenClosed = new HashSet<>();
 
     AlertMonitor(SessionRunner runner, AlertService alerts, AlertProperties properties, TradingProperties trading,
@@ -196,6 +198,7 @@ class AlertMonitor implements ApplicationRunner {
         }
         if ("RUNNING".equals(status)) {
             feed(time);
+            opened(first);
         }
         trades(id, first);
         if ("DONE".equals(status) && lastStatus != null && !"DONE".equals(lastStatus)) {
@@ -230,6 +233,50 @@ class AlertMonitor implements ApplicationRunner {
         }
     }
 
+    /** Reports each newly filled position of the running session within a minute of its fill. */
+    private void opened(boolean first) {
+        if (!properties.trades()) {
+            return;
+        }
+        TradingSession live = runner.current();
+        Object open = live == null ? null : live.status().get("openPositions");
+        if (open instanceof List<?> rows) {
+            @SuppressWarnings("unchecked")
+            List<Map<String, Object>> positions = (List<Map<String, Object>>) rows;
+            newOpenings(positions, seenOpened, first).forEach(alerts::info);
+        }
+    }
+
+    /**
+     * "Trade opened" messages for filled open positions not reported yet; a straddle's two legs (same strategy, index
+     * and open second) are one trade. {@code first} (the monitor's first look at a session): remember, don't report.
+     */
+    static List<String> newOpenings(List<Map<String, Object>> open, Set<String> seen, boolean first) {
+        Map<String, List<Map<String, Object>>> trades = new LinkedHashMap<>();
+        for (Map<String, Object> p : open) {
+            if (!(p.get("quantity") instanceof Number q) || q.longValue() <= 0) {
+                continue;                                     // not filled yet
+            }
+            trades.computeIfAbsent(p.get("strategy") + "|" + p.get("underlying") + "|" + p.get("opened"), k -> new ArrayList<>()).add(p);
+        }
+        List<String> messages = new ArrayList<>();
+        trades.forEach((key, legs) -> {
+            if (!seen.add(key) || first) {
+                return;
+            }
+            Map<String, Object> a = legs.getFirst();
+            long qty = ((Number) a.get("quantity")).longValue();
+            long lot = a.get("lotSize") instanceof Number n ? n.longValue() : 0;
+            String size = lot > 0 ? (qty / lot) + " lots (" + qty + ")" + (legs.size() > 1 ? " each" : "") : qty + " qty";
+            String symbols = String.join(" + ", legs.stream().map(l -> String.valueOf(l.get("symbol"))).toList());
+            String prices = String.join(" / ", legs.stream().map(l -> String.format("%.2f", ((Number) l.get("averageCost")).doubleValue())).toList());
+            String opened = String.valueOf(a.get("opened"));
+            messages.add("Trade opened " + (opened.length() >= 5 ? opened.substring(0, 5) : opened) + ": " + a.get("strategy")
+                    + " · " + symbols + " " + size + " @ " + prices);
+        });
+        return messages;
+    }
+
     private void trades(long session, boolean first) {
         if (!properties.trades()) {
             return;
@@ -244,14 +291,10 @@ class AlertMonitor implements ApplicationRunner {
             int lot = rs.getInt("lot_size");
             String lots = lot > 0 && qty > 0 ? (qty / lot) + " lots (" + qty + ")" : "";
             if (qty == 0) {                                   // an entry that never filled: nothing to report
-                seenOpened.add(id);
                 seenClosed.add(id);
                 return;
             }
-            if (seenOpened.add(id) && !first) {
-                alerts.info("Trade opened " + rs.getString("opened") + ": " + what + " " + lots
-                        + String.format(" @ %.2f", rs.getDouble("average_cost")));
-            }
+            // positions reach the table only when they close: opens are reported from the live session (opened())
             if (rs.getBoolean("done") && seenClosed.add(id) && !first) {
                 alerts.info("Trade closed " + rs.getString("closed") + ": " + what + " " + lots
                         + String.format(" %.2f → %.2f, %s, net ₹%,.0f", rs.getDouble("average_cost"),

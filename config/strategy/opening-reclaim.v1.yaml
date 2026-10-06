@@ -1,0 +1,29 @@
+# Opening-low reclaim (A), v1 (user's request 2026-10-06: "work on these ... ignore expiry day"). Rules registered before any code or result in
+# docs/studies/2026-10-06-five-setups.md (ledger A-036). Designed from the 6 Oct charts, so 6 Oct is not evidence. Never trades
+# an index on the day it expires. Every value is a round number fixed at registration, not fitted.
+version: olr-v1
+strategy: opening-reclaim
+status: UNCALIBRATED
+source: "user-request-2026-10-06 (A-036; values fixed at registration, not tuned)"
+
+scope:
+  entry_from: "09:16"
+  last_new_entry: "10:15"              # exclusive
+  flat_by: "15:15"
+  time_stop_min: 30
+  skip_expiring_index: true
+
+setup:
+  morning_until: "09:30"               # the day's low (high) was made 09:15-09:30
+  near_level_atr: 0.5                  # within 0.5 ATR(3m) of a prior-day level (prior ORH/ORL, PDH, PDL, previous close)
+  hold_min: 3                          # and has held for 3 minutes
+  # entry: a minute close back through the day open; stop beyond the morning extreme;
+  # target the nearest of ORH/PDH/prior ORH (ORL/PDL/prior ORL) >= 0.5 ATR away, else 1.5 ATR
+
+position:
+  premium_budget: 250000               # half the other strategies (A-035: Rs 5L per scalp made three stops a -1.1L day)
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 25                 # emergency only; the index-level stop comes first

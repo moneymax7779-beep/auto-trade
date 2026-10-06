@@ -1,0 +1,31 @@
+# Range-edge fade (E), v1 (user's request 2026-10-06: "work on these ... ignore expiry day"). Rules registered before any code or result in
+# docs/studies/2026-10-06-five-setups.md (ledger A-039). Designed from the 6 Oct charts, so 6 Oct is not evidence. Never trades
+# an index on the day it expires. Every value is a round number fixed at registration, not fitted.
+version: ref-v1
+strategy: range-fade
+status: UNCALIBRATED
+source: "user-request-2026-10-06 (A-039; values fixed at registration, not tuned)"
+
+scope:
+  entry_from: "11:00"
+  last_new_entry: "14:30"
+  flat_by: "15:15"
+  time_stop_min: 30
+  skip_expiring_index: true
+
+setup:
+  lookback_min: 60                     # the range is read from the last 60 minute closes
+  min_vwap_crossings: 3
+  max_span_atr: 3.0
+  no_new_extreme_min: 30               # no new day high or low in the last 30 minutes
+  max_sweep_atr: 0.5                   # a close beyond the edge by at most 0.5 ATR
+  reclaim_within_min: 5                # back inside within 5 minutes
+  target_inset_atr: 0.25               # target 0.25 ATR inside the other edge; stop the sweep's extreme close
+
+position:
+  premium_budget: 250000               # half the other strategies (A-035: Rs 5L per scalp made three stops a -1.1L day)
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 25                 # emergency only; the index-level stop comes first

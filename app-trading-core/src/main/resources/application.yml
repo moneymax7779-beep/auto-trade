@@ -61,7 +61,8 @@ autotrade:
     replay-source: zt              # --mode=replay only: zt (zt-tiger-v2's capture) or own (auto-trade's live capture, md.*; from 28 Sep 2026)
     # Shadow mode (--mode=auto): after each live session, these candidates replay the day from own capture on
     # account SHADOW-1 (no orders anywhere) and the result is sent with the alerts. --mode=shadow --session=D runs it by hand.
-    shadow-strategy-files: []        # etr-v1 moved to the live set 2026-10-02 (A-031); none in shadow
+    shadow-strategy-files:           # etr-v1 moved to the live set 2026-10-02 (A-031)
+      - config/strategy/break-retest.v1.yaml   # brt-v1 forward test from 7 Oct (A-041, user 2026-10-06: "run B in shadow")
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"

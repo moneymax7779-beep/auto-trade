@@ -1,0 +1,26 @@
+# Closing-auction pressure (F), v1 (user's request 2026-10-06: "work on these ... ignore expiry day"). Rules registered before any code or result in
+# docs/studies/2026-10-06-five-setups.md (ledger A-040). Designed from the 6 Oct charts, so 6 Oct is not evidence. Never trades
+# an index on the day it expires. Every value is a round number fixed at registration, not fitted.
+version: aup-v1
+strategy: auction-pressure
+status: UNCALIBRATED
+source: "user-request-2026-10-06 (A-040; values fixed at registration, not tuned)"
+
+scope:
+  entry_from: "15:21"                  # the auction's market-and-limit phase (constituent IEPs from 15:21)
+  last_new_entry: "15:26"
+  flat_by: "15:29"                     # options trade until 15:30
+  time_stop_min: 0                     # none: held to 15:29
+  skip_expiring_index: true
+
+setup:
+  min_coverage_pct: 80                 # constituent auction coverage
+  min_pressure_pct: 0.15               # weighted constituent auction return >= +0.15 % -> call, <= -0.15 % -> put
+
+position:
+  premium_budget: 250000               # half the other strategies (A-035: Rs 5L per scalp made three stops a -1.1L day)
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 25                 # emergency only; the index-level stop comes first

@@ -1,0 +1,28 @@
+# Failed breakout (D), v1 (user's request 2026-10-06: "work on these ... ignore expiry day"). Rules registered before any code or result in
+# docs/studies/2026-10-06-five-setups.md (ledger A-038). Designed from the 6 Oct charts, so 6 Oct is not evidence. Never trades
+# an index on the day it expires. Every value is a round number fixed at registration, not fitted.
+version: fbo-v1
+strategy: failed-breakout
+status: UNCALIBRATED
+source: "user-request-2026-10-06 (A-038; values fixed at registration, not tuned)"
+
+scope:
+  entry_from: "09:45"
+  last_new_entry: "14:30"
+  flat_by: "15:15"
+  time_stop_min: 30
+  skip_expiring_index: true
+
+setup:
+  fail_within_min: 10                  # levels: ORH (after 09:30), PDH, prior ORH (mirror ORL, PDL, prior ORL)
+  vwap_target_min_atr: 0.5             # target the VWAP when at least 0.5 ATR away, else 1.5 ATR
+  # entry: a close beyond both previous closes back inside the level, no new extreme past the failed one;
+  # stop the failed extreme
+
+position:
+  premium_budget: 250000               # half the other strategies (A-035: Rs 5L per scalp made three stops a -1.1L day)
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 25                 # emergency only; the index-level stop comes first

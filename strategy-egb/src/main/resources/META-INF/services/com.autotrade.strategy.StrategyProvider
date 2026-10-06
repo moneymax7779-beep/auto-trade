@@ -2,3 +2,9 @@ com.autotrade.strategy.egb.ExpiryGammaProvider
 com.autotrade.strategy.egb.ExpiryBreakoutStraddleProvider
 com.autotrade.strategy.egb.OpeningDriveProvider
 com.autotrade.strategy.egb.ExpiryTrendRiderProvider
+com.autotrade.strategy.egb.TrendPullbackScalperProvider
+com.autotrade.strategy.egb.SetupProviders$OpeningReclaimProvider
+com.autotrade.strategy.egb.SetupProviders$BreakRetestProvider
+com.autotrade.strategy.egb.SetupProviders$FailedBreakoutProvider
+com.autotrade.strategy.egb.SetupProviders$RangeFadeProvider
+com.autotrade.strategy.egb.SetupProviders$AuctionPressureProvider
