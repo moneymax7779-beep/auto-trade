@@ -22,6 +22,11 @@ public record TradingProperties(Trading trading, Source source, Upstox upstox) {
             return "own".equalsIgnoreCase(replaySource);
         }
 
+        /** --mode=replay only: "bars" replays the stored Upstox one-minute bars (hist.candle); no zt-tiger-v2 needed. */
+        public boolean replayFromBars() {
+            return "bars".equalsIgnoreCase(replaySource);
+        }
+
         /** The underlyings strategies trade: {@code trade-underlyings}, else every recorded underlying. */
         public List<String> tradeUnderlyingList() {
             return tradeUnderlyings != null && !tradeUnderlyings.isEmpty() ? tradeUnderlyings : underlyings;

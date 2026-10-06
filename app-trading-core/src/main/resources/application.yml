@@ -54,11 +54,11 @@ autotrade:
       - config/strategy/expiry-trend-rider.v1.yaml         # etr-v1 live (user, 2026-10-02: "keep it live, no need to run in shadow"; A-031; failed A-029's criterion); last in order
     features-file: config/features/features.v11.yaml   # v11 = v7 with the VWAP proxy using the 15-minute mean basis (A-030, user 2026-10-02: "yes switch to v11"); v7 = v6 + ATR seeded from the previous session
     exchange-file: config/exchange/nse-bse-sessions.v3.yaml
-    costs-file: config/costs/india-index-options-costs.v1.yaml
+    costs-file: config/costs/india-index-options-costs.v2.yaml   # v2: Upstox Plus brokerage Rs 30/order from 2026-09-01 (A-044, user 2026-10-06)
     risk-file: config/risk/paper-risk.v4.yaml   # v4: full capital, no per-trade cap (user, 2026-09-30: "let it use full capital, we are running in PAPER mode"; v5 deployed and withdrawn the same evening)
     poll-interval-ms: 250
     replay-speed: 0                # --mode=replay only: market seconds per second (e.g. 60); 0 = as fast as possible
-    replay-source: zt              # --mode=replay only: zt (zt-tiger-v2's capture) or own (auto-trade's live capture, md.*; from 28 Sep 2026)
+    replay-source: zt              # --mode=replay only: zt (zt-tiger-v2's capture), own (auto-trade's live capture, md.*; from 28 Sep 2026) or bars (Upstox one-minute bars in hist.candle; --mode=fetch-bars loads them)
     # Shadow mode (--mode=auto): after each live session, these candidates replay the day from own capture on
     # account SHADOW-1 (no orders anywhere) and the result is sent with the alerts. --mode=shadow --session=D runs it by hand.
     shadow-strategy-files:           # each runs in its own shadow session (etr-v1 also trades live, in the live set)

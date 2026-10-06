@@ -31,8 +31,12 @@ public final class UpstoxCandles {
     /** Upstox serves at most about a month of one-minute candles per request. */
     private static final int MINUTE_CHUNK_DAYS = 28;
 
-    /** A candle with the session date it belongs to. */
-    public record Candle(OffsetDateTime start, double open, double high, double low, double close) {
+    /** A candle with the session date it belongs to; volume and open interest when the endpoint sends them (0 / NaN). */
+    public record Candle(OffsetDateTime start, double open, double high, double low, double close, long volume, double oi) {
+
+        public Candle(OffsetDateTime start, double open, double high, double low, double close) {
+            this(start, open, high, low, close, 0, Double.NaN);
+        }
 
         public LocalDate session() {
             return start.atZoneSameInstant(MarketTime.IST).toLocalDate();
@@ -93,13 +97,26 @@ public final class UpstoxCandles {
         }
         for (JsonNode row : rows) {
             candles.add(new Candle(OffsetDateTime.parse(row.get(0).asString()), row.get(1).doubleValue(),
-                    row.get(2).doubleValue(), row.get(3).doubleValue(), row.get(4).doubleValue()));
+                    row.get(2).doubleValue(), row.get(3).doubleValue(), row.get(4).doubleValue(),
+                    row.size() > 5 && row.get(5).isNumber() ? row.get(5).longValue() : 0,
+                    row.size() > 6 && row.get(6).isNumber() ? row.get(6).doubleValue() : Double.NaN));
         }
         candles.sort(Comparator.comparing(Candle::start));
         return candles;
     }
 
-    private static String encode(String key) {
+    /** Index keys as the historical endpoints want them. */
+    public static String indexKey(String underlying) {
+        return switch (underlying) {
+            case "NIFTY" -> "NSE_INDEX|Nifty 50";
+            case "BANKNIFTY" -> "NSE_INDEX|Nifty Bank";
+            case "SENSEX" -> "BSE_INDEX|SENSEX";
+            case UpstoxUniverse.VIX_UNDERLYING -> UpstoxUniverse.VIX_KEY;
+            default -> throw new IllegalArgumentException("no Upstox index key for " + underlying);
+        };
+    }
+
+    static String encode(String key) {
         return URLEncoder.encode(key, StandardCharsets.UTF_8).replace("+", "%20");
     }
 }

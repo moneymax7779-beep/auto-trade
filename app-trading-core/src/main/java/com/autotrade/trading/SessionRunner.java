@@ -143,6 +143,38 @@ class SessionRunner implements ApplicationRunner {
                     exit(0);
                 });
             }
+            case "fetch-bars" -> {
+                // historical one-minute bars from Upstox into hist.candle: --from=YYYY-MM-DD --to=YYYY-MM-DD
+                // [--underlyings=NIFTY,SENSEX] [--parts=index,equities,futures,options]
+                LocalDate from = LocalDate.parse(first(args, "from", LocalDate.now(MarketTime.IST).minusDays(7).toString()));
+                LocalDate to = LocalDate.parse(first(args, "to", LocalDate.now(MarketTime.IST).minusDays(1).toString()));
+                List<String> underlyings = List.of(first(args, "underlyings", String.join(",", properties.trading().tradeUnderlyingList())).split(","));
+                java.util.Set<BarFetcher.Part> parts = new java.util.LinkedHashSet<>();
+                for (String p : first(args, "parts", "index,equities,futures,options").split(",")) {
+                    parts.add(BarFetcher.Part.valueOf(p.trim().toUpperCase(java.util.Locale.ROOT)));
+                }
+                java.util.Optional<UpstoxToken> token = java.util.Optional.empty();
+                if (parts.contains(BarFetcher.Part.FUTURES) || parts.contains(BarFetcher.Part.OPTIONS)) {
+                    // one short-lived connection for the token (the reader role's connection cap is small)
+                    try (HikariDataSource zt = ZtReadOnlyDataSource.open(new ZtReadOnlyDataSource.Settings(
+                            properties.source().url(), properties.source().username(), properties.source().password(),
+                            properties.source().passwordFile(), properties.source().passwordKey(), "autotrade-bars", 1))) {
+                        token = upstoxToken(zt);
+                    } catch (Exception e) {
+                        log.warn("zt-tiger-v2 token lookup failed ({}); trying the token file", e.getMessage());
+                        token = new UpstoxTokenStore(Path.of(properties.upstox().tokenFile())).valid(Instant.now());
+                    }
+                    log.info("Upstox token: {}", token.isPresent() ? "valid (user " + token.get().userId() + ")" : "none");
+                }
+                InstrumentMaster master = new InstrumentStore(target).latest(to);
+                BarFetcher.Summary summary = new BarFetcher(target, Path.of(properties.upstox().instrumentDir()),
+                        Path.of("config", "reference", "weights")).fetch(from, to, underlyings, parts, token, master);
+                summary.candles().forEach((what, n) -> log.info("fetched {}: {} candles", what, n));
+                summary.problems().forEach(problem -> log.warn("fetch: {}", problem));
+                log.info("fetch-bars {}..{} done: {} candles, {} problems", from, to,
+                        summary.candles().values().stream().mapToInt(Integer::intValue).sum(), summary.problems().size());
+                exit(summary.problems().isEmpty() ? 0 : 2);
+            }
             case "shadow" -> {
                 // the shadow strategies on a captured day, by hand (the scheduler does this after each live session)
                 LocalDate session = LocalDate.parse(first(args, "session", LocalDate.now(MarketTime.IST).toString()));
@@ -301,7 +333,9 @@ class SessionRunner implements ApplicationRunner {
             hashes.put(file.sourceName(), file.contentHash());
         }
 
-        HikariDataSource source = ZtReadOnlyDataSource.open(new ZtReadOnlyDataSource.Settings(
+        // a bar replay reads only hist.candle: no zt-tiger-v2 connection at all (and none of its connection cap)
+        boolean bars = replay && t.replayFromBars();
+        HikariDataSource source = bars ? null : ZtReadOnlyDataSource.open(new ZtReadOnlyDataSource.Settings(
                 properties.source().url(), properties.source().username(), properties.source().password(),
                 properties.source().passwordFile(), properties.source().passwordKey(), "autotrade-trading-core", 6));
         InstrumentMaster instruments = new InstrumentStore(target).latest(session);
@@ -312,8 +346,9 @@ class SessionRunner implements ApplicationRunner {
         if (replay) {
             // replay-speed (market seconds per second; 0 = as fast as possible) lets the UI be watched
             // replay-source own: auto-trade's own live capture, the same ticks the live session saw (zt: zt-tiger-v2's)
-            com.autotrade.core.event.SessionEventSource events = t.replayFromOwnCapture()
-                    ? new OwnCaptureSource(target) : new ZtSessionSource(source, false);
+            com.autotrade.core.event.SessionEventSource events = bars
+                    ? new BarReplaySource(target, new IndexWeightFiles(Path.of("config", "reference", "weights")))
+                    : t.replayFromOwnCapture() ? new OwnCaptureSource(target) : new ZtSessionSource(source, false);
             feed = new ReplayAsLiveFeed(events, session, t.underlyings(), t.replaySpeed());
         } else if ("upstox".equals(t.feed()) && !upstoxFailed.contains(session)) {
             // Upstox feed (auction data, futures book, VIX) with the token zt-tiger-v2 holds; anything
@@ -346,8 +381,10 @@ class SessionRunner implements ApplicationRunner {
         }
         ReferenceStore referenceStore = new ReferenceStore(target);
         LiveReference liveReference = replay ? null : new LiveReference(referenceStore, session, new UpstoxCandles());
-        SessionHistory history = new CombinedSessionHistory(new ZtSessionHistory(source),
-                new OwnSessionHistory(target), replay ? referenceStore : liveReference);
+        SessionHistory history = bars
+                ? new CombinedSessionHistory(new BarSessionHistory(target), new OwnSessionHistory(target), new BarSessionHistory(target))
+                : new CombinedSessionHistory(new ZtSessionHistory(source), new OwnSessionHistory(target),
+                        replay ? referenceStore : liveReference);
         TradingSession.Settings settings = new TradingSession.Settings(
                 replay ? TradingSession.Mode.PAPER_REPLAY : TradingSession.Mode.PAPER_LIVE, t.account(), session,
                 t.underlyings(), t.tradeUnderlyingList(), features, history, strategies,
@@ -421,7 +458,9 @@ class SessionRunner implements ApplicationRunner {
                 upstoxFailed.add(session);
             }
             timer.shutdownNow();
-            source.close();
+            if (source != null) {
+                    source.close();                      // none for a bar replay
+                }
             log.info("session summary: {}", summary);
         });
         Running started = new Running(session, trading, worker, timer);
