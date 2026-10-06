@@ -134,6 +134,12 @@ final class BarFetcher {
             }
             LocalDate start = expiry.minusDays(OPTION_DAYS_BEFORE_EXPIRY);
             double[] range = indexRange(u, start, expiry);
+            if (range == null) {
+                // the strike window needs the index bars of that week: fetch them first (the public endpoint)
+                store(u, "INDEX", UpstoxCandles.indexKey(u), u, null, 0, null, 0, exchange(u),
+                        publicMinutes(UpstoxCandles.indexKey(u), start, expiry), "upstox-v3", start, expiry, problems);
+                range = indexRange(u, start, expiry);
+            }
             Set<Double> strikes = strikesToKeep(contracts.stream().map(UpstoxExpired.Contract::strike).toList(), range,
                     STRIKES_BEYOND_RANGE);
             int kept = 0;
@@ -147,8 +153,9 @@ final class BarFetcher {
                         expired.minutes(c.expiredKey(), start.isBefore(from) ? from : start, expiry.isAfter(to) ? to : expiry),
                         "upstox-expired-v2", start, expiry, problems);
             }
-            log.info("{} {}: {} of {} option contracts kept (strikes within {} steps of the week's index range {}–{})",
-                    u, expiry, kept, contracts.size(), STRIKES_BEYOND_RANGE, Math.round(range[0]), Math.round(range[1]));
+            log.info("{} {}: {} of {} option contracts kept (strikes within {} steps of the week's index range {})",
+                    u, expiry, kept, contracts.size(), STRIKES_BEYOND_RANGE,
+                    range == null ? "unknown: all strikes kept" : Math.round(range[0]) + "–" + Math.round(range[1]));
         }
         return total;
     }
