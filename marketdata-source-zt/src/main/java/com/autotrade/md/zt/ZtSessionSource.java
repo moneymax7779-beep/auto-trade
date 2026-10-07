@@ -80,73 +80,6 @@ public final class ZtSessionSource implements SessionEventSource {
         return new ReplayResult(delivered, late);
     }
 
-    /** Base for cursors that hold a server-side result set inside a read-only transaction. */
-    private abstract static class JdbcCursor implements EventCursor {
-
-        private final Connection connection;
-        private final PreparedStatement statement;
-        protected final ResultSet rows;
-        private MarketEvent head;
-
-        JdbcCursor(Connection connection, String sql, Binder binder) throws SQLException {
-            this.connection = connection;
-            PreparedStatement prepared = null;
-            try {
-                connection.setAutoCommit(false);
-                prepared = connection.prepareStatement(sql);
-                prepared.setFetchSize(FETCH_SIZE);
-                binder.bind(prepared);
-                rows = prepared.executeQuery();
-                statement = prepared;
-            } catch (SQLException e) {
-                if (prepared != null) {
-                    prepared.close();
-                }
-                connection.close();
-                throw e;
-            }
-        }
-
-        @Override
-        public boolean advance() throws SQLException {
-            if (!rows.next()) {
-                head = null;
-                return false;
-            }
-            head = map();
-            return true;
-        }
-
-        abstract MarketEvent map() throws SQLException;
-
-        @Override
-        public MarketEvent head() {
-            return head;
-        }
-
-        @Override
-        public void close() {
-            try {
-                rows.close();
-                statement.close();
-                connection.rollback();
-            } catch (SQLException ignored) {
-                // read-only cursor; nothing to undo
-            } finally {
-                try {
-                    connection.close();
-                } catch (SQLException ignored) {
-                    // pool handles broken connections
-                }
-            }
-        }
-    }
-
-    @FunctionalInterface
-    private interface Binder {
-        void bind(PreparedStatement statement) throws SQLException;
-    }
-
     /**
      * A session's ticks of one underlying in capture order, read in pages of {@link #PAGE_SEQUENCES} sequence numbers
      * inside one read-only transaction (a single sorted query of a whole session exceeds zt-tiger-v2's temp_file_limit).
@@ -266,22 +199,46 @@ public final class ZtSessionSource implements SessionEventSource {
         }
     }
 
-    private static final class PhaseCursor extends JdbcCursor {
+    /**
+     * The session's phase events of one underlying (a few rows a day), read at once and the connection released, so a
+     * replay of two underlyings holds two zt-tiger-v2 connections (the tick readers), not four.
+     */
+    private static final class PhaseCursor implements EventCursor {
 
-        private final String underlying;
+        private final java.util.Iterator<MarketEvent> events;
+        private MarketEvent head;
 
         PhaseCursor(Connection connection, LocalDate session, String underlying) throws SQLException {
-            super(connection, ZtQueries.SESSION_PHASES, statement -> {
+            List<MarketEvent> list = new ArrayList<>();
+            try (connection; PreparedStatement statement = connection.prepareStatement(ZtQueries.SESSION_PHASES)) {
+                connection.setAutoCommit(false);
                 statement.setString(1, ZtSourceKeys.underlyingKey(underlying));
                 statement.setObject(2, MarketTime.sessionStart(session).atOffset(ZoneOffset.UTC));
                 statement.setObject(3, MarketTime.sessionEnd(session).atOffset(ZoneOffset.UTC));
-            });
-            this.underlying = underlying;
+                try (ResultSet rows = statement.executeQuery()) {
+                    while (rows.next()) {
+                        list.add(ZtQueries.sessionPhaseRow(rows, underlying).event());
+                    }
+                }
+                connection.rollback();
+            }
+            this.events = list.iterator();
         }
 
         @Override
-        MarketEvent map() throws SQLException {
-            return ZtQueries.sessionPhaseRow(rows, underlying).event();
+        public boolean advance() {
+            head = events.hasNext() ? events.next() : null;
+            return head != null;
+        }
+
+        @Override
+        public MarketEvent head() {
+            return head;
+        }
+
+        @Override
+        public void close() {
+            // nothing held
         }
     }
 }
