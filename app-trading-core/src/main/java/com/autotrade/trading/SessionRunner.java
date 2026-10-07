@@ -326,6 +326,10 @@ class SessionRunner implements ApplicationRunner {
             }
             strategies.add(factory);
         }
+        // two versions of one strategy (etr-v1 and etr-v5) run under distinct ids: <id>@<version> for the later one
+        List<StrategyFactory> unique = com.autotrade.strategy.VersionedFactory.unique(strategies);
+        strategies.clear();
+        strategies.addAll(unique);
         Map<String, String> hashes = new LinkedHashMap<>();
         List<ThresholdConfig> files = new ArrayList<>(strategyFiles);
         files.addAll(List.of(featuresFile, exchangeFile, costsFile, riskFile));

@@ -51,7 +51,11 @@ autotrade:
       - config/strategy/early-confirm-runner.v11.yaml      # ecr-v11 = v8 (expiry days only) with no limit on campaigns per side (user, 2026-10-01)
       - config/strategy/opening-drive.v3.yaml              # odb-v3 = v2 with no limit on trades; a re-entry needs a fresh break (user, 2026-10-01)
       - config/strategy/expiry-gamma-breakout.v4.yaml      # egb-v4 = v3 with no limit on campaigns per side (user, 2026-10-01)
-      - config/strategy/expiry-trend-rider.v1.yaml         # etr-v1 live (user, 2026-10-02: "keep it live, no need to run in shadow"; A-031; failed A-029's criterion); last in order
+      - config/strategy/expiry-trend-rider.v1.yaml         # etr-v1 live (user, 2026-10-02: "keep it live, no need to run in shadow"; A-031; failed A-029's criterion)
+      # User 2026-10-07 07:00 IST: "run everything in PAPER mode, no need of SHADOW mode" (A-053). The former shadow
+      # strategies come after the existing ones, so on a common trigger the existing ones take the capital first.
+      - config/strategy/break-retest.v1.yaml               # brt-v1 live (was shadow, A-041); never the expiring index; Rs 2.5L budget
+      - config/strategy/expiry-trend-rider.v5.yaml         # etr-v5 live as "expiry-trend-rider@etr-v5" (was shadow, A-043); same entries as etr-v1, so it trades only when capital is free
     features-file: config/features/features.v11.yaml   # v11 = v7 with the VWAP proxy using the 15-minute mean basis (A-030, user 2026-10-02: "yes switch to v11"); v7 = v6 + ATR seeded from the previous session
     exchange-file: config/exchange/nse-bse-sessions.v3.yaml
     costs-file: config/costs/india-index-options-costs.v2.yaml   # v2: Upstox Plus brokerage Rs 30/order from 2026-09-01 (A-044, user 2026-10-06)
@@ -61,11 +65,9 @@ autotrade:
     replay-source: zt              # --mode=replay only: zt (zt-tiger-v2's capture), own (auto-trade's live capture, md.*; from 28 Sep 2026) or bars (Upstox one-minute bars in hist.candle; --mode=fetch-bars loads them)
     # replay-equity:               # --mode=replay only: start the replayed day from this equity (bin/replay-chain.sh chains days); absent = starting capital
     # Shadow mode (--mode=auto): after each live session, these candidates replay the day from own capture on
-    # account SHADOW-1 (no orders anywhere) and the result is sent with the alerts. --mode=shadow --session=D runs it by hand.
-    shadow-strategy-files:           # each runs in its own shadow session (etr-v1 also trades live, in the live set)
-      - config/strategy/break-retest.v1.yaml        # brt-v1 forward test from 7 Oct (A-041, user 2026-10-06: "run B in shadow")
-      - config/strategy/expiry-trend-rider.v1.yaml  # etr-v1 standalone: the control for etr-v5 (A-043)
-      - config/strategy/expiry-trend-rider.v5.yaml  # etr-v5 = time stop + no re-entry after it (A-043, user: "run v5 in shadow with B")
+    # account SHADOW-1 (no orders anywhere). Empty since 2026-10-07 (user: "run everything in PAPER mode, no need of
+    # SHADOW mode"); --mode=shadow --session=D still runs a list given on the command line.
+    shadow-strategy-files: []
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"
