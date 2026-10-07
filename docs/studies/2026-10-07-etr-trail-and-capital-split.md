@@ -38,3 +38,25 @@ Mac and are added when it is connected. Held-out 22 and 24 Sep: read once, after
   where C made ≥ ₹2,00,000 (a trail must not cut the runners it is meant to protect); held-out: T net ≥ C net.
 - ST is reported, not judged: it goes live only if both pass. A PASS means a decision about live PAPER, not an
   automatic switch; the compounding sizing now live (risk v9) multiplies any unverified rule's losses.
+
+## Test-day result (GCP, 7 Oct 16:15–17:53 IST, sessions with code_version 'a048-a049')
+
+| day | C live set | S ebs-v3 | T etr-v6 | ST both |
+|---|---|---|---|---|
+| 28 Sep | +3,65,097 | +3,65,097 | +3,65,097 | +3,65,097 |
+| 29 Sep | 0 | 0 | 0 | 0 |
+| 30 Sep | −1,11,378 | −1,11,378 | −1,11,378 | −1,11,378 |
+| 1 Oct (design day for T) | +8,50,438 | +8,50,438 | +9,32,455 | +9,32,455 |
+| 5 Oct | 0 | 0 | 0 | 0 |
+| 6 Oct | −46,151 | −46,151 | −46,151 | −46,151 |
+| 23, 25 Sep (zt) | failed | failed | failed | failed |
+
+- The straddle (ebs) did not trade on any test day, so S equals C everywhere: A-048's rule holds only vacuously.
+- The trail armed only on 1 Oct, the day it was designed from (excluded): v6 exited the 72200 PE at 13:01 at ₹586.29
+  (+₹8,00,964, v1 held to 14:30 for +₹8,50,438) and re-entered the 71500 PE 13:43–14:06 for +₹1,31,491. On every
+  other test day T equals C: A-049's rule also holds only vacuously.
+- 23 and 25 Sep (zt, non-expiry days on which neither strategy trades) failed: "temporary file size exceeds
+  temp_file_limit" on zt-tiger-v2. Fixed on our side (paged tick reads, phase events read up front; d6cc716).
+**Reading so far: no evidence either way from the test days.** The held-out days 22 Sep (NIFTY expiry, the straddle
+and the rider both traded) and 24 Sep (SENSEX expiry, the rider traded twice) are the only informative days; they
+run once tonight on image d6cc716 (night2 batch), and the archive expiry days 3, 10, 15, 17 Sep need the Expansion drive.
