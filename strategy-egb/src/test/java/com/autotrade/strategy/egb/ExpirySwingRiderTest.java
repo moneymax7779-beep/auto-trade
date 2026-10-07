@@ -72,4 +72,22 @@ class ExpirySwingRiderTest {
         notExpiry.decide(n.set("structure.lastBarClose", 72000.0).at("10:00"), PositionView.FLAT);
         assertThat(notExpiry.decide(n.set("structure.lastBarClose", 72200.0).at("10:01"), PositionView.FLAT).orders()).isEmpty();
     }
+
+    @Test
+    void v3StopsForTheDayAfterTwoLosingTradesInARow() {
+        Strategy v3 = Strategies.load(Path.of("..", "config", "strategy", "expiry-swing-rider.v3.yaml")).create("SENSEX", Snapshots.SESSION);
+        Snapshots b = Snapshots.bullishCoil();
+        PositionView callsLosing = new PositionView(true, OptionSide.CE, 1, 300, null, 250);
+        PositionView putsLosing = new PositionView(true, OptionSide.PE, 1, 300, null, 240);
+        v3.decide(b.set("structure.lastBarClose", 72000.0).at("10:00"), PositionView.FLAT);
+        assertThat(v3.decide(b.set("structure.lastBarClose", 72200.0).at("10:01"), PositionView.FLAT).orders()).hasSize(1);   // CE
+        assertThat(v3.decide(b.set("structure.lastBarClose", 72010.0).at("10:02"), callsLosing).orders())
+                .singleElement().satisfies(o -> assertThat(o.action()).isEqualTo(OrderIntent.Action.EXIT));             // loss 1
+        assertThat(v3.decide(b.set("structure.lastBarClose", 72000.0).at("10:02:30"), PositionView.FLAT).orders()).hasSize(1);  // PE
+        assertThat(v3.decide(b.set("structure.lastBarClose", 72200.0).at("10:03"), putsLosing).orders())     // +0.26 % from 72010
+                .singleElement().satisfies(o -> assertThat(o.action()).isEqualTo(OrderIntent.Action.EXIT));             // loss 2
+        assertThat(v3.decide(b.set("structure.lastBarClose", 72205.0).at("10:03:30"), PositionView.FLAT).orders())
+                .as("two losses in a row: done for the day").isEmpty();
+        assertThat(v3.decide(b.set("structure.lastBarClose", 72500.0).at("10:10"), PositionView.FLAT).orders()).isEmpty();
+    }
 }

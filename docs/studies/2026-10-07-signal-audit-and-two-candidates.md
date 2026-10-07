@@ -86,3 +86,23 @@ rerun; the control runs did not change.
 ₹50,000 (−₹96,151). esr is not deployed; the live set is unchanged. As the user said (01:05 IST), a new strategy
 must not disturb the existing ones; in one account with one capital pool and one daily loss limit, an always-in
 expiry strategy does disturb them, at any size that matters.
+
+## A-052, expiry swing rider v3: registered 7 Oct 02:25 IST, before any tick result
+User, 02:10–02:20 IST, after asking how to identify a choppy day: "yes register it and test after the close".
+How to identify choppy days (38 index-days of bars, measured by 10:30): the number of 0.15 % swing reversals in the
+morning predicts afternoon choppiness (r −0.52 with afternoon efficiency; VWAP crosses −0.37, morning efficiency ratio
++0.33) but not the afternoon swing-trading result (|r| ≤ 0.30): 1 Oct SENSEX had 15 VWAP crosses before 10:30 and then
+the month's biggest afternoon. So v3 does not classify the day in advance; it lets the day show itself and stops after
+two losing trades in a row. On bars this rule improved train (PF 1.74 → 2.04), test (2.32 → 4.06, worst day −141 % →
+−44 %) and left held-out unchanged; it was chosen after seeing the choppy days, so it is mildly fitted.
+esr-v3 = esr-v1 with the 2-loss stop, a ₹1,50,000 budget and a 35 % premium stop (two stopped trades ≈ ₹1,05,000,
+under the ₹1,10,000 account limit). `expiry-swing-rider.v3.yaml`.
+
+Test after the 7 Oct close, after the A-048/A-049 batch (one image, risk v9 = v4 at ₹5L in replay, costs v2):
+variants C (live set) and E3 (live set + esr-v3) and A3 (esr-v3 alone) on the five expiry days with tick data:
+29 Sep, 1 Oct, 6 Oct (own capture) and 22, 24 Sep (zt-tiger-v2; held-out, read once for this hypothesis).
+
+**PASS if all hold:** (1) E3 nets more than C over the five days; (2) E3's worst day ≥ C's worst day − ₹50,000;
+(3) no disturbance: on no day does the account kill switch fire in E3 when it does not in C, and the existing
+strategies' combined net in E3 is ≥ 90 % of their net in C on every day where they made money in C. A PASS means a
+decision to run it beside the live set; forward days decide after that.

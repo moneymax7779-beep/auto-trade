@@ -25,7 +25,9 @@ import com.autotrade.strategy.Strategy;
  * of the last swing reversal of {@code swing.reversal_pct} on one-minute closes; on the opposite reversal exit and
  * enter the other side; flat at {@code flat_by}. No filters: in the combination search every filter made expiry days
  * worse (docs/studies/2026-10-07-signal-audit-and-two-candidates.md). The resting premium stop is an emergency stop
- * only; after it the strategy waits for the next reversal.
+ * only; after it the strategy waits for the next reversal. v3 (A-052): no new entry for the rest of the day after
+ * {@code risk.stop_after_consecutive_losses} losing trades in a row (a trade is a loss when the held option's bid at
+ * our exit was not above its average premium, or when the premium stop closed it).
  */
 final class ExpirySwingRider implements Strategy {
 
@@ -41,6 +43,11 @@ final class ExpirySwingRider implements Strategy {
     private OptionSide wanted;               // the side to enter after a reversal
     private Instant wantedAt;
     private boolean exitSent;
+    private boolean wasOpen;                 // v3: a position was open at the previous decision
+    private double exitBidSeen = Double.NaN; // v3: the held option's bid when our exit was sent (NaN: closed by the stop)
+    private double openAverage = Double.NaN;
+    private int consecutiveLosses;
+    private boolean doneForDay;
 
     ExpirySwingRider(ExpirySwingRiderConfig config) {
         this.config = config;
@@ -78,7 +85,21 @@ final class ExpirySwingRider implements Strategy {
             wanted = trend > 0 ? OptionSide.CE : OptionSide.PE;
             wantedAt = now;
         }
-        boolean entryWindow = expiryDay && continuous && !time.isBefore(config.entryFrom()) && time.isBefore(config.lastNewEntry());
+        // v3: count losing trades in a row; a position that closed without our exit was closed by the premium stop
+        if (wasOpen && !position.open()) {
+            boolean loss = Double.isNaN(exitBidSeen) || !(exitBidSeen > openAverage);
+            consecutiveLosses = loss ? consecutiveLosses + 1 : 0;
+            if (config.stopAfterConsecutiveLosses() > 0 && consecutiveLosses >= config.stopAfterConsecutiveLosses()) {
+                doneForDay = true;
+            }
+            exitBidSeen = Double.NaN;
+        }
+        wasOpen = position.open();
+        if (position.open()) {
+            openAverage = position.averagePremium();
+        }
+        boolean entryWindow = expiryDay && continuous && !doneForDay && !time.isBefore(config.entryFrom())
+                && time.isBefore(config.lastNewEntry());
         if (position.open()) {
             String exit = null;
             if (!time.isBefore(config.flatBy())) {
@@ -89,6 +110,7 @@ final class ExpirySwingRider implements Strategy {
             if (exit != null && !exitSent) {
                 orders.add(OrderIntent.exit(position.side(), Stage.RUNNER, exit));
                 exitSent = true;
+                exitBidSeen = position.bid();
             }
             if (wanted == position.side()) {
                 wanted = null;       // already holding the trend side
@@ -166,6 +188,7 @@ final class ExpirySwingRider implements Strategy {
         c.put("expiry_day", expiryDay);
         c.put("window", window);
         c.put("swing_agrees", side == OptionSide.CE ? trend > 0 : trend < 0);
+        c.put("not_stopped_for_day", !doneForDay);
         return c;
     }
 
