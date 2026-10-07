@@ -62,7 +62,7 @@ public final class ZtSessionSource implements SessionEventSource {
         List<TickCursor> tickCursors = new ArrayList<>();
         try {
             for (String underlying : underlyings) {
-                TickCursor ticks = new TickCursor(source.getConnection(), session, underlying, verifyHashes);
+                TickCursor ticks = new TickCursor(source, session, underlying, verifyHashes);
                 tickCursors.add(ticks);
                 cursors.add(new ReorderingCursor(ticks, REORDER_WINDOW));
                 cursors.add(new ReorderingCursor(new PhaseCursor(source.getConnection(), session, underlying),
@@ -81,85 +81,82 @@ public final class ZtSessionSource implements SessionEventSource {
     }
 
     /**
-     * A session's ticks of one underlying in capture order, read in pages of {@link #PAGE_SEQUENCES} sequence numbers
-     * inside one read-only transaction (a single sorted query of a whole session exceeds zt-tiger-v2's temp_file_limit).
+     * A session's ticks of one underlying in capture order, read in pages of {@link #PAGE_SEQUENCES} sequence numbers.
+     * Each page is read on its own short connection in autocommit and buffered, so nothing is held open between pages:
+     * a single sorted query of a whole session exceeds zt-tiger-v2's temp_file_limit, and a transaction held open while
+     * the other underlying's page is read was closed by its idle-in-transaction timeout (24 Sep replays, 7 Oct).
      */
     private static final class TickCursor implements EventCursor {
 
-        static final long PAGE_SEQUENCES = 50_000;
+        static final long PAGE_SEQUENCES = 20_000;
 
-        private final Connection connection;
+        private final DataSource source;
         private final String underlyingKey;
         private final LocalDate session;
         private final ZtTickParser parser;
         private final boolean verifyHashes;
         private final long last;
         private long next;
-        private PreparedStatement statement;
-        private ResultSet rows;
+        private final java.util.ArrayDeque<MarketEvent> page = new java.util.ArrayDeque<>();
         private MarketEvent head;
 
-        TickCursor(Connection connection, LocalDate session, String underlying, boolean verifyHashes)
-                throws SQLException {
-            this.connection = connection;
+        TickCursor(DataSource source, LocalDate session, String underlying, boolean verifyHashes) throws SQLException {
+            this.source = source;
             this.underlyingKey = ZtSourceKeys.underlyingKey(underlying);
             this.session = session;
             this.parser = new ZtTickParser(underlying);
             this.verifyHashes = verifyHashes;
             long first = 0;
             long max = -1;
-            try {
-                connection.setAutoCommit(false);
-                try (PreparedStatement bounds = connection.prepareStatement(ZtQueries.TICK_SEQUENCE_BOUNDS)) {
-                    bounds.setString(1, underlyingKey);
-                    bounds.setObject(2, session);
-                    try (ResultSet b = bounds.executeQuery()) {
-                        if (b.next() && b.getObject(1) != null) {
-                            first = b.getLong(1);
-                            max = b.getLong(2);
-                        }
+            try (Connection connection = source.getConnection();
+                 PreparedStatement bounds = connection.prepareStatement(ZtQueries.TICK_SEQUENCE_BOUNDS)) {
+                connection.setAutoCommit(true);
+                bounds.setString(1, underlyingKey);
+                bounds.setObject(2, session);
+                try (ResultSet b = bounds.executeQuery()) {
+                    if (b.next() && b.getObject(1) != null) {
+                        first = b.getLong(1);
+                        max = b.getLong(2);
                     }
                 }
-            } catch (SQLException e) {
-                connection.close();
-                throw e;
             }
             this.next = first;
             this.last = max;
         }
 
-        private boolean openNextPage() throws SQLException {
-            closePage();
-            if (next > last) {
-                return false;
+        /** Reads the next non-empty page into memory; false when the session is exhausted. */
+        private boolean readNextPage() throws SQLException {
+            while (page.isEmpty() && next <= last) {
+                try (Connection connection = source.getConnection();
+                     PreparedStatement statement = connection.prepareStatement(ZtQueries.TICKS_BY_SEQUENCE_PAGE)) {
+                    connection.setAutoCommit(true);
+                    statement.setString(1, underlyingKey);
+                    statement.setObject(2, session);
+                    statement.setLong(3, next);
+                    statement.setLong(4, next + PAGE_SEQUENCES);
+                    try (ResultSet rows = statement.executeQuery()) {
+                        while (rows.next()) {
+                            SourceTickRow row = ZtQueries.tickRow(rows);
+                            if (verifyHashes) {
+                                parser.verifiedHash(row);
+                            }
+                            page.add(parser.parse(row));
+                        }
+                    }
+                }
+                next += PAGE_SEQUENCES;
             }
-            statement = connection.prepareStatement(ZtQueries.TICKS_BY_SEQUENCE_PAGE);
-            statement.setFetchSize(FETCH_SIZE);
-            statement.setString(1, underlyingKey);
-            statement.setObject(2, session);
-            statement.setLong(3, next);
-            statement.setLong(4, next + PAGE_SEQUENCES);
-            next += PAGE_SEQUENCES;
-            rows = statement.executeQuery();
-            return true;
+            return !page.isEmpty();
         }
 
         @Override
         public boolean advance() throws SQLException {
-            while (true) {
-                if (rows != null && rows.next()) {
-                    SourceTickRow row = ZtQueries.tickRow(rows);
-                    if (verifyHashes) {
-                        parser.verifiedHash(row);
-                    }
-                    head = parser.parse(row);
-                    return true;
-                }
-                if (!openNextPage()) {
-                    head = null;
-                    return false;
-                }
+            if (page.isEmpty() && !readNextPage()) {
+                head = null;
+                return false;
             }
+            head = page.poll();
+            return true;
         }
 
         @Override
@@ -167,35 +164,9 @@ public final class ZtSessionSource implements SessionEventSource {
             return head;
         }
 
-        private void closePage() {
-            try {
-                if (rows != null) {
-                    rows.close();
-                }
-                if (statement != null) {
-                    statement.close();
-                }
-            } catch (SQLException ignored) {
-                // read-only cursor
-            }
-            rows = null;
-            statement = null;
-        }
-
         @Override
         public void close() {
-            closePage();
-            try {
-                connection.rollback();
-            } catch (SQLException ignored) {
-                // read-only cursor; nothing to undo
-            } finally {
-                try {
-                    connection.close();
-                } catch (SQLException ignored) {
-                    // pool handles broken connections
-                }
-            }
+            page.clear();
         }
     }
 
