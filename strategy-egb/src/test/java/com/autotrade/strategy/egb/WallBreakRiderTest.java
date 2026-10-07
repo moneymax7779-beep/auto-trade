@@ -61,4 +61,21 @@ class WallBreakRiderTest {
         notExpiry.decide(covering(true).set("regime.dteTradingDays", 2).at("12:40"), PositionView.FLAT);
         assertThat(notExpiry.decide(covering(true).set("regime.dteTradingDays", 2).at("12:41"), PositionView.FLAT).orders()).isEmpty();
     }
+
+    @Test
+    void v2UsesTheWallsOiDropOverTenMinutesSoStaleBseOiStillCounts() {
+        Strategy v2 = Strategies.load(Path.of("..", "config", "strategy", "wall-break-rider.v2.yaml")).create("SENSEX", Snapshots.SESSION);
+        Snapshots dropping = covering(false).set("options.callWallOiChangePct", -6.0).set("structure.spotChange3m", 40.0);
+        assertThat(v2.decide(dropping.at("12:40"), PositionView.FLAT).orders()).isEmpty();
+        assertThat(v2.decide(dropping.at("12:41"), PositionView.FLAT).orders()).singleElement()
+                .satisfies(o -> assertThat(o.side()).isEqualTo(OptionSide.CE));
+        Strategy shallow = Strategies.load(Path.of("..", "config", "strategy", "wall-break-rider.v2.yaml")).create("SENSEX", Snapshots.SESSION);
+        Snapshots small = covering(false).set("options.callWallOiChangePct", -3.0).set("structure.spotChange3m", 40.0);
+        shallow.decide(small.at("12:40"), PositionView.FLAT);
+        assertThat(shallow.decide(small.at("12:41"), PositionView.FLAT).orders()).as("a 3 % drop is not enough").isEmpty();
+        Strategy away = Strategies.load(Path.of("..", "config", "strategy", "wall-break-rider.v2.yaml")).create("SENSEX", Snapshots.SESSION);
+        Snapshots falling = covering(false).set("options.callWallOiChangePct", -6.0).set("structure.spotChange3m", -40.0);
+        away.decide(falling.at("12:40"), PositionView.FLAT);
+        assertThat(away.decide(falling.at("12:41"), PositionView.FLAT).orders()).as("index moving away from the wall").isEmpty();
+    }
 }

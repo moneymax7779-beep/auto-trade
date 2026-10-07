@@ -26,7 +26,9 @@ record WallBreakRiderConfig(
         double trailActivationPct,
         double trailGivebackPct,
         int timeStopMin,
-        double timeStopMinGainPct) {
+        double timeStopMinGainPct,
+        /** v2: the wall's OI must have fallen at least this % over 10 minutes with the index moving toward it (NaN = v1's weakening flags). */
+        double wallOiDropPct) {
 
     static WallBreakRiderConfig from(ThresholdConfig c) {
         return new WallBreakRiderConfig(c.contentHash(), c.version(), c.getInt("scope.dte"),
@@ -37,7 +39,8 @@ record WallBreakRiderConfig(
                 c.getDouble("position.premium_budget"), c.getInt("position.intended_lots"), c.getInt("position.strike_offset"),
                 c.getDouble("exits.premium_stop_pct"), c.getDouble("exits.trail_activation_pct"),
                 c.getDouble("exits.trail_giveback_pct"), c.getInt("exits.time_stop_min"),
-                c.getDouble("exits.time_stop_min_gain_pct"));
+                c.getDouble("exits.time_stop_min_gain_pct"),
+                c.has("signal.wall_oi_drop_pct") ? c.getDouble("signal.wall_oi_drop_pct") : Double.NaN);
     }
 
     @SuppressWarnings("unchecked")

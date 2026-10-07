@@ -43,5 +43,12 @@ public record OptionsFeatures(
         double premiumResponseCe,
         double premiumResponsePe,
         double atmCeSpreadPct,
-        double atmPeSpreadPct) {
+        double atmPeSpreadPct,
+        /**
+         * OI change at the call barrier (put support) strike over the longest wall-weakening lookback (10 min), percent;
+         * NaN without history. Unlike callWallWeakening it does not need OI to fall every minute, so it also works on
+         * BSE, whose option OI updates every 2-3 minutes (A-057/A-058).
+         */
+        double callWallOiChangePct,
+        double putFloorOiChangePct) {
 }

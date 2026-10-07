@@ -205,7 +205,19 @@ public final class OptionChainState {
                 ceQuote.delta, ceQuote.gamma, ceQuote.vega, ceQuote.theta, peQuote.delta,
                 premiumResponse(atmCe, ceQuote, time, spotSeries, atr1m),
                 premiumResponse(atmPe, peQuote, time, spotSeries, atr1m),
-                ceQuote.spreadPct, peQuote.spreadPct);
+                ceQuote.spreadPct, peQuote.spreadPct,
+                wallOiChangePct(callBarrier, time), wallOiChangePct(putSupport, time));
+    }
+
+    /** OI change at the barrier strike over the longest wall-weakening lookback, percent (NaN without history). */
+    private double wallOiChangePct(Barrier barrier, Instant time) {
+        if (barrier.contract == null || barrier.contract.oi.isEmpty()) {
+            return Double.NaN;
+        }
+        int minutes = config.wallWeakeningLookbackMin().stream().mapToInt(Integer::intValue).max().orElse(10);
+        double then = barrier.contract.oi.valueAt(time.minus(Duration.ofMinutes(minutes)));
+        double now = barrier.contract.oi.valueAt(time);
+        return then > 0 && !Double.isNaN(now) ? 100 * (now / then - 1) : Double.NaN;
     }
 
     /** Straddle change over {@code minutes}, percent; NaN without history. Call after {@link #snapshot}. */
@@ -514,7 +526,7 @@ public final class OptionChainState {
         double n = Double.NaN;
         return new OptionsFeatures(expiry == null ? null : expiry.toString(), n, n, contracts.size(), n, n, n, n, n, n, n,
                 n, "UNKNOWN", "UNKNOWN", n, n, n, n, false, false, n, n, n, n, n, n, n, n, n, "NONE", n, n, n, n, n, n,
-                n, n, n);
+                n, n, n, n, n);
     }
 
     static double midPrice(OptionTick tick) {

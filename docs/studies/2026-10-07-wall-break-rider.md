@@ -55,3 +55,17 @@ A PASS means a decision about live PAPER, not an automatic switch.
 **Reading: INSUFFICIENT** (2 trades on the counted days, < 3) and structurally blind on SENSEX, the index it was
 designed from. Not live. A version that tests OI on BSE's update cadence would be a new registered variant (v2); its
 design days stay excluded.
+
+## A-058, wall-break rider v2: registered 7 Oct 23:25 IST, before any result
+User, 23:20 IST: "yes build v2 and test it after the close". The v1 signal could not fire on SENSEX (BSE option OI
+updates every ~2.7 minutes). Features gain two numbers, nothing existing changes: `callWallOiChangePct` and
+`putFloorOiChangePct`, the OI change at the call barrier (put support) strike over 10 minutes, percent.
+**wbr-v2** = wbr-v1 with the signal: CE when the call wall's OI is down ≥ 5 % over 10 minutes and the index is up over
+3 minutes (PE: put floor down ≥ 5 %, index down), on 2 consecutive minutes; VWAP side, futures OI, window, exits and
+size as v1. 5 % is judgment, fixed now.
+
+Test after the 8 Oct close, one image, risk v10, the live set (7 strategies) with and without wbr-v2 and wbr-v2 alone:
+counted 29 Sep, 6 Oct (NIFTY, own), 8 Oct (SENSEX, own, the first forward day), 22 Sep (NIFTY, zt, held-out, read
+once for this hypothesis); design days 24 Sep and 1 Oct reported, not counted. **Reading as A-057**: < 3 wbr trades on
+the counted days = INSUFFICIENT (continue on forward expiry days to 8 counted days); else PASS if wbr-v2 alone > 0,
+set + wbr-v2 > set, no new kill switch, existing strategies keep ≥ 90 % on their winning days.

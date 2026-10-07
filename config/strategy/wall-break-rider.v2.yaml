@@ -1,0 +1,39 @@
+# Wall-break rider, v2 (user 2026-10-07 23:20 IST: "yes build v2 and test it after the close"; ledger A-058): v1 with the
+# signal measured on BSE's cadence too. v1 needed the wall's OI lower at each of 10, 5, 3, 1 minutes ago and now, which
+# never held on SENSEX (BSE option OI updates every ~2.7 min). v2: the call wall's (put floor's) OI down at least 5 %
+# over 10 minutes (options.callWallOiChangePct / putFloorOiChangePct) with the index moving toward it over 3 minutes,
+# on 2 consecutive minutes. Everything else as v1. 5 % is judgment, fixed before any test.
+# v1: Wall-break rider (user 2026-10-07 22:30 IST: "we can have this now, if not implemented?"; ledger A-057). Rules
+# registered before any test in docs/studies/2026-10-07-wall-break-rider.md. On the day the index expires, buy ATM when
+# the call wall (put floor) has lost open interest at every lookback for 10 minutes while the index moves toward it
+# (option writers covering), on 2 consecutive minutes, on the trend side of the VWAP proxy, futures OI not opposing.
+# Design days 24 Sep and 1 Oct (SENSEX) are not evidence. Values fixed at registration, not tuned.
+version: wbr-v2
+strategy: wall-break-rider
+status: UNCALIBRATED
+source: "user-request-2026-10-07 (A-058; values fixed at registration, not tuned)"
+
+scope:
+  dte: 0                               # only the index that expires today
+  entry_from: "10:30"
+  last_new_entry: "14:30"
+  flat_by: "15:15"
+
+signal:
+  confirm_minutes: 2                   # the signal on 2 consecutive snapshots
+  wall_oi_drop_pct: 5                  # v2: wall OI down >= 5 % over 10 min, index moving toward it over 3 min
+  reject_futures_states:               # futures OI must not oppose the move
+    CE: [FRESH_SHORT]
+    PE: [FRESH_LONG]
+
+position:
+  premium_budget: 250000               # half the starting capital (risk v10 scales it with equity); last in order
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 30                 # resting emergency stop
+  trail_activation_pct: 50             # as etr-v6: the trail arms at +50 % on the bid ...
+  trail_giveback_pct: 15               # ... and exits 15 % below the peak bid
+  time_stop_min: 15                    # a cascade starts fast or not at all: after 15 minutes ...
+  time_stop_min_gain_pct: 10           # ... exit unless the bid has been at least 10 % above the average premium

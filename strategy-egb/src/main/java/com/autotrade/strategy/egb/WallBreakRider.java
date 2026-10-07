@@ -22,7 +22,8 @@ import com.autotrade.strategy.Stage;
 import com.autotrade.strategy.Strategy;
 
 /**
- * Wall-break rider, v1 (ledger A-057): on the day the index expires, buy the ATM option when the call wall (put floor)
+ * Wall-break rider, v1 (ledger A-057; v2, A-058, replaces the weakening flags with the wall's OI change over 10
+ * minutes, which also works with BSE's slower OI updates): on the day the index expires, buy the ATM option when the call wall (put floor)
  * has lost open interest at every lookback for 10 minutes while the index moves toward it (writers covering), on
  * {@code signal.confirm_minutes} consecutive snapshots, on the trend side of the VWAP proxy and with futures OI not
  * opposing. Exits: a close back through the last swing, a peak trail on the held option, a no-progress time stop, the
@@ -62,8 +63,8 @@ final class WallBreakRider implements Strategy {
         boolean expiryDay = snapshot.regime().dteTradingDays() == config.dte();
         boolean continuous = SessionPhase.valueOf(snapshot.phase()).isContinuous();
         boolean window = expiryDay && continuous && !time.isBefore(config.entryFrom()) && time.isBefore(config.lastNewEntry());
-        ceStreak = snapshot.options().callWallWeakening() ? ceStreak + 1 : 0;
-        peStreak = snapshot.options().putFloorWeakening() ? peStreak + 1 : 0;
+        ceStreak = callSignal(snapshot) ? ceStreak + 1 : 0;
+        peStreak = putSignal(snapshot) ? peStreak + 1 : 0;
         Map<OptionSide, Map<String, Boolean>> conditions = new java.util.EnumMap<>(OptionSide.class);
         for (OptionSide side : OptionSide.values()) {
             conditions.put(side, conditions(side, snapshot, expiryDay, window));
@@ -120,6 +121,23 @@ final class WallBreakRider implements Strategy {
         MarketState state = new MarketState(Double.NaN, Double.NaN, Double.NaN, Double.NaN,
                 expiryDay ? "EXPIRY_WALLS" : "NOT_EXPIRY", null);
         return new Decision(now, snapshot.underlying(), state, ce, pe, List.copyOf(orders));
+    }
+
+    /** v1: the call-wall weakening flag; v2: the wall's OI down at least wall_oi_drop_pct over 10 min, index rising. */
+    private boolean callSignal(FeatureSnapshot s) {
+        if (Double.isNaN(config.wallOiDropPct())) {
+            return s.options().callWallWeakening();
+        }
+        double change = s.options().callWallOiChangePct();
+        return change <= -config.wallOiDropPct() && s.structure().spotChange3m() > 0;     // NaN compares false
+    }
+
+    private boolean putSignal(FeatureSnapshot s) {
+        if (Double.isNaN(config.wallOiDropPct())) {
+            return s.options().putFloorWeakening();
+        }
+        double change = s.options().putFloorOiChangePct();
+        return change <= -config.wallOiDropPct() && s.structure().spotChange3m() < 0;
     }
 
     private Map<String, Boolean> conditions(OptionSide side, FeatureSnapshot s, boolean expiryDay, boolean window) {
