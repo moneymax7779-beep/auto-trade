@@ -74,3 +74,9 @@ run once tonight on image d6cc716 (night2 batch), and the archive expiry days 3,
 - 24 Sep: the trail closed the 73900 PE at 14:02 at ₹315.55 (TRAIL_15) where v1's swing exit came at 14:36 at ₹285.31.
 **A-048: FAIL** (held-out −₹57,310 vs C, beyond −₹50,000). **A-049: PASS** on the registered rule; thin evidence
 (the trail acted on one independent day plus its design day). Going live is the user's decision.
+
+Re-check of 24 Sep (7 Oct 22:00 IST, image 0ce03d3): the first 24 Sep replays stopped at 15:08 of the replayed day
+(zt-tiger-v2's sequence numbers jump by about 2.2e10 there; the paged reader walked the gap and the idle connection of
+the other index was closed by zt's idle-in-transaction timeout). With short per-page connections and gap skipping,
+all six replays ran the full day (3,740,111 events, last snapshot 15:40) and reproduced the same nets: C and S
++₹2,37,954, T and ST +₹3,03,164, A-055 v10 +₹3,24,311, v11 +₹3,20,151. The verdicts stand.
