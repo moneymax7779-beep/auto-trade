@@ -23,9 +23,14 @@ final class EquityLedger {
      * {@code ??} is the JDBC escape for the jsonb "has key" operator ({@code ?} alone would be a parameter).
      */
     double realisedNet(String account) {
+        return realisedNet(account, null);
+    }
+
+    /** As {@link #realisedNet(String)}, counting only sessions on or after {@code from} (risk v10; null = all). */
+    double realisedNet(String account, java.time.LocalDate from) {
         Double net = jdbc.queryForObject("select coalesce(sum((summary->>'net')::numeric), 0) from trade.session "
-                + "where account = ? and mode = 'PAPER_LIVE' and status in ('DONE', 'STOPPED') and summary ?? 'net'",
-                Double.class, account);
+                + "where account = ? and mode = 'PAPER_LIVE' and status in ('DONE', 'STOPPED') and summary ?? 'net' "
+                + "and session_date >= ?", Double.class, account, from == null ? java.time.LocalDate.of(1970, 1, 1) : from);
         return net == null ? 0 : net;
     }
 

@@ -59,7 +59,7 @@ autotrade:
     features-file: config/features/features.v11.yaml   # v11 = v7 with the VWAP proxy using the 15-minute mean basis (A-030, user 2026-10-02: "yes switch to v11"); v7 = v6 + ATR seeded from the previous session
     exchange-file: config/exchange/nse-bse-sessions.v3.yaml
     costs-file: config/costs/india-index-options-costs.v2.yaml   # v2: Upstox Plus brokerage Rs 30/order from 2026-09-01 (A-044, user 2026-10-06)
-    risk-file: config/risk/paper-risk.v9.yaml   # v9 (A-047, user 2026-10-07 00:40: "switch to v9 and deploy before 09:00"): capital = equity (Rs 5L + realised net of finished live sessions), every budget x equity/5L, daily loss 22 % of equity; = v4 at Rs 5L. v4 = fixed Rs 5L / Rs 1.1L; v8 = v9 at 50 % per trade, 15 %
+    risk-file: config/risk/paper-risk.v10.yaml   # v10 (A-054, user 2026-10-07 07:15: "start the sizing from 5,00,000 from today"): v9 with equity counted from 7 Oct (Rs 5L + live sessions from that date). v9 (A-047): capital = equity, budgets x equity/5L, daily loss 22 % of equity
     poll-interval-ms: 250
     replay-speed: 0                # --mode=replay only: market seconds per second (e.g. 60); 0 = as fast as possible
     replay-source: zt              # --mode=replay only: zt (zt-tiger-v2's capture), own (auto-trade's live capture, md.*; from 28 Sep 2026) or bars (Upstox one-minute bars in hist.candle; --mode=fetch-bars loads them)

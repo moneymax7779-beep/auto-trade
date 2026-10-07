@@ -308,7 +308,7 @@ function EquityPanel({ today }: { today?: Status }) {
     >
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
         <Stat label="Starting capital" value={rupees(e.startingCapital)} />
-        <Stat label="Realised so far (finished sessions)" value={<Pnl value={e.realisedNet} />} />
+        <Stat label={e.equityFrom ? `Realised since ${e.equityFrom}` : "Realised so far (finished sessions)"} value={<Pnl value={e.realisedNet} />} />
         <Stat label={today ? "Capital this session" : "Capital next session"} value={rupees(sessionCapital)} />
         <Stat label="Size factor (× strategy budgets)" value={`${(today?.budgetScale ?? e.budgetScale).toFixed(2)}×`}
           tone={(today?.budgetScale ?? e.budgetScale) < 1 ? "down" : "up"} />

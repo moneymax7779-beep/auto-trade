@@ -393,7 +393,8 @@ class SessionRunner implements ApplicationRunner {
         // a replay uses the starting capital, so its results stay comparable day to day, unless replay-equity chains days
         RiskLimits baseRisk = RiskLimits.from(riskFile);
         RiskLimits risk = EquityLedger.apply(baseRisk,
-                replay ? t.replayRealisedNet(baseRisk.startingCapital()) : new EquityLedger(target).realisedNet(t.account()));
+                replay ? t.replayRealisedNet(baseRisk.startingCapital())
+                        : new EquityLedger(target).realisedNet(t.account(), baseRisk.equityFrom()));
         if (risk.equityMode()) {
             log.info("sizing from equity: capital {} (starting {}), daily loss limit {}, budget scale {}",
                     Math.round(risk.capital()), Math.round(risk.startingCapital()), Math.round(risk.dailyLossLimit()),

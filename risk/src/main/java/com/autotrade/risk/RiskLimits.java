@@ -37,7 +37,9 @@ public record RiskLimits(
         /** v8: the daily loss limit as a share of equity (NaN = the fixed rupee limit). */
         double dailyLossPct,
         /** v8: the share of a strategy's scaled budget it may use (1 = all). */
-        double premiumBudgetFraction) {
+        double premiumBudgetFraction,
+        /** v10: equity counts live sessions from this date on (null = all of them); earlier results are left behind. */
+        java.time.LocalDate equityFrom) {
 
     /** v8: these limits with the capital set to {@code equity}; the daily loss limit follows when it is a share. */
     public RiskLimits withEquity(double equity) {
@@ -46,7 +48,7 @@ public record RiskLimits(
                 noNewEntriesAfter, squareOffAt, maxFeedAgeSec, maxSpreadPct, entryBufferTicks, exitBufferTicks,
                 exitBufferPct, entryTimeoutSec, exitChaseSec, exitChaseMax, stopLimitOffsetPct, reconcileEverySec,
                 casEntryFrom, casEntryTo, maxLossPerTrade, deltaRiskPerTrade, equityMode, startingCapital, dailyLossPct,
-                premiumBudgetFraction);
+                premiumBudgetFraction, equityFrom);
     }
 
     /** v8: what a strategy file's rupee budget is multiplied by: equity / starting capital × the budget fraction. */
@@ -109,6 +111,7 @@ public record RiskLimits(
                 c.has("account.capital_mode") && "equity".equals(c.getString("account.capital_mode")),
                 c.has("account.starting_capital") ? c.getDouble("account.starting_capital") : c.getDouble("account.capital"),
                 c.has("account.daily_loss_pct") ? c.getDouble("account.daily_loss_pct") : Double.NaN,
-                c.has("sizing.premium_budget_pct") ? c.getDouble("sizing.premium_budget_pct") / 100.0 : 1.0);
+                c.has("sizing.premium_budget_pct") ? c.getDouble("sizing.premium_budget_pct") / 100.0 : 1.0,
+                c.has("account.equity_from") ? java.time.LocalDate.parse(String.valueOf(c.get("account.equity_from"))) : null);
     }
 }

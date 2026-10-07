@@ -42,7 +42,8 @@ class EquityController {
         double running = start;
         for (Map<String, Object> r : jdbc.queryForList("select session_date, coalesce(sum((summary->>'net')::numeric), 0) net "
                 + "from trade.session where account = ? and mode = 'PAPER_LIVE' and status in ('DONE', 'STOPPED') and summary ?? 'net' "
-                + "group by 1 order by 1", ACCOUNT)) {
+                + "and session_date >= ? group by 1 order by 1", ACCOUNT,
+                limits.equityFrom() == null ? LocalDate.of(1970, 1, 1) : limits.equityFrom())) {
             double net = ((Number) r.get("net")).doubleValue();
             Map<String, Object> day = new LinkedHashMap<>();
             day.put("date", ((java.sql.Date) r.get("session_date")).toLocalDate().toString());
@@ -58,6 +59,7 @@ class EquityController {
         out.put("riskVersion", limits.hash() == null ? null : riskVersion());
         out.put("equityMode", limits.equityMode());
         out.put("startingCapital", Math.round(start));
+        out.put("equityFrom", limits.equityFrom() == null ? null : limits.equityFrom().toString());
         out.put("realisedNet", Math.round(running - start));
         out.put("equity", Math.round(next.capital()));
         out.put("budgetScale", Math.round(next.budgetScale() * 1000) / 1000.0);

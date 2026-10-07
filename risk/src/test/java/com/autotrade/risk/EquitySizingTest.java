@@ -48,4 +48,15 @@ class EquitySizingTest {
         assertThat(today.dailyLossLimit()).isCloseTo(86_820.6, within(0.1));
         assertThat(v9.withEquity(1_000_000).budgetScale()).isCloseTo(2.0, within(1e-9));
     }
+
+    @Test
+    void v10IsV9WithTheEquityCountedFromSevenOctober() {
+        RiskLimits v10 = RiskLimits.from(ThresholdConfig.load(Path.of("..", "config", "risk", "paper-risk.v10.yaml")));
+        assertThat(v10.equityFrom()).isEqualTo(java.time.LocalDate.of(2026, 10, 7));
+        assertThat(v10.budgetScale()).isCloseTo(1.0, within(1e-9));
+        assertThat(v10.withEquity(500_000).dailyLossLimit()).isEqualTo(110_000);
+        assertThat(v10.withEquity(600_000).equityFrom()).isEqualTo(java.time.LocalDate.of(2026, 10, 7));
+        RiskLimits v9 = RiskLimits.from(ThresholdConfig.load(Path.of("..", "config", "risk", "paper-risk.v9.yaml")));
+        assertThat(v9.equityFrom()).isNull();
+    }
 }

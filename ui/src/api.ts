@@ -249,6 +249,8 @@ export interface Equity {
   riskVersion?: string | null;
   equityMode: boolean;
   startingCapital: number;
+  /** risk v10: the date the equity counts from (null = every live session) */
+  equityFrom?: string | null;
   realisedNet: number;
   equity: number;
   budgetScale: number;
