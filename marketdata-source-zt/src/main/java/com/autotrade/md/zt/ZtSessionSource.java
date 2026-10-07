@@ -143,8 +143,19 @@ public final class ZtSessionSource implements SessionEventSource {
                             page.add(parser.parse(row));
                         }
                     }
+                    next += PAGE_SEQUENCES;
+                    if (page.isEmpty() && next <= last) {
+                        // an empty page: jump to the next sequence number that exists (the numbering can jump mid-session)
+                        try (PreparedStatement gap = connection.prepareStatement(ZtQueries.NEXT_TICK_SEQUENCE)) {
+                            gap.setString(1, underlyingKey);
+                            gap.setObject(2, session);
+                            gap.setLong(3, next);
+                            try (ResultSet g = gap.executeQuery()) {
+                                next = g.next() && g.getObject(1) != null ? g.getLong(1) : last + 1;
+                            }
+                        }
+                    }
                 }
-                next += PAGE_SEQUENCES;
             }
             return !page.isEmpty();
         }

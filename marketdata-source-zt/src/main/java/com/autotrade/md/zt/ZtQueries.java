@@ -30,6 +30,13 @@ public final class ZtQueries {
             + "from market_tick_records where underlying_key = ? and session_date = ? and sequence_number >= ? "
             + "and sequence_number < ? order by sequence_number";
 
+    /**
+     * The first sequence number at or after a value (null when none): skips gaps in the numbering (on 24 Sep 2026 it
+     * jumped by about 2.2e10 mid-session). Params: underlying key, session date, from (incl.).
+     */
+    public static final String NEXT_TICK_SEQUENCE = "select min(sequence_number) from market_tick_records "
+            + "where underlying_key = ? and session_date = ? and sequence_number >= ?";
+
     /** The sequence-number bounds of a session's ticks. Params: underlying key, session date. */
     public static final String TICK_SEQUENCE_BOUNDS = "select min(sequence_number), max(sequence_number) "
             + "from market_tick_records where underlying_key = ? and session_date = ?";
