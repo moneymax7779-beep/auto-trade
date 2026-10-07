@@ -60,3 +60,17 @@ Mac and are added when it is connected. Held-out 22 and 24 Sep: read once, after
 **Reading so far: no evidence either way from the test days.** The held-out days 22 Sep (NIFTY expiry, the straddle
 and the rider both traded) and 24 Sep (SENSEX expiry, the rider traded twice) are the only informative days; they
 run once tonight on image d6cc716 (night2 batch), and the archive expiry days 3, 10, 15, 17 Sep need the Expansion drive.
+
+## Held-out result (22, 24 Sep, zt, read once; GCP night2 batch, image d6cc716, 7 Oct 20:40–21:00 IST)
+
+| day | C | S ebs-v3 | T etr-v6 | ST |
+|---|---|---|---|---|
+| 22 Sep NIFTY | +1,78,342 | +1,21,032 | +1,78,342 | +1,21,032 |
+| 24 Sep SENSEX | +2,37,954 | +2,37,954 | +3,03,164 | +3,03,164 |
+| total | +4,16,296 | +3,58,986 | +4,81,506 | +4,24,196 |
+
+- 22 Sep: at half budget the straddle made +₹76,093 instead of +₹1,52,300 (both legs 2,990 instead of 5,980); the freed
+  capital let expiry-gamma-breakout trade (+₹18,896). The trend rider was unchanged (+₹7,976).
+- 24 Sep: the trail closed the 73900 PE at 14:02 at ₹315.55 (TRAIL_15) where v1's swing exit came at 14:36 at ₹285.31.
+**A-048: FAIL** (held-out −₹57,310 vs C, beyond −₹50,000). **A-049: PASS** on the registered rule; thin evidence
+(the trail acted on one independent day plus its design day). Going live is the user's decision.
