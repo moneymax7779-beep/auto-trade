@@ -15,7 +15,15 @@ public record TradingProperties(Trading trading, Source source, Upstox upstox) {
                           List<String> strategyFiles, String featuresFile, String exchangeFile, String costsFile,
                           String riskFile, long pollIntervalMs, long recheckWindowMs, String startAt, String stopAfter,
                           String feed, double replaySpeed, List<String> tradeUnderlyings, String replaySource,
-                          List<String> shadowStrategyFiles) {
+                          List<String> shadowStrategyFiles, Double replayEquity) {
+
+        /**
+         * --mode=replay only: the equity the replayed day starts from (risk v8/v9 size from it), so consecutive days can
+         * be chained (bin/replay-chain.sh); absent = the starting capital, which keeps single replays comparable.
+         */
+        public double replayRealisedNet(double startingCapital) {
+            return replayEquity == null ? 0 : replayEquity - startingCapital;
+        }
 
         /** --mode=replay only: "own" replays auto-trade's own live capture (md.*), anything else zt-tiger-v2. */
         public boolean replayFromOwnCapture() {

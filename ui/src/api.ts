@@ -72,6 +72,11 @@ export interface Status {
   lastEvent?: string | null;
   feedLagSeconds?: number | null;
   dayPnl?: number;
+  /** risk v8/v9: the session's capital (equity at its start), the starting capital, sizing and the daily loss limit */
+  capital?: number;
+  startingCapital?: number;
+  budgetScale?: number;
+  dailyLossLimit?: number;
   killSwitches?: string[];
   openPositions?: PositionRow[];
   closedPositions?: PositionRow[];
@@ -231,3 +236,23 @@ export const rupees = (value: number | null | undefined) =>
 
 export const fixed = (value: number | null | undefined, digits = 2) =>
   value == null || Number.isNaN(value) ? "–" : value.toFixed(digits);
+
+/** /api/equity: the live account's equity, starting capital + realised net of every finished live session. */
+export interface EquityDay {
+  date: string;
+  equityBefore: number;
+  net: number;
+  equityAfter: number;
+}
+export interface Equity {
+  account: string;
+  riskVersion?: string | null;
+  equityMode: boolean;
+  startingCapital: number;
+  realisedNet: number;
+  equity: number;
+  budgetScale: number;
+  dailyLossLimit: number;
+  asOf: string;
+  days: EquityDay[];
+}

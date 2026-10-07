@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router";
 import {
-  get, parseSide, post, rupees, type LastDecisionRow, type MarketState, type RejectionRow,
+  get, parseSide, post, rupees, type Equity, type LastDecisionRow, type MarketState, type RejectionRow,
   type SessionRow, type Status, type StrategyView, type TradePositionRow,
 } from "../api";
 import { ConfirmButton, ErrorNote, Loading, Panel, Pnl, Stat } from "../components/ui";
@@ -28,6 +28,7 @@ export function LivePage() {
     return (
       <div className="space-y-4">
       <AlertBanner />
+      <EquityPanel />
       <Panel title={s.schedule?.mode === "auto" ? "Waiting for the next trading session" : "No trading session running"}>
         {s.schedule?.mode === "auto" && next ? (
           <p className="text-sm">
@@ -81,6 +82,8 @@ export function LivePage() {
         </div>
         {action.error && <div className="mt-3"><ErrorNote error={action.error} /></div>}
       </Panel>
+
+      <EquityPanel today={s} />
 
       <LiveOverview views={s.strategy ?? {}} positions={s.openPositions ?? []} />
 
@@ -279,4 +282,62 @@ function formatStart(value: string): string {
   const date = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
   const day = date.toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
   return `${day} ${m[4]}`;
+}
+
+/**
+ * The account's equity: starting capital plus the realised net of every finished live session (risk v8/v9 size every
+ * strategy from it at the start of each session). Today's P&L is added after the session ends.
+ */
+function EquityPanel({ today }: { today?: Status }) {
+  const equity = useQuery({ queryKey: ["equity"], queryFn: () => get<Equity>("/api/equity"), refetchInterval: 60000 });
+  const [open, setOpen] = useState(false);
+  if (equity.isLoading) return <Loading what="equity" />;
+  if (equity.error) return <ErrorNote error={equity.error} />;
+  const e = equity.data!;
+  const sessionCapital = today?.capital ?? e.equity;
+  const live = today?.dayPnl ?? 0;
+  const days = [...e.days].reverse();
+  return (
+    <Panel
+      title={<>Account equity · {e.account}{e.riskVersion ? <> · <span className="text-muted">{e.riskVersion}</span></> : null}</>}
+      right={
+        <button className="text-sm text-accent underline" onClick={() => setOpen(!open)}>
+          {open ? "Hide" : "Show"} day by day ({e.days.length})
+        </button>
+      }
+    >
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+        <Stat label="Starting capital" value={rupees(e.startingCapital)} />
+        <Stat label="Realised so far (finished sessions)" value={<Pnl value={e.realisedNet} />} />
+        <Stat label={today ? "Capital this session" : "Capital next session"} value={rupees(sessionCapital)} />
+        <Stat label="Size factor (× strategy budgets)" value={`${(today?.budgetScale ?? e.budgetScale).toFixed(2)}×`}
+          tone={(today?.budgetScale ?? e.budgetScale) < 1 ? "down" : "up"} />
+        <Stat label="Daily loss limit" value={rupees(today?.dailyLossLimit ?? e.dailyLossLimit)} />
+        <Stat label={today ? "Equity if closed now" : "Equity"} value={rupees(sessionCapital + live)} />
+      </div>
+      {!e.equityMode && (
+        <p className="mt-2 text-sm text-muted">The risk file uses a fixed capital: profits are not added to the size.</p>
+      )}
+      {open && (
+        <table className="mt-3 w-full text-sm">
+          <thead>
+            <tr className="text-left text-muted">
+              <th className="py-1">Session</th><th className="text-right">Equity before</th>
+              <th className="text-right">Net</th><th className="text-right">Equity after</th>
+            </tr>
+          </thead>
+          <tbody>
+            {days.map((d) => (
+              <tr key={d.date} className="border-t border-line">
+                <td className="py-1 num">{d.date}</td>
+                <td className="text-right num">{rupees(d.equityBefore)}</td>
+                <td className="text-right"><Pnl value={d.net} /></td>
+                <td className="text-right num">{rupees(d.equityAfter)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </Panel>
+  );
 }

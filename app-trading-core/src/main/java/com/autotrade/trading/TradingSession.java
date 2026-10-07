@@ -477,6 +477,7 @@ public final class TradingSession {
                     : Duration.between(last, Instant.now()).toMillis() / 1000.0);
             status.put("dayPnl", Math.round(oms.dayPnl()));
             status.put("capital", Math.round(settings.risk().capital()));
+            status.put("startingCapital", Math.round(settings.risk().startingCapital()));
             status.put("dailyLossLimit", Math.round(settings.risk().dailyLossLimit()));
             status.put("budgetScale", Math.round(settings.risk().budgetScale() * 100) / 100.0);
             status.put("killSwitches", killSwitch.engaged().keySet());

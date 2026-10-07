@@ -54,10 +54,10 @@ class TradeUnderlyingsTest {
     @Test
     void propertiesFallBackToTheRecordedList() {
         TradingProperties.Trading none = new TradingProperties.Trading("P", List.of("NIFTY", "BANKNIFTY"), "base", null,
-                null, null, null, null, null, 250, 3000, "09:00", "15:45", "upstox", 0, null, null, null);
+                null, null, null, null, null, 250, 3000, "09:00", "15:45", "upstox", 0, null, null, null, null);
         assertThat(none.tradeUnderlyingList()).containsExactly("NIFTY", "BANKNIFTY");
         TradingProperties.Trading some = new TradingProperties.Trading("P", List.of("NIFTY", "BANKNIFTY"), "base", null,
-                null, null, null, null, null, 250, 3000, "09:00", "15:45", "upstox", 0, List.of("NIFTY"), null, null);
+                null, null, null, null, null, 250, 3000, "09:00", "15:45", "upstox", 0, List.of("NIFTY"), null, null, null);
         assertThat(some.tradeUnderlyingList()).containsExactly("NIFTY");
     }
 }

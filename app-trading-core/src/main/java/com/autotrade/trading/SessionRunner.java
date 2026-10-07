@@ -386,9 +386,10 @@ class SessionRunner implements ApplicationRunner {
                 : new CombinedSessionHistory(new ZtSessionHistory(source), new OwnSessionHistory(target),
                         replay ? referenceStore : liveReference);
         // risk v8: live sizes from the account's equity (starting capital + realised net of finished live sessions);
-        // a replay uses the starting capital, so its results stay comparable day to day
-        RiskLimits risk = EquityLedger.apply(RiskLimits.from(riskFile),
-                replay ? 0 : new EquityLedger(target).realisedNet(t.account()));
+        // a replay uses the starting capital, so its results stay comparable day to day, unless replay-equity chains days
+        RiskLimits baseRisk = RiskLimits.from(riskFile);
+        RiskLimits risk = EquityLedger.apply(baseRisk,
+                replay ? t.replayRealisedNet(baseRisk.startingCapital()) : new EquityLedger(target).realisedNet(t.account()));
         if (risk.equityMode()) {
             log.info("sizing from equity: capital {} (starting {}), daily loss limit {}, budget scale {}",
                     Math.round(risk.capital()), Math.round(risk.startingCapital()), Math.round(risk.dailyLossLimit()),

@@ -59,6 +59,7 @@ autotrade:
     poll-interval-ms: 250
     replay-speed: 0                # --mode=replay only: market seconds per second (e.g. 60); 0 = as fast as possible
     replay-source: zt              # --mode=replay only: zt (zt-tiger-v2's capture), own (auto-trade's live capture, md.*; from 28 Sep 2026) or bars (Upstox one-minute bars in hist.candle; --mode=fetch-bars loads them)
+    # replay-equity:               # --mode=replay only: start the replayed day from this equity (bin/replay-chain.sh chains days); absent = starting capital
     # Shadow mode (--mode=auto): after each live session, these candidates replay the day from own capture on
     # account SHADOW-1 (no orders anywhere) and the result is sent with the alerts. --mode=shadow --session=D runs it by hand.
     shadow-strategy-files:           # each runs in its own shadow session (etr-v1 also trades live, in the live set)
