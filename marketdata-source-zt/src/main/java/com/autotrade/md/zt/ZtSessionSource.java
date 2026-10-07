@@ -147,28 +147,122 @@ public final class ZtSessionSource implements SessionEventSource {
         void bind(PreparedStatement statement) throws SQLException;
     }
 
-    private static final class TickCursor extends JdbcCursor {
+    /**
+     * A session's ticks of one underlying in capture order, read in pages of {@link #PAGE_SEQUENCES} sequence numbers
+     * inside one read-only transaction (a single sorted query of a whole session exceeds zt-tiger-v2's temp_file_limit).
+     */
+    private static final class TickCursor implements EventCursor {
 
+        static final long PAGE_SEQUENCES = 50_000;
+
+        private final Connection connection;
+        private final String underlyingKey;
+        private final LocalDate session;
         private final ZtTickParser parser;
         private final boolean verifyHashes;
+        private final long last;
+        private long next;
+        private PreparedStatement statement;
+        private ResultSet rows;
+        private MarketEvent head;
 
         TickCursor(Connection connection, LocalDate session, String underlying, boolean verifyHashes)
                 throws SQLException {
-            super(connection, ZtQueries.TICKS_BY_SEQUENCE, statement -> {
-                statement.setString(1, ZtSourceKeys.underlyingKey(underlying));
-                statement.setObject(2, session);
-            });
+            this.connection = connection;
+            this.underlyingKey = ZtSourceKeys.underlyingKey(underlying);
+            this.session = session;
             this.parser = new ZtTickParser(underlying);
             this.verifyHashes = verifyHashes;
+            long first = 0;
+            long max = -1;
+            try {
+                connection.setAutoCommit(false);
+                try (PreparedStatement bounds = connection.prepareStatement(ZtQueries.TICK_SEQUENCE_BOUNDS)) {
+                    bounds.setString(1, underlyingKey);
+                    bounds.setObject(2, session);
+                    try (ResultSet b = bounds.executeQuery()) {
+                        if (b.next() && b.getObject(1) != null) {
+                            first = b.getLong(1);
+                            max = b.getLong(2);
+                        }
+                    }
+                }
+            } catch (SQLException e) {
+                connection.close();
+                throw e;
+            }
+            this.next = first;
+            this.last = max;
+        }
+
+        private boolean openNextPage() throws SQLException {
+            closePage();
+            if (next > last) {
+                return false;
+            }
+            statement = connection.prepareStatement(ZtQueries.TICKS_BY_SEQUENCE_PAGE);
+            statement.setFetchSize(FETCH_SIZE);
+            statement.setString(1, underlyingKey);
+            statement.setObject(2, session);
+            statement.setLong(3, next);
+            statement.setLong(4, next + PAGE_SEQUENCES);
+            next += PAGE_SEQUENCES;
+            rows = statement.executeQuery();
+            return true;
         }
 
         @Override
-        MarketEvent map() throws SQLException {
-            SourceTickRow row = ZtQueries.tickRow(rows);
-            if (verifyHashes) {
-                parser.verifiedHash(row);
+        public boolean advance() throws SQLException {
+            while (true) {
+                if (rows != null && rows.next()) {
+                    SourceTickRow row = ZtQueries.tickRow(rows);
+                    if (verifyHashes) {
+                        parser.verifiedHash(row);
+                    }
+                    head = parser.parse(row);
+                    return true;
+                }
+                if (!openNextPage()) {
+                    head = null;
+                    return false;
+                }
             }
-            return parser.parse(row);
+        }
+
+        @Override
+        public MarketEvent head() {
+            return head;
+        }
+
+        private void closePage() {
+            try {
+                if (rows != null) {
+                    rows.close();
+                }
+                if (statement != null) {
+                    statement.close();
+                }
+            } catch (SQLException ignored) {
+                // read-only cursor
+            }
+            rows = null;
+            statement = null;
+        }
+
+        @Override
+        public void close() {
+            closePage();
+            try {
+                connection.rollback();
+            } catch (SQLException ignored) {
+                // read-only cursor; nothing to undo
+            } finally {
+                try {
+                    connection.close();
+                } catch (SQLException ignored) {
+                    // pool handles broken connections
+                }
+            }
         }
     }
 

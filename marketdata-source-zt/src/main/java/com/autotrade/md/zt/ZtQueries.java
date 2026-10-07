@@ -19,6 +19,21 @@ public final class ZtQueries {
             + "instrument_type, quote_source, analytics_complete, depth_complete, payload_hash, payload_json "
             + "from market_tick_records where underlying_key = ? and session_date = ? order by sequence_number";
 
+    /**
+     * {@link #TICKS_BY_SEQUENCE} for one range of sequence numbers. A whole session in one sorted query needs
+     * gigabytes of temporary space (the payloads ride along in the sort), more than zt-tiger-v2's temp_file_limit
+     * allows; a page of sequence numbers sorts within it. Params: underlying key, session date, from (incl.), to (excl.).
+     */
+    public static final String TICKS_BY_SEQUENCE_PAGE = "select sequence_number, tick_type, instrument_token, symbol, "
+            + "exchange_timestamp_ms, received_at, contract_expiry, contract_lot_size, exchange_segment, "
+            + "instrument_type, quote_source, analytics_complete, depth_complete, payload_hash, payload_json "
+            + "from market_tick_records where underlying_key = ? and session_date = ? and sequence_number >= ? "
+            + "and sequence_number < ? order by sequence_number";
+
+    /** The sequence-number bounds of a session's ticks. Params: underlying key, session date. */
+    public static final String TICK_SEQUENCE_BOUNDS = "select min(sequence_number), max(sequence_number) "
+            + "from market_tick_records where underlying_key = ? and session_date = ?";
+
     /** Params: underlying key, session date. */
     public static final String TICK_COUNTS = "select tick_type, count(*), min(sequence_number), max(sequence_number) "
             + "from market_tick_records where underlying_key = ? and session_date = ? group by tick_type";
