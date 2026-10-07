@@ -106,3 +106,23 @@ variants C (live set) and E3 (live set + esr-v3) and A3 (esr-v3 alone) on the fi
 (3) no disturbance: on no day does the account kill switch fire in E3 when it does not in C, and the existing
 strategies' combined net in E3 is ≥ 90 % of their net in C on every day where they made money in C. A PASS means a
 decision to run it beside the live set; forward days decide after that.
+
+### A-052 result (GCP night2 batch, image d6cc716 with paged zt reads, 7 Oct 18:00–19:10 IST)
+
+| day | C live set (5) | E3 set + esr-v3 | of which esr-v3 | A3 esr-v3 alone |
+|---|---|---|---|---|
+| 29 Sep NIFTY | 0 | −18,079 | −18,079 | −18,079 |
+| 1 Oct SENSEX | +8,50,438 | +7,45,038 | −1,05,399 | −1,05,399 |
+| 6 Oct NIFTY | −46,151 | +20,966 | +67,117 | +67,117 |
+| 22 Sep NIFTY (held-out) | +1,78,342 | +81,440 | −52,149 | −52,149 |
+| 24 Sep SENSEX (held-out) | +2,37,954 | +3,55,673 | +1,75,695 | +1,75,695 |
+| total | +12,20,583 | +11,85,038 | +67,185 | +67,185 |
+
+- Rule (1), E3 nets more than C: **fails** (−₹35,545).
+- Rule (2), worst day: E3 −₹18,079 vs C −₹46,151: holds.
+- Rule (3), no new kill switch: holds (none in either).
+- Rule (4), the existing strategies keep ≥ 90 % on days they made money: **fails**. 22 Sep: straddle +₹1,07,547 in E3 vs
+  +₹1,52,300 in C (existing 75 %); 24 Sep: trend rider +₹1,70,573 vs +₹2,28,549 (existing 76 %). esr-v3 held capital
+  when they wanted it.
+**Reading: FAIL.** The two-loss stop worked (no day below −₹1,05,399 and no kill switch), but esr-v3 makes +₹67,185 on
+five expiry days by itself and costs the existing strategies more than that when it shares the account. Not deployed.
