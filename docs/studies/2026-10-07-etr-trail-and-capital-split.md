@@ -1,0 +1,40 @@
+# ETR peak trail (etr-v6) and expiry-day capital split (ebs-v3): registered before any result (ledger A-048, A-049)
+
+User, 7 Oct 2026 01:00 IST, after the ₹10 crore goal review: "yes build 1 and 2 and test them after the close".
+Both are changes to the engine that earned 69 % of the replay record (expiry-trend-rider, A-029), so both are judged on
+the same days with the same discipline as every other rule: values fixed here, one variant each, no tuning after the
+results, held-out days read once.
+
+## What the record says (the reason for each change)
+- Capital: in the 13 replayed days the trend rider's entries or adds were refused for capital 9 times. Six were its own
+  earlier stages filling the account; three, all on 22 Sep (a held-out day), were the expiry-breakout straddle holding
+  the whole ₹5L until 14:00 while the rider's trigger fired at 13:54, 13:55 and 14:01. Opening drive already has a
+  ₹1,00,000 expiry-day budget, so the "opening drive blocks ETR" premise of the review was wrong; the contention is
+  straddle vs rider, both expiry strategies. **ebs-v3** = ebs-v2 with `position.premium_budget: 250000`.
+- Runner management: on 1 Oct the held put peaked near ₹804 around 14:00 and the swing exit fired at 14:30 at ₹610,
+  a quarter below the peak; 15 Sep ran into the 15:15 flat-by; 24 Sep exited on the swing at ₹285. The A-042 time stop
+  made things worse (it freed the slot for a bad re-entry), so this is a trail on the option itself, not a clock.
+  **etr-v6** = etr-v1 plus: once the held option's bid is 50 % above the average premium, exit when the bid falls 15 %
+  below its running peak (`TRAIL_15`); swing exit, flat-by and the 40 % resting stop unchanged. 50 and 15 are judgment
+  (the swing exit tolerated a 25 % giveback on the design day); they are not fitted and will not be changed after the
+  result. 1 Oct is the design day and is not evidence for v6.
+
+## Test (after the 7 Oct close)
+Image from branch `exp/a048-a049` (code = main 9718ed5 plus the trail), features v11, risk v9 (= v4 at ₹5L in replay),
+costs v2. Four variants of the live set on each day, from the same image:
+- C control: ebs-v2, ecr-v11, odb-v3, egb-v4, etr-v1 (the live set);
+- S split: C with ebs-v3;
+- T trail: C with etr-v6;
+- ST: both.
+Days: GCP own capture 28, 29, 30 Sep, 1, 5, 6 Oct and zt-tiger-v2 23, 25 Sep (read after hours) = 8 test days, of
+which 23, 25, 29 Sep, 1, 6 Oct are expiry days. The archive days 3, 8, 10, 15, 17 Sep need the Expansion drive on the
+Mac and are added when it is connected. Held-out 22 and 24 Sep: read once, after the test days, both expiry days.
+1 Oct counts for S, not for T or ST (design day of the trail).
+
+## Reading, fixed now
+- A-048 (S) PASS if, over the test days, S net ≥ C net and on the days the straddle traded S loses no more than half of
+  C's straddle profit on those days; held-out: S net ≥ C net − ₹50,000.
+- A-049 (T) PASS if, over the test days excluding 1 Oct, T net ≥ C net and T keeps ≥ 90 % of C's profit on each day
+  where C made ≥ ₹2,00,000 (a trail must not cut the runners it is meant to protect); held-out: T net ≥ C net.
+- ST is reported, not judged: it goes live only if both pass. A PASS means a decision about live PAPER, not an
+  automatic switch; the compounding sizing now live (risk v9) multiplies any unverified rule's losses.

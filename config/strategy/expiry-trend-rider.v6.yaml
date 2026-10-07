@@ -1,0 +1,37 @@
+# Expiry trend rider, v6 (user 2026-10-07, for the Rs 10 crore goal; ledger A-049): v1 plus a peak trail on the held
+# option: once its bid is 50 % above the average premium, exit when the bid falls 15 % below its running peak
+# (reason TRAIL_15). The swing exit, flat_by and the resting premium stop stay. Designed after the 1 Oct runner
+# gave back a quarter of its peak premium before the swing exit; 1 Oct is therefore not evidence for v6.
+# v1 (user's request 2026-10-01: "build it, test on archive and run shadow"). Rules registered
+# before any code or result in docs/studies/2026-10-01-expiry-trend-rider.md (ledger A-029). Designed from the
+# 1 Oct SENSEX expiry fall, so 1 Oct is not evidence. On the day the index expires, ride new day lows (highs)
+# beyond the opening range while breadth, futures OI and ATM IV agree; add on each new extreme; exit on a
+# 3-minute close back beyond the last swing. No limit on trades.
+version: etr-v6
+strategy: expiry-trend-rider
+status: UNCALIBRATED
+source: "user-request-2026-10-07 (A-049: \"build 1 and 2 and test them after the close\"; values fixed at registration, not tuned)"
+
+scope:
+  dte: 0                               # only the index that expires today
+  entry_from: "11:00"                  # new entries and adds from …
+  last_new_entry: "14:30"              # … until (exclusive)
+  flat_by: "15:15"                     # whole position closed
+
+trend:
+  breadth_min: 50                      # weighted mover breadth <= -50 for puts, >= +50 for calls
+  reject_futures_states:               # futures OI must not oppose the move
+    PE: [FRESH_LONG, SHORT_COVERING]
+    CE: [FRESH_SHORT, LONG_UNWIND]
+  iv_change_3m_min: 0                  # ATM IV rising over 3 minutes (> 0)
+
+position:
+  premium_budget: 500000               # the full plan (entry + adds) at the entry ask
+  intended_lots: 4                     # 1 plan lot per entry or add (about ₹1,25,000 each)
+  max_adds: 3
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 40                 # resting emergency stop; the swing exit comes first
+  trail_activation_pct: 50             # v6: the trail arms when the held option's bid is 50 % above the average premium
+  trail_giveback_pct: 15               # v6: then exit when the bid is 15 % below its running peak

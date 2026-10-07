@@ -29,7 +29,11 @@ record ExpiryTrendRiderConfig(
         /** v4: exit when no new extreme in the trade's direction for this many minutes (0 / absent = off). */
         int noNewExtremeMin,
         /** v5: after a time-stop exit, no new entry for the rest of that index's day (absent = false). */
-        boolean noReentryAfterTimeStop) {
+        boolean noReentryAfterTimeStop,
+        /** v6: the trail arms once the held option's bid is this % above the average premium (0 / absent = off). */
+        double trailActivationPct,
+        /** v6: once armed, exit when the bid falls this % below its running peak. */
+        double trailGivebackPct) {
 
     static ExpiryTrendRiderConfig from(ThresholdConfig c) {
         return new ExpiryTrendRiderConfig(c.contentHash(), c.version(), c.getInt("scope.dte"),
@@ -43,7 +47,9 @@ record ExpiryTrendRiderConfig(
                 c.getDouble("exits.premium_stop_pct"),
                 c.has("exits.pyramid_risk_cap") && c.getBoolean("exits.pyramid_risk_cap"),
                 c.has("exits.no_new_extreme_min") ? c.getInt("exits.no_new_extreme_min") : 0,
-                c.has("exits.no_reentry_after_time_stop") && c.getBoolean("exits.no_reentry_after_time_stop"));
+                c.has("exits.no_reentry_after_time_stop") && c.getBoolean("exits.no_reentry_after_time_stop"),
+                c.has("exits.trail_activation_pct") ? c.getDouble("exits.trail_activation_pct") : 0,
+                c.has("exits.trail_giveback_pct") ? c.getDouble("exits.trail_giveback_pct") : 0);
     }
 
     @SuppressWarnings("unchecked")

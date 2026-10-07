@@ -131,4 +131,29 @@ class ExpiryTrendRiderTest {
         v4.decide(falling(72060, 72050).at("13:11"), holdingPuts());
         assertThat(v4.decide(falling(71990, 71980).at("13:24"), PositionView.FLAT).orders()).as("v4 re-enters").hasSize(1);
     }
+
+    @Test
+    void v6TrailsThePeakBidOnceFiftyPercentUpAndExitsFifteenPercentBelowIt() {
+        Strategy v6 = Strategies.load(Path.of("..", "config", "strategy", "expiry-trend-rider.v6.yaml")).create("SENSEX", Snapshots.SESSION);
+        v6.decide(falling(72110, 72100).at("12:40"), PositionView.FLAT);
+        assertThat(v6.decide(falling(72060, 72050).at("12:41"), PositionView.FLAT).orders()).hasSize(1);   // entry on a new low
+        PositionView up40 = new PositionView(true, OptionSide.PE, 1, 200, null, 280);
+        PositionView up60 = new PositionView(true, OptionSide.PE, 1, 200, null, 320);
+        PositionView peak = new PositionView(true, OptionSide.PE, 1, 200, null, 400);
+        PositionView back14 = new PositionView(true, OptionSide.PE, 1, 200, null, 345);
+        PositionView back15 = new PositionView(true, OptionSide.PE, 1, 200, null, 340);
+        assertThat(v6.decide(falling(72040, 72030).at("12:50"), up40).orders()).as("not armed below +50 %: the new low adds")
+                .allMatch(o -> o.action() == OrderIntent.Action.ADD);
+        assertThat(v6.decide(falling(72045, 72030).at("12:55"), up60).orders()).as("armed, no exit").isEmpty();
+        assertThat(v6.decide(falling(72045, 72030).at("13:00"), peak).orders()).isEmpty();
+        assertThat(v6.decide(falling(72045, 72030).at("13:05"), back14).orders()).as("13.75 % below the peak").isEmpty();
+        assertThat(v6.decide(falling(72045, 72030).at("13:06"), back15).orders()).singleElement()
+                .satisfies(o -> assertThat(o.reason()).isEqualTo("TRAIL_15"));
+
+        Strategy v1 = FACTORY.create("SENSEX", Snapshots.SESSION);
+        v1.decide(falling(72110, 72100).at("12:40"), PositionView.FLAT);
+        v1.decide(falling(72060, 72050).at("12:41"), PositionView.FLAT);
+        v1.decide(falling(72045, 72030).at("13:00"), peak);
+        assertThat(v1.decide(falling(72045, 72030).at("13:06"), back15).orders()).as("v1 has no trail").isEmpty();
+    }
 }
