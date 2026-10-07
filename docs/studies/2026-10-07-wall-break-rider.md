@@ -34,3 +34,24 @@ continues on forward expiry days until 8 counted expiry days. Otherwise PASS if 
 counted days, (2) the set with wbr nets more than the set without it, (3) no day where the account kill switch fires
 with wbr but not without, and (4) the existing strategies keep ≥ 90 % of their net on every day they made money.
 A PASS means a decision about live PAPER, not an automatic switch.
+
+## Result (GCP, 7 Oct 22:35–23:15 IST, image 2e6cd50)
+
+| day | live set | set + wbr | wbr alone | role |
+|---|---|---|---|---|
+| 29 Sep NIFTY | −1,494 | −1,494 | 0 | counted |
+| 6 Oct NIFTY | −82,534 | −82,534 | 0 | counted |
+| 22 Sep NIFTY | +1,93,161 | +45,551 | +19,869 | counted, held-out (read once) |
+| 24 Sep SENSEX | +3,67,785 | +3,67,785 | 0 | design |
+| 1 Oct SENSEX | +6,85,467 | +6,85,467 | 0 | design |
+
+- wbr alone traded twice on the counted days, both 22 Sep NIFTY PE: 10:36–10:58 +₹92,937 (TRAIL_15) and 13:52–14:14
+  −₹73,068 (PREMIUM_STOP). Beside the set the 10:36 entry was refused for capital (the early-confirm runner held it)
+  and the 13:52 entry took capital from the straddle (+₹77,758 instead of +₹1,52,300): 22 Sep −₹1,47,610 vs the set.
+- The signal never fired on SENSEX on any day, including both design days: 0 minutes of wall weakening. Cause found
+  in own capture: BSE option OI updates about every 2.7 minutes (SENSEX 72200 PE, 1 Oct 12:00–13:00: 23 OI changes in
+  22 of 60 minutes) against every minute on NSE (NIFTY 22600 PE, 6 Oct: 60 changes in 59 minutes). The feature needs OI
+  strictly lower at 10, 5, 3 and 1 minutes ago and now, which stale BSE OI almost never satisfies.
+**Reading: INSUFFICIENT** (2 trades on the counted days, < 3) and structurally blind on SENSEX, the index it was
+designed from. Not live. A version that tests OI on BSE's update cadence would be a new registered variant (v2); its
+design days stay excluded.
