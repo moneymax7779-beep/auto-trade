@@ -32,6 +32,8 @@ public final class ZtReadOnlyDataSource {
         config.setPassword(resolvePassword(settings));
         config.setReadOnly(true);
         config.setMaximumPoolSize(settings.poolSize());
+        // zt-tiger-v2 allows the reader role 6 connections in all: open them on demand, keep at most one idle
+        config.setMinimumIdle(Math.min(1, settings.poolSize()));
         config.setPoolName("zt-source");
         config.addDataSourceProperty("ApplicationName", settings.applicationName());
         HikariDataSource dataSource = new HikariDataSource(config);
