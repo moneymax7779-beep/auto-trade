@@ -39,7 +39,18 @@ public record RiskLimits(
         /** v8: the share of a strategy's scaled budget it may use (1 = all). */
         double premiumBudgetFraction,
         /** v10: equity counts live sessions from this date on (null = all of them); earlier results are left behind. */
-        java.time.LocalDate equityFrom) {
+        java.time.LocalDate equityFrom,
+        /** v11: an entry's limit is at least this % above the ask (0 = ticks only, v1-v10). */
+        double entryBufferPct,
+        /** v11: times an unfilled single-leg entry is re-priced at the current ask (0 = never, v1-v10). */
+        int entryChaseMax,
+        /** v11: seconds after sending (or the last re-price) before an unfilled entry is re-priced. */
+        int entryChaseSec) {
+
+    /** v11: the buffer above the ask for an entry limit: the larger of the ticks and the percentage. */
+    public double entryBuffer(double ask, double tickSize) {
+        return Math.max(entryBufferTicks * tickSize, entryBufferPct > 0 ? ask * entryBufferPct / 100.0 : 0);
+    }
 
     /** v8: these limits with the capital set to {@code equity}; the daily loss limit follows when it is a share. */
     public RiskLimits withEquity(double equity) {
@@ -48,7 +59,7 @@ public record RiskLimits(
                 noNewEntriesAfter, squareOffAt, maxFeedAgeSec, maxSpreadPct, entryBufferTicks, exitBufferTicks,
                 exitBufferPct, entryTimeoutSec, exitChaseSec, exitChaseMax, stopLimitOffsetPct, reconcileEverySec,
                 casEntryFrom, casEntryTo, maxLossPerTrade, deltaRiskPerTrade, equityMode, startingCapital, dailyLossPct,
-                premiumBudgetFraction, equityFrom);
+                premiumBudgetFraction, equityFrom, entryBufferPct, entryChaseMax, entryChaseSec);
     }
 
     /** v8: what a strategy file's rupee budget is multiplied by: equity / starting capital × the budget fraction. */
@@ -112,6 +123,9 @@ public record RiskLimits(
                 c.has("account.starting_capital") ? c.getDouble("account.starting_capital") : c.getDouble("account.capital"),
                 c.has("account.daily_loss_pct") ? c.getDouble("account.daily_loss_pct") : Double.NaN,
                 c.has("sizing.premium_budget_pct") ? c.getDouble("sizing.premium_budget_pct") / 100.0 : 1.0,
-                c.has("account.equity_from") ? java.time.LocalDate.parse(String.valueOf(c.get("account.equity_from"))) : null);
+                c.has("account.equity_from") ? java.time.LocalDate.parse(String.valueOf(c.get("account.equity_from"))) : null,
+                c.has("orders.entry_buffer_pct") ? c.getDouble("orders.entry_buffer_pct") : 0,
+                c.has("orders.entry_chase_max") ? c.getInt("orders.entry_chase_max") : 0,
+                c.has("orders.entry_chase_sec") ? c.getInt("orders.entry_chase_sec") : 2);
     }
 }

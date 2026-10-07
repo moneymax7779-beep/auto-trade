@@ -51,8 +51,11 @@ public final class ManagedPosition {
     Instant closedAt;
     Instant exitPricedAt;
     int exitChases;
-    /** Times a straddle leg's unfilled entries were re-priced at the new ask. */
+    /** Times a straddle leg's (or, risk v11, a single-leg position's) unfilled entries were re-priced at the new ask. */
     int entryChases;
+    /** risk v11: the limit of the latest entry orders and when it was set (a re-price only ever raises it). */
+    double entryLimit;
+    Instant entryPricedAt;
 
     /** "" for a single-leg position; the leg's side for one leg of a straddle. */
     final String leg;

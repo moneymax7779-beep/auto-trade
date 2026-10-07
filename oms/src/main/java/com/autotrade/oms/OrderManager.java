@@ -409,6 +409,7 @@ public final class OrderManager implements Consumer<OrderUpdate> {
             if (!position.leg.isEmpty()) {
                 chaseLegEntry(position, now);
             } else {
+                chaseEntry(position, now);
                 for (String id : working(position.entryOrders)) {
                     Instant sent = position.orderSentAt.get(id);
                     if (sent != null && Duration.between(sent, now).toSeconds() >= limits.entryTimeoutSec()) {
@@ -421,6 +422,36 @@ public final class OrderManager implements Consumer<OrderUpdate> {
                     && Duration.between(position.exitPricedAt, now).toSeconds() >= limits.exitChaseSec()) {
                 chaseExit(position);
             }
+        }
+    }
+
+    /**
+     * risk v11: a single-leg entry still unfilled {@code entry_chase_sec} after it was priced is re-priced once (up to
+     * {@code entry_chase_max} times) at the current ask plus the entry buffer, if that is higher than its limit; the
+     * entry timeout still counts from the first send. A breakout's option often moves a rupee in the order's latency.
+     */
+    private void chaseEntry(ManagedPosition position, Instant now) {
+        if (limits.entryChaseMax() <= 0 || position.entryChases >= limits.entryChaseMax() || position.entryPricedAt == null
+                || Duration.between(position.entryPricedAt, now).toSeconds() < limits.entryChaseSec()) {
+            return;
+        }
+        List<String> entries = working(position.entryOrders);
+        if (entries.isEmpty()) {
+            return;
+        }
+        double ask = askOf(position.contract);
+        if (!(ask > 0)) {
+            return;
+        }
+        double limit = position.contract.roundUp(ask + limits.entryBuffer(ask, position.contract.tickSize()));
+        if (limit <= position.entryLimit) {
+            return;
+        }
+        position.entryChases++;
+        position.entryLimit = limit;
+        position.entryPricedAt = now;
+        for (String id : entries) {
+            broker.modify(id, position.orderQuantity.getOrDefault(id, 0L), limit, 0);
         }
     }
 
@@ -617,7 +648,12 @@ public final class OrderManager implements Consumer<OrderUpdate> {
             listener.rejected(position.strategy, position.underlying, "BUY", "no ask for " + position.contract.symbol());
             return;
         }
-        double limit = position.contract.roundUp(ask + limits.entryBufferTicks() * position.contract.tickSize());
+        double limit = position.contract.roundUp(ask + limits.entryBuffer(ask, position.contract.tickSize()));
+        position.entryLimit = limit;
+        position.entryPricedAt = clock.get();
+        if (position.leg.isEmpty()) {
+            position.entryChases = 0;        // risk v11: every entry or add gets its own re-price
+        }
         long remaining = (long) lots * position.contract.lotSize();
         position.committedPremium += remaining * ask;
         long slice = (long) position.contract.maxLotsPerOrder() * position.contract.lotSize();

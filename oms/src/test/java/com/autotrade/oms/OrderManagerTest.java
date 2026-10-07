@@ -272,6 +272,34 @@ class OrderManagerTest {
         assertThat(alerts).singleElement().asString().contains("reconciliation mismatch");
     }
 
+    @Test
+    void riskV11PricesEntriesWithAPercentBufferAndRepricesOnceWhenTheAskRunsAway() {
+        RiskLimits v11 = RiskLimits.from(ThresholdConfig.load(Path.of("..", "config", "risk", "paper-risk.v11.yaml")));
+        assertThat(v11.entryBuffer(300, 0.05)).isCloseTo(0.9, org.assertj.core.api.Assertions.within(1e-9));
+        assertThat(v11.entryBuffer(20, 0.05)).as("4 ticks when larger").isCloseTo(0.2, org.assertj.core.api.Assertions.within(1e-9));
+        oms = new OrderManager("P1", "P1-S1", "ecr", SESSION, broker, new RiskEngine(v11, killSwitch), COSTS, 25, clock::get,
+                new OmsListener() {
+                    @Override
+                    public void orderSent(ManagedPosition position, String role, OrderRequest request) {
+                        sent.add(request);
+                    }
+
+                    @Override
+                    public void alert(String message) {
+                        alerts.add(message);
+                    }
+                });
+        quote("10:00:00", 99.5, 100, 100);
+        oms.enter("NIFTY", OptionSide.CE, CE, 1, "EARLY", market("10:00"));
+        assertThat(sent.getFirst().limitPrice()).isEqualTo(100.30);            // 100 + 0.3 %
+        quote("10:00:01", 101.0, 101.5, 101.2);                                // ran 1.5 % away
+        quote("10:00:02", 101.0, 101.5, 101.2);
+        oms.onTimer(at("10:00:02"));                                          // 2 s: re-price at 101.5 + 0.3 %
+        quote("10:00:03", 101.0, 101.5, 101.2);                                // the modify lands and fills
+        assertThat(oms.livePositions()).singleElement()
+                .satisfies(p -> assertThat(p.averageCost).isCloseTo(101.5, org.assertj.core.api.Assertions.within(0.01)));
+    }
+
     private void quote(String time, double bid, double ask, double ltp) {
         Instant at = at(time);
         clock.set(at);
