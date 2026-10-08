@@ -51,11 +51,10 @@ autotrade:
       - config/strategy/early-confirm-runner.v11.yaml      # ecr-v11 = v8 (expiry days only) with no limit on campaigns per side (user, 2026-10-01)
       - config/strategy/opening-drive.v3.yaml              # odb-v3 = v2 with no limit on trades; a re-entry needs a fresh break (user, 2026-10-01)
       - config/strategy/expiry-gamma-breakout.v4.yaml      # egb-v4 = v3 with no limit on campaigns per side (user, 2026-10-01)
-      - config/strategy/expiry-trend-rider.v7.yaml         # etr-v7 live (A-059 PASS, user 2026-10-08 18:30: "swap v1 with v7"; A-060) = etr-v1 + profit lock (breakeven after +30 %); v1 live 2 Oct-8 Oct (A-031)
+      - config/strategy/expiry-trend-rider.v7.yaml         # etr-v7 live (A-059 PASS, user 2026-10-08 18:30: "swap v1 with v7"; A-060) = etr-v1 + profit lock (breakeven after +30 %); v1 live 2 Oct-8 Oct (A-031). Alone since A-061 (etr-v6 removed: the two split the capital)
       # User 2026-10-07 07:00 IST: "run everything in PAPER mode, no need of SHADOW mode" (A-053). The former shadow
       # strategies come after the existing ones, so on a common trigger the existing ones take the capital first.
       - config/strategy/break-retest.v1.yaml               # brt-v1 live (was shadow, A-041); never the expiring index; Rs 2.5L budget
-      - config/strategy/expiry-trend-rider.v6.yaml         # etr-v6 live as "expiry-trend-rider@etr-v6" (A-049 PASS; user 2026-10-07 21:05: "swap v5 with the trail"; A-056): v1 + peak trail; same entries as etr-v1, so the two share the capital on a common trigger
     features-file: config/features/features.v11.yaml   # v11 = v7 with the VWAP proxy using the 15-minute mean basis (A-030, user 2026-10-02: "yes switch to v11"); v7 = v6 + ATR seeded from the previous session
     exchange-file: config/exchange/nse-bse-sessions.v3.yaml
     costs-file: config/costs/india-index-options-costs.v2.yaml   # v2: Upstox Plus brokerage Rs 30/order from 2026-09-01 (A-044, user 2026-10-06)
