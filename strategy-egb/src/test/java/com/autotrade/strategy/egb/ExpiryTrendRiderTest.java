@@ -156,4 +156,22 @@ class ExpiryTrendRiderTest {
         v1.decide(falling(72045, 72030).at("13:00"), peak);
         assertThat(v1.decide(falling(72045, 72030).at("13:06"), back15).orders()).as("v1 has no trail").isEmpty();
     }
+
+    @Test
+    void v7LocksTheEntryOnceThePositionHasBeenThirtyPercentUp() {
+        Strategy v7 = Strategies.load(Path.of("..", "config", "strategy", "expiry-trend-rider.v7.yaml")).create("SENSEX", Snapshots.SESSION);
+        v7.decide(falling(72110, 72100).at("12:40"), PositionView.FLAT);
+        assertThat(v7.decide(falling(72060, 72050).at("12:41"), PositionView.FLAT).orders()).hasSize(1);
+        PositionView up35 = new PositionView(true, OptionSide.PE, 1, 200, null, 270);
+        PositionView back = new PositionView(true, OptionSide.PE, 1, 200, null, 199);
+        assertThat(v7.decide(falling(72055, 72050).at("12:50"), up35).orders()).as("armed, no exit").isEmpty();
+        assertThat(v7.decide(falling(72055, 72050).at("12:55"), back).orders()).singleElement()
+                .satisfies(o -> assertThat(o.reason()).isEqualTo("PROFIT_LOCK"));
+
+        Strategy v1 = FACTORY.create("SENSEX", Snapshots.SESSION);
+        v1.decide(falling(72110, 72100).at("12:40"), PositionView.FLAT);
+        v1.decide(falling(72060, 72050).at("12:41"), PositionView.FLAT);
+        v1.decide(falling(72055, 72050).at("12:50"), up35);
+        assertThat(v1.decide(falling(72055, 72050).at("12:55"), back).orders()).as("v1 has no lock").isEmpty();
+    }
 }

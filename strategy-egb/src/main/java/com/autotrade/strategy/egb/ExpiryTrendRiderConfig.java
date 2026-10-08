@@ -33,7 +33,11 @@ record ExpiryTrendRiderConfig(
         /** v6: the trail arms once the held option's bid is this % above the average premium (0 / absent = off). */
         double trailActivationPct,
         /** v6: once armed, exit when the bid falls this % below its running peak. */
-        double trailGivebackPct) {
+        double trailGivebackPct,
+        /** v7: the profit lock arms once the bid has been this % above the average premium (0 / absent = off). */
+        double profitLockArmPct,
+        /** v7: once armed, exit when the bid falls to this % above the average premium (0 = breakeven). */
+        double profitLockFloorPct) {
 
     static ExpiryTrendRiderConfig from(ThresholdConfig c) {
         return new ExpiryTrendRiderConfig(c.contentHash(), c.version(), c.getInt("scope.dte"),
@@ -49,7 +53,9 @@ record ExpiryTrendRiderConfig(
                 c.has("exits.no_new_extreme_min") ? c.getInt("exits.no_new_extreme_min") : 0,
                 c.has("exits.no_reentry_after_time_stop") && c.getBoolean("exits.no_reentry_after_time_stop"),
                 c.has("exits.trail_activation_pct") ? c.getDouble("exits.trail_activation_pct") : 0,
-                c.has("exits.trail_giveback_pct") ? c.getDouble("exits.trail_giveback_pct") : 0);
+                c.has("exits.trail_giveback_pct") ? c.getDouble("exits.trail_giveback_pct") : 0,
+                c.has("exits.profit_lock_arm_pct") ? c.getDouble("exits.profit_lock_arm_pct") : 0,
+                c.has("exits.profit_lock_floor_pct") ? c.getDouble("exits.profit_lock_floor_pct") : 0);
     }
 
     @SuppressWarnings("unchecked")

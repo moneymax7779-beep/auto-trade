@@ -80,3 +80,18 @@ Re-check of 24 Sep (7 Oct 22:00 IST, image 0ce03d3): the first 24 Sep replays st
 the other index was closed by zt's idle-in-transaction timeout). With short per-page connections and gap skipping,
 all six replays ran the full day (3,740,111 events, last snapshot 15:40) and reproduced the same nets: C and S
 +₹2,37,954, T and ST +₹3,03,164, A-055 v10 +₹3,24,311, v11 +₹3,20,151. The verdicts stand.
+
+## A-059, ETR profit lock (etr-v7): registered 8 Oct 15:55 IST, before any result
+User, 15:50 IST, after the 8 Oct review: "yes register and test the profit lock, ignore the 14.00 cutoff for now".
+On 8 Oct the 14:01 SENSEX 71500 PE (v1 and v6, 2,440 qty each) peaked at +49 % (₹1.25L each) at 14:22 and both closed
+at −30 % on the swing exit at 14:39 (−₹1,53,360 together). The swing exit is slow against expiry-afternoon premium,
+and v6's trail arms only at +50 %. 8 Oct is therefore the design day of this rule and does not count.
+**etr-v7** = etr-v1 plus: once the held option's bid has been ≥ 30 % above the average premium, exit when the bid
+falls back to the average premium (PROFIT_LOCK). Everything else as v1. 30 % and breakeven are judgment, fixed now.
+
+Test, standalone (the trend rider alone, full capital, so nothing else interferes), v1 vs v7, one image, risk v10:
+counted expiry days 24 Sep, 29 Sep, 1 Oct, 6 Oct (own / zt); held-out 22 Sep (zt) read once; 8 Oct reported only.
+The archive expiry days (3, 10, 15, 17 Sep) are added when the drive is connected.
+**PASS if:** (1) over the counted days v7 nets ≥ v1; (2) on every counted day where v1 made ≥ ₹2,00,000, v7 keeps
+≥ 90 % of it (the lock must not shake out the runners: 24 Sep, 1 Oct); (3) held-out v7 ≥ v1 − ₹25,000. A PASS means a
+decision about the live set (the user's), not an automatic switch.
