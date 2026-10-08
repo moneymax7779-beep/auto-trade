@@ -19,7 +19,10 @@ import com.autotrade.core.time.MarketTime;
  */
 final class DailySummary {
 
-    private static final DateTimeFormatter DAY = DateTimeFormatter.ofPattern("EEE dd MMM yyyy", Locale.ENGLISH);
+    private static final DateTimeFormatter SHORT_DAY = DateTimeFormatter.ofPattern("EEE dd MMM", Locale.ENGLISH);
+    private static final DateTimeFormatter SHORT_EXPIRY = DateTimeFormatter.ofPattern("dd MMM", Locale.ENGLISH);
+    private static final DateTimeFormatter EXPIRY = new java.time.format.DateTimeFormatterBuilder().parseCaseInsensitive()
+            .appendPattern("dd MMM yy").toFormatter(Locale.ENGLISH);
 
     record Trade(String time, String closed, String strategy, String symbol, long quantity, double entry, double exit, double net,
                  String reason) {
@@ -50,44 +53,43 @@ final class DailySummary {
     }
 
     /**
-     * The message text (pure: tested without a database). User, 8 Oct: "summary should be readable no need to mention
-     * about the strategies and goals, just say this is profit/loss followed by the trades".
+     * The message text (pure: tested without a database). User, 8 Oct: "just say this is profit/loss followed by the
+     * trades", then "make it more readable and simple": the result leads each trade; the expiry is shown only when the
+     * option does not expire that day.
      */
     static String text(LocalDate day, double dayNet, List<Trade> trades) {
         StringBuilder m = new StringBuilder();
-        m.append(dayNet >= 0 ? "🟢" : "🔴").append(" Profit/Loss · ").append(day.format(DAY)).append(" (PAPER)\n");
-        long wins = trades.stream().filter(t -> t.net() > 0).count();
-        m.append(dayNet >= 0 ? "Profit " : "Loss ").append(signedRupees(dayNet));
-        if (!trades.isEmpty()) {
-            m.append(" · ").append(trades.size()).append(trades.size() == 1 ? " trade" : " trades").append(", ").append(wins)
-                    .append(wins == 1 ? " in profit" : " in profit");
-        }
-        m.append(" (after charges)\n");
+        m.append(dayNet >= 0 ? "🟢 Profit " : "🔴 Loss ").append(signedRupees(dayNet)).append(" · ")
+                .append(day.format(SHORT_DAY)).append(" (PAPER)\n");
         if (trades.isEmpty()) {
-            m.append("\nNo trades today.");
-            return m.toString().strip();
+            return m.append("No trades today.").toString();
         }
-        m.append("\nTrades:\n");
-        int n = 0;
+        long won = trades.stream().filter(t -> t.net() > 0).count();
+        m.append(trades.size()).append(trades.size() == 1 ? " trade: " : " trades: ").append(won).append(" won, ")
+                .append(trades.size() - won).append(" lost · after charges\n");
         for (Trade t : trades) {
-            n++;
-            m.append(t.net() > 0 ? "✅ " : "❌ ").append(n).append(". ").append(t.time())
-                    .append(t.closed() == null ? "" : "–" + t.closed()).append("  ").append(readable(t.symbol())).append('\n')
-                    .append("    Buy ").append(t.quantity()).append(" @ ₹").append(SurgeAlertRules.fmt(t.entry(), 2))
-                    .append(" → Sell @ ₹").append(SurgeAlertRules.fmt(t.exit(), 2)).append("  ").append(signedRupees(t.net())).append('\n');
+            m.append('\n').append(t.net() > 0 ? "✅ " : "❌ ").append(signedRupees(t.net())).append("  ").append(contract(t.symbol(), day))
+                    .append('\n').append("     ").append(t.time()).append(t.closed() == null ? "" : "–" + t.closed())
+                    .append(" · ").append(SurgeAlertRules.fmt(t.quantity(), 0)).append(" qty · ")
+                    .append(SurgeAlertRules.fmt(t.entry(), 2)).append(" → ").append(SurgeAlertRules.fmt(t.exit(), 2));
         }
-        String out = m.toString().strip();
+        String out = m.toString();
         return out.length() > 4000 ? out.substring(0, 3990) + "\n…" : out;     // Telegram's limit is 4096 characters
     }
 
-    /** "SENSEX 72400 PE 08 OCT 26" → "SENSEX 72400 PE (08 Oct)". */
-    static String readable(String symbol) {
+    /** "SENSEX 72400 PE 08 OCT 26" on 8 Oct → "SENSEX 72400 PE"; "NIFTY 22450 PE 13 OCT 26" → "NIFTY 22450 PE · exp 13 Oct". */
+    static String contract(String symbol, LocalDate day) {
         String[] p = symbol.split(" ");
-        if (p.length >= 6) {
-            String month = p[4].charAt(0) + p[4].substring(1).toLowerCase(Locale.ROOT);
-            return p[0] + " " + p[1] + " " + p[2] + " (" + p[3] + " " + month + ")";
+        if (p.length < 6) {
+            return symbol;
         }
-        return symbol;
+        String name = p[0] + " " + p[1] + " " + p[2];
+        try {
+            LocalDate expiry = LocalDate.parse(p[3] + " " + p[4] + " " + p[5], EXPIRY);
+            return expiry.equals(day) ? name : name + " · exp " + expiry.format(SHORT_EXPIRY);
+        } catch (java.time.format.DateTimeParseException e) {
+            return symbol;
+        }
     }
 
     private static String hhmm(java.sql.Timestamp t) {
