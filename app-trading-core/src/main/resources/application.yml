@@ -51,7 +51,7 @@ autotrade:
       - config/strategy/early-confirm-runner.v11.yaml      # ecr-v11 = v8 (expiry days only) with no limit on campaigns per side (user, 2026-10-01)
       - config/strategy/opening-drive.v3.yaml              # odb-v3 = v2 with no limit on trades; a re-entry needs a fresh break (user, 2026-10-01)
       - config/strategy/expiry-gamma-breakout.v4.yaml      # egb-v4 = v3 with no limit on campaigns per side (user, 2026-10-01)
-      - config/strategy/expiry-trend-rider.v1.yaml         # etr-v1 live (user, 2026-10-02: "keep it live, no need to run in shadow"; A-031; failed A-029's criterion)
+      - config/strategy/expiry-trend-rider.v7.yaml         # etr-v7 live (A-059 PASS, user 2026-10-08 18:30: "swap v1 with v7"; A-060) = etr-v1 + profit lock (breakeven after +30 %); v1 live 2 Oct-8 Oct (A-031)
       # User 2026-10-07 07:00 IST: "run everything in PAPER mode, no need of SHADOW mode" (A-053). The former shadow
       # strategies come after the existing ones, so on a common trigger the existing ones take the capital first.
       - config/strategy/break-retest.v1.yaml               # brt-v1 live (was shadow, A-041); never the expiring index; Rs 2.5L budget
