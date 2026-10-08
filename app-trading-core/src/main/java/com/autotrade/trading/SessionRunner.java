@@ -232,6 +232,7 @@ class SessionRunner implements ApplicationRunner {
         LocalTime stopAfter = LocalTime.parse(properties.trading().stopAfter());
         boolean window = calendar.isTradingDay(today) && !time.isBefore(startAt) && time.isBefore(stopAfter);
         shadowAfterClose(today, time, stopAfter);
+        dailySummaryAfterClose(today, time, stopAfter);
         Running active = running;
         boolean alive = active != null && active.worker().isAlive();
         if (!window || alive) {
@@ -284,6 +285,32 @@ class SessionRunner implements ApplicationRunner {
                 alerts.raise("shadow", AlertService.Level.WARN, "Shadow run for " + today + " failed: " + e.getMessage());
             }
         });
+    }
+
+    /**
+     * The daily P&amp;L summary to Telegram (admin and group), once per trading day after today's live session is DONE
+     * (5 minutes after stop-after). A marker file under .local/daily-summary keeps it to one message a day, also after
+     * a restart.
+     */
+    private void dailySummaryAfterClose(LocalDate today, LocalTime time, LocalTime stopAfter) {
+        if (!calendar.isTradingDay(today) || time.isBefore(stopAfter.plusMinutes(5))) {
+            return;
+        }
+        Path marker = Path.of(".local", "daily-summary", today + ".sent");
+        if (java.nio.file.Files.exists(marker)) {
+            return;
+        }
+        try {
+            String text = new DailySummary(target, properties.trading().riskFile()).build(properties.trading().account(), today);
+            if (text == null) {
+                return;     // no finished live session today (yet)
+            }
+            alerts.dailySummary(text);
+            java.nio.file.Files.createDirectories(marker.getParent());
+            java.nio.file.Files.writeString(marker, java.time.Instant.now().toString());
+        } catch (Exception e) {
+            log.warn("daily summary for {} failed: {}", today, e.getMessage(), e);
+        }
     }
 
     /** The next start time: today if still before the window's start, else the next trading day. */

@@ -76,6 +76,20 @@ class AlertService {
         deliver(Level.SIGNAL, message);
     }
 
+    /** The daily P&amp;L summary: logged, kept on the Live page, sent to the admin chat and the group chat. */
+    synchronized void dailySummary(String message) {
+        log.info("DAILY SUMMARY\n{}", message);
+        recent.addFirst(new Sent(Instant.now(), Level.INFO, message));
+        while (recent.size() > 50) {
+            recent.removeLast();
+        }
+        telegram.sendToAdminAndGroup(message);
+    }
+
+    boolean telegramGroupConfigured() {
+        return telegram.groupConfigured();
+    }
+
     synchronized List<Alert> active() {
         return List.copyOf(active.values());
     }

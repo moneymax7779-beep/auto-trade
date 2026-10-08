@@ -44,13 +44,31 @@ final class TelegramNotifier {
     }
 
     void send(String text) {
-        sender.submit(() -> deliver(text));
+        sender.submit(() -> deliver(text, "TELEGRAM_CHAT_ID"));
     }
 
-    private void deliver(String text) {
+    /**
+     * Sends to the admin chat (TELEGRAM_CHAT_ID) and, when the file names one, the group chat (TELEGRAM_GROUP_ID):
+     * the daily P&amp;L summary goes to both.
+     */
+    void sendToAdminAndGroup(String text) {
+        sender.submit(() -> {
+            deliver(text, "TELEGRAM_CHAT_ID");
+            if (settings().containsKey("TELEGRAM_GROUP_ID")) {
+                deliver(text, "TELEGRAM_GROUP_ID");
+            }
+        });
+    }
+
+    /** True when the settings file also names a group chat. */
+    boolean groupConfigured() {
+        return settings().containsKey("TELEGRAM_GROUP_ID");
+    }
+
+    private void deliver(String text, String chatKey) {
         Map<String, String> settings = settings();
         String token = settings.get("TELEGRAM_BOT_TOKEN");
-        String chat = settings.get("TELEGRAM_CHAT_ID");
+        String chat = settings.get(chatKey);
         if (token == null || chat == null) {
             if (!warnedMissing) {
                 log.info("telegram alerts off: {} has no TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID", file);
@@ -68,10 +86,10 @@ final class TelegramNotifier {
         try {
             HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() != 200) {
-                log.warn("telegram alert not delivered: HTTP {}", response.statusCode());   // body may echo details; not logged
+                log.warn("telegram message to {} not delivered: HTTP {}", chatKey, response.statusCode());   // body not logged
             }
         } catch (IOException e) {
-            log.warn("telegram alert not delivered: {}", e.getClass().getSimpleName());
+            log.warn("telegram message to {} not delivered: {}", chatKey, e.getClass().getSimpleName());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
