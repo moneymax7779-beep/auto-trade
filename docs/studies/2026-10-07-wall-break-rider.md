@@ -69,3 +69,21 @@ counted 29 Sep, 6 Oct (NIFTY, own), 8 Oct (SENSEX, own, the first forward day), 
 once for this hypothesis); design days 24 Sep and 1 Oct reported, not counted. **Reading as A-057**: < 3 wbr trades on
 the counted days = INSUFFICIENT (continue on forward expiry days to 8 counted days); else PASS if wbr-v2 alone > 0,
 set + wbr-v2 > set, no new kill switch, existing strategies keep ≥ 90 % on their winning days.
+
+### A-058 result (GCP, 8 Oct 16:15–17:10 IST, image f97ca62)
+
+| day | live set | set + wbr-v2 | wbr-v2 alone | role |
+|---|---|---|---|---|
+| 8 Oct SENSEX | +3,98,948 | +2,80,202 | −36,272 (7 trades) | counted (forward) |
+| 29 Sep NIFTY | −1,494 | +12,714 | +14,208 (3) | counted |
+| 6 Oct NIFTY | −82,534 | −82,534 | 0 | counted |
+| 22 Sep NIFTY | +1,93,161 | +1,27,911 | +7,247 (4) | counted, held-out (once) |
+| counted total | +5,08,081 | +3,38,293 | −14,817 (14) | |
+| 24 Sep SENSEX | +3,67,785 | +5,05,848 | +3,18,811 | design |
+| 1 Oct SENSEX | +6,85,467 | +9,78,366 | +1,84,075 | design |
+
+- v2's signal fires on SENSEX now (8 Oct: 7 trades). On the counted days alone it lost ₹14,817 over 14 trades; on its
+  two design days it made +₹5,02,886: it fits the days it was built from and not the others.
+- Beside the set: 8 Oct the trend rider v1 made +₹1,66,476 instead of +₹3,31,285 (50 %), 22 Sep the straddle
+  +₹77,758 instead of +₹1,52,300 (51 %): wbr-v2 takes their capital.
+**Reading: FAIL** (rules 1, 2 and 4). Not deployed.

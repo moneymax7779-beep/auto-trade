@@ -95,3 +95,20 @@ The archive expiry days (3, 10, 15, 17 Sep) are added when the drive is connecte
 **PASS if:** (1) over the counted days v7 nets ≥ v1; (2) on every counted day where v1 made ≥ ₹2,00,000, v7 keeps
 ≥ 90 % of it (the lock must not shake out the runners: 24 Sep, 1 Oct); (3) held-out v7 ≥ v1 − ₹25,000. A PASS means a
 decision about the live set (the user's), not an automatic switch.
+
+### A-059 result (GCP, 8 Oct 17:10–17:45 IST, image 4cfe28e; the trend rider alone)
+
+| day | v1 | v7 (profit lock) | role |
+|---|---|---|---|
+| 22 Sep NIFTY | −93,987 | −93,987 | held-out (once) |
+| 24 Sep SENSEX | +2,28,549 | +2,28,549 | counted |
+| 29 Sep NIFTY | 0 | 0 | counted |
+| 1 Oct SENSEX | +8,50,438 | +8,50,438 | counted |
+| 6 Oct NIFTY | −46,151 | −46,151 | counted |
+| 8 Oct SENSEX | +2,75,986 | +3,61,685 | design |
+
+The lock never acted on a counted day: no trade there went 30 % up and back to its entry, and the runners of 24 Sep
+and 1 Oct are untouched (100 % kept). On the design day it closed the 14:01 SENSEX 71500 PE (3,240 qty, average
+₹111.37) at 14:31 for −₹37,870 instead of −₹1,23,568; the fill came at ₹100.00, 10 % below the lock level, in a
+fast-falling bid. **Reading: PASS on the registered rule, with no evidence from the counted days** (it acted only on
+its design day). Going live is the user's decision.
