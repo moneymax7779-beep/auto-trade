@@ -45,7 +45,13 @@ public record RiskLimits(
         /** v11: times an unfilled single-leg entry is re-priced at the current ask (0 = never, v1-v10). */
         int entryChaseMax,
         /** v11: seconds after sending (or the last re-price) before an unfilled entry is re-priced. */
-        int entryChaseSec) {
+        int entryChaseSec,
+        /** v12: single-leg entries are sliced: no child order larger than the ask quantity within this % of the best ask (0 = off). */
+        double entrySliceDepthPct,
+        /** v12: slicing stops when the ask has run this % above the first slice's ask. */
+        double entrySliceMaxDriftPct,
+        /** v12: a single-leg entry or add buys at most this % of the option's premium traded in the last minute (0 = off). */
+        double maxParticipationPct) {
 
     /** v11: the buffer above the ask for an entry limit: the larger of the ticks and the percentage. */
     public double entryBuffer(double ask, double tickSize) {
@@ -59,7 +65,8 @@ public record RiskLimits(
                 noNewEntriesAfter, squareOffAt, maxFeedAgeSec, maxSpreadPct, entryBufferTicks, exitBufferTicks,
                 exitBufferPct, entryTimeoutSec, exitChaseSec, exitChaseMax, stopLimitOffsetPct, reconcileEverySec,
                 casEntryFrom, casEntryTo, maxLossPerTrade, deltaRiskPerTrade, equityMode, startingCapital, dailyLossPct,
-                premiumBudgetFraction, equityFrom, entryBufferPct, entryChaseMax, entryChaseSec);
+                premiumBudgetFraction, equityFrom, entryBufferPct, entryChaseMax, entryChaseSec, entrySliceDepthPct,
+                entrySliceMaxDriftPct, maxParticipationPct);
     }
 
     /** v8: what a strategy file's rupee budget is multiplied by: equity / starting capital × the budget fraction. */
@@ -126,6 +133,9 @@ public record RiskLimits(
                 c.has("account.equity_from") ? java.time.LocalDate.parse(String.valueOf(c.get("account.equity_from"))) : null,
                 c.has("orders.entry_buffer_pct") ? c.getDouble("orders.entry_buffer_pct") : 0,
                 c.has("orders.entry_chase_max") ? c.getInt("orders.entry_chase_max") : 0,
-                c.has("orders.entry_chase_sec") ? c.getInt("orders.entry_chase_sec") : 2);
+                c.has("orders.entry_chase_sec") ? c.getInt("orders.entry_chase_sec") : 2,
+                c.has("orders.entry_slice_depth_pct") ? c.getDouble("orders.entry_slice_depth_pct") : 0,
+                c.has("orders.entry_slice_max_drift_pct") ? c.getDouble("orders.entry_slice_max_drift_pct") : 2,
+                c.has("sizing.max_participation_pct") ? c.getDouble("sizing.max_participation_pct") : 0);
     }
 }

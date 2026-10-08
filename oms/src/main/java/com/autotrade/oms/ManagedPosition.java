@@ -56,6 +56,10 @@ public final class ManagedPosition {
     /** risk v11: the limit of the latest entry orders and when it was set (a re-price only ever raises it). */
     double entryLimit;
     Instant entryPricedAt;
+    /** risk v12: quantity still to buy in slices, the first slice's ask and when slicing began. */
+    long pendingEntryQuantity;
+    double sliceStartAsk;
+    Instant sliceStartedAt;
 
     /** "" for a single-leg position; the leg's side for one leg of a straddle. */
     final String leg;

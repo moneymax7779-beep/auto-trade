@@ -300,6 +300,81 @@ class OrderManagerTest {
                 .satisfies(p -> assertThat(p.averageCost).isCloseTo(101.5, org.assertj.core.api.Assertions.within(0.01)));
     }
 
+    private OrderManager v12() {
+        RiskLimits v12 = RiskLimits.from(ThresholdConfig.load(Path.of("..", "config", "risk", "paper-risk.v12.yaml")));
+        return new OrderManager("P1", "P1-S1", "ecr", SESSION, broker, new RiskEngine(v12, killSwitch), COSTS, 25, clock::get,
+                new OmsListener() {
+                    @Override
+                    public void orderSent(ManagedPosition position, String role, OrderRequest request) {
+                        sent.add(request);
+                    }
+
+                    @Override
+                    public void alert(String message) {
+                        alerts.add(message);
+                    }
+                });
+    }
+
+    private void book(String time, double[] askPrices, long[] askQty, long volume) {
+        Instant at = at(time);
+        clock.set(at);
+        int[] orders = new int[askPrices.length];
+        java.util.Arrays.fill(orders, 1);
+        OptionTick tick = new OptionTick(at, at, "NIFTY", 1, 7, "NIFTY 23100 CE", LocalDate.of(2026, 9, 29), 23100,
+                OptionTick.OptionType.CE, 65, askPrices[0], volume, 0.0, 0.0, 0.0,
+                DepthLevels.of(new double[] {askPrices[0] - 0.5}, new long[] {10_000}, new int[] {1}),
+                DepthLevels.of(askPrices, askQty, orders),
+                0.1, 0.5, 0.001, -10.0, 12.0, 1.0, at, true, true);
+        oms.observe(tick);
+        broker.accept(tick);
+    }
+
+    @Test
+    void riskV12SlicesAnEntryToTheVisibleBookAndBuysTheRestOnTheNextQuotes() {
+        oms = v12();
+        double[] prices = {100.00, 100.30, 101.00};
+        long[] qty = {650, 650, 6500};                                       // within 0.5 % of 100: 1,300
+        book("10:00:00", prices, qty, 0);
+        oms.enter("NIFTY", OptionSide.CE, CE, 40, "EARLY", market("10:00"));    // 2,600 wanted
+        assertThat(sent).hasSize(1);
+        assertThat(sent.getFirst().quantity()).isEqualTo(1300);
+        assertThat(sent.getFirst().limitPrice()).isEqualTo(100.50);
+        book("10:00:01", prices, qty, 0);                                     // the first slice fills
+        book("10:00:02", prices, qty, 0);                                     // the next slice goes out
+        assertThat(sent.stream().filter(r -> r.side() == com.autotrade.broker.OrderSide.BUY)).hasSize(2);
+        book("10:00:03", prices, qty, 0);
+        assertThat(oms.livePositions()).singleElement().satisfies(p -> assertThat(p.quantity).isEqualTo(2600));
+    }
+
+    @Test
+    void riskV12StopsSlicingWhenThePriceRunsAndKeepsWhatItBought() {
+        oms = v12();
+        book("10:00:00", new double[] {100.00, 100.30}, new long[] {650, 650}, 0);
+        oms.enter("NIFTY", OptionSide.CE, CE, 40, "EARLY", market("10:00"));
+        book("10:00:01", new double[] {100.00, 100.30}, new long[] {650, 650}, 0);     // 1,300 filled
+        book("10:00:02", new double[] {102.50, 102.60}, new long[] {650, 650}, 0);     // ran 2.5 %: stop
+        book("10:00:03", new double[] {102.50, 102.60}, new long[] {650, 650}, 0);
+        assertThat(sent.stream().filter(r -> r.side() == com.autotrade.broker.OrderSide.BUY)).hasSize(1);
+        assertThat(oms.livePositions()).singleElement().satisfies(p -> assertThat(p.quantity).isEqualTo(1300));
+    }
+
+    @Test
+    void riskV12CapsAnEntryAtTwoPercentOfTheLastMinutesTradedPremium() {
+        oms = v12();
+        double[] deep = {100.00};
+        long[] lots = {100_000};
+        book("09:59:00", deep, lots, 0);
+        book("10:00:00", deep, lots, 100_000);                                // ₹1 Cr traded in the minute: 2 % = ₹2L
+        oms.enter("NIFTY", OptionSide.CE, CE, 60, "EARLY", market("10:00"));    // 3,900 wanted; cap 1,950 (30 lots)
+        long bought = sent.stream().filter(r -> r.side() == com.autotrade.broker.OrderSide.BUY).mapToLong(OrderRequest::quantity).sum();
+        assertThat(bought).isEqualTo(1755);                                   // first slice: 27 lots (the freeze limit)
+        book("10:00:01", deep, lots, 100_000);
+        book("10:00:02", deep, lots, 100_000);
+        book("10:00:03", deep, lots, 100_000);
+        assertThat(oms.livePositions()).singleElement().satisfies(p -> assertThat(p.quantity).isEqualTo(1950));
+    }
+
     private void quote(String time, double bid, double ask, double ltp) {
         Instant at = at(time);
         clock.set(at);

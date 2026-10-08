@@ -84,7 +84,12 @@ public final class OrderManager implements Consumer<OrderUpdate> {
     private final Map<String, Role> roles = new HashMap<>();
     private final Deque<Instant> recentOrders = new ArrayDeque<>();
     private final Set<String> terminal = new HashSet<>();
+    private static final System.Logger log = System.getLogger(OrderManager.class.getName());
     private final Map<Long, double[]> lastQuotes = new HashMap<>();
+    /** risk v12: the latest ask ladder of every option seen (prices, quantities). */
+    private final Map<Long, OptionTick> lastBooks = new HashMap<>();
+    /** risk v12: cumulative traded quantity samples of every option seen, for the last-minute traded premium. */
+    private final Map<Long, java.util.ArrayDeque<double[]>> volumeSamples = new HashMap<>();
     private final Map<Long, Double> lastDeltas = new HashMap<>();
     private final Map<String, Bracket> brackets = new HashMap<>();
     private int sequence;
@@ -254,6 +259,7 @@ public final class OrderManager implements Consumer<OrderUpdate> {
     }
 
     private void exit(ManagedPosition position, String reason) {
+        position.pendingEntryQuantity = 0;     // risk v12: no further entry slices once an exit starts
         if (position.state == ManagedPosition.State.CANCELLING_FOR_EXIT
                 || position.state == ManagedPosition.State.EXITING || position.state == ManagedPosition.State.CLOSED) {
             return;
@@ -350,6 +356,12 @@ public final class OrderManager implements Consumer<OrderUpdate> {
 
     /** Latest quotes for held contracts, entry timeouts and exit chasing. */
     public synchronized void onQuote(OptionTick tick) {
+        for (ManagedPosition position : List.copyOf(live.values())) {
+            if (position.contract.token() == tick.instrumentToken() && position.pendingEntryQuantity > 0
+                    && working(position.entryOrders).isEmpty()) {
+                sendSlice(position);     // risk v12: the previous slice is done; buy the next on this quote
+            }
+        }
         for (ManagedPosition position : live.values()) {
             if (position.contract.token() == tick.instrumentToken()) {
                 if (!tick.bids().isEmpty()) {
@@ -551,7 +563,7 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         if (position.state == ManagedPosition.State.CANCELLING_FOR_EXIT) {
             maybeSellAfterCancels(position);
         }
-        if (position.boughtQuantity == 0 && !anyWorking(position)) {
+        if (position.boughtQuantity == 0 && !anyWorking(position) && position.pendingEntryQuantity <= 0) {
             position.exitReason = position.exitReason == null ? "ENTRY_NOT_FILLED" : position.exitReason;
             close(position);
         }
@@ -634,6 +646,17 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         if (!tick.bids().isEmpty() && !tick.asks().isEmpty()) {
             lastQuotes.put(tick.instrumentToken(), new double[] {tick.bids().price(0), tick.asks().price(0)});
         }
+        if (!tick.asks().isEmpty()) {
+            lastBooks.put(tick.instrumentToken(), tick);
+        }
+        if (tick.cumulativeVolume() != null && tick.lastPrice() > 0) {
+            java.util.ArrayDeque<double[]> samples = volumeSamples.computeIfAbsent(tick.instrumentToken(), k -> new java.util.ArrayDeque<>());
+            double now = tick.receivedAt().toEpochMilli();
+            samples.addLast(new double[] {now, tick.cumulativeVolume(), tick.lastPrice()});
+            while (samples.size() > 2 && samples.peekFirst()[0] < now - 75_000) {
+                samples.removeFirst();
+            }
+        }
         if (tick.delta() != null && tick.delta() != 0 && Double.isFinite(tick.delta())) {
             lastDeltas.put(tick.instrumentToken(), tick.delta());
         }
@@ -655,13 +678,98 @@ public final class OrderManager implements Consumer<OrderUpdate> {
             position.entryChases = 0;        // risk v11: every entry or add gets its own re-price
         }
         long remaining = (long) lots * position.contract.lotSize();
+        if (position.leg.isEmpty() && limits.maxParticipationPct() > 0) {
+            // risk v12: at most max_participation_pct of the premium traded in this option over the last minute
+            double traded = tradedPremiumLastMinute(position.contract.token());
+            if (traded > 0) {
+                long lot = position.contract.lotSize();
+                long cap = Math.max(lot, (long) (traded * limits.maxParticipationPct() / 100.0 / ask) / lot * lot);
+                if (cap < remaining) {
+                    log.log(System.Logger.Level.INFO, "{0} {1} entry capped by participation: {2} of {3} (last minute traded Rs {4})",
+                            position.strategy, position.contract.symbol(), cap, remaining, Math.round(traded));
+                    remaining = cap;
+                }
+            }
+        }
         position.committedPremium += remaining * ask;
+        if (position.leg.isEmpty() && limits.entrySliceDepthPct() > 0) {
+            // risk v12: buy in slices no larger than the ask within entry_slice_depth_pct; the rest on the next quotes
+            position.pendingEntryQuantity = remaining;
+            position.sliceStartAsk = ask;
+            position.sliceStartedAt = clock.get();
+            sendSlice(position);
+            return;
+        }
         long slice = (long) position.contract.maxLotsPerOrder() * position.contract.lotSize();
         while (remaining > 0) {
             long quantity = Math.min(remaining, slice);
             send(position, "ENTRY", OrderSide.BUY, OrderType.LIMIT, quantity, limit, 0, position.entryOrders);
             remaining -= quantity;
         }
+    }
+
+    /**
+     * risk v12: sends the next entry slice: the ask quantity within entry_slice_depth_pct of the best ask (whole lots, at
+     * least one lot, at most the freeze quantity), priced at that depth. Stops when the entry timeout has passed since the
+     * first slice or the ask has run entry_slice_max_drift_pct above the first slice's ask; the position keeps what it has.
+     */
+    private void sendSlice(ManagedPosition position) {
+        if (position.pendingEntryQuantity <= 0 || position.state == ManagedPosition.State.EXITING
+                || position.state == ManagedPosition.State.CLOSED || position.state == ManagedPosition.State.CANCELLING_FOR_EXIT) {
+            position.pendingEntryQuantity = 0;
+            return;
+        }
+        OptionTick book = lastBooks.get(position.contract.token());
+        double ask = book == null || book.asks().isEmpty() ? Double.NaN : book.asks().price(0);
+        boolean late = position.sliceStartedAt != null
+                && Duration.between(position.sliceStartedAt, clock.get()).toSeconds() >= limits.entryTimeoutSec();
+        if (!(ask > 0) || late || ask > position.sliceStartAsk * (1 + limits.entrySliceMaxDriftPct() / 100.0)) {
+            if (position.pendingEntryQuantity > 0) {
+                log.log(System.Logger.Level.INFO, "{0} {1} slicing stopped ({2}): {3} not bought", position.strategy,
+                        position.contract.symbol(), !(ask > 0) ? "no ask" : late ? "timeout" : "price ran", position.pendingEntryQuantity);
+            }
+            position.committedPremium -= position.pendingEntryQuantity * position.sliceStartAsk;
+            position.pendingEntryQuantity = 0;
+            if (position.boughtQuantity == 0 && !anyWorking(position)) {
+                position.exitReason = position.exitReason == null ? "ENTRY_NOT_FILLED" : position.exitReason;
+                close(position);
+            }
+            return;
+        }
+        double ceiling = ask * (1 + limits.entrySliceDepthPct() / 100.0);
+        long available = 0;
+        for (int i = 0; i < book.asks().size(); i++) {
+            if (book.asks().price(i) > 0 && book.asks().price(i) <= ceiling) {
+                available += book.asks().quantity(i);
+            }
+        }
+        long lot = position.contract.lotSize();
+        long quantity = Math.min(position.pendingEntryQuantity, Math.max(lot, available / lot * lot));
+        quantity = Math.min(quantity, (long) position.contract.maxLotsPerOrder() * lot);
+        double limit = position.contract.roundUp(ceiling);
+        position.entryLimit = limit;
+        position.entryPricedAt = clock.get();
+        position.pendingEntryQuantity -= quantity;
+        send(position, "ENTRY", OrderSide.BUY, OrderType.LIMIT, quantity, limit, 0, position.entryOrders);
+    }
+
+    /** risk v12: the premium traded in this option over the last minute (0 without a minute of samples). */
+    private double tradedPremiumLastMinute(long token) {
+        java.util.ArrayDeque<double[]> samples = volumeSamples.get(token);
+        if (samples == null || samples.size() < 2) {
+            return 0;
+        }
+        double[] last = samples.peekLast();
+        double[] first = null;
+        for (double[] sample : samples) {
+            if (sample[0] <= last[0] - 60_000) {
+                first = sample;
+            }
+        }
+        if (first == null) {
+            return 0;
+        }
+        return Math.max(0, last[1] - first[1]) * last[2];
     }
 
     /**
