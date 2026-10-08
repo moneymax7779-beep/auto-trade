@@ -31,3 +31,27 @@ Test: the live set (application.yml, 6 strategies), v10 vs v12, each day started
 and no v12 entry slice was larger than the ask within 0.5 % at its quote (checked against own capture). Reported, not
 judged: the change in fill prices and in net. Going live is the user's decision: v12 makes paper fills more honest
 and probably a little worse.
+
+### A-062 result (GCP, 8 Oct 22:20–23:40 IST, image 1e9505c, each day from equity ₹9,97,219)
+
+| day | v10 | v12 | main difference |
+|---|---|---|---|
+| 22 Sep | +3,72,126 | +3,37,738 | early-confirm runner and trend rider bought less (timeouts, a 2 % run) |
+| 23 Sep | −98,496 | −40,254 | smaller break-retest loser |
+| 24 Sep | +3,93,482 | +4,39,266 | — |
+| 25 Sep | −40,887 | −42,997 | — |
+| 28 Sep | +7,30,197 | +81,468 | opening drive 09:16 NIFTY 22950 PE: v10 bought 15,730 (₹9.96L) at ₹63.29 into a book showing ₹1.6–3.7L within 0.5 % while the ask ran ₹63.20 → ₹68.80 in 6 s; v12 bought 1,755 |
+| 29 Sep | −1,841 | +45,975 | — |
+| 30 Sep | −2,22,640 (kill switch) | −74,741 | smaller opening-drive losers |
+| 1 Oct | +6,16,495 | +6,19,119 | — |
+| 5 Oct | +69,375 | +69,358 | — |
+| 6 Oct | −74,834 | −74,554 | — |
+| 7 Oct | +1,20,651 | +16,953 | — |
+| 8 Oct | +7,34,912 | +4,60,365 | 14:01 SENSEX 71500 PE: a smaller 14:02 add left capital for a 14:12 add at ₹132; the higher average kept the profit lock from arming; −₹3,39,724 vs −₹75,585 |
+| total | +25,98,540 | +18,37,696 | −₹7,60,844 (−29 %) |
+
+Mechanics: 43 trades in both; v12 bought ≥ 90 % of v10's quantity on 37 (86 %); the average entry price was 0.13 %
+higher. **PASS (mechanics).** The money result: at ₹10L equity the v10 paper fills were already about 30 % better
+than the books allowed on these days, mostly at the open (opening drive sized to the full budget into thin 09:16
+books) and through path effects on expiry afternoons. A slice that does not fill waits for the 10 s entry timeout
+(28 Sep: the second slice); re-pricing it sooner is a possible v13, not part of this test.
