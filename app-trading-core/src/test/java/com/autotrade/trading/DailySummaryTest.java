@@ -10,20 +10,25 @@ import org.junit.jupiter.api.Test;
 class DailySummaryTest {
 
     @Test
-    void theMessageCarriesTheDayEquityGoalPaceStrategiesAndTrades() {
+    void theMessageIsTheDaysProfitOrLossFollowedByTheTrades() {
         List<DailySummary.Trade> trades = List.of(
-                new DailySummary.Trade("11:23", "expiry-trend-rider", "SENSEX 72000 PE 08 OCT 26", 2200, 156.89, 361.46, 448456, "SWING_HIGH_RECLAIMED"),
-                new DailySummary.Trade("14:01", "expiry-trend-rider", "SENSEX 71500 PE 08 OCT 26", 2440, 103.59, 71.92, -77889, "SWING_HIGH_RECLAIMED"),
-                new DailySummary.Trade("10:30", "break-retest", "NIFTY 22450 PE 13 OCT 26", 2210, 125.50, 144.51, 41364, "TARGET"));
-        String text = DailySummary.text(LocalDate.of(2026, 10, 8), 411931, 9000, 560121, 972052, 605000, 2, true, trades, 2, 13);
-        assertThat(text).startsWith("🟢 Daily P&L · auto-trade PAPER · Thu 08 Oct 2026");
-        assertThat(text).contains("Day: +₹4,11,931 (+73.5%) · 3 trades, 2 wins · costs ₹9,000");
-        assertThat(text).contains("Equity: ₹5,60,121 → ₹9,72,052");
-        assertThat(text).contains("Goal pace (10%/session, session 2): ₹6,05,000 · ahead +₹3,67,052");
-        assertThat(text).contains("• expiry-trend-rider: 2 trades, 1 win, +₹3,70,567");
-        assertThat(text).contains("14:01 expiry-trend-rider · SENSEX 71500 PE 08 OCT 26 · 2440 @ ₹103.59 → ₹71.92 · −₹77,889 (SWING_HIGH_RECLAIMED)");
-        assertThat(text).endsWith("Not filled: 2 · refused by risk/capital: 13");
-        assertThat(DailySummary.text(LocalDate.of(2026, 10, 9), 0, 0, 500000, 500000, 550000, 1, true, List.of(), 0, 0))
-                .startsWith("🟢").contains("No trades today.").contains("behind −₹50,000");
+                new DailySummary.Trade("11:23", "13:36", "expiry-trend-rider", "SENSEX 72000 PE 08 OCT 26", 2200, 156.89, 361.46, 448456, "X"),
+                new DailySummary.Trade("14:01", "14:39", "expiry-trend-rider", "SENSEX 71500 PE 08 OCT 26", 2440, 103.59, 71.92, -77889, "Y"));
+        String text = DailySummary.text(LocalDate.of(2026, 10, 8), 370567, trades);
+        assertThat(text).isEqualTo("""
+                🟢 Profit/Loss · Thu 08 Oct 2026 (PAPER)
+                Profit +₹3,70,567 · 2 trades, 1 in profit (after charges)
+
+                Trades:
+                ✅ 1. 11:23–13:36  SENSEX 72000 PE (08 Oct)
+                    Buy 2200 @ ₹156.89 → Sell @ ₹361.46  +₹4,48,456
+                ❌ 2. 14:01–14:39  SENSEX 71500 PE (08 Oct)
+                    Buy 2440 @ ₹103.59 → Sell @ ₹71.92  −₹77,889""");
+        assertThat(text).doesNotContain("expiry-trend-rider").doesNotContain("Goal").doesNotContain("X)");
+        assertThat(DailySummary.text(LocalDate.of(2026, 10, 9), -12000,
+                List.of(new DailySummary.Trade("10:00", "10:05", "s", "NIFTY 22450 PE 13 OCT 26", 65, 100, 90, -12000, "STOP"))))
+                .startsWith("🔴 Profit/Loss · Fri 09 Oct 2026 (PAPER)\nLoss −₹12,000 · 1 trade, 0 in profit");
+        assertThat(DailySummary.text(LocalDate.of(2026, 10, 12), 0, List.of()))
+                .isEqualTo("🟢 Profit/Loss · Mon 12 Oct 2026 (PAPER)\nProfit ₹0 (after charges)\n\nNo trades today.");
     }
 }

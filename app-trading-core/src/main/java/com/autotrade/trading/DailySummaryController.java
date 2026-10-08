@@ -33,7 +33,7 @@ class DailySummaryController {
         out.put("date", day.toString());
         out.put("telegramConfigured", alerts.telegramConfigured());
         out.put("groupConfigured", alerts.telegramGroupConfigured());
-        out.put("text", new DailySummary(target, properties.trading().riskFile()).build(properties.trading().account(), day));
+        out.put("text", new DailySummary(target).build(properties.trading().account(), day));
         return out;
     }
 }

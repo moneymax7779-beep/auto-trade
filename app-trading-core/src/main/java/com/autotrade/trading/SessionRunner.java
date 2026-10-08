@@ -301,7 +301,7 @@ class SessionRunner implements ApplicationRunner {
             return;
         }
         try {
-            String text = new DailySummary(target, properties.trading().riskFile()).build(properties.trading().account(), today);
+            String text = new DailySummary(target).build(properties.trading().account(), today);
             if (text == null) {
                 return;     // no finished live session today (yet)
             }
