@@ -20,6 +20,14 @@ export const STRATEGY_INFO: Record<string, { short: string; name: string; when: 
     short: "EGB", name: "Expiry gamma breakout", when: "expiry day · 09:30–14:45 · flat 15:15",
     what: "Compression, then a break of ORH / PDH or ORL / PDL, a retest and hold; tranches 25 / 45 / 30.",
   },
+  "break-retest": {
+    short: "BRT", name: "Break and retest", when: "non-expiring index · 09:31–14:30 · 30-min stop",
+    what: "A close through ORH / ORL / PDH / PDL, a retest that holds, entry on the turn; stop at the retest extreme, target the next level.",
+  },
+  "ma-cross": {
+    short: "MAC", name: "EMA9 / EMA20 cross", when: "non-expiring index · 09:30–14:30 · 60-min stop",
+    what: "A cross of the fast average over the slow one buys the ATM option that way; stop at the last swing, target twice the stop distance.",
+  },
   "expiry-trend-rider": {
     short: "ETR", name: "Expiry trend rider", when: "expiry index · 11:00–14:30 · flat 15:15",
     what: "Rides a trend with breadth and futures OI behind it, adding up to 3 times; exits on a swing break.",

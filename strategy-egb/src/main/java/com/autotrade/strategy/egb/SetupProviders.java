@@ -59,6 +59,13 @@ public final class SetupProviders {
         }
     }
 
+    public static final class MaCrossProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "ma-cross";
+        }
+    }
+
     public static final class AuctionPressureProvider extends Base {
         @Override
         public String strategyKey() {

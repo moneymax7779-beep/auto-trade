@@ -174,4 +174,30 @@ class SetupFamiliesTest {
         assertThat(weak.at("15:22", 22718, PositionView.FLAT, "cas.constituentCoveragePct", 100.0,
                 "cas.weightedIepReturnPct", 0.40).orders()).as("decided at the first minute").isEmpty();
     }
+
+    @Test
+    void maCrossBuysOnTheCrossWithASwingStopAndTwiceTheRiskAsTarget() {
+        Day d = new Day("ma-cross.v1.yaml", Map.of("structure.lastSwingLow", 22580.0, "structure.lastSwingHigh", 22700.0));
+        d.at("10:00", 22600, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22602.0);     // below
+        assertThat(d.at("10:01", 22610, PositionView.FLAT, "structure.ema9", 22605.0, "structure.ema20", 22601.0).orders())
+                .as("cross up: call, stop at the swing low 22,580 (risk 30), target 22,670").singleElement()
+                .satisfies(o -> {
+                    assertThat(o.side()).isEqualTo(OptionSide.CE);
+                    assertThat(o.reason()).isEqualTo("EMA_CROSS_UP");
+                });
+        PositionView holding = new PositionView(true, OptionSide.CE, 1, 50, null, 52);
+        assertThat(d.at("10:05", 22650, holding, "structure.ema9", 22620.0, "structure.ema20", 22605.0).orders()).isEmpty();
+        assertThat(d.at("10:06", 22671, holding, "structure.ema9", 22630.0, "structure.ema20", 22608.0).orders())
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("TARGET");
+
+        Day far = new Day("ma-cross.v1.yaml", Map.of("structure.lastSwingLow", 22500.0, "structure.lastSwingHigh", 22700.0));
+        far.at("10:00", 22600, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22602.0);
+        assertThat(far.at("10:01", 22610, PositionView.FLAT, "structure.ema9", 22605.0, "structure.ema20", 22601.0).orders())
+                .as("the swing stop is 110 points = 5.5 ATR away: skip").isEmpty();
+
+        Day down = new Day("ma-cross.v1.yaml", Map.of("structure.lastSwingLow", 22500.0, "structure.lastSwingHigh", 22630.0));
+        down.at("11:00", 22600, PositionView.FLAT, "structure.ema9", 22603.0, "structure.ema20", 22601.0);
+        assertThat(down.at("11:01", 22590, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22601.0).orders())
+                .singleElement().extracting(OrderIntent::side).isEqualTo(OptionSide.PE);
+    }
 }

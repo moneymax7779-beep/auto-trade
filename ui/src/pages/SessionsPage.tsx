@@ -7,6 +7,7 @@ import { TimelineChart } from "../components/TimelineChart";
 import { ErrorNote, Loading, Panel, Pnl, StageBadge, Table } from "../components/ui";
 import { markersFromOrders } from "./markers";
 import { exitMarkers, TradesTable } from "../components/TradesTable";
+import { strategyShort } from "../components/strategies";
 
 export function SessionsPage() {
   const sessions = useQuery({ queryKey: ["sessions"], queryFn: () => get<SessionRow[]>("/api/sessions") });
@@ -27,6 +28,7 @@ export function SessionsPage() {
           { key: "w", label: "Wins", align: "right", render: (r) => r.summary?.wins ?? "–" },
           { key: "n", label: "Net", align: "right", render: (r) => <Pnl value={r.summary?.net} /> },
           { key: "r", label: "Reconciled", render: (r) => (r.summary?.reconciled == null ? "–" : r.summary.reconciled ? "yes" : "NO") },
+          { key: "strat", label: "Strategies", render: (r) => <StrategyChips ids={r.strategy_id} /> },
           { key: "c", label: "Code", render: (r) => <span className="num text-xs">{r.code_version}</span> },
           { key: "s", label: "Started", render: (r) => r.started_at },
         ]}
@@ -110,7 +112,10 @@ export function SessionDetailPage() {
   return (
     <div className="space-y-4">
       <Panel
-        title={<>Session {id} {session && <>· {session.session_date} · {session.mode} · net <Pnl value={session.summary?.net} /></>}</>}
+        title={<>Session {id} {session && <>· {session.session_date} · {session.mode}
+          {strategyIds.length === 1 && <> · <span title={strategyIds[0]}>{strategyShort(strategyIds[0])}</span></>}
+          {strategyIds.length > 1 && <span className="ml-1 text-xs font-normal text-muted">· {strategyIds.length} strategies</span>}
+          {" "}· net <Pnl value={session.summary?.net} /></>}</>}
         right={
           <div className="flex flex-wrap gap-1">
             {strategyIds.length > 1 && strategyIds.map((sid) => (
@@ -173,5 +178,18 @@ export function SessionDetailPage() {
         ]} />
       </Panel>
     </div>
+  );
+}
+
+/** The strategies a session ran, as short names ("EBS · ECR · ODB · EGB · ETR"; the full ids on hover). */
+function StrategyChips({ ids }: { ids: string }) {
+  const list = (ids ?? "").split("+").filter(Boolean);
+  if (list.length === 0) return <span className="text-muted">–</span>;
+  return (
+    <span className="text-xs" title={list.join(" + ")}>
+      {list.map((id, i) => (
+        <span key={id}>{i > 0 && <span className="text-muted"> · </span>}<span className={list.length === 1 ? "font-semibold" : ""}>{strategyShort(id)}</span></span>
+      ))}
+    </span>
   );
 }

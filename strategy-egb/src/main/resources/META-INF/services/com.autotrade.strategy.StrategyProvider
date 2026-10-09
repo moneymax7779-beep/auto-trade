@@ -12,3 +12,4 @@ com.autotrade.strategy.egb.ExpirySwingRiderProvider
 com.autotrade.strategy.egb.WallBreakRiderProvider
 com.autotrade.strategy.egb.SetupProviders$BreakRetestRunnerProvider
 com.autotrade.strategy.egb.SetupProviders$TrendDayRiderProvider
+com.autotrade.strategy.egb.SetupProviders$MaCrossProvider
