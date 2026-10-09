@@ -90,6 +90,8 @@ export interface SessionRow {
   account: string;
   mode: string;
   session_date: string;
+  /** config file name -> content hash, e.g. {"ma-cross.v1.yaml": "sha256:..."} */
+  configs?: Record<string, string>;
   feed: string;
   strategy_id: string;
   strategy_hash: string;

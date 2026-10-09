@@ -7,7 +7,7 @@ import { TimelineChart } from "../components/TimelineChart";
 import { ErrorNote, Loading, Panel, Pnl, StageBadge, Table } from "../components/ui";
 import { markersFromOrders } from "./markers";
 import { exitMarkers, TradesTable } from "../components/TradesTable";
-import { strategyShort } from "../components/strategies";
+import { STRATEGY_INFO, strategyShort } from "../components/strategies";
 
 export function SessionsPage() {
   const sessions = useQuery({ queryKey: ["sessions"], queryFn: () => get<SessionRow[]>("/api/sessions") });
@@ -28,7 +28,7 @@ export function SessionsPage() {
           { key: "w", label: "Wins", align: "right", render: (r) => r.summary?.wins ?? "–" },
           { key: "n", label: "Net", align: "right", render: (r) => <Pnl value={r.summary?.net} /> },
           { key: "r", label: "Reconciled", render: (r) => (r.summary?.reconciled == null ? "–" : r.summary.reconciled ? "yes" : "NO") },
-          { key: "strat", label: "Strategies", render: (r) => <StrategyChips ids={r.strategy_id} /> },
+          { key: "strat", label: "Strategy", render: (r) => <StrategyChips ids={r.strategy_id} configs={r.configs} /> },
           { key: "c", label: "Code", render: (r) => <span className="num text-xs">{r.code_version}</span> },
           { key: "s", label: "Started", render: (r) => r.started_at },
         ]}
@@ -113,8 +113,8 @@ export function SessionDetailPage() {
     <div className="space-y-4">
       <Panel
         title={<>Session {id} {session && <>· {session.session_date} · {session.mode}
-          {strategyIds.length === 1 && <> · <span title={strategyIds[0]}>{strategyShort(strategyIds[0])}</span></>}
-          {strategyIds.length > 1 && <span className="ml-1 text-xs font-normal text-muted">· {strategyIds.length} strategies</span>}
+          {strategyIds.length === 1 && <> · {STRATEGY_INFO[strategyIds[0]]?.name ?? strategyIds[0]}</>}
+          {strategyIds.length > 1 && <> · {strategyIds.length} strategies</>}
           {" "}· net <Pnl value={session.summary?.net} /></>}</>}
         right={
           <div className="flex flex-wrap gap-1">
@@ -129,6 +129,7 @@ export function SessionDetailPage() {
           </div>
         }
       >
+        <StrategyNote ids={strategyIds} configs={session?.configs} />
         {decisions.isLoading ? <Loading what="decisions" /> : decisions.error ? <ErrorNote error={decisions.error} /> :
           rows.length === 0 ? <p className="text-sm text-muted">No decisions for {underlying}.</p> : (
             <>
@@ -181,15 +182,47 @@ export function SessionDetailPage() {
   );
 }
 
-/** The strategies a session ran, as short names ("EBS · ECR · ODB · EGB · ETR"; the full ids on hover). */
-function StrategyChips({ ids }: { ids: string }) {
+/** The strategy a session ran, by full name with its config version; several strategies as short codes (full names on hover). */
+function StrategyChips({ ids, configs }: { ids: string; configs?: Record<string, string> }) {
   const list = (ids ?? "").split("+").filter(Boolean);
   if (list.length === 0) return <span className="text-muted">–</span>;
+  if (list.length === 1) {
+    const id = list[0];
+    return (
+      <span className="text-xs" title={id}>
+        <span className="font-semibold">{STRATEGY_INFO[id]?.name ?? id}</span>
+        <span className="num text-muted"> · {configVersion(id, configs) ?? id}</span>
+      </span>
+    );
+  }
   return (
-    <span className="text-xs" title={list.join(" + ")}>
-      {list.map((id, i) => (
-        <span key={id}>{i > 0 && <span className="text-muted"> · </span>}<span className={list.length === 1 ? "font-semibold" : ""}>{strategyShort(id)}</span></span>
-      ))}
+    <span className="text-xs" title={list.map((id) => `${STRATEGY_INFO[id]?.name ?? id} (${configVersion(id, configs) ?? id})`).join("\n")}>
+      {list.map((id, i) => <span key={id}>{i > 0 && <span className="text-muted"> · </span>}{strategyShort(id)}</span>)}
     </span>
+  );
+}
+
+/** "ma-cross.v1" from the session's config file names; undefined when the session did not record the file. */
+function configVersion(strategyId: string, configs?: Record<string, string>): string | undefined {
+  const file = Object.keys(configs ?? {}).find((f) => f.startsWith(strategyId + ".v"));
+  return file?.replace(/\.yaml$/, "");
+}
+
+/** What the session's strategy is, in words: full name, id, config version and the catalogue's one-line description. */
+function StrategyNote({ ids, configs }: { ids: string[]; configs?: Record<string, string> }) {
+  if (ids.length === 0) return null;
+  return (
+    <div className="mb-3 space-y-1 text-xs">
+      {ids.map((id) => {
+        const info = STRATEGY_INFO[id];
+        return (
+          <div key={id}>
+            <span className="text-muted">Strategy: </span><span className="font-semibold">{info?.name ?? id}</span>
+            <span className="num text-muted"> · {id} · {configVersion(id, configs) ?? "config version not recorded"}</span>
+            {info && <span className="text-muted"> · {info.what} ({info.when})</span>}
+          </div>
+        );
+      })}
+    </div>
   );
 }
