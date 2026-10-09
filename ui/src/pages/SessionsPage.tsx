@@ -129,7 +129,6 @@ export function SessionDetailPage() {
           </div>
         }
       >
-        <StrategyNote ids={strategyIds} configs={session?.configs} />
         {decisions.isLoading ? <Loading what="decisions" /> : decisions.error ? <ErrorNote error={decisions.error} /> :
           rows.length === 0 ? <p className="text-sm text-muted">No decisions for {underlying}.</p> : (
             <>
@@ -208,21 +207,3 @@ function configVersion(strategyId: string, configs?: Record<string, string>): st
   return file?.replace(/\.yaml$/, "");
 }
 
-/** What the session's strategy is, in words: full name, id, config version and the catalogue's one-line description. */
-function StrategyNote({ ids, configs }: { ids: string[]; configs?: Record<string, string> }) {
-  if (ids.length === 0) return null;
-  return (
-    <div className="mb-3 space-y-1 text-xs">
-      {ids.map((id) => {
-        const info = STRATEGY_INFO[id];
-        return (
-          <div key={id}>
-            <span className="text-muted">Strategy: </span><span className="font-semibold">{info?.name ?? id}</span>
-            <span className="num text-muted"> · {id} · {configVersion(id, configs) ?? "config version not recorded"}</span>
-            {info && <span className="text-muted"> · {info.what} ({info.when})</span>}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
