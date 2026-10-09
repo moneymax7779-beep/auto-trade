@@ -71,7 +71,7 @@ export function StrategyMatrix({ cells, positions = [], underlyings }: {
             return (
               <tr key={id} className="border-t border-line align-top">
                 <td className="py-2 pr-3">
-                  <Link to="/strategies" className="font-semibold hover:underline">{info?.short ?? id}</Link>
+                  <span className="font-semibold" title={info?.name ?? id}>{info?.short ?? id}</span>
                   <div className="text-muted">{info?.when ?? ""}</div>
                 </td>
                 {underlyings.map((u) => {

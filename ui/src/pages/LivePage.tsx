@@ -120,7 +120,7 @@ function LiveOverview({ views, positions }: { views: Record<string, StrategyView
         const v = entries.find((e) => e.underlying === u)!.view;
         return { underlying: u, spot: v.spot, time: v.time, state: v.state };
       })} />
-      <Panel title="Strategies" right={<Link to="/strategies" className="text-xs text-accent hover:underline">what each one does, and its record →</Link>}>
+      <Panel title="Strategies">
         <StrategyMatrix cells={cells} positions={positions ?? []} underlyings={underlyings} />
       </Panel>
     </>

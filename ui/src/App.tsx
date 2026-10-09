@@ -5,13 +5,12 @@ import { LivePage } from "./pages/LivePage";
 import { ReplayPage } from "./pages/ReplayPage";
 import { ResearchPage, RunDetailPage } from "./pages/ResearchPage";
 import { SessionDetailPage, SessionsPage } from "./pages/SessionsPage";
-import { StrategiesPage } from "./pages/StrategiesPage";
 
 const NAV = [
   ["/live", "Overview"],
   ["/index/NIFTY", "NIFTY"],
   ["/index/SENSEX", "SENSEX"],
-  ["/strategies", "Strategies"],
+  // ["/strategies", "Strategies"],   hidden 2026-10-09 (user: "Hide the Strategies page for now"); StrategiesPage.tsx kept
   ["/sessions", "Sessions"],
   ["/research", "Research"],
   ["/replay", "Replay"],
@@ -42,7 +41,6 @@ export function App() {
           <Route path="/" element={<LivePage />} />
           <Route path="/live" element={<LivePage />} />
           <Route path="/index/:underlying" element={<IndexPage />} />
-          <Route path="/strategies" element={<StrategiesPage />} />
           <Route path="/sessions" element={<SessionsPage />} />
           <Route path="/sessions/:id" element={<SessionDetailPage />} />
           <Route path="/research" element={<ResearchPage />} />
