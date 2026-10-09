@@ -55,6 +55,7 @@ autotrade:
       # User 2026-10-07 07:00 IST: "run everything in PAPER mode, no need of SHADOW mode" (A-053). The former shadow
       # strategies come after the existing ones, so on a common trigger the existing ones take the capital first.
       - config/strategy/break-retest.v1.yaml               # brt-v1 live (was shadow, A-041); never the expiring index; Rs 2.5L budget
+      - config/strategy/ma-cross.v1.yaml                   # mac-v1 forward test in PAPER (A-067, user 2026-10-09 20:40: "run it in paper"); A-066 test PASS, held-out FAIL on one trade; never the expiring index; Rs 2.5L budget; last, so the others take the capital first
     features-file: config/features/features.v11.yaml   # v11 = v7 with the VWAP proxy using the 15-minute mean basis (A-030, user 2026-10-02: "yes switch to v11"); v7 = v6 + ATR seeded from the previous session
     exchange-file: config/exchange/nse-bse-sessions.v3.yaml
     costs-file: config/costs/india-index-options-costs.v2.yaml   # v2: Upstox Plus brokerage Rs 30/order from 2026-09-01 (A-044, user 2026-10-06)
