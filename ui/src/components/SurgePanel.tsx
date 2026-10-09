@@ -15,6 +15,8 @@ interface Surge {
   t: string; vol: number; x: number; spot: number | null; atm?: number; flow: Flow;
   futures?: { oi: number; pct: number; px: number; label: string; score: number };
   CE?: SideFlow; PE?: SideFlow;
+  /** Futures quantity in minute t bought at the ask / sold at the bid (estimate; boughtPct of the classified part). */
+  aggressor?: { bought: number; sold: number; unclassified: number; boughtPct: number | null };
   /** Index points after the flow is known (from the close of t+1): +5 / +15 / +30 min, best / worst close within 15 min. */
   from?: string; move5?: number | null; move15: number | null; move30: number | null; best15?: number | null; worst15?: number | null;
 }
@@ -481,7 +483,12 @@ function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, 
     const up = price == null ? undefined : known.filter((k) => k.lo > price).sort((p, q) => p.lo - q.lo)[0];
     const down = price == null ? undefined : known.filter((k) => k.hi < price).sort((p, q) => q.hi - p.hi)[0];
     const burst = groups.find((g) => minutes(g.start) <= hover.m && hover.m <= minutes(g.end) && g.flips.length > 0);
-    return { m: hover.m, price, vol: vols.get(hover.m), surge: byMinute.get(hover.m), inside, up, down, flips: burst?.flips ?? [],
+    // a burst of several surge minutes: its futures bought / sold summed over those minutes
+    const whole = groups.find((g) => minutes(g.start) <= hover.m && hover.m <= minutes(g.end) && g.surges.length > 1);
+    const split = whole?.surges.reduce((a, x) => (x.aggressor ? { b: a.b + x.aggressor.bought, s: a.s + x.aggressor.sold } : a), { b: 0, s: 0 });
+    const burstSplit = whole && split && split.b + split.s > 0
+      ? { start: whole.start, end: whole.end, pct: Math.round((100 * split.b) / (split.b + split.s)) } : null;
+    return { m: hover.m, price, vol: vols.get(hover.m), surge: byMinute.get(hover.m), inside, up, down, flips: burst?.flips ?? [], burstSplit,
       vwap: lineMaps.vwap.get(hover.m), ema: lineMaps.ema20.get(hover.m),
       ce: prem ? premAt("CE", hover.m) : null, pe: prem ? premAt("PE", hover.m) : null };
   })();
@@ -758,6 +765,19 @@ function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, 
             {tip.surge && (
               <div className="mt-1 space-y-0.5 border-t border-line pt-1">
                 <div style={{ color: flowColor(tip.surge.flow) }} className="font-semibold">{tip.surge.flow} surge · {nf(tip.surge.x, 1)}×</div>
+                {tip.surge.aggressor && tip.surge.aggressor.boughtPct != null && (
+                  <div className="num" title="futures trades at or above the ask count as bought, at or below the bid as sold (estimate)">
+                    <span className={tip.surge.aggressor.boughtPct >= 60 ? "text-up" : tip.surge.aggressor.boughtPct <= 40 ? "text-down" : ""}>
+                      {tip.surge.aggressor.boughtPct >= 60 ? "buyers hit the ask" : tip.surge.aggressor.boughtPct <= 40 ? "sellers hit the bid" : "two-sided"}
+                    </span>{" "}
+                    · bought {tip.surge.aggressor.boughtPct} % · sold {100 - tip.surge.aggressor.boughtPct} %
+                    <div className="text-muted">{nf(tip.surge.aggressor.bought)} bought · {nf(tip.surge.aggressor.sold)} sold
+                      {tip.surge.aggressor.unclassified > 0 && <> · {nf(tip.surge.aggressor.unclassified)} unclear</>}</div>
+                  </div>
+                )}
+                {tip.burstSplit && (
+                  <div className="num text-muted">burst {tip.burstSplit.start}–{tip.burstSplit.end}: bought {tip.burstSplit.pct} % · sold {100 - tip.burstSplit.pct} %</div>
+                )}
                 <div>futures OI {signed(tip.surge.futures?.pct, 2)} % {short(tip.surge.futures?.label)}</div>
                 <div>calls {signed(tip.surge.CE?.pct, 1)} % {short(tip.surge.CE?.label)} · puts {signed(tip.surge.PE?.pct, 1)} % {short(tip.surge.PE?.label)}</div>
                 <div className="num">from {tip.surge.from ?? "t+1"}: +5 {signed(tip.surge.move5)} · +15 {signed(tip.surge.move15)} · +30 {signed(tip.surge.move30)}</div>

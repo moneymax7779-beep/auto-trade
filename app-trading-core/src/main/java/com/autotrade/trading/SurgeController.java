@@ -215,6 +215,9 @@ class SurgeController {
                 }
                 s.put("atm", atm);
             }
+            if (futureExpiry != null) {
+                s.put("aggressor", aggressor(underlying, futureExpiry, day, t));
+            }
             s.put("flow", scores.size() < 2 ? "mixed" : SurgeFlow.overall(scores));
             flows.put(flowKey, new LinkedHashMap<>(s));
             outcome(s, index, t);
@@ -222,6 +225,33 @@ class SurgeController {
         }
         out.put("surges", surges);
         return out;
+    }
+
+    /** Futures quantity bought at the ask and sold at the bid in minute t (AggressorSplit). */
+    private Map<String, Object> aggressor(String underlying, LocalDate expiry, LocalDate day, LocalTime t) {
+        Instant start = day.atTime(t).atZone(MarketTime.IST).toInstant();
+        List<AggressorSplit.Tick> previous = jdbc.query("select price, volume, bid_px[1], ask_px[1] from md.future_tick "
+                + "where underlying = ? and expiry = ? and recv_ts >= ? and recv_ts < ? order by recv_ts desc, src_seq desc limit 1",
+                (rs, i) -> tick(rs), underlying, expiry, java.sql.Timestamp.from(start.minusSeconds(300)), java.sql.Timestamp.from(start));
+        List<AggressorSplit.Tick> minute = jdbc.query("select price, volume, bid_px[1], ask_px[1] from md.future_tick "
+                + "where underlying = ? and expiry = ? and recv_ts >= ? and recv_ts < ? order by recv_ts, src_seq",
+                (rs, i) -> tick(rs), underlying, expiry, java.sql.Timestamp.from(start), java.sql.Timestamp.from(start.plusSeconds(60)));
+        AggressorSplit.Split split = AggressorSplit.of(previous.isEmpty() ? null : previous.getFirst(), minute);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("bought", split.bought());
+        out.put("sold", split.sold());
+        out.put("unclassified", split.unclassified());
+        out.put("boughtPct", split.boughtPct());
+        return out;
+    }
+
+    private static AggressorSplit.Tick tick(java.sql.ResultSet rs) throws java.sql.SQLException {
+        double volume = rs.getDouble(2);
+        double bid = rs.getDouble(3);
+        boolean noBid = rs.wasNull();
+        double ask = rs.getDouble(4);
+        boolean noAsk = rs.wasNull();
+        return new AggressorSplit.Tick(rs.getDouble(1), volume, noBid ? Double.NaN : bid, noAsk ? Double.NaN : ask);
     }
 
     private static Map<String, Object> optionSide(Map<String, Quote> q, String type, double atm, double step) {
