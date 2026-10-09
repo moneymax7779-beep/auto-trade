@@ -52,3 +52,41 @@ by no more than ₹50,000 against the live set alone.
 below −₹1,06,000.
 
 A pass makes a candidate eligible for live PAPER; going live is the user's decision.
+
+## Result (9 Oct, 16:22–19:00 IST, GCP image 7a34b98, standalone runs, each day from equity ₹10,61,863)
+
+| day | brt-v1 | split (brt-v2 + brtr-v1) | brtr-v1 at ₹2,50,000 (descriptive) | tdr-v1 |
+|---|---|---|---|---|
+| 28 Sep | 0 | 0 | 0 | −63,963 |
+| 29 Sep | +49,577 | +9,369 | −27,002 | 0 |
+| 30 Sep | +50,420 | −55,525 | −1,62,324 | −8,510 |
+| 1 Oct | +25,588 | +81,047 | +1,42,627 | −90,516 |
+| 5 Oct | +73,775 | −25,832 | −1,25,236 | 0 |
+| 6 Oct | +20,172 | +93,141 | +1,67,487 | −34,835 |
+| 7 Oct | +17,870 | −1,10,635 | −2,38,821 | −2,63,453 |
+| 8 Oct | −40,572 | +1,88,072 | +3,31,020 | +4,75,643 |
+| **test** | **+1,96,830** (28 trades) | **+1,79,637** (55) | +87,751 (27, 4 wins) | **+14,366** (11, 3 wins) |
+| 22 Sep | −27,184 | −57,037 | −94,885 | −29,870 |
+| 23 Sep | −69,269 | −86,466 | −69,269 | −90,209 |
+| 24 Sep | +2,838 | +1,87,679 | +3,80,266 | +98,917 |
+| 25 Sep | −45,167 | −50,336 | −45,167 | 0 |
+| **held-out** | **−1,38,782** | **−6,160** | +1,70,945 | **−21,162** |
+| 9 Oct (design) | +67,473 | +99,173 | +1,34,216 | −1,58,304 (4 stops) |
+
+**A-064 tdr-v1: FAIL.** Test: 11 trades, 3 wins, net +₹14,366, profit factor 1.03 (needed 1.5), worst day 7 Oct
+−₹2,63,453 (two 14:01 puts both hit the 25 % premium stop; needed ≥ −₹1,06,000); held-out −₹21,162 (needed ≥ 0). It
+lost on its own design day: the hour-long proof is complete around 11:10, just before 9 Oct's 11:30–12:00 pullback,
+and four entries were stopped. One trade (8 Oct NIFTY PE 10:49 → 15:15, +₹4,75,643) is the whole test profit.
+
+**A-065 split: FAIL.** Split net is below brt-v1 on the test days (+₹1,79,637 vs +₹1,96,830) and one split test day is
+below −₹1,06,000 (7 Oct −₹1,10,635); on the held-out days it is better (−₹6,160 vs −₹1,38,782). Ten test trades reached
+a target or time stop, so the test is not inconclusive.
+
+What the runner does (descriptive, not a pass): brtr-v1 alone wins rarely (4 of 27 test trades) but its winners are the
+day's trend (8 Oct +₹4,38,325, 24 Sep +₹3,80,266, 1 Oct +₹1,82,652, 6 Oct +₹1,67,487, 9 Oct +₹1,34,216, all held to
+VWAP trail or 15:15). Its losers are brt-v1's target trades that reversed to the structure stop. Over all 13 days it
+made +₹3,92,912 against brt-v1's +₹1,25,521, with losing days down to −₹2,38,821. That pattern is a hypothesis for a
+future registration on days from 12 Oct, not a result.
+
+The live-set runs (capital interaction) were stopped after phase A because both candidates had failed; one partial
+replay of 28 Sep was stopped. Nothing goes live; the live set is unchanged.
