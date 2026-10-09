@@ -42,6 +42,10 @@ abstract class SetupStrategy implements Strategy {
     private final boolean skipExpiringIndex;
     private final double premiumStopPct;
     private final int strikeOffset;
+    /** A-064/A-065: exit on a 3-minute close (09:15-based bars) back through the session VWAP. Default off. */
+    private final boolean vwapTrail3m;
+    /** A-065: false = ride without the target level (the runner). Default true. */
+    private final boolean useTarget;
 
     /** Minute closes, newest last (the snapshot spot each minute). */
     protected final ArrayDeque<Double> closes = new ArrayDeque<>();
@@ -60,6 +64,8 @@ abstract class SetupStrategy implements Strategy {
         this.skipExpiringIndex = config.getBoolean("scope.skip_expiring_index");
         this.premiumStopPct = config.getDouble("exits.premium_stop_pct");
         this.strikeOffset = config.getInt("position.strike_offset");
+        this.vwapTrail3m = config.has("exits.vwap_trail_3m") && config.getBoolean("exits.vwap_trail_3m");
+        this.useTarget = !config.has("exits.use_target") || config.getBoolean("exits.use_target");
     }
 
     @Override
@@ -98,7 +104,7 @@ abstract class SetupStrategy implements Strategy {
 
         List<OrderIntent> orders = new ArrayList<>();
         if (position.open()) {
-            String exit = exitReason(position.side(), spot, now, time);
+            String exit = exitReason(position.side(), spot, now, time, s.structure().vwapSpotProxy());
             if (exit != null && !exitSent) {
                 orders.add(OrderIntent.exit(position.side(), Stage.CONFIRMED, exit));
                 exitSent = true;
@@ -120,7 +126,7 @@ abstract class SetupStrategy implements Strategy {
                 new SideView(OptionSide.PE, pe, Double.NaN, Double.NaN, Double.NaN, lastConditions), List.copyOf(orders));
     }
 
-    private String exitReason(OptionSide side, double spot, Instant now, LocalTime time) {
+    private String exitReason(OptionSide side, double spot, Instant now, LocalTime time, double vwap) {
         if (!time.isBefore(flatBy)) {
             return "FLAT_BY";
         }
@@ -128,16 +134,25 @@ abstract class SetupStrategy implements Strategy {
             return null;
         }
         double sign = side == OptionSide.CE ? 1 : -1;
-        if (Double.isFinite(plan.target()) && sign * (spot - plan.target()) >= 0) {
+        if (useTarget && Double.isFinite(plan.target()) && sign * (spot - plan.target()) >= 0) {
             return "TARGET";
         }
         if (Double.isFinite(plan.stop()) && sign * (spot - plan.stop()) < 0) {
             return "STOP";
         }
+        if (vwapTrail3m && threeMinuteClose(time) && Double.isFinite(vwap) && sign * (spot - vwap) < 0) {
+            return "VWAP_TRAIL";
+        }
         if (timeStopMin > 0 && enteredAt != null && Duration.between(enteredAt, now).toMinutes() >= timeStopMin) {
             return "TIME_" + timeStopMin;
         }
         return null;
+    }
+
+    /** The snapshot at 09:18, 09:21, ... carries the close of the 3-minute bar that just ended (bars from 09:15). */
+    static boolean threeMinuteClose(LocalTime time) {
+        int minutes = (int) Duration.between(LocalTime.of(9, 15), time).toMinutes();
+        return minutes > 0 && minutes % 3 == 0;
     }
 
     private static Stage stage(OptionSide side, PositionView position) {

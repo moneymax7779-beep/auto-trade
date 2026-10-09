@@ -8,7 +8,7 @@ import com.autotrade.config.ThresholdConfig;
 import com.autotrade.strategy.Strategy;
 import com.autotrade.strategy.StrategyFactory;
 
-/** Builds the five setup families (A-036 to A-040) from their versioned files. */
+/** Builds the setup families (A-036 to A-040, A-064, A-065) from their versioned files. */
 public final class SetupFactory implements StrategyFactory {
 
     static final Map<String, Function<ThresholdConfig, Strategy>> FAMILIES = Map.of(
@@ -16,7 +16,9 @@ public final class SetupFactory implements StrategyFactory {
             "break-retest", BreakRetest::new,
             "failed-breakout", FailedBreakout::new,
             "range-fade", RangeFade::new,
-            "auction-pressure", AuctionPressure::new);
+            "auction-pressure", AuctionPressure::new,
+            "break-retest-runner", BreakRetest::new,                 // A-065: brt-v1's entry, runner exits from its file
+            "trend-day-rider", TrendDayRider::new);                  // A-064
 
     private final ThresholdConfig config;
     private final Function<ThresholdConfig, Strategy> family;

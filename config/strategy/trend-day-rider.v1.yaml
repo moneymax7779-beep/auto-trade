@@ -1,0 +1,37 @@
+# Trend-day rider, v1 (2026-10-09, user: "yes register 2 and 3 and test them"; ledger A-064). Rules registered before any
+# code or result in docs/studies/2026-10-09-trend-day-rider-and-brt-runner.md. Designed from 9 Oct (a trend day the system
+# caught 30 minutes of): 9 Oct is not evidence. Every value is a round number fixed at registration, not fitted. Unlike the
+# trend pullback scalper (A-035, failed): an hour of trend proof, an index-level structure stop, no target, rides with a
+# VWAP trail. Calls shown; puts mirrored.
+version: tdr-v1
+strategy: trend-day-rider
+status: UNCALIBRATED
+source: "user-request-2026-10-09 (A-064; values fixed at registration, not tuned)"
+
+scope:
+  entry_from: "10:30"
+  last_new_entry: "14:30"
+  flat_by: "15:15"
+  time_stop_min: 0                     # no time stop
+  skip_expiring_index: true
+
+trend:
+  vwap_minutes: 60                     # the last 60 minute closes all beyond the session VWAP
+  from_open_pct: 0.3                   # the close at least 0.3 % beyond the day's open
+  extreme_within_min: 30               # a new session-extreme close within the last 30 minutes
+  day_breadth_min: 20                  # day breadth (-100..+100) at least +20 for calls, at most -20 for puts
+
+setup:
+  pullback_within_min: 10              # within the last 10 minutes a close came within...
+  pullback_atr: 0.5                    # ...0.5 ATR(3m) of EMA20 (or through it); entry on a close beyond the previous two
+  # stop: the extreme close of those 10 minutes; each pullback is traded once
+
+position:
+  premium_budget: 250000               # as break-retest; scaled by equity under risk v12
+  intended_lots: 1
+  strike_offset: 0                     # ATM, nearest expiry
+
+exits:
+  premium_stop_pct: 25                 # emergency only; the index-level stop comes first
+  use_target: false
+  vwap_trail_3m: true                  # a 3-minute close (09:15-based bars) back through the session VWAP

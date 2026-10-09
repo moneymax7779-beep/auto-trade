@@ -1,0 +1,35 @@
+# brtr-v1 break-retest runner (2026-10-09, user: "yes register 2 and 3 and test them"; ledger A-065, study
+# docs/studies/2026-10-09-trend-day-rider-and-brt-runner.md): brt-v1's entry exactly (same code, same values), half its
+# budget, and runner exits: brt-v1's structure stop, a 3-minute close back through VWAP, flat by 15:15. No target, no
+# time stop. Designed from 9 Oct (SENSEX 72100 CE left at the 30-minute stop on a trend day): 9 Oct is not evidence.
+# Break and retest (B), v1 (user's request 2026-10-06: "work on these ... ignore expiry day"). Rules registered before any code or result in
+# docs/studies/2026-10-06-five-setups.md (ledger A-037). Designed from the 6 Oct charts, so 6 Oct is not evidence. Never trades
+# an index on the day it expires. Every value is a round number fixed at registration, not fitted.
+version: brtr-v1
+strategy: break-retest-runner
+status: UNCALIBRATED
+source: "user-request-2026-10-06 (A-037; values fixed at registration, not tuned)"
+
+scope:
+  entry_from: "09:31"
+  last_new_entry: "14:30"
+  flat_by: "15:15"
+  time_stop_min: 0                     # brtr-v1: no time stop
+  skip_expiring_index: true
+
+setup:
+  retest_within_min: 20                # levels: ORH/ORL (after 09:30), PDH, PDL
+  retest_atr: 0.3                      # back within 0.3 ATR of the level, never a close more than 0.3 ATR through it
+  max_beyond_atr: 1.0                  # the entry close no more than 1 ATR past the level
+  # entry: a close beyond both previous closes after the retest; stop the retest's extreme close; target the next
+  # level >= 0.5 ATR away, else 1.5 ATR
+
+position:
+  premium_budget: 125000               # half of brt-v1 (brt-v2 takes the other half with brt-v1's exits)
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 25                 # emergency only; the index-level stop comes first
+  use_target: false                    # brtr-v1: ride past the target level
+  vwap_trail_3m: true                  # brtr-v1: exit on a 3-minute close (09:15-based bars) back through the session VWAP

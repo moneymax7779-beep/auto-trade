@@ -45,6 +45,20 @@ public final class SetupProviders {
         }
     }
 
+    public static final class BreakRetestRunnerProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "break-retest-runner";
+        }
+    }
+
+    public static final class TrendDayRiderProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "trend-day-rider";
+        }
+    }
+
     public static final class AuctionPressureProvider extends Base {
         @Override
         public String strategyKey() {

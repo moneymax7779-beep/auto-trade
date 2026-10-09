@@ -10,3 +10,5 @@ com.autotrade.strategy.egb.SetupProviders$RangeFadeProvider
 com.autotrade.strategy.egb.SetupProviders$AuctionPressureProvider
 com.autotrade.strategy.egb.ExpirySwingRiderProvider
 com.autotrade.strategy.egb.WallBreakRiderProvider
+com.autotrade.strategy.egb.SetupProviders$BreakRetestRunnerProvider
+com.autotrade.strategy.egb.SetupProviders$TrendDayRiderProvider
