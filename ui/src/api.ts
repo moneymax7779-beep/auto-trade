@@ -260,3 +260,23 @@ export interface Equity {
   asOf: string;
   days: EquityDay[];
 }
+
+/** One closed position with its day, from /api/performance (the Performance page aggregates these). */
+export interface PerformanceRow {
+  session_id: number;
+  session_date: string;
+  strategy_id: string | null;
+  underlying: string;
+  option_side: string;
+  symbol: string;
+  opened_at: string;
+  closed_at: string;
+  exit_reason: string | null;
+  realised: number;
+  costs: number;
+  net: number;
+  quantity: number | null;
+  lot_size: number | null;
+  average_cost: number | null;
+  average_exit: number | null;
+}

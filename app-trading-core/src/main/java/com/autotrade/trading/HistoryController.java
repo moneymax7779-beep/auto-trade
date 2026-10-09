@@ -89,6 +89,19 @@ class HistoryController {
                 + "from trade.position where session_id = ? order by opened_at", id);
     }
 
+    /**
+     * Every closed position of the sessions of one mode (default: the live PAPER sessions), with its day and
+     * contract, for the Performance page: win/loss counts, premium points, the red/green calendar. Small enough
+     * to aggregate in the browser, where the symbol and strategy toggles live.
+     */
+    @GetMapping("/performance")
+    List<Map<String, Object>> performance(@RequestParam(defaultValue = "PAPER_LIVE") String mode) {
+        return query("select s.id session_id, s.session_date::text session_date, p.strategy_id, p.underlying, p.option_side, "
+                + "p.symbol, " + ist("p.opened_at") + ", " + ist("p.closed_at") + ", p.exit_reason, p.realised, p.costs, p.net, "
+                + "p.quantity, p.lot_size, p.average_cost, p.average_exit from trade.position p join trade.session s on s.id = p.session_id "
+                + "where s.mode = ? and p.closed_at is not null order by s.session_date, p.opened_at", mode);
+    }
+
     @GetMapping("/sessions/{id}/rejections")
     List<Map<String, Object>> rejections(@PathVariable long id) {
         return query("select strategy_id, underlying, intent, reason, " + ist("at") + " from trade.rejection where session_id = ? "

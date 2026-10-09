@@ -2,6 +2,7 @@ import { NavLink, Route, Routes } from "react-router";
 import { ConfigPage } from "./pages/ConfigPage";
 import { IndexPage } from "./pages/IndexPage";
 import { LivePage } from "./pages/LivePage";
+import { PerformancePage } from "./pages/PerformancePage";
 import { ReplayPage } from "./pages/ReplayPage";
 import { ResearchPage, RunDetailPage } from "./pages/ResearchPage";
 import { SessionDetailPage, SessionsPage } from "./pages/SessionsPage";
@@ -12,6 +13,7 @@ const NAV = [
   ["/index/SENSEX", "SENSEX"],
   // ["/strategies", "Strategies"],   hidden 2026-10-09 (user: "Hide the Strategies page for now"); StrategiesPage.tsx kept
   ["/sessions", "Sessions"],
+  ["/performance", "Performance"],
   ["/research", "Research"],
   ["/replay", "Replay"],
   ["/config", "Config"],
@@ -43,6 +45,7 @@ export function App() {
           <Route path="/index/:underlying" element={<IndexPage />} />
           <Route path="/sessions" element={<SessionsPage />} />
           <Route path="/sessions/:id" element={<SessionDetailPage />} />
+          <Route path="/performance" element={<PerformancePage />} />
           <Route path="/research" element={<ResearchPage />} />
           <Route path="/research/:id" element={<RunDetailPage />} />
           <Route path="/replay" element={<ReplayPage />} />
