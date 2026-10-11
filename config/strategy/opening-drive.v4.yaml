@@ -1,0 +1,36 @@
+# v4 (2026-10-11, user: "do 2 and 3, register and test them"; ledger A-072): odb-v3 plus a cool-down after a LOSING
+# trade: no new entry for 15 minutes after a losing trade closes. After a winning trade v3's re-entry rule stands.
+# The trigger window is 09:16-09:26, so in practice: no second trade after a first trade that lost. Designed from the
+# 30 Sep SENSEX open (09:21 call stopped at 09:23 for -Rs 69.2K, re-entered 09:24, stopped at 09:31 for -Rs 27.4K).
+# Everything else exactly as odb-v3.
+# v3 (2026-10-01, user's decision: "allow the system to re-enter, don't put any restrictions on no. of trades as long as data is valid"):
+# odb-v2 with no limit on trades (scope.max_trades: 0): after a trade closes a level trades again once spot has come back to its untouched side and broken it again, still only 09:16-09:25. Every entry still needs its own signal, valid data (feed age, spread) and the risk limits.
+# Opening drive through prior-day levels, v2 = v1 + a smaller budget on expiry days (user's decision, 2026-09-28: "create as strategy, let it
+# trigger and trade as we are running in PAPER mode", "trade with sufficient quantity of 5,00,000").
+version: odb-v4
+strategy: opening-drive
+status: UNCALIBRATED
+source: "user-request-2026-10-11 (A-072; cool-down value fixed at registration, not tuned)"
+
+scope:
+  trigger_from: "09:16"
+  trigger_until: "09:26"
+  time_exit: "10:00"
+  levels:
+    CE: [PDH, PRIOR_ORH]
+    PE: [PDL, PRIOR_ORL]
+  min_previous_session_minutes: 355
+  max_trades: 0
+  max_entry_attempts: 2
+  reentry_cooldown_after_loss_min: 15  # v4: no new entry for 15 min after a losing trade closes
+
+position:
+  strike_offset: 0
+  premium_budget: 500000
+  expiry_day_premium_budget: 100000
+
+exits:
+  premium_stop_pct: 25
+  structure_stop: true
+  trail_activate_pct: 20
+  trail_giveback_pct: 20

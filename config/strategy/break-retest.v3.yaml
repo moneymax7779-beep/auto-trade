@@ -1,0 +1,32 @@
+# Break and retest, v3 (user 2026-10-11: "register and test break-retest v2 with the wider stop"; ledger A-074; named
+# v3 because break-retest.v2.yaml is A-065's runner-split half): brt-v1 with the stop 1 ATR beyond the broken level
+# instead of at the retest's extreme close, and half the premium budget (Rs 1,25,000) so the rupee risk per trade stays
+# about where v1's was (v1's stop sat about 0.3-1.3 ATR from the entry; v3's about 1-2 ATR). Entry, target, time stop,
+# window and everything else exactly as brt-v1.
+# Designed from 15 Sep SENSEX (09:42 put stopped at 09:44 by a 28-point tick before a 400-point fall) and 30 Sep SENSEX
+# (four stops within 1-4 minutes): both are design days and reported apart. Values fixed at registration, not tuned.
+version: brt-v3
+strategy: break-retest
+status: UNCALIBRATED
+source: "user-request-2026-10-11 (A-074; values fixed at registration, not tuned)"
+
+scope:
+  entry_from: "09:31"
+  last_new_entry: "14:30"
+  flat_by: "15:15"
+  time_stop_min: 30
+  skip_expiring_index: true
+
+setup:
+  retest_within_min: 20
+  retest_atr: 0.3
+  max_beyond_atr: 1.0
+  stop_atr_beyond_level: 1.0           # v3: stop 1 ATR beyond the broken level (v1: the retest's extreme close)
+
+position:
+  premium_budget: 125000               # v3: half of v1, so the wider stop risks about the same rupees per trade
+  intended_lots: 1
+  strike_offset: 0
+
+exits:
+  premium_stop_pct: 25

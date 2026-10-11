@@ -33,6 +33,8 @@ final class BreakRetest extends SetupStrategy {
 
     private final int retestWithinMin;
     private final double retestAtr, maxBeyondAtr;
+    /** v2 (A-074): the stop this many ATR beyond the broken level, instead of the retest's extreme close (0 = v1). */
+    private final double stopAtrBeyondLevel;
     private final Map<String, Watch> watches = new HashMap<>();
 
     BreakRetest(ThresholdConfig c) {
@@ -40,6 +42,15 @@ final class BreakRetest extends SetupStrategy {
         retestWithinMin = c.getInt("setup.retest_within_min");
         retestAtr = c.getDouble("setup.retest_atr");
         maxBeyondAtr = c.getDouble("setup.max_beyond_atr");
+        stopAtrBeyondLevel = c.has("setup.stop_atr_beyond_level") ? c.getDouble("setup.stop_atr_beyond_level") : 0;
+    }
+
+    /** v1: the retest's extreme close; v2: {@code stop_atr_beyond_level} ATR on the far side of the broken level. */
+    double stopFor(double level, boolean up, double extremeClose, double atr) {
+        if (!(stopAtrBeyondLevel > 0)) {
+            return extremeClose;
+        }
+        return up ? level - stopAtrBeyondLevel * atr : level + stopAtrBeyondLevel * atr;
     }
 
     @Override
@@ -81,7 +92,7 @@ final class BreakRetest extends SetupStrategy {
                 w.taken = true;
                 double target = w.up ? target(close, atr, true, 0.5, 1.5, st.orHigh(), st.pdh(), st.prevOrHigh())
                         : target(close, atr, false, 0.5, 1.5, st.orLow(), st.pdl(), st.prevOrLow());
-                entry = new Entry(w.up ? OptionSide.CE : OptionSide.PE, w.extremeClose, target,
+                entry = new Entry(w.up ? OptionSide.CE : OptionSide.PE, stopFor(w.level, w.up, w.extremeClose, atr), target,
                         w.up ? "BREAK_RETEST_UP" : "BREAK_RETEST_DOWN");
             }
         }

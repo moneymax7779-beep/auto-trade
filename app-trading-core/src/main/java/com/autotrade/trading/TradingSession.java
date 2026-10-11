@@ -302,6 +302,16 @@ public final class TradingSession {
             candidate(strategyId, underlying, snapshot, decision, intent, false, reason);
             return;
         }
+        if (intent.action() == OrderIntent.Action.ENTER || intent.action() == OrderIntent.Action.ENTER_STRADDLE) {
+            String streak = losingStreakRefusal(strategyId, underlying);     // risk v13 (A-071)
+            if (streak != null) {
+                String what = intent.action() == OrderIntent.Action.ENTER ? "ENTER " + intent.side() : "ENTER STRADDLE";
+                rejected(strategyId, underlying, what, streak);
+                candidate(strategyId, underlying, snapshot, decision, intent, false, streak);
+                log.info("{} {} {} {} REJECTED: {}", time, underlying, strategyId, what, streak);
+                return;
+            }
+        }
         switch (intent.action()) {
             case ENTER -> {
                 var contract = contracts.find(underlying,
@@ -418,6 +428,29 @@ public final class TradingSession {
         } catch (RuntimeException e) {
             log.warn("candidate not recorded ({} {} {}): {}", strategyId, underlying, intent.action(), e.getMessage());
         }
+    }
+
+    /**
+     * Risk v13 (A-071): the refusal when this strategy's last {@code max_consecutive_losses} closed trades on this
+     * underlying today all lost (a straddle's legs, opened together, count as one trade); null when entries may go on.
+     */
+    private String losingStreakRefusal(String strategyId, String underlying) {
+        int max = risk.limits().maxConsecutiveLosses();
+        if (max <= 0) {
+            return null;
+        }
+        Map<Instant, Double> tradeNet = new java.util.TreeMap<>();
+        for (ManagedPosition p : oms.closedPositions()) {
+            if (strategyId.equals(p.strategy()) && underlying.equals(p.underlying()) && p.openedAt() != null) {
+                tradeNet.merge(p.openedAt(), p.net(), Double::sum);
+            }
+        }
+        int streak = 0;
+        List<Double> nets = new ArrayList<>(tradeNet.values());
+        for (int i = nets.size() - 1; i >= 0 && nets.get(i) < 0; i--) {
+            streak++;
+        }
+        return streak >= max ? max + " losing trades in a row on " + underlying + " today (risk v13): no new entries" : null;
     }
 
     private void rejected(String strategyId, String underlying, String intent, String reason) {

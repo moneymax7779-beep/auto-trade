@@ -1,0 +1,47 @@
+# Pre-trade risk limits for PAPER trading. Exits are never blocked by risk; these limits stop new entries and adds,
+# and force a square-off.
+# v13 (2026-10-11, user: "do 2 and 3, register and test them"; ledger A-071): v12 plus a losing-streak stop per
+# strategy and underlying: after 2 losing trades in a row by one strategy on one index, that strategy makes no new
+# entry on that index for the rest of the day (a straddle's two legs count as one trade; other strategies and the
+# other index are unaffected; exits are never blocked). Designed from 30 Sep SENSEX (opening drive lost twice by 09:31,
+# break-retest lost four of five). Everything else exactly as v12; see paper-risk.v12.yaml for the history.
+version: paper-risk-v13
+name: paper-risk
+status: UNCALIBRATED
+
+account:
+  capital: 500000
+  capital_mode: equity
+  starting_capital: 500000
+  equity_from: "2026-10-07"
+  daily_loss_pct: 22
+  daily_loss_limit: 110000
+  max_open_positions: 4
+  max_lots_per_underlying: 400
+  max_orders_per_minute: 20
+  max_consecutive_losses: 2            # v13: two losing trades in a row → that strategy stops on that index for the day
+
+sizing:
+  max_participation_pct: 2
+  premium_budget_pct: 100
+
+time:
+  no_new_entries_after: "14:45"
+  square_off_at: "15:36"
+  cas_entry_window: "15:20-15:30"
+
+data:
+  max_feed_age_sec: 5
+  max_spread_pct: 1.5
+
+orders:
+  entry_buffer_ticks: 4
+  exit_buffer_ticks: 4
+  exit_buffer_pct: 1.0
+  entry_slice_depth_pct: 0.5
+  entry_slice_max_drift_pct: 2
+  entry_timeout_sec: 10
+  exit_chase_sec: 2
+  exit_chase_max: 6
+  stop_limit_offset_pct: 5
+  reconcile_every_sec: 30

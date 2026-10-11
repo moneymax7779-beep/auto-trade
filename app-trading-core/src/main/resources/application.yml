@@ -54,7 +54,9 @@ autotrade:
       - config/strategy/expiry-trend-rider.v7.yaml         # etr-v7 live (A-059 PASS, user 2026-10-08 18:30: "swap v1 with v7"; A-060) = etr-v1 + profit lock (breakeven after +30 %); v1 live 2 Oct-8 Oct (A-031). Alone since A-061 (etr-v6 removed: the two split the capital)
       # User 2026-10-07 07:00 IST: "run everything in PAPER mode, no need of SHADOW mode" (A-053). The former shadow
       # strategies come after the existing ones, so on a common trigger the existing ones take the capital first.
-      - config/strategy/break-retest.v1.yaml               # brt-v1 live (was shadow, A-041); never the expiring index; Rs 2.5L budget
+      # brt-v1 removed 2026-10-11 (A-075, user: "remove break retest"): 60 tick trades, PF 0.81, losing on held-out and
+      # unseen days; removing it measured +Rs 76,835 over 22 tick days with every other strategy's trades unchanged (A-074).
+      # Its file and code stay; it returns only through a new registered test.
       - config/strategy/ma-cross.v1.yaml                   # mac-v1 forward test in PAPER (A-067, user 2026-10-09 20:40: "run it in paper"); A-066 test PASS, held-out FAIL on one trade; never the expiring index; Rs 2.5L budget; last, so the others take the capital first
     features-file: config/features/features.v11.yaml   # v11 = v7 with the VWAP proxy using the 15-minute mean basis (A-030, user 2026-10-02: "yes switch to v11"); v7 = v6 + ATR seeded from the previous session
     exchange-file: config/exchange/nse-bse-sessions.v3.yaml

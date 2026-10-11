@@ -37,7 +37,25 @@ record ExpiryTrendRiderConfig(
         /** v7: the profit lock arms once the bid has been this % above the average premium (0 / absent = off). */
         double profitLockArmPct,
         /** v7: once armed, exit when the bid falls to this % above the average premium (0 = breakeven). */
-        double profitLockFloorPct) {
+        double profitLockFloorPct,
+        /**
+         * v8 (A-073): a new entry (not an add) needs the ATM option's time value, in index points, to be at most this
+         * multiple of the index's high-low range over the last 60 minutes (0 / absent = off). Time value per leg =
+         * (ATM straddle − |spot − ATM strike|) / 2; missing data never blocks.
+         */
+        double timeValueMaxRangeRatio) {
+
+    /** v1-v7 shape: no time-value budget. */
+    ExpiryTrendRiderConfig(String hash, String version, int dte, LocalTime entryFrom, LocalTime lastNewEntry, LocalTime flatBy,
+                           double breadthMin, Map<OptionSide, Set<String>> rejectFuturesStates, double ivChange3mMin,
+                           double premiumBudget, int intendedLots, int maxAdds, int strikeOffset, double premiumStopPct,
+                           boolean pyramidRiskCap, int noNewExtremeMin, boolean noReentryAfterTimeStop,
+                           double trailActivationPct, double trailGivebackPct, double profitLockArmPct,
+                           double profitLockFloorPct) {
+        this(hash, version, dte, entryFrom, lastNewEntry, flatBy, breadthMin, rejectFuturesStates, ivChange3mMin,
+                premiumBudget, intendedLots, maxAdds, strikeOffset, premiumStopPct, pyramidRiskCap, noNewExtremeMin,
+                noReentryAfterTimeStop, trailActivationPct, trailGivebackPct, profitLockArmPct, profitLockFloorPct, 0);
+    }
 
     static ExpiryTrendRiderConfig from(ThresholdConfig c) {
         return new ExpiryTrendRiderConfig(c.contentHash(), c.version(), c.getInt("scope.dte"),
@@ -55,7 +73,8 @@ record ExpiryTrendRiderConfig(
                 c.has("exits.trail_activation_pct") ? c.getDouble("exits.trail_activation_pct") : 0,
                 c.has("exits.trail_giveback_pct") ? c.getDouble("exits.trail_giveback_pct") : 0,
                 c.has("exits.profit_lock_arm_pct") ? c.getDouble("exits.profit_lock_arm_pct") : 0,
-                c.has("exits.profit_lock_floor_pct") ? c.getDouble("exits.profit_lock_floor_pct") : 0);
+                c.has("exits.profit_lock_floor_pct") ? c.getDouble("exits.profit_lock_floor_pct") : 0,
+                c.has("entry.time_value_max_range_ratio") ? c.getDouble("entry.time_value_max_range_ratio") : 0);
     }
 
     @SuppressWarnings("unchecked")

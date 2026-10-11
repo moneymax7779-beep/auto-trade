@@ -29,7 +29,11 @@ public final class UpstoxExpired {
     private static final JsonMapper JSON = JsonMapper.builder().build();
     /** About a month of one-minute candles per request, as the live candle endpoints. */
     static final int MINUTE_CHUNK_DAYS = 28;
-    public static final long PAUSE_MS = 150;
+    /**
+     * Pause before each request. 1 s keeps a long pull under Upstox's 30-minute request cap (2,000 as published for the
+     * standard APIs): at 150 ms a month-by-month pull hit HTTP 429 after about 2,000 requests (10 Oct 2026).
+     */
+    public static final long PAUSE_MS = 1000;
 
     /** An expired contract as Upstox lists it. */
     public record Contract(String expiredKey, String tradingSymbol, LocalDate expiry, double strike, String optionType,

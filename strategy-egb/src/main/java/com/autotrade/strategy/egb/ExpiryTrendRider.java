@@ -41,6 +41,8 @@ final class ExpiryTrendRider implements Strategy {
     private boolean timeStopped;            // v5: a time-stop exit happened today: no new entry
     private double trailPeak = Double.NaN;  // v6: the held option's highest bid since the trail armed (NaN = not armed)
     private boolean lockArmed;              // v7: the bid has been profit_lock_arm_pct above the average premium
+    /** v8: the index each minute over the last hour, for its 60-minute high-low range: {epoch minute, spot}. */
+    private final java.util.ArrayDeque<double[]> lastHour = new java.util.ArrayDeque<>();
 
     ExpiryTrendRider(ExpiryTrendRiderConfig config) {
         this.config = config;
@@ -71,6 +73,13 @@ final class ExpiryTrendRider implements Strategy {
         }
         if (Double.isFinite(st.dayHigh())) {
             previousHigh = st.dayHigh();
+        }
+        double minute = now.getEpochSecond() / 60.0;
+        if (Double.isFinite(snapshot.spot())) {
+            lastHour.addLast(new double[] {minute, snapshot.spot()});
+        }
+        while (!lastHour.isEmpty() && minute - lastHour.peekFirst()[0] > 60) {
+            lastHour.removeFirst();
         }
         Map<OptionSide, Map<String, Boolean>> conditions = new java.util.EnumMap<>(OptionSide.class);
         for (OptionSide side : OptionSide.values()) {
@@ -130,7 +139,7 @@ final class ExpiryTrendRider implements Strategy {
             trailPeak = Double.NaN;
             lockArmed = false;
             for (OptionSide side : List.of(OptionSide.PE, OptionSide.CE)) {
-                if (conditions.get(side).get("trigger") && !timeStopped) {
+                if (conditions.get(side).get("trigger") && !timeStopped && timeValueWithinBudget(snapshot)) {
                     orders.add(new OrderIntent(OrderIntent.Action.ENTER, side, 1, Stage.CONFIRMED,
                             side == OptionSide.PE ? "NEW_DAY_LOW" : "NEW_DAY_HIGH", config.premiumStopPct(),
                             config.strikeOffset()));
@@ -145,6 +154,29 @@ final class ExpiryTrendRider implements Strategy {
         MarketState state = new MarketState(Double.NaN, Double.NaN, Double.NaN, Double.NaN,
                 expiryDay ? "EXPIRY_TREND" : "NOT_EXPIRY", null);
         return new Decision(now, snapshot.underlying(), state, ce, pe, List.copyOf(orders));
+    }
+
+    /**
+     * v8 (A-073): the ATM option's time value per leg, (straddle − |spot − ATM strike|) / 2 in index points, is at most
+     * {@code time_value_max_range_ratio} × the index's high-low range over the last 60 minutes. Off (always true) when the
+     * ratio is 0; true when the straddle or the hour of history is missing (missing data never blocks).
+     */
+    boolean timeValueWithinBudget(FeatureSnapshot s) {
+        double ratio = config.timeValueMaxRangeRatio();
+        if (!(ratio > 0)) {
+            return true;
+        }
+        double straddle = s.options().straddle(), atm = s.options().atmStrike(), spot = s.spot();
+        if (!(straddle > 0) || !Double.isFinite(atm) || !Double.isFinite(spot) || lastHour.size() < 30) {
+            return true;
+        }
+        double timeValue = (straddle - Math.abs(spot - atm)) / 2;
+        double lo = Double.POSITIVE_INFINITY, hi = Double.NEGATIVE_INFINITY;
+        for (double[] p : lastHour) {
+            lo = Math.min(lo, p[1]);
+            hi = Math.max(hi, p[1]);
+        }
+        return timeValue <= ratio * (hi - lo);
     }
 
     private Map<String, Boolean> conditions(OptionSide side, FeatureSnapshot s, boolean newExtreme, boolean expiryDay,
@@ -165,6 +197,9 @@ final class ExpiryTrendRider implements Strategy {
         boolean trend = c.get("beyond_opening_range") && c.get("breadth_agrees") && c.get("futures_oi_ok") && c.get("iv_rising");
         c.put("trend", trend);
         c.put("trigger", window && trend && newExtreme);
+        if (config.timeValueMaxRangeRatio() > 0) {
+            c.put("time_value_ok", timeValueWithinBudget(s));      // v8: shown in the stage changes; gates entries only
+        }
         return Collections.unmodifiableMap(c);
     }
 

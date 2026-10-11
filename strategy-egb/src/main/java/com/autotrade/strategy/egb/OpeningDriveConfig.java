@@ -24,7 +24,19 @@ record OpeningDriveConfig(
         boolean structureStop,
         double trailActivatePct,
         double trailGivebackPct,
-        int maxTrades) {
+        int maxTrades,
+        /** v4 (A-072): minutes after a losing trade closes before a new entry (0 = no cool-down, v1-v3). */
+        int reentryCooldownAfterLossMin) {
+
+    /** v1-v3 shape: no cool-down after a loss. */
+    OpeningDriveConfig(String hash, String version, LocalTime triggerFrom, LocalTime triggerUntil, LocalTime timeExit,
+                       Map<OptionSide, List<String>> levels, int minPreviousSessionMinutes, int maxEntryAttempts,
+                       int strikeOffset, double premiumBudget, double expiryDayPremiumBudget, double premiumStopPct,
+                       boolean structureStop, double trailActivatePct, double trailGivebackPct, int maxTrades) {
+        this(hash, version, triggerFrom, triggerUntil, timeExit, levels, minPreviousSessionMinutes, maxEntryAttempts,
+                strikeOffset, premiumBudget, expiryDayPremiumBudget, premiumStopPct, structureStop, trailActivatePct,
+                trailGivebackPct, maxTrades, 0);
+    }
 
     static OpeningDriveConfig from(ThresholdConfig c) {
         return new OpeningDriveConfig(c.contentHash(), c.version(), c.getTime("scope.trigger_from"),
@@ -35,7 +47,8 @@ record OpeningDriveConfig(
                 c.has("position.expiry_day_premium_budget") ? c.getDouble("position.expiry_day_premium_budget") : Double.NaN,
                 c.getDouble("exits.premium_stop_pct"), c.getBoolean("exits.structure_stop"),
                 c.getDouble("exits.trail_activate_pct"), c.getDouble("exits.trail_giveback_pct"),
-                c.has("scope.max_trades") ? c.getInt("scope.max_trades") : 1);
+                c.has("scope.max_trades") ? c.getInt("scope.max_trades") : 1,
+                c.has("scope.reentry_cooldown_after_loss_min") ? c.getInt("scope.reentry_cooldown_after_loss_min") : 0);
     }
 
     @SuppressWarnings("unchecked")

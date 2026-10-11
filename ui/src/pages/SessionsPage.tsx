@@ -5,18 +5,103 @@ import { Link, useParams } from "react-router";
 import { fixed, get, type DecisionRow, type OrderRow, type SessionRow, type TradePositionRow } from "../api";
 import { TimelineChart } from "../components/TimelineChart";
 import { ErrorNote, Loading, Panel, Pnl, StageBadge, Table } from "../components/ui";
-import { markersFromOrders } from "./markers";
-import { exitMarkers, TradesTable } from "../components/TradesTable";
+import { chartTrades, TradesTable } from "../components/TradesTable";
+import { compactRupees } from "../components/TimelineChart";
 import { STRATEGY_INFO, strategyShort } from "../components/strategies";
+
+/** Background tints for runs, alternating; translucent so they read in light and dark themes. */
+const RUN_TINTS = ["rgba(59,130,246,0.10)", "rgba(245,158,11,0.12)", "rgba(16,185,129,0.10)", "rgba(168,85,247,0.10)",
+  "rgba(236,72,153,0.09)", "rgba(20,184,166,0.11)"];
+const RUN_DOTS = ["#3b82f6", "#f59e0b", "#10b981", "#a855f7", "#ec4899", "#14b8a6"];
+
+/** Where a session's data came from, in words. */
+function feedLabel(feed: string): string {
+  if (feed.includes("bars")) return "Upstox one-minute bars (coarse)";
+  if (feed.includes("own-capture")) return "own tick capture";
+  if (feed.includes("zt-tiger")) return "zt-tiger-v2 tick capture";
+  return feed;
+}
+
+interface Run { index: number; first: number; size: number; from: string; to: string; net: number }
+
+/** The session's config files, sorted ("expiry-trend-rider.v7.yaml,…,paper-risk.v12.yaml"). */
+const configKey = (r: SessionRow) => Object.keys(r.configs ?? {}).sort().join(",");
+
+/** The risk file's version ("risk v13") and each strategy file as "ODB v4"; {@code all} = every config file. */
+function configTags(r: SessionRow): { risk: string | null; strategies: string[]; all: string[] } {
+  const files = Object.keys(r.configs ?? {}).sort().map((f) => f.replace(/\.yaml$/, ""));
+  const risk = files.find((f) => f.startsWith("paper-risk."));
+  const strategies = files
+    .filter((f) => !/^(paper-risk|features|nse-bse|india-index)/.test(f))
+    .map((f) => { const [name, ver] = f.split(/\.(?=v\d+$)/); return `${strategyShort(name)} ${ver ?? ""}`.trim(); });
+  return { risk: risk ? `risk ${risk.replace("paper-risk.", "")}` : null, strategies, all: files };
+}
+
+/**
+ * Groups the sessions (newest first) into runs: consecutive sessions with the same mode, feed, code and strategy set,
+ * started within 30 minutes of each other (a batch of replays), or the live sessions of one code version.
+ */
+function groupRuns(rows: SessionRow[]): Run[] {
+  const runOf: Run[] = [];
+  // the config files (risk, features, every strategy version) are part of a run's identity: two runs of the same days
+  // with different settings are different runs
+  const key = (r: SessionRow) => `${r.mode}|${r.feed}|${r.code_version}|${r.strategy_id}|${configKey(r)}`;
+  const minutes = (s?: string | null) => (s ? new Date(s.replace(" ", "T")).getTime() / 60000 : NaN);
+  let current: Run = { index: -1, first: 0, size: 0, from: "", to: "", net: 0 };
+  let dates = new Set<string>();
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i], prev = rows[i - 1];
+    // a replay run never holds the same day twice: a repeated date starts a new run
+    const sameBatch = prev != null && key(prev) === key(r) && (r.mode === "PAPER_LIVE"
+      || (Math.abs(minutes(prev.started_at) - minutes(r.started_at)) <= 30 && !dates.has(r.session_date)));
+    if (i === 0 || !sameBatch) {
+      current = { index: current.index + 1, first: i, size: 0, from: r.session_date, to: r.session_date, net: 0 };
+      dates = new Set<string>();
+    }
+    dates.add(r.session_date);
+    current.size++;
+    if (r.session_date < current.from) current.from = r.session_date;
+    if (r.session_date > current.to) current.to = r.session_date;
+    current.net += Number(r.summary?.net ?? 0);
+    runOf.push(current);
+  }
+  return runOf;
+}
 
 export function SessionsPage() {
   const sessions = useQuery({ queryKey: ["sessions"], queryFn: () => get<SessionRow[]>("/api/sessions") });
+  const runs = useMemo(() => groupRuns(sessions.data ?? []), [sessions.data]);
   if (sessions.isLoading) return <Loading what="sessions" />;
   if (sessions.error) return <ErrorNote error={sessions.error} />;
   return (
     <Panel title="Trading sessions (PAPER)">
+      <p className="mb-2 text-xs text-muted">
+        Each colour band is one run: a batch of replays started together (same data, code and strategies), or the live
+        sessions of one code version. The line above each band says what the run was.
+      </p>
       <Table
         rows={sessions.data!}
+        rowStyle={(_, i) => ({ background: RUN_TINTS[runs[i].index % RUN_TINTS.length] })}
+        before={(r, i) => {
+          const run = runs[i];
+          if (run.first !== i) return null;
+          const n = r.strategy_id.split("+").filter(Boolean).length;
+          return (
+            <div className="flex flex-wrap items-center gap-x-2 text-xs">
+              <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: RUN_DOTS[run.index % RUN_DOTS.length] }} />
+              <span className="font-semibold">{r.mode === "PAPER_LIVE" ? "Live PAPER sessions" : "Replay run"}</span>
+              <span className="text-muted">· {run.size} session{run.size === 1 ? "" : "s"} · {run.from === run.to ? run.from : `${run.from} – ${run.to}`}</span>
+              <span className="text-muted">· {feedLabel(r.feed)}</span>
+              <span className="text-muted" title={configTags(r).all.join("\n")}>
+                · {n > 1 ? `${n} strategies` : STRATEGY_INFO[r.strategy_id]?.name ?? r.strategy_id}
+                {" "}({configTags(r).strategies.join(" · ")})
+                {configTags(r).risk && <> · <span className="font-semibold">{configTags(r).risk}</span></>}
+              </span>
+              <span className="num text-muted">· code {r.code_version}</span>
+              <span className="text-muted">· net</span> <Pnl value={run.net} />
+            </div>
+          );
+        }}
         empty="No sessions yet. Run bin/trading-core --mode=replay --session=YYYY-MM-DD or --mode=live."
         columns={[
           { key: "id", label: "#", render: (r) => <Link className="text-accent underline" to={`/sessions/${r.id}`}>{r.id}</Link> },
@@ -74,7 +159,11 @@ export function SessionDetailPage() {
     const shownLevels = mergeLevels(visibleLevels(lv.levels, toggles), lv.tolerancePct).filter((l) => inRange(l.price) && l.from <= end);
     // only the nearest two above and below the last price get an axis tag; a tag for every level piles up
     const last = spots[spots.length - 1];
+    // the key levels (PDH, PDL, ORH, ORL and their prior-day versions) always carry their name; of the rest only the
+    // nearest two above and below do
+    const key = /\b(PDH|PDL|ORH|ORL)\b/;
     const tagged = new Set([
+      ...shownLevels.filter((l) => key.test(l.name)),
       ...shownLevels.filter((l) => l.price >= last).sort((p, q) => p.price - q.price).slice(0, 2),
       ...shownLevels.filter((l) => l.price < last).sort((p, q) => q.price - p.price).slice(0, 2),
     ]);
@@ -103,10 +192,31 @@ export function SessionDetailPage() {
     { name: "PE runner", color: "#fca5a5", width: 1, dashed: true, points: rows.map((r) => ({ t: r.t, value: score(r.pe_scores?.runner) })) },
   ], [rows]);
   const hasScores = scores.some((line) => line.points.some((p) => p.value != null));
-  // Entries from the strategy's orders; exits from the positions (they include the executor's stops
-  // and a straddle's combined target or stop, which no strategy order announces).
-  const markers = useMemo(() => [...markersFromOrders(rows, false),
-    ...exitMarkers(positions.data ?? [], underlying, strategy)], [rows, positions.data, underlying, strategy]);
+  // Entries and exits from the filled positions (what was really bought and sold, including the executor's stops and
+  // a straddle's combined target or stop); by default every strategy's trades on this index, labelled by strategy.
+  // futures volume per minute (and its normal for that minute) from the surge report of the session's date
+  const surgeData = useQuery({
+    queryKey: ["surges", session?.session_date ?? "none"],
+    enabled: !!session?.session_date,
+    queryFn: () => get<{ underlyings: { underlying: string; volume?: [string, number, number | null][] }[] }>(
+      `/api/surges?date=${session!.session_date}`),
+  });
+  const volume = useMemo(() => {
+    const u = surgeData.data?.underlyings.find((x) => x.underlying === underlying);
+    return (u?.volume ?? []).map(([t, v, normal]) => ({
+      t, value: v, color: normal && v >= 5 * normal ? "rgba(245,158,11,0.9)" : "rgba(148,163,184,0.45)",
+    }));
+  }, [surgeData.data, underlying]);
+  const [markerScope, setMarkerScope] = useState<"all" | "selected">("all");
+  const [focus, setFocus] = useState<{ from: string; to: string } | null>(null);
+  const spotAt = useMemo(() => {
+    const byMinute = new Map(rows.map((r) => [r.t, r.spot ?? null]));
+    return (t: string) => byMinute.get(t) ?? null;
+  }, [rows]);
+  const trades = useMemo(() => chartTrades(positions.data ?? [], underlying,
+    markerScope === "all" || strategyIds.length <= 1 ? null : strategy, strategyShort, spotAt),
+  [positions.data, underlying, strategy, markerScope, strategyIds.length, spotAt]);
+  const pickIndex = (u: string) => { setUnderlying(u); setFocus(null); };
   const changes = useMemo(() => rows.filter((r, i) => i === 0 || r.ce_stage !== rows[i - 1].ce_stage || r.pe_stage !== rows[i - 1].pe_stage), [rows]);
 
   return (
@@ -123,7 +233,7 @@ export function SessionDetailPage() {
                 className={`rounded px-3 py-1 text-xs ${sid === strategy ? "bg-accent text-black" : "border border-line"}`}>{sid}</button>
             ))}
             {["NIFTY", "BANKNIFTY", "SENSEX"].map((u) => (
-              <button key={u} onClick={() => setUnderlying(u)}
+              <button key={u} onClick={() => pickIndex(u)}
                 className={`rounded px-3 py-1 text-sm ${u === underlying ? "bg-accent text-black" : "border border-line"}`}>{u}</button>
             ))}
           </div>
@@ -132,8 +242,50 @@ export function SessionDetailPage() {
         {decisions.isLoading ? <Loading what="decisions" /> : decisions.error ? <ErrorNote error={decisions.error} /> :
           rows.length === 0 ? <p className="text-sm text-muted">No decisions for {underlying}.</p> : (
             <>
-              <div className="mb-2"><LevelTogglesBar toggles={toggles} onChange={setToggles} /></div>
-              <TimelineChart date={session?.session_date ?? "2026-01-01"} lines={price} markers={markers} height={300} />
+              <div className="mb-2 flex flex-wrap items-center gap-3">
+                <LevelTogglesBar toggles={toggles} onChange={setToggles} />
+                {strategyIds.length > 1 && (
+                  <div className="flex items-center gap-1 text-xs" role="group" aria-label="Trades on the chart">
+                    <span className="text-muted">trades on chart</span>
+                    {(["all", "selected"] as const).map((s) => (
+                      <button key={s} type="button" onClick={() => setMarkerScope(s)}
+                        className={`rounded-full border px-2.5 py-0.5 ${markerScope === s ? "border-accent bg-accent/10 font-semibold" : "border-line text-muted"}`}>
+                        {s === "all" ? "all strategies" : strategyShort(strategy ?? "")}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div id="session-chart">
+                <TimelineChart date={session?.session_date ?? "2026-01-01"} lines={price} trades={trades} volume={volume}
+                  focus={focus} height={420} />
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
+                <span className="text-muted">
+                  <span style={{ color: "#16a34a" }}>▲</span> call bought · <span style={{ color: "#dc2626" }}>▼</span> put bought ·
+                  <span style={{ color: "#2563eb" }}> ●</span> straddle · ■ exit (green profit, red loss) · thick line = the index
+                  from entry to exit ·{" "}
+                  {volume.length > 0
+                    ? <>bars = futures volume (<span style={{ color: "#f59e0b" }}>amber</span> ≥ 5× that minute's normal) · </>
+                    : <>no futures volume on this server for {session?.session_date} · </>}
+                  click a trade to zoom:
+                </span>
+                {trades.length === 0 && <span className="text-muted">no trades on {underlying}</span>}
+                {trades.map((tr) => {
+                  const active = focus != null && focus.from === tr.from && focus.to === (tr.to ?? tr.from);
+                  return (
+                    <button key={tr.n} type="button" onClick={() => setFocus({ from: tr.from, to: tr.to ?? tr.from })}
+                      className={`rounded border px-2 py-0.5 ${active ? "border-accent bg-accent/10" : "border-line"}`}>
+                      <span className="font-semibold">#{tr.n} {tr.who}</span>{" "}
+                      <span className="text-muted">{tr.side === "STRADDLE" ? "straddle" : tr.side} {tr.from}→{tr.to ?? "open"}</span>{" "}
+                      <span className="num font-semibold" style={{ color: tr.net >= 0 ? "#16a34a" : "#dc2626" }}>{compactRupees(tr.net)}</span>
+                    </button>
+                  );
+                })}
+                {focus && (
+                  <button type="button" onClick={() => setFocus(null)} className="rounded border border-accent px-2 py-0.5 text-accent">whole day</button>
+                )}
+              </div>
               {hasScores ? (
                 <>
                   <div className="mt-3 text-xs text-muted">Confirm and runner scores (0–100) over the day</div>
@@ -147,7 +299,12 @@ export function SessionDetailPage() {
       </Panel>
 
       <Panel title="Trades">
-        <TradesTable rows={positions.data ?? []} showStrategy={strategyIds.length > 1} empty="No trades." />
+        <TradesTable rows={positions.data ?? []} showStrategy={strategyIds.length > 1} empty="No trades." numbered
+          onPick={(t) => {
+            setUnderlying(t.underlying);
+            setFocus({ from: t.opened.slice(11, 16), to: (t.closed ?? t.opened).slice(11, 16) });
+            document.getElementById("session-chart")?.scrollIntoView({ behavior: "smooth", block: "center" });
+          }} />
       </Panel>
 
       <Panel title="Stage changes">

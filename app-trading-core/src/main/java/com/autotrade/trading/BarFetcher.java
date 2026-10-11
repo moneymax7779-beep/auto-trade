@@ -155,9 +155,11 @@ final class BarFetcher {
                     continue;
                 }
                 try {
+                    // the fetch log records the range actually requested (cFrom..cTo), not the contract's whole window:
+                    // a month-by-month pull otherwise marks the next month's days as fetched and skips them
                     total += store(u, "OPTION", c.expiredKey(), c.tradingSymbol(), c.expiry(), c.strike(), c.optionType(),
                             c.lotSize(), c.exchange() == null ? exchange(u) : c.exchange(),
-                            expired.minutes(c.expiredKey(), cFrom, cTo), "upstox-expired-v2", start, expiry, problems);
+                            expired.minutes(c.expiredKey(), cFrom, cTo), "upstox-expired-v2", cFrom, cTo, problems);
                 } catch (Exception e) {
                     problems.add(u + " OPTION " + c.tradingSymbol() + ": " + e.getMessage());
                 }
@@ -209,7 +211,7 @@ final class BarFetcher {
                 try {
                     total += store(u, "OPTION", i.instrumentKey(), i.tradingSymbol(), i.expiry(), i.strike(), i.type(), i.lotSize(),
                             i.exchange() == null ? exchange(u) : i.exchange(),
-                            publicMinutes(i.instrumentKey(), cFrom, end), "upstox-v3", start, end, problems);
+                            publicMinutes(i.instrumentKey(), cFrom, end), "upstox-v3", cFrom, end, problems);
                 } catch (Exception e) {
                     problems.add(u + " OPTION " + i.tradingSymbol() + ": " + e.getMessage());
                 }
@@ -237,7 +239,7 @@ final class BarFetcher {
                 try {
                     total += store(u, "FUTURE", c.expiredKey(), c.tradingSymbol(), c.expiry(), 0, null, c.lotSize(),
                             c.exchange() == null ? exchange(u) : c.exchange(),
-                            expired.minutes(c.expiredKey(), cFrom, cTo), "upstox-expired-v2", start, expiry, problems);
+                            expired.minutes(c.expiredKey(), cFrom, cTo), "upstox-expired-v2", cFrom, cTo, problems);
                 } catch (Exception e) {
                     problems.add(u + " FUTURE " + c.tradingSymbol() + ": " + e.getMessage());
                 }
@@ -249,7 +251,8 @@ final class BarFetcher {
             Instrument f = live.get();
             LocalDate start = f.expiry().minusDays(FUTURE_DAYS_BEFORE_EXPIRY);
             total += store(u, "FUTURE", f.instrumentKey(), f.tradingSymbol(), f.expiry(), 0, null, f.lotSize(), f.exchange(),
-                    publicMinutes(f.instrumentKey(), start.isBefore(from) ? from : start, to), "upstox-v3", start, to, problems);
+                    publicMinutes(f.instrumentKey(), start.isBefore(from) ? from : start, to), "upstox-v3",
+                    start.isBefore(from) ? from : start, to, problems);
         } else if (!any) {
             problems.add(u + ": no future contract found for the range");
         }

@@ -1,4 +1,4 @@
-import type { ChartMarker } from "./TimelineChart";
+import type { ChartMarker, ChartTrade } from "./TimelineChart";
 import { rupees, type TradePositionRow } from "../api";
 import { Pnl, Table } from "./ui";
 
@@ -92,6 +92,47 @@ export function exitMarkers(rows: TradePositionRow[], underlying: string, strate
     .map((t) => ({ t: time(t.closed)!, text: `exit ${t.exit ?? ""} ${signed(t.net)}`, tone: "info" as const }));
 }
 
+/**
+ * Entry and exit markers for a chart from the filled positions (what was actually bought and sold, including the
+ * executor's own stops), one pair per trade in {@code underlying}; {@code strategy} null = every strategy. Each label
+ * starts with the strategy's short code: "ETR buy PE 72200 @194.48", "ETR exit SWING_HIGH_RECLAIMED +₹8,46,200".
+ */
+export function tradeMarkers(rows: TradePositionRow[], underlying: string, strategy: string | null,
+                             short: (id: string) => string): ChartMarker[] {
+  const out: ChartMarker[] = [];
+  for (const t of groupTrades(rows)) {
+    if (t.underlying !== underlying || (strategy != null && t.strategy != null && t.strategy !== strategy)) continue;
+    const who = t.strategy ? short(t.strategy) : "";
+    const leg = t.legs[0];
+    const s = parse(leg.symbol);
+    const what = t.legs.length === 2 ? `straddle ${s?.strike ?? ""}` : s ? `${s.type} ${s.strike}` : leg.symbol;
+    const entryPx = t.legs.length === 2 ? "" : ` @${px(leg.average_cost)}`;
+    const tone = t.legs.length === 2 ? "info" as const : leg.option_side === "CE" ? "up" as const : "down" as const;
+    out.push({ t: time(t.opened)!, text: `${who} buy ${what}${entryPx}`.trim(), tone });
+    if (t.closed != null) {
+      const exitPx = t.legs.length === 2 ? "" : ` @${px(leg.average_exit)}`;
+      out.push({ t: time(t.closed)!, text: `${who} exit${exitPx} ${t.exit ?? ""} ${signed(t.net)}`.replace(/\s+/g, " ").trim(),
+        tone: "info" });
+    }
+  }
+  return out;
+}
+
+/**
+ * The session's trades on one index for the price chart, numbered as in the trades table (#1 = the session's first
+ * trade on any index), with the index level at entry and exit from {@code spotAt} ("HH:mm" → spot).
+ */
+export function chartTrades(rows: TradePositionRow[], underlying: string, strategy: string | null,
+                            short: (id: string) => string, spotAt: (t: string) => number | null): ChartTrade[] {
+  return groupTrades(rows).flatMap((t, i) => {
+    if (t.underlying !== underlying || (strategy != null && t.strategy != null && t.strategy !== strategy)) return [];
+    const from = time(t.opened)!, to = time(t.closed);
+    const side = t.legs.length === 2 ? "STRADDLE" as const : t.legs[0].option_side === "PE" ? "PE" as const : "CE" as const;
+    return [{ n: i + 1, who: t.strategy ? short(t.strategy) : "", side, from, to, net: t.net,
+      entrySpot: spotAt(from), exitSpot: to ? spotAt(to) : null }];
+  });
+}
+
 /** One value per leg, stacked (a straddle shows "CE …" over "PE …"). */
 function PerLeg({ trade, value }: { trade: Trade; value: (leg: TradePositionRow) => string }) {
   if (trade.legs.length === 1) return <span className="num whitespace-nowrap">{value(trade.legs[0])}</span>;
@@ -111,10 +152,14 @@ const paid = (t: Trade) => t.legs.every((l) => l.quantity != null && l.average_c
  * Trades with a straddle as one row: lots, quantity, entry and exit premium (average fill per unit),
  * premium paid, time, exit reason, net and costs. Wide tables scroll inside their panel.
  */
-export function TradesTable({ rows, showStrategy, empty = "No trades." }: {
+export function TradesTable({ rows, showStrategy, empty = "No trades.", numbered = false, onPick }: {
   rows: TradePositionRow[];
   showStrategy: boolean;
   empty?: string;
+  /** a "#" column matching the numbers on the chart */
+  numbered?: boolean;
+  /** clicking a trade's number calls this (e.g. to zoom the chart to it) */
+  onPick?: (trade: Trade, n: number) => void;
 }) {
   const trades = groupTrades(rows);
   return (
@@ -122,6 +167,14 @@ export function TradesTable({ rows, showStrategy, empty = "No trades." }: {
       rows={trades}
       empty={empty}
       columns={[
+        ...(numbered ? [{
+          key: "no", label: "#", render: (t: Trade) => {
+            const n = trades.indexOf(t) + 1;
+            return onPick
+              ? <button type="button" className="num text-accent underline" title="show on the chart" onClick={() => onPick(t, n)}>#{n}</button>
+              : <span className="num">#{n}</span>;
+          },
+        }] : []),
         ...(showStrategy ? [{ key: "st", label: "Strategy", render: (t: Trade) => <span className="text-xs">{t.strategy ?? "–"}</span> }] : []),
         {
           key: "c", label: "Trade", render: (t: Trade) => (

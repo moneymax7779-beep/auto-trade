@@ -1,4 +1,4 @@
-import { type ReactNode, useState } from "react";
+import { type CSSProperties, Fragment, type ReactNode, useState } from "react";
 
 export function Panel({ title, right, children }: { title?: ReactNode; right?: ReactNode; children: ReactNode }) {
   return (
@@ -121,10 +121,14 @@ export function ConfirmButton({ label, confirmLabel, onConfirm, tone = "danger",
   );
 }
 
-export function Table<T>({ rows, columns, empty = "Nothing yet." }: {
+export function Table<T>({ rows, columns, empty = "Nothing yet.", rowStyle, before }: {
   rows: T[];
   columns: { key: string; label: string; render: (row: T) => ReactNode; align?: "right" }[];
   empty?: string;
+  /** Optional per-row style (e.g. a background band per group of rows). */
+  rowStyle?: (row: T, i: number) => CSSProperties | undefined;
+  /** Optional full-width row rendered above row i (e.g. a group heading); null for none. */
+  before?: (row: T, i: number) => ReactNode;
 }) {
   if (rows.length === 0) return <p className="text-sm text-muted">{empty}</p>;
   return (
@@ -138,13 +142,21 @@ export function Table<T>({ rows, columns, empty = "Nothing yet." }: {
           </tr>
         </thead>
         <tbody>
-          {rows.map((row, i) => (
-            <tr key={i} className="border-b border-line/50 hover:bg-panel-2/50">
-              {columns.map((c) => (
-                <td key={c.key} className={`px-2 py-1.5 ${c.align === "right" ? "num text-right" : ""}`}>{c.render(row)}</td>
-              ))}
-            </tr>
-          ))}
+          {rows.map((row, i) => {
+            const heading = before?.(row, i);
+            return (
+              <Fragment key={i}>
+                {heading != null && heading !== false && (
+                  <tr><td colSpan={columns.length} className="px-2 pb-1 pt-4">{heading}</td></tr>
+                )}
+                <tr className="border-b border-line/50 hover:bg-panel-2/50" style={rowStyle?.(row, i)}>
+                  {columns.map((c) => (
+                    <td key={c.key} className={`px-2 py-1.5 ${c.align === "right" ? "num text-right" : ""}`}>{c.render(row)}</td>
+                  ))}
+                </tr>
+              </Fragment>
+            );
+          })}
         </tbody>
       </table>
     </div>

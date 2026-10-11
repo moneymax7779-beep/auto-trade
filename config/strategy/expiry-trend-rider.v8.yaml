@@ -1,0 +1,40 @@
+# Expiry trend rider, v8 (user 2026-10-11: "register and test the time-value budget"; ledger A-073): etr-v7 plus a
+# time-value budget on NEW entries (adds unchanged): enter only if the ATM option's time value per leg, in index
+# points, is at most 0.5 x the index's high-low range over the last 60 minutes. Time value per leg =
+# (ATM straddle - |spot - ATM strike|) / 2. Reasoning for 0.5: an at-the-money option gains about half of the index's
+# move (delta ~0.5), so to earn back its time value the index has to travel about twice that time value; the rule asks
+# that the last hour actually moved that much. Missing data (no straddle, under 30 minutes of history) never blocks.
+# Designed from 6 Oct NIFTY (two 22700 CE entries at 11:46 and 12:45 lost Rs 1.23L as the index went sideways and the
+# expiry-day time value bled), which is therefore not evidence. Value fixed at registration, not tuned.
+# v7: v1 plus a profit lock (A-059). v1: rules in docs/studies/2026-10-01-expiry-trend-rider.md (A-029).
+version: etr-v8
+strategy: expiry-trend-rider
+status: UNCALIBRATED
+source: "user-request-2026-10-11 (A-073: \"register and test the time-value budget\"; value fixed at registration)"
+
+scope:
+  dte: 0
+  entry_from: "11:00"
+  last_new_entry: "14:30"
+  flat_by: "15:15"
+
+trend:
+  breadth_min: 50
+  reject_futures_states:
+    PE: [FRESH_LONG, SHORT_COVERING]
+    CE: [FRESH_SHORT, LONG_UNWIND]
+  iv_change_3m_min: 0
+
+entry:
+  time_value_max_range_ratio: 0.5      # v8: ATM time value per leg <= 0.5 x the last 60 minutes' index range
+
+position:
+  premium_budget: 500000
+  intended_lots: 4
+  max_adds: 3
+  strike_offset: 0
+
+exits:
+  premium_stop_pct: 40
+  profit_lock_arm_pct: 30
+  profit_lock_floor_pct: 0

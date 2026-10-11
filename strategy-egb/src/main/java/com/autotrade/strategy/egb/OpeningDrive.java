@@ -48,6 +48,9 @@ final class OpeningDrive implements Strategy {
     private int trades;                      // positions closed today
     private final java.util.Set<String> rearm = new java.util.HashSet<>();   // v3: levels waiting for a fresh break
     private final java.util.Set<String> backWhileHeld = new java.util.HashSet<>();   // v3: levels spot recrossed while held
+    private double lastBid = Double.NaN;      // v4: the last bid and average cost seen while held,
+    private double lastCost = Double.NaN;     //     to tell a losing trade when it closes
+    private Instant lossClosedAt;             // v4 (A-072): when the last losing trade was seen closed
 
     OpeningDrive(OpeningDriveConfig config) {
         this.config = config;
@@ -98,6 +101,10 @@ final class OpeningDrive implements Strategy {
             }
             if (Double.isFinite(bid)) {
                 bestBid = Double.isFinite(bestBid) ? Math.max(bestBid, bid) : bid;
+                lastBid = bid;
+            }
+            if (Double.isFinite(cost) && cost > 0) {
+                lastCost = cost;
             }
             if (exitReason != null && !exitSent) {   // sent once; the executor chases an unfilled exit
                 orders.add(OrderIntent.exit(position.side(), Stage.CONFIRMED, exitReason));
@@ -110,7 +117,13 @@ final class OpeningDrive implements Strategy {
                 // but only on a fresh break: each level re-arms once spot is back on its untouched side
                 held = false;
                 trades++;
+                // v4: a trade whose last seen bid was below its cost closed at a loss: start the cool-down
+                if (Double.isFinite(lastBid) && Double.isFinite(lastCost) && lastBid < lastCost) {
+                    lossClosedAt = now;
+                }
                 bestBid = Double.NaN;
+                lastBid = Double.NaN;
+                lastCost = Double.NaN;
                 exitSent = false;
                 if (config.maxTrades() != 0 && trades >= config.maxTrades()) {
                     done = true;
@@ -126,7 +139,9 @@ final class OpeningDrive implements Strategy {
             }
             asked = false;                       // an entry sent last snapshot was refused or not filled
             List<Level> hits = hits(spot);
-            if (!done && continuous && window && !hits.isEmpty() && attempts < config.maxEntryAttempts()) {
+            boolean coolingDown = config.reentryCooldownAfterLossMin() > 0 && lossClosedAt != null
+                    && java.time.Duration.between(lossClosedAt, now).toMinutes() < config.reentryCooldownAfterLossMin();
+            if (!done && continuous && window && !hits.isEmpty() && attempts < config.maxEntryAttempts() && !coolingDown) {
                 // several levels broken at once: the stop uses the one nearest the price (the tighter stop)
                 Level level = hits.stream().min((a, b) -> Double.compare(Math.abs(a.price() - spot),
                         Math.abs(b.price() - spot))).orElseThrow();

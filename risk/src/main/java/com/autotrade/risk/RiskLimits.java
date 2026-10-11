@@ -51,7 +51,30 @@ public record RiskLimits(
         /** v12: slicing stops when the ask has run this % above the first slice's ask. */
         double entrySliceMaxDriftPct,
         /** v12: a single-leg entry or add buys at most this % of the option's premium traded in the last minute (0 = off). */
-        double maxParticipationPct) {
+        double maxParticipationPct,
+        /**
+         * v13 (A-071): after this many losing trades in a row by one strategy on one underlying, that strategy makes no new
+         * entry on that underlying for the rest of the day (0 = off, v1-v12). A straddle's two legs count as one trade.
+         */
+        int maxConsecutiveLosses) {
+
+    /** v1-v12 shape: no losing-streak limit. */
+    public RiskLimits(String hash, double capital, double dailyLossLimit, int maxOpenPositions, int maxLotsPerUnderlying,
+                      int maxOrdersPerMinute, LocalTime noNewEntriesAfter, LocalTime squareOffAt, int maxFeedAgeSec,
+                      double maxSpreadPct, int entryBufferTicks, int exitBufferTicks, double exitBufferPct,
+                      int entryTimeoutSec, int exitChaseSec, int exitChaseMax, double stopLimitOffsetPct,
+                      int reconcileEverySec, LocalTime casEntryFrom, LocalTime casEntryTo, double maxLossPerTrade,
+                      double deltaRiskPerTrade, boolean equityMode, double startingCapital, double dailyLossPct,
+                      double premiumBudgetFraction, java.time.LocalDate equityFrom, double entryBufferPct,
+                      int entryChaseMax, int entryChaseSec, double entrySliceDepthPct, double entrySliceMaxDriftPct,
+                      double maxParticipationPct) {
+        this(hash, capital, dailyLossLimit, maxOpenPositions, maxLotsPerUnderlying, maxOrdersPerMinute, noNewEntriesAfter,
+                squareOffAt, maxFeedAgeSec, maxSpreadPct, entryBufferTicks, exitBufferTicks, exitBufferPct, entryTimeoutSec,
+                exitChaseSec, exitChaseMax, stopLimitOffsetPct, reconcileEverySec, casEntryFrom, casEntryTo, maxLossPerTrade,
+                deltaRiskPerTrade, equityMode, startingCapital, dailyLossPct, premiumBudgetFraction, equityFrom,
+                entryBufferPct, entryChaseMax, entryChaseSec, entrySliceDepthPct, entrySliceMaxDriftPct,
+                maxParticipationPct, 0);
+    }
 
     /** v11: the buffer above the ask for an entry limit: the larger of the ticks and the percentage. */
     public double entryBuffer(double ask, double tickSize) {
@@ -66,7 +89,7 @@ public record RiskLimits(
                 exitBufferPct, entryTimeoutSec, exitChaseSec, exitChaseMax, stopLimitOffsetPct, reconcileEverySec,
                 casEntryFrom, casEntryTo, maxLossPerTrade, deltaRiskPerTrade, equityMode, startingCapital, dailyLossPct,
                 premiumBudgetFraction, equityFrom, entryBufferPct, entryChaseMax, entryChaseSec, entrySliceDepthPct,
-                entrySliceMaxDriftPct, maxParticipationPct);
+                entrySliceMaxDriftPct, maxParticipationPct, maxConsecutiveLosses);
     }
 
     /** v8: what a strategy file's rupee budget is multiplied by: equity / starting capital × the budget fraction. */
@@ -136,6 +159,7 @@ public record RiskLimits(
                 c.has("orders.entry_chase_sec") ? c.getInt("orders.entry_chase_sec") : 2,
                 c.has("orders.entry_slice_depth_pct") ? c.getDouble("orders.entry_slice_depth_pct") : 0,
                 c.has("orders.entry_slice_max_drift_pct") ? c.getDouble("orders.entry_slice_max_drift_pct") : 2,
-                c.has("sizing.max_participation_pct") ? c.getDouble("sizing.max_participation_pct") : 0);
+                c.has("sizing.max_participation_pct") ? c.getDouble("sizing.max_participation_pct") : 0,
+                c.has("account.max_consecutive_losses") ? c.getInt("account.max_consecutive_losses") : 0);
     }
 }
