@@ -73,6 +73,20 @@ public final class SetupProviders {
         }
     }
 
+    public static final class TrendStateProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "trend-state";
+        }
+    }
+
+    public static final class OpeningRangeBreakoutProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "opening-range-breakout";
+        }
+    }
+
     public static final class AuctionPressureProvider extends Base {
         @Override
         public String strategyKey() {

@@ -75,6 +75,8 @@ autotrade:
     shadow-strategy-files:
       - config/strategy/opening-range-continuation.v1.yaml
       - config/strategy/opening-range-continuation.v2.yaml
+      # 2026-10-12 (A-083, user: "put orb-v1 in shadow and test the capital reserve"): the 15-minute ORB, own session.
+      - config/strategy/opening-range-breakout.v1.yaml
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"

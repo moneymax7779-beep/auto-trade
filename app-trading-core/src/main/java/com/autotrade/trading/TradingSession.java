@@ -329,9 +329,16 @@ public final class TradingSession {
                 // risk v6: the premium whose first stop (structure via delta, or premium) loses the risk per trade
                 budget = Math.min(budget, risk.limits().premiumCapForRisk(stopPct, ask, oms.delta(contract.get()),
                         intent.stopPoints()));
+                // risk v14 (A-084): on an expiry day the non-expiring index keeps the expiry reserve free
+                double reserveRoom = expiryReserveRoom(underlying);
+                boolean reserveBinds = reserveRoom < budget;
+                budget = Math.min(budget, reserveRoom);
                 if (budget < contract.get().lotSize() * ask) {        // an expiry-day budget already used
-                    String reason = String.format("expiry-day budget: %.0f left, one lot costs %.0f", budget,
-                            contract.get().lotSize() * ask);
+                    String reason = reserveBinds
+                            ? String.format("expiry reserve (risk v14): %.0f left for non-expiring indices, one lot costs %.0f",
+                                    Math.max(0, budget), contract.get().lotSize() * ask)
+                            : String.format("expiry-day budget: %.0f left, one lot costs %.0f", budget,
+                                    contract.get().lotSize() * ask);
                     rejected(strategyId, underlying, "ENTER " + intent.side(), reason);
                     candidate(strategyId, underlying, snapshot, decision, intent, false, reason);
                     return;
@@ -395,6 +402,20 @@ public final class TradingSession {
             return factory.premiumBudget() * scale;
         }
         return expiryBudget - oms.premiumInUse(factory.id());
+    }
+
+    /**
+     * Risk v14 (A-084): how much premium an entry on {@code underlying} may still buy under the expiry reserve: on a day
+     * when a traded underlying expires and this one does not, the non-expiring underlyings together may hold at most
+     * {@link RiskLimits#nonExpiringPremiumCap()}; infinite otherwise (and with the reserve off).
+     */
+    private double expiryReserveRoom(String underlying) {
+        double cap = risk.limits().nonExpiringPremiumCap();
+        if (!Double.isFinite(cap) || contracts.expiresToday(underlying)
+                || settings.tradeUnderlyings().stream().noneMatch(contracts::expiresToday)) {
+            return Double.POSITIVE_INFINITY;
+        }
+        return cap - oms.premiumInUseOn(u -> !contracts.expiresToday(u));
     }
 
     /** Status key: the underlying alone with one strategy, "underlying · strategy" with several. */

@@ -56,7 +56,31 @@ public record RiskLimits(
          * v13 (A-071): after this many losing trades in a row by one strategy on one underlying, that strategy makes no new
          * entry on that underlying for the rest of the day (0 = off, v1-v12). A straddle's two legs count as one trade.
          */
-        int maxConsecutiveLosses) {
+        int maxConsecutiveLosses,
+        /**
+         * v14 (A-084): on a day when a traded underlying expires, entries on the underlyings that do not expire may hold
+         * at most (100 - this) % of the capital as premium, so this share stays free for the expiring index's strategies
+         * (0 = off, v1-v13).
+         */
+        double expiryReservePct) {
+
+    /** v13 shape: no expiry-day reserve. */
+    public RiskLimits(String hash, double capital, double dailyLossLimit, int maxOpenPositions, int maxLotsPerUnderlying,
+                      int maxOrdersPerMinute, LocalTime noNewEntriesAfter, LocalTime squareOffAt, int maxFeedAgeSec,
+                      double maxSpreadPct, int entryBufferTicks, int exitBufferTicks, double exitBufferPct,
+                      int entryTimeoutSec, int exitChaseSec, int exitChaseMax, double stopLimitOffsetPct,
+                      int reconcileEverySec, LocalTime casEntryFrom, LocalTime casEntryTo, double maxLossPerTrade,
+                      double deltaRiskPerTrade, boolean equityMode, double startingCapital, double dailyLossPct,
+                      double premiumBudgetFraction, java.time.LocalDate equityFrom, double entryBufferPct,
+                      int entryChaseMax, int entryChaseSec, double entrySliceDepthPct, double entrySliceMaxDriftPct,
+                      double maxParticipationPct, int maxConsecutiveLosses) {
+        this(hash, capital, dailyLossLimit, maxOpenPositions, maxLotsPerUnderlying, maxOrdersPerMinute, noNewEntriesAfter,
+                squareOffAt, maxFeedAgeSec, maxSpreadPct, entryBufferTicks, exitBufferTicks, exitBufferPct, entryTimeoutSec,
+                exitChaseSec, exitChaseMax, stopLimitOffsetPct, reconcileEverySec, casEntryFrom, casEntryTo, maxLossPerTrade,
+                deltaRiskPerTrade, equityMode, startingCapital, dailyLossPct, premiumBudgetFraction, equityFrom,
+                entryBufferPct, entryChaseMax, entryChaseSec, entrySliceDepthPct, entrySliceMaxDriftPct,
+                maxParticipationPct, maxConsecutiveLosses, 0);
+    }
 
     /** v1-v12 shape: no losing-streak limit. */
     public RiskLimits(String hash, double capital, double dailyLossLimit, int maxOpenPositions, int maxLotsPerUnderlying,
@@ -73,7 +97,7 @@ public record RiskLimits(
                 exitChaseSec, exitChaseMax, stopLimitOffsetPct, reconcileEverySec, casEntryFrom, casEntryTo, maxLossPerTrade,
                 deltaRiskPerTrade, equityMode, startingCapital, dailyLossPct, premiumBudgetFraction, equityFrom,
                 entryBufferPct, entryChaseMax, entryChaseSec, entrySliceDepthPct, entrySliceMaxDriftPct,
-                maxParticipationPct, 0);
+                maxParticipationPct, 0, 0);
     }
 
     /** v11: the buffer above the ask for an entry limit: the larger of the ticks and the percentage. */
@@ -89,7 +113,15 @@ public record RiskLimits(
                 exitBufferPct, entryTimeoutSec, exitChaseSec, exitChaseMax, stopLimitOffsetPct, reconcileEverySec,
                 casEntryFrom, casEntryTo, maxLossPerTrade, deltaRiskPerTrade, equityMode, startingCapital, dailyLossPct,
                 premiumBudgetFraction, equityFrom, entryBufferPct, entryChaseMax, entryChaseSec, entrySliceDepthPct,
-                entrySliceMaxDriftPct, maxParticipationPct, maxConsecutiveLosses);
+                entrySliceMaxDriftPct, maxParticipationPct, maxConsecutiveLosses, expiryReservePct);
+    }
+
+    /**
+     * v14: the most premium entries on an underlying that does not expire today may hold in total, on a day when a
+     * traded underlying expires; infinite when the reserve is off.
+     */
+    public double nonExpiringPremiumCap() {
+        return expiryReservePct > 0 ? capital * (100.0 - expiryReservePct) / 100.0 : Double.POSITIVE_INFINITY;
     }
 
     /** v8: what a strategy file's rupee budget is multiplied by: equity / starting capital × the budget fraction. */
@@ -160,6 +192,7 @@ public record RiskLimits(
                 c.has("orders.entry_slice_depth_pct") ? c.getDouble("orders.entry_slice_depth_pct") : 0,
                 c.has("orders.entry_slice_max_drift_pct") ? c.getDouble("orders.entry_slice_max_drift_pct") : 2,
                 c.has("sizing.max_participation_pct") ? c.getDouble("sizing.max_participation_pct") : 0,
-                c.has("account.max_consecutive_losses") ? c.getInt("account.max_consecutive_losses") : 0);
+                c.has("account.max_consecutive_losses") ? c.getInt("account.max_consecutive_losses") : 0,
+                c.has("account.expiry_reserve_pct") ? c.getDouble("account.expiry_reserve_pct") : 0);
     }
 }

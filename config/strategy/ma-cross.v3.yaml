@@ -1,0 +1,29 @@
+# EMA9 / EMA20 cross without the time stop, v3 (same request as v2; ledger A-080, same study).
+# v3 = v1 with time_stop_min 0: exits only at the 2R target, the swing stop, 15:15 or the emergency premium stop.
+# 12 Oct 12:54 NIFTY put: the 60-minute time stop sold at the bottom of a range at 13:54, before a ~55-point fall.
+# Every other value is v1's.
+#
+version: mac-v3
+strategy: ma-cross
+status: UNCALIBRATED
+source: "user-request-2026-10-12 (A-080; v1 without the time stop, not tuned)"
+
+scope:
+  entry_from: "09:30"
+  last_new_entry: "14:30"              # exclusive
+  flat_by: "15:15"
+  time_stop_min: 0                     # v3: no time stop (v1: 60)
+  skip_expiring_index: true
+
+setup:
+  max_stop_atr: 3.0                    # skip a cross whose swing stop is more than 3 ATR(3m) away (or unknown / wrong side)
+  reward_to_risk: 2.0                  # target = entry + 2 x (entry - stop)
+  # the averages are the features' EMA9 and EMA20 of 3-minute bars (structure.ema9 / ema20)
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 25                 # emergency only; the index-level stop comes first

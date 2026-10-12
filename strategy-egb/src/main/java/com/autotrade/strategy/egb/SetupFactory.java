@@ -8,19 +8,21 @@ import com.autotrade.config.ThresholdConfig;
 import com.autotrade.strategy.Strategy;
 import com.autotrade.strategy.StrategyFactory;
 
-/** Builds the setup families (A-036 to A-040, A-064, A-065) from their versioned files. */
+/** Builds the setup families (A-036 to A-040, A-064, A-065, A-066, A-076, A-081, A-082) from their versioned files. */
 public final class SetupFactory implements StrategyFactory {
 
-    static final Map<String, Function<ThresholdConfig, Strategy>> FAMILIES = Map.of(
-            "opening-reclaim", OpeningReclaim::new,
-            "break-retest", BreakRetest::new,
-            "failed-breakout", FailedBreakout::new,
-            "range-fade", RangeFade::new,
-            "auction-pressure", AuctionPressure::new,
-            "break-retest-runner", BreakRetest::new,                 // A-065: brt-v1's entry, runner exits from its file
-            "trend-day-rider", TrendDayRider::new,                   // A-064
-            "ma-cross", MaCross::new,                                // A-066
-            "opening-range-continuation", OpeningRangeContinuation::new);   // A-076
+    static final Map<String, Function<ThresholdConfig, Strategy>> FAMILIES = Map.ofEntries(
+            Map.entry("opening-reclaim", OpeningReclaim::new),
+            Map.entry("break-retest", BreakRetest::new),
+            Map.entry("failed-breakout", FailedBreakout::new),
+            Map.entry("range-fade", RangeFade::new),
+            Map.entry("auction-pressure", AuctionPressure::new),
+            Map.entry("break-retest-runner", BreakRetest::new),   // A-065: brt-v1's entry, runner exits from its file
+            Map.entry("trend-day-rider", TrendDayRider::new),   // A-064
+            Map.entry("ma-cross", MaCross::new),   // A-066
+            Map.entry("opening-range-continuation", OpeningRangeContinuation::new),   // A-076
+            Map.entry("trend-state", TrendState::new),   // A-081
+            Map.entry("opening-range-breakout", OpeningRangeBreakout::new));   // A-082
 
     private final ThresholdConfig config;
     private final Function<ThresholdConfig, Strategy> family;

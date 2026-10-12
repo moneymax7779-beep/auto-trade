@@ -1,0 +1,29 @@
+# Trend state at 10:15, v1 (user 2026-10-12 15:47: "why there is loss trade despite best and clear moves today? ... do
+# whatever is needed to achieve 10 cr goal"; ledger A-081, docs/studies/2026-10-12-cross-chop-and-trend-state.md).
+# EMA20 of 3-minute bars exists only from about 10:15; on 12 Oct both indices were then below VWAP, below the ORL and
+# with EMA9 under EMA20, and stayed below VWAP to the close. This buys that state once, at the first 3-minute close
+# 10:15-10:30 where all three hold, and holds until a 3-minute close back through VWAP or 15:15. Designed from 12 Oct
+# only (not in the test data); values fixed at registration. Priors: A-064 trend-day rider FAIL, A-076/A-078 orc FAIL.
+version: tsa-v1
+strategy: trend-state
+status: UNCALIBRATED
+source: "user-request-2026-10-12 (A-081; values fixed at registration, not tuned)"
+
+scope:
+  entry_from: "10:15"                  # EMA20 of 3-minute bars exists from about here (20 bars from 09:15)
+  last_new_entry: "10:31"              # exclusive: the 3-minute closes 10:15, 10:18, ..., 10:30
+  flat_by: "15:15"
+  time_stop_min: 0                     # no time stop: the VWAP decides
+  skip_expiring_index: true            # the expiring index belongs to the expiry strategies
+
+setup: {}                              # the rule has no thresholds: VWAP side, EMA9 vs EMA20, beyond ORL / ORH
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 30                 # emergency only; the VWAP stop and trail come first
+  vwap_trail_3m: true                  # exit on a 3-minute close back through the session VWAP
+  use_target: false                    # no target: ride the trend

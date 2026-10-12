@@ -227,4 +227,86 @@ class SetupFamiliesTest {
             }
         }
     }
+
+    /** A-079: mac-v2 takes a cross only on the VWAP's side (VWAP 22,600 here); v1 takes both. */
+    @Test
+    void maCrossV2TakesOnlyCrossesOnTheVwapSide() {
+        for (String version : new String[] {"v1", "v2"}) {
+            Day below = new Day("ma-cross." + version + ".yaml", Map.of("structure.lastSwingLow", 22570.0,
+                    "structure.lastSwingHigh", 22700.0));
+            below.at("12:38", 22585, PositionView.FLAT, "structure.ema9", 22584.0, "structure.ema20", 22586.0);
+            Decision up = below.at("12:39", 22590, PositionView.FLAT, "structure.ema9", 22588.0, "structure.ema20", 22587.0);
+            if (version.equals("v1")) {
+                assertThat(up.orders()).as("v1: a cross up below VWAP is taken").singleElement()
+                        .extracting(OrderIntent::side).isEqualTo(OptionSide.CE);
+            } else {
+                assertThat(up.orders()).as("v2: a cross up below VWAP is skipped").isEmpty();
+            }
+            Day above = new Day("ma-cross." + version + ".yaml", Map.of("structure.lastSwingLow", 22580.0,
+                    "structure.lastSwingHigh", 22700.0));
+            above.at("10:00", 22600, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22602.0);
+            assertThat(above.at("10:01", 22610, PositionView.FLAT, "structure.ema9", 22605.0, "structure.ema20", 22601.0)
+                    .orders()).as(version + ": a cross up above VWAP is taken").singleElement()
+                    .extracting(OrderIntent::side).isEqualTo(OptionSide.CE);
+        }
+    }
+
+    /**
+     * A-081: tsa-v1 waits for EMA20, then buys the put once at the first 3-minute close 10:15-10:30 with the index
+     * below VWAP, EMA9 below EMA20 and below the ORL (12 Oct NIFTY's state at 10:18); not again that day.
+     */
+    @Test
+    void trendStateBuysThePutOnceWhenTheDownTrendStateHoldsAfterEma20Exists() {
+        Map<String, Object> or = Map.of("structure.orComplete", true, "structure.orHigh", 22647.0,
+                "structure.orLow", 22515.0, "structure.vwapSpotProxy", 22558.0);
+        Day d = new Day("trend-state.v1.yaml", or);
+        d.dte = 1;
+        LocalTime t = LocalTime.of(9, 16);
+        for (; t.isBefore(LocalTime.of(10, 15)); t = t.plusMinutes(1)) {
+            assertThat(d.at(t.toString(), 22490, PositionView.FLAT, "structure.ema9", 22505.0).orders()).isEmpty();
+        }
+        assertThat(d.at("10:15", 22486, PositionView.FLAT, "structure.ema9", 22505.0).orders())
+                .as("EMA20 not there yet").isEmpty();
+        d.at("10:16", 22486, PositionView.FLAT, "structure.ema9", 22505.0, "structure.ema20", 22529.0);
+        d.at("10:17", 22486, PositionView.FLAT, "structure.ema9", 22505.0, "structure.ema20", 22529.0);
+        Decision entry = d.at("10:18", 22480, PositionView.FLAT, "structure.ema9", 22503.0, "structure.ema20", 22527.0);
+        assertThat(entry.orders()).singleElement().satisfies(o -> {
+            assertThat(o.side()).isEqualTo(OptionSide.PE);
+            assertThat(o.reason()).isEqualTo("TREND_STATE_DOWN");
+        });
+        d.at("10:19", 22478, PositionView.FLAT, "structure.ema9", 22500.0, "structure.ema20", 22525.0);
+        d.at("10:20", 22476, PositionView.FLAT, "structure.ema9", 22500.0, "structure.ema20", 22525.0);
+        assertThat(d.at("10:21", 22470, PositionView.FLAT, "structure.ema9", 22498.0, "structure.ema20", 22523.0).orders())
+                .as("one trade per index per day").isEmpty();
+    }
+
+    /**
+     * A-082: the 10:00-10:15 candle closes above the ORH (22,647) with futures volume 2x normal; with put OI building the
+     * ORB buys the call, stop at the candle's lowest minute close (22,640), target 2R; without the OI build it stays out.
+     */
+    @Test
+    void orbBuysTheCallOnA15MinuteCloseAboveTheRangeOnlyWithPutOiBuilding() {
+        for (String putFlow : new String[] {"BUILD", "UNWIND"}) {
+            Map<String, Object> or = Map.of("structure.orComplete", true, "structure.orHigh", 22647.0,
+                    "structure.orLow", 22515.0, "futures.rvolTod", 2.0, "options.peOiFlow", putFlow);
+            Day d = new Day("opening-range-breakout.v1.yaml", or);
+            d.dte = 1;
+            LocalTime t = LocalTime.of(9, 16);
+            for (; t.isBefore(LocalTime.of(10, 1)); t = t.plusMinutes(1)) {
+                assertThat(d.at(t.toString(), 22600).orders()).isEmpty();
+            }
+            for (; t.isBefore(LocalTime.of(10, 15)); t = t.plusMinutes(1)) {
+                assertThat(d.at(t.toString(), 22640 + (t.getMinute() - 1) * 0.5).orders()).isEmpty();
+            }
+            Decision close = d.at("10:15", 22660);
+            if (putFlow.equals("BUILD")) {
+                assertThat(close.orders()).singleElement().satisfies(o -> {
+                    assertThat(o.side()).isEqualTo(OptionSide.CE);
+                    assertThat(o.reason()).isEqualTo("ORB_UP");
+                });
+            } else {
+                assertThat(close.orders()).as("put OI not building: no entry").isEmpty();
+            }
+        }
+    }
 }

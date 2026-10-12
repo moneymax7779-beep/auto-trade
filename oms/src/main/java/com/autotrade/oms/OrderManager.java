@@ -316,6 +316,18 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         return total;
     }
 
+    /** Risk v14: capital tied up by live positions on the underlyings {@code underlying} accepts. */
+    public synchronized double premiumInUseOn(java.util.function.Predicate<String> underlying) {
+        double total = 0;
+        for (ManagedPosition position : live.values()) {
+            if (underlying.test(position.underlying)) {
+                total += working(position.entryOrders).isEmpty() ? position.averageCost * position.quantity
+                        : position.premiumInUse();
+            }
+        }
+        return total;
+    }
+
     /**
      * A live straddle's combined exit as percentages {target, stop} of the premium paid; null for a
      * single-leg position or once the bracket has fired.
