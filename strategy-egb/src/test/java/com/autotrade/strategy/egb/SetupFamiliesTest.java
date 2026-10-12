@@ -309,4 +309,27 @@ class SetupFamiliesTest {
             }
         }
     }
+
+    /** A-085: 12 Oct NIFTY's opening: open 22,593, high 22,644 at 09:17, 22,524 at 09:24 (-0.31 %, at the low): the put. */
+    @Test
+    void openingDriveMomentumBuysThePutWhenTheDriveIsStillPressingAt0924() {
+        Day d = new Day("opening-drive-momentum.v1.yaml", Map.of("structure.dayOpen", 22593.0));
+        d.dte = 1;
+        double[] path = {22633, 22644, 22635, 22610, 22588};          // 09:16 .. 09:20
+        LocalTime t = LocalTime.of(9, 16);
+        for (double spot : path) {
+            assertThat(d.at(t.toString(), spot).orders()).isEmpty();
+            t = t.plusMinutes(1);
+        }
+        assertThat(d.at("09:21", 22586).orders()).as("-0.03 % from the open: no drive yet").isEmpty();
+        d.at("09:22", 22585);
+        d.at("09:23", 22560);
+        assertThat(d.at("09:24", 22524).orders()).singleElement().satisfies(o -> {
+            assertThat(o.side()).isEqualTo(OptionSide.PE);
+            assertThat(o.reason()).isEqualTo("OPENING_DRIVE_DOWN");
+        });
+        d.at("09:25", 22530);
+        d.at("09:26", 22529);
+        assertThat(d.at("09:27", 22520).orders()).as("one trade per index per day").isEmpty();
+    }
 }

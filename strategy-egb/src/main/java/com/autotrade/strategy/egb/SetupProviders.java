@@ -87,6 +87,13 @@ public final class SetupProviders {
         }
     }
 
+    public static final class OpeningDriveMomentumProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "opening-drive-momentum";
+        }
+    }
+
     public static final class AuctionPressureProvider extends Base {
         @Override
         public String strategyKey() {

@@ -22,7 +22,8 @@ public final class SetupFactory implements StrategyFactory {
             Map.entry("ma-cross", MaCross::new),   // A-066
             Map.entry("opening-range-continuation", OpeningRangeContinuation::new),   // A-076
             Map.entry("trend-state", TrendState::new),   // A-081
-            Map.entry("opening-range-breakout", OpeningRangeBreakout::new));   // A-082
+            Map.entry("opening-range-breakout", OpeningRangeBreakout::new),   // A-082
+            Map.entry("opening-drive-momentum", OpeningDriveMomentum::new));   // A-085
 
     private final ThresholdConfig config;
     private final Function<ThresholdConfig, Strategy> family;

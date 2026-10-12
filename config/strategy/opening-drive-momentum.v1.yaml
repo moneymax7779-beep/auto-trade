@@ -1,0 +1,33 @@
+# Opening drive momentum, v1 (user 2026-10-12 ~22:10: "why the morning move not captured despite having future volume
+# and heavy OI changes confirming the trend, I need some strategy here"; ledger A-085).
+# 12 Oct: NIFTY fell 22,644 -> 22,524 between 09:17 and 09:24, inside its own opening range; no prior level was near
+# (PDL 22,296), futures volume was 0.6-1.5x normal and call and put OI built together, so neither the opening drive
+# (odb, needs a prior level) nor any post-09:30 rule could act. An index-point screen (.local/opening-screen, 194 days
+# Jan-12 Oct, rules fixed before looking): following a >= 0.2 % drive from the open at 09:21-09:30, stop at the session's
+# other extreme, beat fading it in Jan-Jun (PF 1.33 in R, exit 12:00), Jul-Sep (1.60) and Oct (4.74); the points per
+# trade were small before October. This test adds option fills, costs and the frame. Values from the screen's design
+# half (k = 0.2 %, 30 % pullback, exit 12:00), not tuned on the option replays.
+version: odm-v1
+strategy: opening-drive-momentum
+status: UNCALIBRATED
+source: "user-request-2026-10-12 (A-085; values from the Jan-Jun index screen, fixed at registration)"
+
+scope:
+  entry_from: "09:21"                  # the first 3-minute closes: 09:21, 09:24, 09:27, 09:30
+  last_new_entry: "09:31"              # exclusive
+  flat_by: "12:00"                     # the screen's exit
+  time_stop_min: 0
+  skip_expiring_index: true            # the expiring index (0 DTE) belongs to the expiry strategies
+
+setup:
+  min_move_pct: 0.2                    # at least 0.2 % from the day's open
+  max_pullback_frac: 0.3               # and still in the outer 30 % of the session's range on that side
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 50                 # emergency only; the index stop (session extreme) comes first
+  use_target: false

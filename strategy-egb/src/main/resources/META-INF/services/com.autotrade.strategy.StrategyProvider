@@ -16,3 +16,4 @@ com.autotrade.strategy.egb.SetupProviders$MaCrossProvider
 com.autotrade.strategy.egb.SetupProviders$OpeningRangeContinuationProvider
 com.autotrade.strategy.egb.SetupProviders$TrendStateProvider
 com.autotrade.strategy.egb.SetupProviders$OpeningRangeBreakoutProvider
+com.autotrade.strategy.egb.SetupProviders$OpeningDriveMomentumProvider
