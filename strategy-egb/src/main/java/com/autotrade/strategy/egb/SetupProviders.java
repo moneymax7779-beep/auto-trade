@@ -66,6 +66,13 @@ public final class SetupProviders {
         }
     }
 
+    public static final class OpeningRangeContinuationProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "opening-range-continuation";
+        }
+    }
+
     public static final class AuctionPressureProvider extends Base {
         @Override
         public String strategyKey() {

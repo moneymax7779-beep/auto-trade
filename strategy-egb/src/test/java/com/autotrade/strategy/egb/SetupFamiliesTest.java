@@ -200,4 +200,31 @@ class SetupFamiliesTest {
         assertThat(down.at("11:01", 22590, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22601.0).orders())
                 .singleElement().extracting(OrderIntent::side).isEqualTo(OptionSide.PE);
     }
+
+    /**
+     * A-078: an ORL break at 09:51, before EMA20 exists (as on 12 Oct). orc-v1 has no trend then and stays out; orc-v2
+     * takes the VWAP side and the close below EMA9 as the trend and buys the put, stop 1 ATR back above the ORL.
+     */
+    @Test
+    void orcV2TakesAnOpeningRangeBreakBeforeEma20ExistsAndV1DoesNot() {
+        Map<String, Object> or = Map.of("structure.orComplete", true, "structure.orHigh", 22647.0,
+                "structure.orLow", 22515.0, "futures.rvolTod", 2.0, "structure.ema9", 22530.0);
+        for (String version : new String[] {"v1", "v2"}) {
+            Day d = new Day("opening-range-continuation." + version + ".yaml", or);
+            d.dte = 1;                                              // the index does not expire today
+            LocalTime t = LocalTime.of(9, 16);
+            for (; t.isBefore(LocalTime.of(9, 51)); t = t.plusMinutes(1)) {
+                assertThat(d.at(t.toString(), 22540).orders()).isEmpty();   // inside the range, below the VWAP
+            }
+            Decision brk = d.at("09:51", 22505);                    // first 3-minute close below ORL - 0.1 ATR (22,513)
+            if (version.equals("v1")) {
+                assertThat(brk.orders()).as("v1: EMA20 unknown, no trend").isEmpty();
+            } else {
+                assertThat(brk.orders()).singleElement().satisfies(o -> {
+                    assertThat(o.side()).isEqualTo(OptionSide.PE);
+                    assertThat(o.reason()).isEqualTo("OR_CONTINUATION_DOWN");
+                });
+            }
+        }
+    }
 }

@@ -19,7 +19,8 @@ public final class SetupFactory implements StrategyFactory {
             "auction-pressure", AuctionPressure::new,
             "break-retest-runner", BreakRetest::new,                 // A-065: brt-v1's entry, runner exits from its file
             "trend-day-rider", TrendDayRider::new,                   // A-064
-            "ma-cross", MaCross::new);                               // A-066
+            "ma-cross", MaCross::new,                                // A-066
+            "opening-range-continuation", OpeningRangeContinuation::new);   // A-076
 
     private final ThresholdConfig config;
     private final Function<ThresholdConfig, Strategy> family;

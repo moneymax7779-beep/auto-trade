@@ -69,7 +69,12 @@ autotrade:
     # Shadow mode (--mode=auto): after each live session, these candidates replay the day from own capture on
     # account SHADOW-1 (no orders anywhere). Empty since 2026-10-07 (user: "run everything in PAPER mode, no need of
     # SHADOW mode"); --mode=shadow --session=D still runs a list given on the command line.
-    shadow-strategy-files: []
+    # 2026-10-12 (A-077, user: "yes set orc-v1 up in shadow"): opening-range continuation runs in shadow only, after
+    # each live session, on SHADOW-1 (no capital shared with the live set), until it has 15-20 new days to judge.
+    # 2026-10-12 (A-078, user: "make orc-v2 that can enter before 10:15"): v2 joins v1, each in its own shadow session.
+    shadow-strategy-files:
+      - config/strategy/opening-range-continuation.v1.yaml
+      - config/strategy/opening-range-continuation.v2.yaml
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"
