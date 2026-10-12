@@ -1,0 +1,31 @@
+# orb-v2 = orb-v1 (A-082) + the IV filter: enter only with the ATM IV percentile >= 50 or the ATM IV rising over 3 minutes
+# (user 2026-10-12 ~23:50: "yes register both filter tests and run in shadow"; ledger A-087). From the context evaluation
+# of 118 tick-day trades (.local/context-eval): in-sample, so judged on forward shadow days only. v1 notes follow.
+#
+version: orb-v2
+strategy: opening-range-breakout
+status: UNCALIBRATED
+source: "user-request-2026-10-12 (A-087 = A-082 + filter; values from the guide or round numbers, fixed at registration)"
+
+scope:
+  entry_from: "10:15"                  # the guide's window
+  last_new_entry: "14:31"              # exclusive: the 14:30 candle close is the last
+  flat_by: "15:15"
+  time_stop_min: 0                     # the guide has none: stop, target or square-off
+  skip_expiring_index: true            # the expiring index belongs to the expiry strategies
+
+setup:
+  min_futures_rvol: 1.5                # "a spike in volume": futures volume >= 1.5x normal for the time of day
+  reward_to_risk: 2.0                  # "at least 1:1.5 or 1:2"
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM ("ATM or slightly ITM")
+
+exits:
+  premium_stop_pct: 30                 # emergency only; the candle stop comes first
+  use_target: true                     # 2R target
+
+filters:
+  iv_percentile_min: 50                   # A-087: IV filter: enter only with the ATM IV percentile >= 50 or the ATM IV rising over 3 minutes

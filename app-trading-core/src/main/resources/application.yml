@@ -79,6 +79,11 @@ autotrade:
       - config/strategy/opening-range-breakout.v1.yaml
       # 2026-10-12 23:40 (A-086, user: "yes we can put odm-v1 in shadow mode"): opening drive momentum, own session.
       - config/strategy/opening-drive-momentum.v1.yaml
+      # 2026-10-12 23:55 (A-087 IV filter, A-088 breadth filter; user: "yes register both filter tests and run in shadow")
+      - config/strategy/opening-drive-momentum.v2.yaml
+      - config/strategy/opening-drive-momentum.v3.yaml
+      - config/strategy/opening-range-breakout.v2.yaml
+      - config/strategy/opening-range-breakout.v3.yaml
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"

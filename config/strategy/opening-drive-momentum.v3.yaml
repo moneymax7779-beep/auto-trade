@@ -1,0 +1,31 @@
+# odm-v3 = odm-v1 (A-085) + the breadth filter: enter only with mover breadth >= 50 in the trade's direction (calls +50, puts -50)
+# (user 2026-10-12 ~23:50: "yes register both filter tests and run in shadow"; ledger A-088). From the context evaluation
+# of 118 tick-day trades (.local/context-eval): in-sample, so judged on forward shadow days only. v1 notes follow.
+#
+version: odm-v3
+strategy: opening-drive-momentum
+status: UNCALIBRATED
+source: "user-request-2026-10-12 (A-088 = A-085 + filter; values from the Jan-Jun index screen, fixed at registration)"
+
+scope:
+  entry_from: "09:21"                  # the first 3-minute closes: 09:21, 09:24, 09:27, 09:30
+  last_new_entry: "09:31"              # exclusive
+  flat_by: "12:00"                     # the screen's exit
+  time_stop_min: 0
+  skip_expiring_index: true            # the expiring index (0 DTE) belongs to the expiry strategies
+
+setup:
+  min_move_pct: 0.2                    # at least 0.2 % from the day's open
+  max_pullback_frac: 0.3               # and still in the outer 30 % of the session's range on that side
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 50                 # emergency only; the index stop (session extreme) comes first
+  use_target: false
+
+filters:
+  breadth_min_agree: 50                   # A-088: breadth filter: enter only with mover breadth >= 50 in the trade's direction (calls +50, puts -50)

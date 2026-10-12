@@ -332,4 +332,33 @@ class SetupFamiliesTest {
         d.at("09:26", 22529);
         assertThat(d.at("09:27", 22520).orders()).as("one trade per index per day").isEmpty();
     }
+
+    /** A-087 / A-088: odm-v2 (IV) and odm-v3 (breadth) veto odm-v1's 09:24 put unless their filter holds. */
+    @Test
+    void ivAndBreadthFiltersVetoTheDriveUnlessTheyHold() {
+        Object[][] cases = {
+            {"opening-drive-momentum.v2.yaml", "volatility.atmIvPercentile", 30.0, "options.atmIvChange3m", -0.01, false},
+            {"opening-drive-momentum.v2.yaml", "volatility.atmIvPercentile", 30.0, "options.atmIvChange3m", 0.02, true},
+            {"opening-drive-momentum.v2.yaml", "volatility.atmIvPercentile", 60.0, "options.atmIvChange3m", -0.01, true},
+            {"opening-drive-momentum.v3.yaml", "breadth.moverBreadth", -93.0, "breadth.momentumBreadth", 0.0, true},
+            {"opening-drive-momentum.v3.yaml", "breadth.moverBreadth", -20.0, "breadth.momentumBreadth", 0.0, false},
+        };
+        for (Object[] k : cases) {
+            Day d = new Day((String) k[0], Map.of("structure.dayOpen", 22593.0, (String) k[1], k[2], (String) k[3], k[4]));
+            d.dte = 1;
+            double[] path = {22633, 22644, 22635, 22610, 22588, 22586, 22585, 22560};   // 09:16 .. 09:23
+            LocalTime t = LocalTime.of(9, 16);
+            for (double spot : path) {
+                d.at(t.toString(), spot);
+                t = t.plusMinutes(1);
+            }
+            Decision at0924 = d.at("09:24", 22524);
+            if ((Boolean) k[5]) {
+                assertThat(at0924.orders()).as(k[0] + " " + k[2] + " " + k[4]).singleElement()
+                        .extracting(OrderIntent::side).isEqualTo(OptionSide.PE);
+            } else {
+                assertThat(at0924.orders()).as(k[0] + " " + k[2] + " " + k[4]).isEmpty();
+            }
+        }
+    }
 }

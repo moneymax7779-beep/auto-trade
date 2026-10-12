@@ -39,6 +39,10 @@ abstract class SetupStrategy implements Strategy {
     private final LocalTime lastNewEntry;
     private final LocalTime flatBy;
     private final int timeStopMin;
+    /** A-087: the entry needs the ATM IV percentile at least this, or the ATM IV rising over 3 minutes (NaN = off). */
+    private final double ivPercentileMin;
+    /** A-088: the entry needs mover breadth at least this far in its direction (+ for calls, - for puts; NaN = off). */
+    private final double breadthMinAgree;
     private final boolean skipExpiringIndex;
     private final double premiumStopPct;
     private final int strikeOffset;
@@ -61,6 +65,8 @@ abstract class SetupStrategy implements Strategy {
         this.lastNewEntry = config.getTime("scope.last_new_entry");
         this.flatBy = config.getTime("scope.flat_by");
         this.timeStopMin = config.getInt("scope.time_stop_min");
+        this.ivPercentileMin = config.has("filters.iv_percentile_min") ? config.getDouble("filters.iv_percentile_min") : Double.NaN;
+        this.breadthMinAgree = config.has("filters.breadth_min_agree") ? config.getDouble("filters.breadth_min_agree") : Double.NaN;
         this.skipExpiringIndex = config.getBoolean("scope.skip_expiring_index");
         this.premiumStopPct = config.getDouble("exits.premium_stop_pct");
         this.strikeOffset = config.getInt("position.strike_offset");
@@ -101,6 +107,9 @@ abstract class SetupStrategy implements Strategy {
         c.put("not_expiring_index", !expiringIndex);
         c.put("window", window);
         Entry entry = evaluate(s, time, window && !expiringIndex && !position.open() && Double.isFinite(spot), c);
+        if (entry != null && !filtersPass(entry, s, c)) {
+            entry = null;                                    // A-087 / A-088: the setup's trade, vetoed by its filter
+        }
 
         List<OrderIntent> orders = new ArrayList<>();
         if (position.open()) {
@@ -147,6 +156,28 @@ abstract class SetupStrategy implements Strategy {
             return "TIME_" + timeStopMin;
         }
         return null;
+    }
+
+    /**
+     * A-087 / A-088 entry filters (off unless the file sets them): the IV filter passes with the ATM IV percentile at least
+     * {@code filters.iv_percentile_min} or the ATM IV rising over 3 minutes; the breadth filter passes with mover breadth
+     * at least {@code filters.breadth_min_agree} in the trade's direction. Unknown values fail a filter that is on.
+     */
+    private boolean filtersPass(Entry entry, FeatureSnapshot s, Map<String, Boolean> c) {
+        boolean pass = true;
+        if (!Double.isNaN(ivPercentileMin)) {
+            double pct = s.volatility().atmIvPercentile(), change = s.options().atmIvChange3m();
+            boolean iv = pct >= ivPercentileMin || change > 0;           // NaN compares false
+            c.put("iv_filter", iv);
+            pass &= iv;
+        }
+        if (!Double.isNaN(breadthMinAgree)) {
+            double b = s.breadth().moverBreadth();
+            boolean breadth = entry.side() == OptionSide.CE ? b >= breadthMinAgree : b <= -breadthMinAgree;
+            c.put("breadth_filter", breadth);
+            pass &= breadth;
+        }
+        return pass;
     }
 
     /** The snapshot at 09:18, 09:21, ... carries the close of the 3-minute bar that just ended (bars from 09:15). */
