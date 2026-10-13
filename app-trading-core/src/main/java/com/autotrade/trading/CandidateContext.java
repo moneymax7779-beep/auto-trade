@@ -70,6 +70,12 @@ final class CandidateContext {
         put(c, "ivPercentile", s.volatility().atmIvPercentile());
         put(c, "realizedVolPercentile", s.volatility().realizedVolPercentile());
         put(c, "vix", s.volatility().vix());
+        put(c, "ceOiChange5mZ", o.ceOiChange5mZ());                     // features v12 (A-090)
+        put(c, "peOiChange5mZ", o.peOiChange5mZ());
+        put(c, "distPwhAtr", s.structure().distPwhAtr());
+        put(c, "distPwlAtr", s.structure().distPwlAtr());
+        put(c, "distPmhAtr", s.structure().distPmhAtr());
+        put(c, "distPmlAtr", s.structure().distPmlAtr());
         put(c, "vixChange15m", s.volatility().vixChange15m());
         if (side != null) {
             c.put("stage", side.stage().name());

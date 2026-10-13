@@ -83,6 +83,7 @@ public final class StructureState {
     private final Deque<Long> vwapCrossings = new ArrayDeque<>();
     private final java.time.LocalDate previousSessionDate;
     private double prevOrHigh = Double.NaN;
+    private double pwh = Double.NaN, pwl = Double.NaN, pmh = Double.NaN, pml = Double.NaN;   // v12 period levels
     private double prevOrLow = Double.NaN;
     private int prevSessionMinutes;
     // features v8: the trailing box (the box_minutes bars before the latest closed bar)
@@ -625,7 +626,16 @@ public final class StructureState {
                 Double.isFinite(dayHigh) ? dayHigh : Double.NaN,
                 Double.isFinite(dayLow) ? dayLow : Double.NaN,
                 prevOrHigh, prevOrLow, prevSessionMinutes, boxHigh, boxLow, lastMinuteClose,
-                zoneLow, zoneLowTouches, zoneHigh, zoneHighTouches);
+                zoneLow, zoneLowTouches, zoneHigh, zoneHighTouches,
+                pwh, pwl, pmh, pml, distance(pwh, atr), distance(pwl, atr), distance(pmh, atr), distance(pml, atr));
+    }
+
+    /** Features v12 (A-090): the previous week's and previous month's high and low (NaN = unknown). */
+    public void periodLevels(PeriodLevels levels) {
+        pwh = levels.weekHigh();
+        pwl = levels.weekLow();
+        pmh = levels.monthHigh();
+        pml = levels.monthLow();
     }
 
     /** Signed (spot − level) / ATR. */

@@ -65,5 +65,18 @@ public record StructureFeatures(
         double zoneLow,
         int zoneLowTouches,
         double zoneHigh,
-        int zoneHighTouches) {
+        int zoneHighTouches,
+        /**
+         * v12 (A-090): the previous ISO week's high / low (PWH / PWL) and the previous calendar month's (PMH / PML), from
+         * continuous trading (09:15-15:15) of the sessions in history; NaN when off or not covered. Distances are signed
+         * (spot - level) / ATR like distPdhAtr.
+         */
+        double pwh,
+        double pwl,
+        double pmh,
+        double pml,
+        double distPwhAtr,
+        double distPwlAtr,
+        double distPmhAtr,
+        double distPmlAtr) {
 }

@@ -361,4 +361,29 @@ class SetupFamiliesTest {
             }
         }
     }
+
+    /** A-091: odm-v4's peak trail arms at +50 % and exits when the bid is 15 % below its peak; odm-v3 has no trail. */
+    @Test
+    void odmV4TrailsTheHeldOptionFromItsPeak() {
+        Day d = new Day("opening-drive-momentum.v4.yaml", Map.of("structure.dayOpen", 22593.0));
+        d.dte = 1;
+        java.time.Instant opened = Snapshots.SESSION.atTime(9, 24).atZone(com.autotrade.core.time.MarketTime.IST).toInstant();
+        double[] bids = {130, 155, 170, 145};                       // +30 % (not armed), armed at 155, peak 170, 145 > 144.5
+        LocalTime t = LocalTime.of(10, 0);
+        for (double bid : bids) {
+            assertThat(d.at(t.toString(), 22500, new PositionView(true, OptionSide.PE, 1, 100, opened, bid)).orders())
+                    .as("bid " + bid).isEmpty();
+            t = t.plusMinutes(1);
+        }
+        assertThat(d.at(t.toString(), 22500, new PositionView(true, OptionSide.PE, 1, 100, opened, 144)).orders())
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("TRAIL_15");
+
+        Day v3 = new Day("opening-drive-momentum.v3.yaml", Map.of("structure.dayOpen", 22593.0));
+        v3.dte = 1;
+        LocalTime u = LocalTime.of(10, 0);
+        for (double bid : new double[] {155, 170, 144, 120}) {
+            assertThat(v3.at(u.toString(), 22500, new PositionView(true, OptionSide.PE, 1, 100, opened, bid)).orders()).isEmpty();
+            u = u.plusMinutes(1);
+        }
+    }
 }

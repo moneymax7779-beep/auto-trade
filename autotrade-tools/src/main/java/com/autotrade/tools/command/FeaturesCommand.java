@@ -55,10 +55,11 @@ final class FeaturesCommand {
 
     static int run(SessionEventSource source, SessionHistory history, LocalDate session, List<String> underlyings,
                    Path featuresFile, Path exchangeFile, Path outputDirectory, List<LocalTime> printAt,
-                   Persistence persistence) throws Exception {
+                   Persistence persistence, DataSource target) throws Exception {
         ThresholdConfig featuresConfig = ThresholdConfig.load(featuresFile);
         ThresholdConfig exchangeConfig = ThresholdConfig.load(exchangeFile);
         FeatureConfig config = FeatureConfig.from(featuresConfig, exchangeConfig);
+        history = com.autotrade.md.store.SessionHistories.forFeatures(history, config.barBackfill(), target);   // v12
         Files.createDirectories(outputDirectory);
         Runs runs = persistence == null ? null : new Runs(persistence.dataSource());
         Long runId = null;

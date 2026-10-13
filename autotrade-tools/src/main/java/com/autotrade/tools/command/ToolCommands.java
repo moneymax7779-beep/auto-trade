@@ -372,12 +372,13 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
         SessionEventSource eventSource = args.get("from", "zt").equals("own")
                 ? new StoredSessionSource(target) : new ZtSessionSource(source.dataSource(), false);
         List<LocalTime> printAt = args.list("at", "").stream().map(LocalTime::parse).toList();
-        return FeaturesCommand.run(eventSource, new CombinedSessionHistory(new ZtSessionHistory(source.dataSource()), new OwnSessionHistory(target),
-                new ReferenceStore(target)), sessions.getFirst(),
+        com.autotrade.core.history.SessionHistory history = new CombinedSessionHistory(
+                new ZtSessionHistory(source.dataSource()), new OwnSessionHistory(target), new ReferenceStore(target));
+        return FeaturesCommand.run(eventSource, history, sessions.getFirst(),
                 args.upperList("underlying", DEFAULT_UNDERLYINGS),
                 Path.of(args.get("features-file", FEATURES_FILE)), Path.of(args.get("exchange-file", EXCHANGE_FILE)),
                 Path.of(args.get("out", ".local/features")), printAt,
-                args.flag("save") ? new FeaturesCommand.Persistence(target, CodeVersion.current()) : null);
+                args.flag("save") ? new FeaturesCommand.Persistence(target, CodeVersion.current()) : null, target);
     }
 
     private int simulate(ToolArgs args) throws Exception {

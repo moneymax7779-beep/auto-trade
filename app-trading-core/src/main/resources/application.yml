@@ -51,15 +51,15 @@ autotrade:
       - config/strategy/early-confirm-runner.v11.yaml      # ecr-v11 = v8 (expiry days only) with no limit on campaigns per side (user, 2026-10-01)
       - config/strategy/opening-drive.v3.yaml              # odb-v3 = v2 with no limit on trades; a re-entry needs a fresh break (user, 2026-10-01)
       - config/strategy/expiry-gamma-breakout.v4.yaml      # egb-v4 = v3 with no limit on campaigns per side (user, 2026-10-01)
-      - config/strategy/expiry-trend-rider.v7.yaml         # etr-v7 live (A-059 PASS, user 2026-10-08 18:30: "swap v1 with v7"; A-060) = etr-v1 + profit lock (breakeven after +30 %); v1 live 2 Oct-8 Oct (A-031). Alone since A-061 (etr-v6 removed: the two split the capital)
+      - config/strategy/expiry-trend-rider.v1.yaml         # etr-v1 live again from 14 Oct (A-093, user 2026-10-13 ~18:15: "do whatever is needed for best profits"): v7's profit lock sold the 13 Oct NIFTY 0DTE call at breakeven at 14:23 before it ran 30 -> 145 (replay at live equity: +Rs 10.59L held to 15:15); never better than v1 on the 23 tick days. v7 live 9-13 Oct (A-060); v1 live 2-8 Oct (A-031)
       # User 2026-10-07 07:00 IST: "run everything in PAPER mode, no need of SHADOW mode" (A-053). The former shadow
       # strategies come after the existing ones, so on a common trigger the existing ones take the capital first.
       # brt-v1 removed 2026-10-11 (A-075, user: "remove break retest"): 60 tick trades, PF 0.81, losing on held-out and
       # unseen days; removing it measured +Rs 76,835 over 22 tick days with every other strategy's trades unchanged (A-074).
       # Its file and code stay; it returns only through a new registered test.
       - config/strategy/ma-cross.v1.yaml                   # mac-v1 forward test in PAPER (A-067, user 2026-10-09 20:40: "run it in paper"); A-066 test PASS, held-out FAIL on one trade; never the expiring index; Rs 2.5L budget; last, so the others take the capital first
-      - config/strategy/opening-drive-momentum.v3.yaml     # odm-v3 forward test in PAPER from 13 Oct (A-089, user 2026-10-13 ~06:45: "yes run odm-v3 in PAPER today"): opening drive 09:21-09:30 + breadth >= 50 agreeing; in-set replay left the six identical (+Rs 5.23L on 23 tick days, in-sample filter); last, so the others take the capital first
-    features-file: config/features/features.v11.yaml   # v11 = v7 with the VWAP proxy using the 15-minute mean basis (A-030, user 2026-10-02: "yes switch to v11"); v7 = v6 + ATR seeded from the previous session
+      - config/strategy/opening-drive-momentum.v4.yaml     # odm-v4 live from 14 Oct (A-093) = odm-v3 (A-089) + peak trail (arm +50 %, exit 15 % off the peak; A-091 PASS, thin): never worse than v3 on 23 tick days (+Rs 1.55L), 13 Oct +Rs 35K; last, so the others take the capital first
+    features-file: config/features/features.v12.yaml   # v12 from 14 Oct (A-090 PASS, A-093): v11 + bar backfill of spot history, weekly/monthly levels, OI-change z-scores; no trade changed on 23 tick days. v11 (A-030) live 2-13 Oct
     exchange-file: config/exchange/nse-bse-sessions.v3.yaml
     costs-file: config/costs/india-index-options-costs.v2.yaml   # v2: Upstox Plus brokerage Rs 30/order from 2026-09-01 (A-044, user 2026-10-06)
     risk-file: config/risk/paper-risk.v12.yaml   # v12 (A-063, user 2026-10-09 00:19: "switch to v12 and deploy before 09:00"): v10 + entries sliced to the visible book (0.5 % of the ask, 2 % drift, 10 s) + 2 % participation cap (A-062). v10 (A-054, user 2026-10-07 07:15: "start the sizing from 5,00,000 from today"): v9 with equity counted from 7 Oct (Rs 5L + live sessions from that date). v9 (A-047): capital = equity, budgets x equity/5L, daily loss 22 % of equity
@@ -85,6 +85,9 @@ autotrade:
       - config/strategy/opening-drive-momentum.v3.yaml
       - config/strategy/opening-range-breakout.v2.yaml
       - config/strategy/opening-range-breakout.v3.yaml
+      # 2026-10-13 (A-093): odm-v5, the opening drive also on the expiring index (A-092 INCONCLUSIVE: no extra trade on 23
+      # tick days; 13 Oct would have taken the NIFTY 0DTE call +Rs 2.50L); odm-v3 stays in shadow (odm-v4 is live).
+      - config/strategy/opening-drive-momentum.v5.yaml
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"

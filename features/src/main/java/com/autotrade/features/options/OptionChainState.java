@@ -97,6 +97,7 @@ public final class OptionChainState {
     private final TimedSeries atmIvSeries = new TimedSeries(RETENTION);
     private final TimedSeries straddleSeries = new TimedSeries(RETENTION);
     private LocalDate expiry;
+    private com.autotrade.core.history.OiBaseline oiBaseline = com.autotrade.core.history.OiBaseline.NONE;
     private Instant lastTime;
 
     public OptionChainState(FeatureConfig config, SessionClock clock, LocalDate session) {
@@ -124,6 +125,28 @@ public final class OptionChainState {
 
     public LocalDate expiry() {
         return expiry;
+    }
+
+    /**
+     * Features v12: the baseline the 5-minute OI change z-scores are measured against. A missing baseline, or one
+     * measured with other strikes, weights or window than this file's options_chain settings, leaves the z-scores NaN.
+     */
+    public com.autotrade.core.history.OiBaseline.Status oiBaseline(com.autotrade.core.history.OiBaseline baseline) {
+        this.oiBaseline = com.autotrade.core.history.OiBaseline.NONE;
+        if (baseline == null || baseline.isEmpty()) {
+            return com.autotrade.core.history.OiBaseline.Status.MISSING;
+        }
+        if (!expectedParams().equals(baseline.params())) {
+            return com.autotrade.core.history.OiBaseline.Status.MISMATCH;
+        }
+        this.oiBaseline = baseline;
+        return com.autotrade.core.history.OiBaseline.Status.ACCEPTED;
+    }
+
+    /** The definition of ceOiChange5m / peOiChange5m under this file's settings. */
+    public com.autotrade.core.history.OiBaseline.Params expectedParams() {
+        return new com.autotrade.core.history.OiBaseline.Params(config.nearAtmStrikes(), config.heavyWeightStrikes(),
+                config.outerStrikeWeight(), 5);
     }
 
     public Instant lastTime() {
@@ -206,7 +229,26 @@ public final class OptionChainState {
                 premiumResponse(atmCe, ceQuote, time, spotSeries, atr1m),
                 premiumResponse(atmPe, peQuote, time, spotSeries, atr1m),
                 ceQuote.spreadPct, peQuote.spreadPct,
-                wallOiChangePct(callBarrier, time), wallOiChangePct(putSupport, time));
+                wallOiChangePct(callBarrier, time), wallOiChangePct(putSupport, time),
+                oiZ("CE", ce, windows, nearOi, time), oiZ("PE", pe, windows, nearOi, time));
+    }
+
+    /**
+     * Features v12 (A-090): the 5-minute weighted OI change as a share of near-ATM OI, as a robust z-score against the
+     * baseline cell for this days-to-expiry and 15-minute bucket; NaN when off, without a 5-minute window or baseline.
+     */
+    private double oiZ(String side, double[] change, List<Integer> windows, double nearOi, Instant time) {
+        int five = windows.indexOf(5);
+        if (!config.oiZscore() || five < 0 || !(nearOi > 0) || expiry == null) {
+            return Double.NaN;
+        }
+        int bucket = com.autotrade.core.history.OiBaseline.minuteBucket(config.marketOpen(),
+                time.atZone(com.autotrade.core.time.MarketTime.IST).toLocalTime());
+        if (bucket < 0) {
+            return Double.NaN;                                // before 09:15 or from 15:30: no baseline
+        }
+        return oiBaseline.z(side, com.autotrade.core.history.OiBaseline.dteBucket(session, expiry), bucket,
+                change[five] / nearOi);
     }
 
     /** OI change at the barrier strike over the longest wall-weakening lookback, percent (NaN without history). */
@@ -526,7 +568,7 @@ public final class OptionChainState {
         double n = Double.NaN;
         return new OptionsFeatures(expiry == null ? null : expiry.toString(), n, n, contracts.size(), n, n, n, n, n, n, n,
                 n, "UNKNOWN", "UNKNOWN", n, n, n, n, false, false, n, n, n, n, n, n, n, n, n, "NONE", n, n, n, n, n, n,
-                n, n, n, n, n);
+                n, n, n, n, n, n, n);
     }
 
     static double midPrice(OptionTick tick) {

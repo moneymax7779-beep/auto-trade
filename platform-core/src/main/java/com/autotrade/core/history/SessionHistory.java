@@ -35,6 +35,11 @@ public interface SessionHistory {
         return List.of();
     }
 
+    /** Features v12: the normal near-ATM option OI change (from the stored bars); none by default. */
+    default OiBaseline oiBaseline(String underlying) {
+        return OiBaseline.NONE;
+    }
+
     /** Reference series such as India VIX; none unless combined via {@link #withReference}. */
     default ReferenceData reference() {
         return ReferenceData.NONE;
@@ -62,6 +67,11 @@ public interface SessionHistory {
             @Override
             public List<IvSession> atmIvMinutes(String underlying, LocalDate session, int sessions) {
                 return market.atmIvMinutes(underlying, session, sessions);
+            }
+
+            @Override
+            public OiBaseline oiBaseline(String underlying) {
+                return market.oiBaseline(underlying);
             }
 
             @Override

@@ -1,0 +1,34 @@
+# odm-v5 = odm-v3 (A-088) also on the index that expires that day (skip_expiring_index false), nothing else changed
+# (user 2026-10-13 ~16:10: post-mortem "application missed great moves ... what should we do not miss any good signals";
+# ledger A-092). 13 Oct: NIFTY (expiring) rallied 22,289 -> 22,581 from 09:16 to 09:55 while odm-v3 was barred from it;
+# the index-point screen showed the drive on expiring indices like other days (PF 1.25 Jan-Jun, 1.64 Jul-Sep, n=40).
+# On the expiring index the ATM option is 0 DTE (more gamma, faster decay); the capital it holds until 12:00 can crowd
+# the expiry strategies, which the in-set replay measures. v3 notes follow.
+#
+version: odm-v5
+strategy: opening-drive-momentum
+status: UNCALIBRATED
+source: "user-request-2026-10-13 (A-092 = A-088 on the expiring index too; values from the Jan-Jun index screen, fixed at registration)"
+
+scope:
+  entry_from: "09:21"                  # the first 3-minute closes: 09:21, 09:24, 09:27, 09:30
+  last_new_entry: "09:31"              # exclusive
+  flat_by: "12:00"                     # the screen's exit
+  time_stop_min: 0
+  skip_expiring_index: false           # v5 (A-092): the expiring index too (v3: true)
+
+setup:
+  min_move_pct: 0.2                    # at least 0.2 % from the day's open
+  max_pullback_frac: 0.3               # and still in the outer 30 % of the session's range on that side
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 50                 # emergency only; the index stop (session extreme) comes first
+  use_target: false
+
+filters:
+  breadth_min_agree: 50                   # A-088: breadth filter: enter only with mover breadth >= 50 in the trade's direction (calls +50, puts -50)

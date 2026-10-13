@@ -50,6 +50,13 @@ abstract class SetupStrategy implements Strategy {
     private final boolean vwapTrail3m;
     /** A-065: false = ride without the target level (the runner). Default true. */
     private final boolean useTarget;
+    /**
+     * A-091: a peak trail on the held option (as the trend rider's A-049): armed once the bid is this % above the average
+     * premium, then exit when the bid falls {@link #trailGivebackPct} % below its running peak. 0 = off.
+     */
+    private final double trailActivationPct;
+    private final double trailGivebackPct;
+    private double trailPeak = Double.NaN;
 
     /** Minute closes, newest last (the snapshot spot each minute). */
     protected final ArrayDeque<Double> closes = new ArrayDeque<>();
@@ -72,6 +79,8 @@ abstract class SetupStrategy implements Strategy {
         this.strikeOffset = config.getInt("position.strike_offset");
         this.vwapTrail3m = config.has("exits.vwap_trail_3m") && config.getBoolean("exits.vwap_trail_3m");
         this.useTarget = !config.has("exits.use_target") || config.getBoolean("exits.use_target");
+        this.trailActivationPct = config.has("exits.trail_activation_pct") ? config.getDouble("exits.trail_activation_pct") : 0;
+        this.trailGivebackPct = config.has("exits.trail_giveback_pct") ? config.getDouble("exits.trail_giveback_pct") : 0;
     }
 
     @Override
@@ -114,12 +123,17 @@ abstract class SetupStrategy implements Strategy {
         List<OrderIntent> orders = new ArrayList<>();
         if (position.open()) {
             String exit = exitReason(position.side(), spot, now, time, s.structure().vwapSpotProxy());
+            String trail = trailExit(position);                          // A-091: after the index exits
+            if (exit == null) {
+                exit = trail;
+            }
             if (exit != null && !exitSent) {
                 orders.add(OrderIntent.exit(position.side(), Stage.CONFIRMED, exit));
                 exitSent = true;
             }
         } else {
             exitSent = false;
+            trailPeak = Double.NaN;
             if (entry != null) {
                 orders.add(new OrderIntent(OrderIntent.Action.ENTER, entry.side(), 1, Stage.CONFIRMED, entry.reason(),
                         premiumStopPct, strikeOffset));
@@ -133,6 +147,21 @@ abstract class SetupStrategy implements Strategy {
                 expiringIndex ? "EXPIRING_INDEX" : "SETUP", null),
                 new SideView(OptionSide.CE, ce, Double.NaN, Double.NaN, Double.NaN, lastConditions),
                 new SideView(OptionSide.PE, pe, Double.NaN, Double.NaN, Double.NaN, lastConditions), List.copyOf(orders));
+    }
+
+    /** A-091: the peak trail's exit reason, or null (off, not armed, or the bid still within the giveback). */
+    private String trailExit(PositionView position) {
+        if (!(trailActivationPct > 0) || !(position.bid() > 0) || !(position.averagePremium() > 0)) {
+            return null;
+        }
+        if (Double.isNaN(trailPeak)) {
+            if (position.bid() >= position.averagePremium() * (1 + trailActivationPct / 100.0)) {
+                trailPeak = position.bid();
+            }
+            return null;
+        }
+        trailPeak = Math.max(trailPeak, position.bid());
+        return position.bid() <= trailPeak * (1 - trailGivebackPct / 100.0) ? "TRAIL_" + Math.round(trailGivebackPct) : null;
     }
 
     private String exitReason(OptionSide side, double spot, Instant now, LocalTime time, double vwap) {

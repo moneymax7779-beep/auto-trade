@@ -1,4 +1,4 @@
-package com.autotrade.trading;
+package com.autotrade.md.store;
 
 import java.sql.Timestamp;
 import java.time.Instant;
@@ -17,6 +17,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import com.autotrade.core.history.DailyBar;
 import com.autotrade.core.history.IvSession;
 import com.autotrade.core.history.MinuteBar;
+import com.autotrade.core.history.OiBaseline;
 import com.autotrade.core.history.ReferenceData;
 import com.autotrade.core.history.SessionHistory;
 import com.autotrade.core.time.MarketTime;
@@ -24,13 +25,14 @@ import com.autotrade.core.time.MarketTime;
 /**
  * Session history from the stored one-minute bars ({@code hist.candle}): the previous session's daily bar, futures volume
  * per minute of earlier sessions (the nearest-expiry contract of each day), spot minute bars, and India VIX as reference
- * data. No IV history (the bars carry none): IV percentiles stay NaN in a bar replay.
+ * data. No IV history (the bars carry none): IV percentiles stay NaN in a bar replay. Features v12 also back-fills live
+ * and tick-replay history with its spot bars and reads the OI baseline built from its option bars (A-090).
  */
-final class BarSessionHistory implements SessionHistory, ReferenceData {
+public final class BarSessionHistory implements SessionHistory, ReferenceData {
 
     private final JdbcTemplate jdbc;
 
-    BarSessionHistory(DataSource target) {
+    public BarSessionHistory(DataSource target) {
         this.jdbc = new JdbcTemplate(target);
     }
 
@@ -69,11 +71,24 @@ final class BarSessionHistory implements SessionHistory, ReferenceData {
 
     @Override
     public List<List<MinuteBar>> spotMinuteBars(String underlying, LocalDate session, int sessions) {
-        List<List<MinuteBar>> result = new ArrayList<>();
-        for (LocalDate day : dates(underlying, "INDEX", session, sessions)) {
-            result.add(List.copyOf(bars(underlying, "INDEX", day, LocalTime.of(9, 15), LocalTime.of(15, 15))));
+        List<LocalDate> dates = dates(underlying, "INDEX", session, sessions);
+        if (dates.isEmpty()) {
+            return List.of();
         }
-        return result;
+        // one range query for every session, grouped by IST date (dates are newest first)
+        Map<LocalDate, List<MinuteBar>> byDate = new TreeMap<>(java.util.Comparator.reverseOrder());
+        dates.forEach(d -> byDate.put(d, new ArrayList<>()));
+        jdbc.query("select bar_start, open, high, low, close from hist.candle where underlying = ? and kind = 'INDEX' "
+                + "and bar_start >= ? and bar_start < ? and (bar_start at time zone 'Asia/Kolkata')::time >= '09:15' "
+                + "and (bar_start at time zone 'Asia/Kolkata')::time < '15:15' order by bar_start",
+                rs -> {
+                    Instant start = rs.getTimestamp(1).toInstant();
+                    List<MinuteBar> day = byDate.get(start.atZone(MarketTime.IST).toLocalDate());
+                    if (day != null) {
+                        day.add(new MinuteBar(start, rs.getDouble(2), rs.getDouble(3), rs.getDouble(4), rs.getDouble(5)));
+                    }
+                }, underlying, ts(dates.getLast(), LocalTime.MIN), ts(dates.getFirst().plusDays(1), LocalTime.MIN));
+        return byDate.values().stream().map(List::copyOf).toList();
     }
 
     @Override
@@ -84,6 +99,24 @@ final class BarSessionHistory implements SessionHistory, ReferenceData {
     @Override
     public ReferenceData reference() {
         return this;
+    }
+
+    /** Features v12 (A-090): the near-ATM OI change baseline built from these bars ({@code ref.oi_baseline}). */
+    @Override
+    public OiBaseline oiBaseline(String underlying) {
+        Map<OiBaseline.Cell.Key, OiBaseline.Cell> cells = new java.util.HashMap<>();
+        java.util.Set<OiBaseline.Params> params = new java.util.HashSet<>();
+        jdbc.query("select side, dte_bucket, minute_bucket, median, mad, n, near_atm_strikes, heavy_weight_strikes, "
+                + "outer_strike_weight, window_min from ref.oi_baseline where underlying = ?", rs -> {
+                    cells.put(new OiBaseline.Cell.Key(rs.getString(1), rs.getInt(2), rs.getInt(3)),
+                            new OiBaseline.Cell(rs.getDouble(4), rs.getDouble(5), rs.getInt(6)));
+                    params.add(new OiBaseline.Params(rs.getInt(7), rs.getInt(8), rs.getDouble(9), rs.getInt(10)));
+                }, underlying);
+        if (cells.isEmpty()) {
+            return OiBaseline.NONE;
+        }
+        // rows built with different definitions are never mixed: no single definition, so the engine refuses it
+        return new OiBaseline(params.size() == 1 ? params.iterator().next() : null, cells);
     }
 
     // ---------------------------------------------------------------- ReferenceData (India VIX from the bars)

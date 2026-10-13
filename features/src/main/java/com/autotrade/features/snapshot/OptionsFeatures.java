@@ -50,5 +50,11 @@ public record OptionsFeatures(
          * BSE, whose option OI updates every 2-3 minutes (A-057/A-058).
          */
         double callWallOiChangePct,
-        double putFloorOiChangePct) {
+        double putFloorOiChangePct,
+        /**
+         * v12 (A-090): robust z-score of the 5-minute near-ATM call (put) OI change, as a share of near-ATM OI, against
+         * the stored bars' baseline for the same days-to-expiry and 15-minute bucket; NaN when off or without baseline.
+         */
+        double ceOiChange5mZ,
+        double peOiChange5mZ) {
 }

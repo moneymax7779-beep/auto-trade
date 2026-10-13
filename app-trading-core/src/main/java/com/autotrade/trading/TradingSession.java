@@ -159,6 +159,14 @@ public final class TradingSession {
             }
             engines.put(underlying, new FeatureEngine(underlying, settings.session(), settings.features(),
                     settings.history(), this::onSnapshot));
+            switch (engines.get(underlying).oiBaselineStatus()) {           // features v12 (A-090)
+                case MISSING -> log.warn("{}: no OI baseline loaded (ref.oi_baseline empty); OI z-scores stay empty",
+                        underlying);
+                case MISMATCH -> log.warn("{}: the OI baseline was measured with other strikes, weights or window than "
+                        + "this features file (or mixes definitions); OI z-scores stay empty - rebuild it with "
+                        + "bin/build-oi-baseline.sql", underlying);
+                default -> { }
+            }
         }
     }
 

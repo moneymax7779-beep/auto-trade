@@ -1,5 +1,7 @@
 package com.autotrade.features;
 
+import com.autotrade.features.levels.PeriodLevels;
+
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
@@ -57,7 +59,11 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
     private final String underlying;
     private final LocalDate session;
     private final FeatureConfig config;
+    /** v12: sessions of history read for the previous week's and month's levels (a month back from any day). */
+    static final int PERIOD_SESSIONS = 50;
+
     private final SessionClock clock;
+    private final com.autotrade.core.history.OiBaseline.Status oiBaselineStatus;
     private final Consumer<FeatureSnapshot> sink;
     private final StructureState structure;
     private final FuturesState futures;
@@ -96,9 +102,19 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
         this.futures = new FuturesState(config, underlying, session, open, new VolumeProfile(
                 history.futuresMinuteVolumes(underlying, session, config.rvolLookbackSessions())));
         this.options = new OptionChainState(config, clock, session);
+        // v12 (A-090): a missing baseline, or one measured with other strikes, weights or window, leaves z-scores NaN
+        this.oiBaselineStatus = config.oiZscore() ? options.oiBaseline(history.oiBaseline(underlying))
+                : com.autotrade.core.history.OiBaseline.Status.OFF;
         this.breadth = new BreadthState(config);
         this.ext = config.extensions();
-        this.volatility = ext == null ? null : new VolatilityState(config, underlying, session, history);
+        // one read of the earlier sessions' spot bars serves the volatility percentiles and the v12 period levels
+        java.util.List<java.util.List<com.autotrade.core.history.MinuteBar>> earlier = ext == null ? null
+                : history.spotMinuteBars(underlying, session, ext.volatilityHistorySessions());
+        if (config.periodLevels()) {                                     // v12 (A-090): previous week / month high-low
+            structure.periodLevels(PeriodLevels.of(session, earlier != null && ext.volatilityHistorySessions() >= PERIOD_SESSIONS
+                    ? earlier : history.spotMinuteBars(underlying, session, PERIOD_SESSIONS)));
+        }
+        this.volatility = ext == null ? null : new VolatilityState(config, underlying, session, history, earlier);
         this.cas = ext == null ? null : new CasState(ext, session,
                 history.reference().auctionTurnover(underlying, session, ext.auctionHistorySessions()),
                 config.casSettlementMethod(), config.indexIepAvailable());
@@ -106,6 +122,11 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
         this.nextSnapshotAt = open.plus(interval);
         this.lastSnapshotAt = session.atTime(config.derivativesClose())
                 .atZone(MarketTime.IST).toInstant();
+    }
+
+    /** Features v12: whether the OI z-scores have a usable baseline (callers log MISSING and MISMATCH). */
+    public com.autotrade.core.history.OiBaseline.Status oiBaselineStatus() {
+        return oiBaselineStatus;
     }
 
     @Override

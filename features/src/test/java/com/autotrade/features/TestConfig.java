@@ -18,6 +18,13 @@ public final class TestConfig {
                 ThresholdConfig.load(Path.of("..", "config", "exchange", "nse-bse-sessions.v2.yaml")));
     }
 
+    /** features v12 (A-090): v11 plus bar backfill, period levels and OI z-scores. */
+    public static FeatureConfig loadV12() {
+        return FeatureConfig.from(
+                ThresholdConfig.load(Path.of("..", "config", "features", "features.v12.yaml")),
+                ThresholdConfig.load(Path.of("..", "config", "exchange", "nse-bse-sessions.v3.yaml")));
+    }
+
     public static FeatureConfig load() {
         return FeatureConfig.from(
                 ThresholdConfig.load(Path.of("..", "config", "features", "features.v2.yaml")),

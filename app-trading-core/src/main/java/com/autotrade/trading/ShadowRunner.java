@@ -90,6 +90,7 @@ final class ShadowRunner {
             ReferenceStore reference = new ReferenceStore(target);
             SessionHistory history = new CombinedSessionHistory(new ZtSessionHistory(zt), new OwnSessionHistory(target),
                     reference);
+            history = com.autotrade.md.store.SessionHistories.forFeatures(history, features.barBackfill(), target);   // v12
             TradingSession.Settings settings = new TradingSession.Settings(TradingSession.Mode.PAPER_REPLAY, ACCOUNT,
                     session, t.underlyings(), t.tradeUnderlyingList(), features, history, strategies,
                     RiskLimits.from(riskFile), CostModel.from(costsFile), FillModel.from(costsFile, t.fillModel()),

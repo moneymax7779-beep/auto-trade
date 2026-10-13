@@ -44,6 +44,7 @@ import com.autotrade.core.history.SessionHistory;
 import com.autotrade.core.history.CombinedSessionHistory;
 import com.autotrade.core.history.IndexWeightFiles;
 import com.autotrade.md.store.LiveCapture;
+import com.autotrade.md.store.BarSessionHistory;
 import com.autotrade.md.store.OwnSessionHistory;
 import com.autotrade.md.store.ReferenceStore;
 import com.autotrade.md.store.Runs;
@@ -416,6 +417,8 @@ class SessionRunner implements ApplicationRunner {
                 ? new CombinedSessionHistory(new BarSessionHistory(target), new OwnSessionHistory(target), new BarSessionHistory(target))
                 : new CombinedSessionHistory(new ZtSessionHistory(source), new OwnSessionHistory(target),
                         replay ? referenceStore : liveReference);
+        // features v12 (A-090): older sessions' spot bars and the OI baseline from the stored one-minute bars
+        history = com.autotrade.md.store.SessionHistories.forFeatures(history, features.barBackfill(), target);
         // risk v8: live sizes from the account's equity (starting capital + realised net of finished live sessions);
         // a replay uses the starting capital, so its results stay comparable day to day, unless replay-equity chains days
         RiskLimits baseRisk = RiskLimits.from(riskFile);

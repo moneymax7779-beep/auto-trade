@@ -93,7 +93,16 @@ public record FeatureConfig(
          * v11: the spot VWAP proxy subtracts the basis averaged over this many minutes instead of the
          * latest tick's basis (0 = latest tick, as before). Thin futures make the tick basis jump.
          */
-        int vwapBasisMinutes) {
+        int vwapBasisMinutes,
+        /**
+         * v12 (A-090): older sessions' spot minute bars come from the stored one-minute bars when the captured history
+         * lacks them (percentiles and the weekly / monthly levels see months, not weeks). Off before v12.
+         */
+        boolean barBackfill,
+        /** v12: previous ISO week's and previous calendar month's high / low (PWH, PWL, PMH, PML) and distances. */
+        boolean periodLevels,
+        /** v12: robust z-scores of the 5-minute near-ATM call / put OI change against the stored bars' baseline. */
+        boolean oiZscore) {
 
     public static FeatureConfig from(ThresholdConfig features, ThresholdConfig exchange) {
         Map<String, LocalTime[]> windows = new LinkedHashMap<>();
@@ -173,7 +182,10 @@ public record FeatureConfig(
                 features.has("structure.zone_touch_gap_min") ? features.getInt("structure.zone_touch_gap_min") : 0,
                 features.has("structure.breakout_excludes_opening_range")
                         && features.getBoolean("structure.breakout_excludes_opening_range"),
-                features.has("structure.vwap_basis_minutes") ? features.getInt("structure.vwap_basis_minutes") : 0);
+                features.has("structure.vwap_basis_minutes") ? features.getInt("structure.vwap_basis_minutes") : 0,
+                features.has("history.bar_backfill") && features.getBoolean("history.bar_backfill"),
+                features.has("structure.period_levels") && features.getBoolean("structure.period_levels"),
+                features.has("options_chain.oi_zscore") && features.getBoolean("options_chain.oi_zscore"));
     }
 
     /** True when the file defines the v3 feature sections. */

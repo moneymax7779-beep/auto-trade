@@ -44,9 +44,15 @@ public final class VolatilityState {
     private boolean vixTicks;
 
     public VolatilityState(FeatureConfig config, String underlying, LocalDate session, SessionHistory history) {
+        this(config, underlying, session, history,
+                history.spotMinuteBars(underlying, session, config.extensions().volatilityHistorySessions()));
+    }
+
+    /** With the earlier sessions' spot bars already read ({@code volatility.history_sessions} of them, newest first). */
+    public VolatilityState(FeatureConfig config, String underlying, LocalDate session, SessionHistory history,
+                           List<List<MinuteBar>> spot) {
         this.ext = config.extensions();
         this.session = session;
-        List<List<MinuteBar>> spot = history.spotMinuteBars(underlying, session, ext.volatilityHistorySessions());
         for (List<MinuteBar> bars : spot) {
             WilderAtr atr = new WilderAtr(config.atrPeriod());
             List<Double> closes = new ArrayList<>();

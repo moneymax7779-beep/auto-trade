@@ -130,8 +130,10 @@ final class LifecycleCommand {
         }
 
         List<FillModel> models = List.of(FillModel.from(costConfig, "base"), FillModel.from(costConfig, "stressed"));
+        FeatureConfig featureConfig = FeatureConfig.from(featuresConfig, exchangeConfig);
         LifecycleReplay replay = new LifecycleReplay(new LifecycleReplay.Settings(
-                FeatureConfig.from(featuresConfig, exchangeConfig), history, strategies, models,
+                featureConfig, com.autotrade.md.store.SessionHistories.forFeatures(history, featureConfig.barBackfill(), target),
+                strategies, models,
                 CostModel.from(costConfig), strategies.premiumStopPct()));
         FrameStats frames = new FrameStats("base");
         FrameSink sink = store == null ? frames : FrameSink.both(frames, store);

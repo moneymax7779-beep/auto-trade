@@ -57,6 +57,12 @@ public final class CombinedSessionHistory implements SessionHistory {
         return reference;
     }
 
+    @Override
+    public OiBaseline oiBaseline(String underlying) {
+        OiBaseline a = primary.oiBaseline(underlying);
+        return a.isEmpty() ? secondary.oiBaseline(underlying) : a;
+    }
+
     private static <T> List<T> larger(List<T> a, List<T> b) {
         return b.size() > a.size() ? b : a;
     }
