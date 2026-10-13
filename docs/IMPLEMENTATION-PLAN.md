@@ -444,3 +444,8 @@ gives the same result, so earlier runs were not affected.
 
 Not possible: an auction backtest before 28 Sep (no per-stock auction data exists for past sessions);
 exit rules and profit targets from the design (it gives none).
+
+## 15. Intelligent trading layer (2026-10-13)
+
+The plan for a regime engine, an opportunity scorer and a conductor (one decision layer over the strategies) is in
+`INTELLIGENT-TRADING-PLAN.md`.
