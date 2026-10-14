@@ -225,3 +225,41 @@ The bar-day data does not single out 10:30–12:30. This is a test of the user's
 - set net ≥ control on the tick days and on the bar days;
 - mac-v4's own PF ≥ mac-v1's on the same days;
 - no day worse than control by more than ₹50,000.
+
+## 10. The chosen set's trades by context (descriptive, 15 Oct ~00:20 IST, `.local/best/split.txt`)
+
+The chosen set is the live set without egb (A-095 run). Directional entries only; straddles excluded. PF is shown for
+tick days and bar days.
+
+| Context at entry | Tick days | Bar days | Holds on both? |
+|---|---|---|---|
+| all directional entries | 3.61 (89 trades) | 1.34 (610 trades) | – |
+| **futures RVOL ≥ 1.5** | **6.56** (30) | **1.68** (155) | **yes** (below 1.0: 2.38 / 1.07) |
+| room to the next level ≥ 1.5 ATR | 4.08 | 1.69 | mildly |
+| entry 10:30–12:30 | 2.50 | 1.22 | weaker but profitable on both (why A-103 failed) |
+| futures OI state agrees | 9.94 (14) | 1.33 | no |
+| option writers support the trade | 3.24 | 1.14 | no; "writers against" did better on both |
+| with VWAP | 3.13 | 1.46 | no (against: 6.59 / 1.20) |
+
+Futures volume confirmation is the one consistent factor. It is the next hypothesis to register: a larger size when
+futures RVOL ≥ 1.5 at entry, not a filter. It is not tested yet.
+
+## 11. Overnight results (15 Oct 00:00–00:55 IST) and what was deployed
+
+| Row | Change | Tick days | Bar days | Verdict |
+|---|---|---|---|---|
+| A-101 | risk v16, one automatic A-grade release a day | −₹35,619 | −₹11,576 | worse on every day it acted; not deployed |
+| A-102 | odb-v4, cool-down after a loss | +₹5,680 | −₹62,565 | FAIL (worst day −₹57,963) |
+| A-103 | mac-v4, 10:30–12:30 quiet window | −₹2,92,304 | −₹5,47,833 | FAIL |
+| A-104 | odb-v4 + mac-v4 | −₹2,86,624 | −₹6,10,397 | FAIL |
+
+**Deployed to GCP** at 00:19 IST for the 15 Oct session (commit eb6c718, ledger A-105):
+- the live set without egb-v4 (A-095 PASS);
+- the kill-switch UI release fix;
+- chart levels on days without the own tick capture, plus week and month levels;
+- futures bars from Jan to Sep copied to GCP for the chart VWAP.
+
+Every other change tested tonight lost money over the 193 days and stays out.
+
+**Next registered candidate** (not yet tested): a larger size when futures RVOL ≥ 1.5 at entry. It is the one context
+factor consistent on both data sets (§10).
