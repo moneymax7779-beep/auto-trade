@@ -228,6 +228,33 @@ class SetupFamiliesTest {
         }
     }
 
+    /**
+     * A-103: mac-v4 skips a cross signalled 10:30-12:30 unless A-grade (IV pct >= 50 or rising, breadth >= 50 its way);
+     * outside the window it is mac-v1. 14 Oct: the 10:42 calls had breadth +45 / +33 (skipped), 12:54 is outside.
+     */
+    @Test
+    void maCrossV4NeedsTheAGradeOnlyInsideTheQuietWindow() {
+        Map<String, Object> swings = Map.of("structure.lastSwingLow", 22580.0, "structure.lastSwingHigh", 22700.0);
+        Day v1 = new Day("ma-cross.v1.yaml", swings), v4 = new Day("ma-cross.v4.yaml", swings);
+        for (Day d : new Day[] {v1, v4}) {
+            d.at("10:41", 22600, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22602.0);
+        }
+        Object[] cross = {"structure.ema9", 22605.0, "structure.ema20", 22601.0, "volatility.atmIvPercentile", 81.0,
+                "breadth.moverBreadth", 44.8};
+        assertThat(v1.at("10:42", 22610, PositionView.FLAT, cross).orders()).as("v1 takes it").hasSize(1);
+        assertThat(v4.at("10:42", 22610, PositionView.FLAT, cross).orders()).as("v4: breadth 44.8 < 50 in the window").isEmpty();
+
+        Day strong = new Day("ma-cross.v4.yaml", swings);
+        strong.at("11:00", 22600, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22602.0);
+        assertThat(strong.at("11:01", 22610, PositionView.FLAT, "structure.ema9", 22605.0, "structure.ema20", 22601.0,
+                "volatility.atmIvPercentile", 60.0, "breadth.moverBreadth", 62.0).orders()).as("A-grade passes").hasSize(1);
+
+        Day after = new Day("ma-cross.v4.yaml", swings);
+        after.at("12:53", 22600, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22602.0);
+        assertThat(after.at("12:54", 22610, PositionView.FLAT, "structure.ema9", 22605.0, "structure.ema20", 22601.0,
+                "breadth.moverBreadth", 10.0).orders()).as("after 12:30: mac-v1 rules, no grade needed").hasSize(1);
+    }
+
     /** A-079: mac-v2 takes a cross only on the VWAP's side (VWAP 22,600 here); v1 takes both. */
     @Test
     void maCrossV2TakesOnlyCrossesOnTheVwapSide() {

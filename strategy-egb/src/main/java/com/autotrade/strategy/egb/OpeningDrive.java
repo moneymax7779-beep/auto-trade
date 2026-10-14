@@ -139,6 +139,11 @@ final class OpeningDrive implements Strategy {
             }
             asked = false;                       // an entry sent last snapshot was refused or not filled
             List<Level> hits = hits(spot);
+            if (!Double.isNaN(config.breadthMinAgree())) {   // v6 (A-098): breadth must agree; unknown fails
+                double b = snapshot.breadth().moverBreadth();
+                hits = hits.stream().filter(l -> l.side() == OptionSide.CE ? b >= config.breadthMinAgree()
+                        : b <= -config.breadthMinAgree()).toList();
+            }
             boolean coolingDown = config.reentryCooldownAfterLossMin() > 0 && lossClosedAt != null
                     && java.time.Duration.between(lossClosedAt, now).toMinutes() < config.reentryCooldownAfterLossMin();
             if (!done && continuous && window && !hits.isEmpty() && attempts < config.maxEntryAttempts() && !coolingDown) {
@@ -172,8 +177,10 @@ final class OpeningDrive implements Strategy {
                     case "PRIOR_ORL" -> st.prevOrLow();
                     default -> throw new IllegalArgumentException("unknown opening-drive level " + name);
                 };
-                // counted only if the day opened on its untouched side (a gap through it is not a break)
-                boolean untouched = side == OptionSide.CE ? st.dayOpen() < price : st.dayOpen() > price;
+                // counted only if the day opened on its untouched side (a gap through it is not a break); v5: and at
+                // least min_open_distance_pct of the level away, so first-minute noise around it is not a break
+                double room = config.minOpenDistancePct() / 100.0 * price;
+                boolean untouched = side == OptionSide.CE ? st.dayOpen() < price - room : st.dayOpen() > price + room;
                 if (Double.isFinite(price) && untouched) {
                     result.add(new Level(name, price, side));
                 }
@@ -199,6 +206,10 @@ final class OpeningDrive implements Strategy {
         Map<String, Boolean> c = new LinkedHashMap<>();
         c.put("previous_session_complete", previousComplete);
         c.put("trigger_window", window);
+        if (!Double.isNaN(config.breadthMinAgree())) {
+            double b = snapshot.breadth().moverBreadth();
+            c.put("breadth_agrees", side == OptionSide.CE ? b >= config.breadthMinAgree() : b <= -config.breadthMinAgree());
+        }
         for (String name : config.levels().getOrDefault(side, List.of())) {
             boolean usable = levels != null && levels.stream().anyMatch(l -> l.side() == side && l.name().equals(name));
             c.put(name.toLowerCase() + "_usable", usable);

@@ -166,4 +166,47 @@ class OpeningDriveTest {
         assertThat(v3.decide(open().set("spot", 23010.0).at("09:18"), PositionView.FLAT).orders())
                 .singleElement().satisfies(o -> assertThat(o.action()).isEqualTo(OrderIntent.Action.ENTER));
     }
+
+    /** 14 Oct NIFTY: opened 22715.75, 3.25 points under PDH 22719.0; 09:16 bar closed 22747.1, back under PDH at 09:17. */
+    private static Snapshots oct14() {
+        return new Snapshots()
+                .set("spot", 22674.3)
+                .set("structure.dayOpen", 22715.75)
+                .set("structure.pdh", 22719.0)
+                .set("structure.pdl", 22288.7)
+                .set("structure.prevOrHigh", 22477.9)
+                .set("structure.prevOrLow", 22288.7)
+                .set("structure.prevSessionMinutes", 375);
+    }
+
+    private static Strategy load(String file) {
+        return Strategies.load(Path.of("..", "config", "strategy", file)).create("NIFTY", Snapshots.SESSION);
+    }
+
+    @Test
+    void v5IgnoresALevelTheDayOpenedRightUnderAndV3BuysItsFirstPoke() {
+        Strategy v3 = load("opening-drive.v3.yaml"), v5 = load("opening-drive.v5.yaml");
+        v3.decide(oct14().at("09:16"), PositionView.FLAT);
+        v5.decide(oct14().at("09:16"), PositionView.FLAT);
+        assertThat(v3.decide(oct14().set("spot", 22747.1).at("09:17"), PositionView.FLAT).orders())
+                .singleElement().satisfies(o -> assertThat(o.reason()).isEqualTo("BREAK_PDH"));
+        assertThat(v5.decide(oct14().set("spot", 22747.1).at("09:17"), PositionView.FLAT).orders()).isEmpty();
+        // an open 0.1 % or more under the level keeps it: 22719 x 0.999 = 22696.3
+        Strategy far = load("opening-drive.v5.yaml");
+        far.decide(oct14().set("structure.dayOpen", 22690.0).at("09:16"), PositionView.FLAT);
+        assertThat(far.decide(oct14().set("structure.dayOpen", 22690.0).set("spot", 22747.1).at("09:17"),
+                PositionView.FLAT).orders()).singleElement().satisfies(o -> assertThat(o.reason()).isEqualTo("BREAK_PDH"));
+    }
+
+    @Test
+    void v6BuysTheBreakOnlyWithBreadthItsWay() {
+        Strategy v6 = load("opening-drive.v6.yaml");
+        v6.decide(oct14().at("09:16"), PositionView.FLAT);
+        assertThat(v6.decide(oct14().set("spot", 22747.1).set("breadth.moverBreadth", -0.9).at("09:17"),
+                PositionView.FLAT).orders()).isEmpty();                      // 14 Oct 09:17: breadth against the call
+        assertThat(v6.decide(oct14().set("spot", 22748.0).set("breadth.moverBreadth", Double.NaN).at("09:18"),
+                PositionView.FLAT).orders()).isEmpty();                      // unknown fails
+        assertThat(v6.decide(oct14().set("spot", 22750.0).set("breadth.moverBreadth", 55.0).at("09:19"),
+                PositionView.FLAT).orders()).singleElement().satisfies(o -> assertThat(o.reason()).isEqualTo("BREAK_PDH"));
+    }
 }

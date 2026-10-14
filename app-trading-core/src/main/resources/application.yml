@@ -50,7 +50,9 @@ autotrade:
       - config/strategy/expiry-breakout-straddle.v2.yaml   # ebs-v2 = v1 with no limit on straddles a day (user, 2026-10-01)
       - config/strategy/early-confirm-runner.v11.yaml      # ecr-v11 = v8 (expiry days only) with no limit on campaigns per side (user, 2026-10-01)
       - config/strategy/opening-drive.v3.yaml              # odb-v3 = v2 with no limit on trades; a re-entry needs a fresh break (user, 2026-10-01)
-      - config/strategy/expiry-gamma-breakout.v4.yaml      # egb-v4 = v3 with no limit on campaigns per side (user, 2026-10-01)
+      # egb-v4 removed 2026-10-15 (A-095 PASS, A-105; user 14 Oct: "choose the best and make the changes"): 0 trades on
+      # the 24 tick days, 6 on 169 bar days (1 win, PF 0.17); without it +Rs 75,795 on bar days, tick days unchanged,
+      # every other strategy's trades unchanged. Its file and code stay; it returns only through a new registered test.
       - config/strategy/expiry-trend-rider.v1.yaml         # etr-v1 live again from 14 Oct (A-093, user 2026-10-13 ~18:15: "do whatever is needed for best profits"): v7's profit lock sold the 13 Oct NIFTY 0DTE call at breakeven at 14:23 before it ran 30 -> 145 (replay at live equity: +Rs 10.59L held to 15:15); never better than v1 on the 23 tick days. v7 live 9-13 Oct (A-060); v1 live 2-8 Oct (A-031)
       # User 2026-10-07 07:00 IST: "run everything in PAPER mode, no need of SHADOW mode" (A-053). The former shadow
       # strategies come after the existing ones, so on a common trigger the existing ones take the capital first.

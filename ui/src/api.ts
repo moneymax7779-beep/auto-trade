@@ -77,6 +77,10 @@ export interface Status {
   startingCapital?: number;
   budgetScale?: number;
   dailyLossLimit?: number;
+  /** risk v16 (A-101): operator releases of the daily-loss switch left today, and the limit raise per release (% of equity). */
+  dailyLossReleasesLeft?: number;
+  dailyLossReleaseRaisePct?: number;
+  dailyLossAutoRelease?: boolean;
   killSwitches?: string[];
   openPositions?: PositionRow[];
   closedPositions?: PositionRow[];

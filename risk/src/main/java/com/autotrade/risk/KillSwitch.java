@@ -34,10 +34,20 @@ public final class KillSwitch {
         }
     }
 
-    public synchronized void release(String scope) {
+    /** Releases one scope; false when it was not engaged (nothing changed). */
+    public synchronized boolean release(String scope) {
         if (engaged.remove(scope) != null) {
             listener.changed(scope, null);
+            return true;
         }
+        return false;
+    }
+
+    /** Releases every engaged scope and returns them (the operator's "release" from the UI). */
+    public synchronized java.util.List<String> releaseAll() {
+        java.util.List<String> scopes = java.util.List.copyOf(engaged.keySet());
+        scopes.forEach(this::release);
+        return scopes;
     }
 
     /** The first engaged switch covering this account and strategy, if any. */

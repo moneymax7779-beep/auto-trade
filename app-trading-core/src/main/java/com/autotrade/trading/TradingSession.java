@@ -357,6 +357,12 @@ public final class TradingSession {
                 int lots = sizing.lots(intent.lots());
                 RiskDecision result = oms.enter(strategyId, underlying, intent.side(), contract.get(), lots,
                         intent.stage().name(), market, stopPct);
+                // risk v16 (A-101): refused by the daily loss limit, an A-grade entry releases the switch (once a day)
+                if (!result.approved() && result.reason() != null && result.reason().contains("daily loss limit")
+                        && autoReleaseDailyLoss(snapshot, intent.side(), strategyId, underlying, time)) {
+                    result = oms.enter(strategyId, underlying, intent.side(), contract.get(), lots,
+                            intent.stage().name(), market, stopPct);
+                }
                 logDecision(strategyId, underlying, intent, lots, result, contract.get());
                 candidate(strategyId, underlying, snapshot, decision, intent, result.approved(), result.reason());
             }
@@ -499,8 +505,72 @@ public final class TradingSession {
         killSwitch.engage(scope, reason, clock.get(), "operator");
     }
 
-    public void releaseKillSwitch(String scope) {
+    /**
+     * A-grade (A-100's definition, fixed from the 12 Oct evaluation of 118 trades): ATM IV percentile at least 50 or ATM
+     * IV rising over 3 minutes, and mover breadth at least +50 for a call (at most -50 for a put). Unknown fails.
+     */
+    static boolean aGrade(FeatureSnapshot s, OptionSide side) {
+        double pct = s.volatility().atmIvPercentile(), change = s.options().atmIvChange3m(), b = s.breadth().moverBreadth();
+        boolean iv = pct >= 50 || change > 0;
+        boolean breadth = side == OptionSide.CE ? b >= 50 : b <= -50;
+        return iv && breadth;
+    }
+
+    /**
+     * risk v16 (A-101): the application releases the daily-loss switch itself for an A-grade entry, once a day, raising
+     * the day's limit by 10 % of equity; only when that raise leaves room for the day's loss so far.
+     */
+    private boolean autoReleaseDailyLoss(FeatureSnapshot snapshot, OptionSide side, String strategyId, String underlying,
+                                         LocalTime time) {
+        if (!settings.risk().dailyLossAutoRelease() || risk.dailyLossReleasesLeft() <= 0 || !aGrade(snapshot, side)
+                || !(oms.dayPnl() > -risk.dailyLossLimitAfterRelease())) {
+            return false;
+        }
+        String scope = "ACCOUNT:" + settings.account();
+        if (!risk.releaseDailyLoss()) {
+            return false;
+        }
         killSwitch.release(scope);
+        log.warn("{} {} {} {}: A-grade entry, daily-loss kill switch RELEASED by the application (day {}, limit now {}, "
+                        + "releases left {})", time, underlying, strategyId, side, Math.round(oms.dayPnl()),
+                Math.round(risk.dailyLossLimit()), risk.dailyLossReleasesLeft());
+        return true;
+    }
+
+    /** What an operator release did: the scopes released, and why a scope was kept (null when none was). */
+    public record Release(List<String> released, String refused) {
+    }
+
+    /**
+     * Releases {@code scope}, or every engaged switch for "ALL". The daily-loss switch (ACCOUNT scope engaged by risk)
+     * goes through the risk engine: with risk v16 one release a day, raising the day's loss limit by 10 % of equity;
+     * once used, it stays engaged (A-101).
+     */
+    public Release releaseKillSwitch(String scope) {
+        List<String> scopes = "ALL".equals(scope) ? List.copyOf(killSwitch.engaged().keySet()) : List.of(scope);
+        List<String> released = new ArrayList<>();
+        String refused = null;
+        for (String s : scopes) {
+            KillSwitch.Engagement e = killSwitch.engaged().get(s);
+            if (e == null) {
+                continue;
+            }
+            boolean dailyLoss = s.equals("ACCOUNT:" + settings.account()) && "risk".equals(e.by())
+                    && e.reason() != null && e.reason().startsWith("daily loss limit");
+            if (dailyLoss && !risk.releaseDailyLoss()) {
+                refused = "the daily-loss kill switch was already released once today (limit now "
+                        + Math.round(risk.dailyLossLimit()) + "); it stays engaged";
+                continue;
+            }
+            if (killSwitch.release(s)) {
+                released.add(s);
+                if (dailyLoss) {
+                    log.warn("daily-loss kill switch released by the operator: limit now {}, releases left {}",
+                            Math.round(risk.dailyLossLimit()), risk.dailyLossReleasesLeft());
+                }
+            }
+        }
+        return new Release(List.copyOf(released), refused);
     }
 
     public void exitAll(String reason) {
@@ -540,7 +610,10 @@ public final class TradingSession {
             status.put("dayPnl", Math.round(oms.dayPnl()));
             status.put("capital", Math.round(settings.risk().capital()));
             status.put("startingCapital", Math.round(settings.risk().startingCapital()));
-            status.put("dailyLossLimit", Math.round(settings.risk().dailyLossLimit()));
+            status.put("dailyLossLimit", Math.round(risk.dailyLossLimit()));          // v16: raised by an operator release
+            status.put("dailyLossReleasesLeft", risk.dailyLossReleasesLeft());
+            status.put("dailyLossReleaseRaisePct", settings.risk().dailyLossReleaseRaisePct());
+            status.put("dailyLossAutoRelease", settings.risk().dailyLossAutoRelease());
             status.put("budgetScale", Math.round(settings.risk().budgetScale() * 100) / 100.0);
             status.put("killSwitches", killSwitch.engaged().keySet());
             List<Map<String, Object>> positions = new ArrayList<>();

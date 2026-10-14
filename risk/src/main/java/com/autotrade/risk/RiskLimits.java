@@ -62,7 +62,34 @@ public record RiskLimits(
          * at most (100 - this) % of the capital as premium, so this share stays free for the expiring index's strategies
          * (0 = off, v1-v13).
          */
-        double expiryReservePct) {
+        double expiryReservePct,
+        /**
+         * v16 (A-101): times a day the daily-loss kill switch may be released (0 = a release does not raise the limit, so
+         * the switch engages again at the next entry, v1-v15).
+         */
+        int dailyLossReleasesPerDay,
+        /** v16 (A-101): each such release raises the day's loss limit by this % of equity. */
+        double dailyLossReleaseRaisePct,
+        /** v16 (A-101): the application releases it itself for an A-grade entry (false = only the operator, v1-v15). */
+        boolean dailyLossAutoRelease) {
+
+    /** v14 shape: no operator release of the daily-loss switch. */
+    public RiskLimits(String hash, double capital, double dailyLossLimit, int maxOpenPositions, int maxLotsPerUnderlying,
+                      int maxOrdersPerMinute, LocalTime noNewEntriesAfter, LocalTime squareOffAt, int maxFeedAgeSec,
+                      double maxSpreadPct, int entryBufferTicks, int exitBufferTicks, double exitBufferPct,
+                      int entryTimeoutSec, int exitChaseSec, int exitChaseMax, double stopLimitOffsetPct,
+                      int reconcileEverySec, LocalTime casEntryFrom, LocalTime casEntryTo, double maxLossPerTrade,
+                      double deltaRiskPerTrade, boolean equityMode, double startingCapital, double dailyLossPct,
+                      double premiumBudgetFraction, java.time.LocalDate equityFrom, double entryBufferPct,
+                      int entryChaseMax, int entryChaseSec, double entrySliceDepthPct, double entrySliceMaxDriftPct,
+                      double maxParticipationPct, int maxConsecutiveLosses, double expiryReservePct) {
+        this(hash, capital, dailyLossLimit, maxOpenPositions, maxLotsPerUnderlying, maxOrdersPerMinute, noNewEntriesAfter,
+                squareOffAt, maxFeedAgeSec, maxSpreadPct, entryBufferTicks, exitBufferTicks, exitBufferPct, entryTimeoutSec,
+                exitChaseSec, exitChaseMax, stopLimitOffsetPct, reconcileEverySec, casEntryFrom, casEntryTo, maxLossPerTrade,
+                deltaRiskPerTrade, equityMode, startingCapital, dailyLossPct, premiumBudgetFraction, equityFrom,
+                entryBufferPct, entryChaseMax, entryChaseSec, entrySliceDepthPct, entrySliceMaxDriftPct,
+                maxParticipationPct, maxConsecutiveLosses, expiryReservePct, 0, 0, false);
+    }
 
     /** v13 shape: no expiry-day reserve. */
     public RiskLimits(String hash, double capital, double dailyLossLimit, int maxOpenPositions, int maxLotsPerUnderlying,
@@ -113,7 +140,8 @@ public record RiskLimits(
                 exitBufferPct, entryTimeoutSec, exitChaseSec, exitChaseMax, stopLimitOffsetPct, reconcileEverySec,
                 casEntryFrom, casEntryTo, maxLossPerTrade, deltaRiskPerTrade, equityMode, startingCapital, dailyLossPct,
                 premiumBudgetFraction, equityFrom, entryBufferPct, entryChaseMax, entryChaseSec, entrySliceDepthPct,
-                entrySliceMaxDriftPct, maxParticipationPct, maxConsecutiveLosses, expiryReservePct);
+                entrySliceMaxDriftPct, maxParticipationPct, maxConsecutiveLosses, expiryReservePct, dailyLossReleasesPerDay,
+                dailyLossReleaseRaisePct, dailyLossAutoRelease);
     }
 
     /**
@@ -193,6 +221,9 @@ public record RiskLimits(
                 c.has("orders.entry_slice_max_drift_pct") ? c.getDouble("orders.entry_slice_max_drift_pct") : 2,
                 c.has("sizing.max_participation_pct") ? c.getDouble("sizing.max_participation_pct") : 0,
                 c.has("account.max_consecutive_losses") ? c.getInt("account.max_consecutive_losses") : 0,
-                c.has("account.expiry_reserve_pct") ? c.getDouble("account.expiry_reserve_pct") : 0);
+                c.has("account.expiry_reserve_pct") ? c.getDouble("account.expiry_reserve_pct") : 0,
+                c.has("account.daily_loss_releases_per_day") ? c.getInt("account.daily_loss_releases_per_day") : 0,
+                c.has("account.daily_loss_release_raise_pct") ? c.getDouble("account.daily_loss_release_raise_pct") : 0,
+                c.has("account.daily_loss_auto_release") && c.getBoolean("account.daily_loss_auto_release"));
     }
 }

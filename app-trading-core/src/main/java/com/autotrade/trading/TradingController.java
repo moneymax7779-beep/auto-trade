@@ -55,13 +55,23 @@ class TradingController {
         return ResponseEntity.ok(session.status());
     }
 
+    /**
+     * Releases a kill switch: {@code scope} ALL (the UI) releases every engaged switch, e.g. ACCOUNT:PAPER-1 set by
+     * the daily loss limit; a scope that is not engaged is a 409, never a silent no-op. Note: a daily-loss switch
+     * engages again at the next entry while the day's loss is still beyond the limit.
+     */
     @PostMapping("/kill/release")
-    ResponseEntity<Map<String, Object>> release(@RequestParam(defaultValue = "GLOBAL") String scope) {
+    ResponseEntity<Map<String, Object>> release(@RequestParam(defaultValue = "ALL") String scope) {
         TradingSession session = runner.current();
         if (session == null) {
             return ResponseEntity.status(409).body(Map.of("error", "no session"));
         }
-        session.releaseKillSwitch(scope);
+        TradingSession.Release release = session.releaseKillSwitch(scope);
+        if (release.released().isEmpty()) {
+            String error = release.refused() != null ? release.refused() : "no engaged kill switch for scope " + scope;
+            return ResponseEntity.status(409).body(Map.of("error", error,
+                    "engaged", session.status().getOrDefault("killSwitches", java.util.List.of())));
+        }
         return ResponseEntity.ok(session.status());
     }
 

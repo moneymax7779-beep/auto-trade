@@ -43,6 +43,11 @@ abstract class SetupStrategy implements Strategy {
     private final double ivPercentileMin;
     /** A-088: the entry needs mover breadth at least this far in its direction (+ for calls, - for puts; NaN = off). */
     private final double breadthMinAgree;
+    /** A-103: inside [quietFrom, quietUntil) an entry needs the A-grade (IV and breadth below); null = no quiet window. */
+    private final LocalTime quietFrom;
+    private final LocalTime quietUntil;
+    private final double quietIvPercentileMin;
+    private final double quietBreadthMinAgree;
     private final boolean skipExpiringIndex;
     private final double premiumStopPct;
     private final int strikeOffset;
@@ -81,6 +86,18 @@ abstract class SetupStrategy implements Strategy {
         this.useTarget = !config.has("exits.use_target") || config.getBoolean("exits.use_target");
         this.trailActivationPct = config.has("exits.trail_activation_pct") ? config.getDouble("exits.trail_activation_pct") : 0;
         this.trailGivebackPct = config.has("exits.trail_giveback_pct") ? config.getDouble("exits.trail_giveback_pct") : 0;
+        if (config.has("filters.quiet_window")) {                // A-103: "10:30-12:30"
+            String[] w = config.getString("filters.quiet_window").split("-");
+            this.quietFrom = LocalTime.parse(w[0].trim());
+            this.quietUntil = LocalTime.parse(w[1].trim());
+        } else {
+            this.quietFrom = null;
+            this.quietUntil = null;
+        }
+        this.quietIvPercentileMin = config.has("filters.quiet_iv_percentile_min")
+                ? config.getDouble("filters.quiet_iv_percentile_min") : 50;
+        this.quietBreadthMinAgree = config.has("filters.quiet_breadth_min_agree")
+                ? config.getDouble("filters.quiet_breadth_min_agree") : 50;
     }
 
     @Override
@@ -118,6 +135,16 @@ abstract class SetupStrategy implements Strategy {
         Entry entry = evaluate(s, time, window && !expiringIndex && !position.open() && Double.isFinite(spot), c);
         if (entry != null && !filtersPass(entry, s, c)) {
             entry = null;                                    // A-087 / A-088: the setup's trade, vetoed by its filter
+        }
+        if (entry != null && quietFrom != null && !time.isBefore(quietFrom) && time.isBefore(quietUntil)) {
+            // A-103: the quiet window lets only an A-grade entry through (IV pct or IV rising, and breadth its way)
+            double pct = s.volatility().atmIvPercentile(), change = s.options().atmIvChange3m(), b = s.breadth().moverBreadth();
+            boolean grade = (pct >= quietIvPercentileMin || change > 0)
+                    && (entry.side() == OptionSide.CE ? b >= quietBreadthMinAgree : b <= -quietBreadthMinAgree);
+            c.put("quiet_window_a_grade", grade);
+            if (!grade) {
+                entry = null;
+            }
         }
 
         List<OrderIntent> orders = new ArrayList<>();

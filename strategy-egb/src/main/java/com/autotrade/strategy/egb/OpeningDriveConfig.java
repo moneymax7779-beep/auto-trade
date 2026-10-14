@@ -26,7 +26,11 @@ record OpeningDriveConfig(
         double trailGivebackPct,
         int maxTrades,
         /** v4 (A-072): minutes after a losing trade closes before a new entry (0 = no cool-down, v1-v3). */
-        int reentryCooldownAfterLossMin) {
+        int reentryCooldownAfterLossMin,
+        /** v5 (A-097): a level counts only if the day opened at least this % of it away (0 = any distance, v1-v4). */
+        double minOpenDistancePct,
+        /** v6 (A-098): an entry needs mover breadth at least this far its way (+ calls, - puts; NaN = off, v1-v5). */
+        double breadthMinAgree) {
 
     /** v1-v3 shape: no cool-down after a loss. */
     OpeningDriveConfig(String hash, String version, LocalTime triggerFrom, LocalTime triggerUntil, LocalTime timeExit,
@@ -35,7 +39,7 @@ record OpeningDriveConfig(
                        boolean structureStop, double trailActivatePct, double trailGivebackPct, int maxTrades) {
         this(hash, version, triggerFrom, triggerUntil, timeExit, levels, minPreviousSessionMinutes, maxEntryAttempts,
                 strikeOffset, premiumBudget, expiryDayPremiumBudget, premiumStopPct, structureStop, trailActivatePct,
-                trailGivebackPct, maxTrades, 0);
+                trailGivebackPct, maxTrades, 0, 0, Double.NaN);
     }
 
     static OpeningDriveConfig from(ThresholdConfig c) {
@@ -48,7 +52,9 @@ record OpeningDriveConfig(
                 c.getDouble("exits.premium_stop_pct"), c.getBoolean("exits.structure_stop"),
                 c.getDouble("exits.trail_activate_pct"), c.getDouble("exits.trail_giveback_pct"),
                 c.has("scope.max_trades") ? c.getInt("scope.max_trades") : 1,
-                c.has("scope.reentry_cooldown_after_loss_min") ? c.getInt("scope.reentry_cooldown_after_loss_min") : 0);
+                c.has("scope.reentry_cooldown_after_loss_min") ? c.getInt("scope.reentry_cooldown_after_loss_min") : 0,
+                c.has("scope.min_open_distance_pct") ? c.getDouble("scope.min_open_distance_pct") : 0,
+                c.has("filters.breadth_min_agree") ? c.getDouble("filters.breadth_min_agree") : Double.NaN);
     }
 
     @SuppressWarnings("unchecked")

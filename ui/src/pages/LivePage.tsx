@@ -62,7 +62,7 @@ export function LivePage() {
           <div className="flex flex-wrap gap-2">
             {killed ? (
               <ConfirmButton tone="neutral" label="Release kill switch" confirmLabel="Confirm release"
-                onConfirm={() => action.mutate("/api/kill/release?scope=GLOBAL")} />
+                onConfirm={() => action.mutate("/api/kill/release?scope=ALL")} />
             ) : (
               <ConfirmButton label="Kill switch" confirmLabel="Block new entries?"
                 onConfirm={() => action.mutate("/api/kill?scope=GLOBAL&reason=operator%20UI")} />
@@ -80,6 +80,18 @@ export function LivePage() {
           <Stat label="Feed lag" value={lag == null ? "replay" : `${lag.toFixed(1)} s`} tone={lag != null && lag > 5 ? "down" : undefined} />
           <Stat label="Kill switches" value={killed ? s.killSwitches!.join(", ") : "none"} tone={killed ? "down" : "muted"} />
         </div>
+        {killed && (
+          <p className="mt-3 text-sm text-muted">
+            {!s.dailyLossReleaseRaisePct
+              ? <>A released daily-loss switch engages again at the next entry while the day's loss is beyond the limit
+                  (₹{(s.dailyLossLimit ?? 0).toLocaleString("en-IN")}).</>
+              : (s.dailyLossReleasesLeft ?? 0) > 0
+              ? <>{s.dailyLossAutoRelease ? "The application releases the daily-loss switch itself for the first A-grade signal" : "Releasing the daily-loss switch"}{" "}
+                  (raises today's loss limit by {s.dailyLossReleaseRaisePct}% of equity; now ₹{(s.dailyLossLimit ?? 0).toLocaleString("en-IN")});{" "}
+                  {s.dailyLossReleasesLeft} release left today.</>
+              : <>The daily-loss switch cannot be released again today (limit ₹{(s.dailyLossLimit ?? 0).toLocaleString("en-IN")}).</>}
+          </p>
+        )}
         {action.error && <div className="mt-3"><ErrorNote error={action.error} /></div>}
       </Panel>
 
