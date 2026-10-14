@@ -15,7 +15,7 @@ class ReplayEquityTest {
 
     private static TradingProperties.Trading trading(Double equity) {
         return new TradingProperties.Trading("P", List.of("NIFTY"), "base", null, null, null, null, null, null, 250, 3000,
-                "09:00", "15:45", "upstox", 0, null, "own", null, equity);
+                "09:00", "15:45", "upstox", 0, null, "own", null, equity, null);
     }
 
     @Test

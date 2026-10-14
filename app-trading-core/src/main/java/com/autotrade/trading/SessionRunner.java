@@ -476,9 +476,10 @@ class SessionRunner implements ApplicationRunner {
         Runs runs = new Runs(target);
         Long snapshotRun = null;
         SnapshotWriter snapshots = null;
-        if (!replay) {
-            // Live feature snapshots: the decision evidence, and IV history for later sessions.
-            snapshotRun = runs.start("LIVE_FEATURES", CodeVersion.current(), feed.name(), List.of(session),
+        if (!replay || t.storeReplaySnapshots()) {
+            // Live feature snapshots: the decision evidence, and IV history for later sessions. A replay's (opt-in) go
+            // under their own run kind, which nothing reading LIVE_FEATURES (IV history, chart levels) ever sees.
+            snapshotRun = runs.start(replay ? "REPLAY_FEATURES" : "LIVE_FEATURES", CodeVersion.current(), feed.name(), List.of(session),
                     t.underlyings(), new tools.jackson.databind.json.JsonMapper().writeValueAsString(hashes));
             snapshots = new SnapshotWriter(target, snapshotRun);
             trading.recordSnapshots(snapshots);
