@@ -459,7 +459,7 @@ public final class TradingSession {
             SideView side = intent.side() == null ? null : intent.side() == OptionSide.CE ? decision.ce() : decision.pe();
             store.candidate(sessionId, strategyId, underlying, snapshot.time(), intent.action().name(),
                     intent.side() == null ? null : intent.side().name(), intent.reason(), approved,
-                    approved ? null : refusal, snapshot.spot(), CandidateContext.of(snapshot, side));
+                    approved ? null : refusal, snapshot.spot(), CandidateContext.of(snapshot, side, lastSnapshots));
         } catch (RuntimeException e) {
             log.warn("candidate not recorded ({} {} {}): {}", strategyId, underlying, intent.action(), e.getMessage());
         }

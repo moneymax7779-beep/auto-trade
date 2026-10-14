@@ -31,6 +31,22 @@ public interface ReferenceData {
         return List.of();
     }
 
+    /**
+     * Participant-wise open interest of the {@code sessions} most recent sessions strictly before {@code session}
+     * (NSE publishes a day's file that evening), newest first, every participant type of each. Empty when not loaded.
+     */
+    default List<ParticipantOi> participantOi(LocalDate session, int sessions) {
+        return List.of();
+    }
+
+    /**
+     * GIFT Nifty quotes fetched from the evening before {@code session} up to its end, in fetch order. Callers use only
+     * quotes with {@link GiftQuote#fetchedAt()} at or before the time they evaluate. Empty when none were fetched.
+     */
+    default List<GiftQuote> giftNiftyQuotes(LocalDate session) {
+        return List.of();
+    }
+
     ReferenceData NONE = new ReferenceData() {
         @Override
         public List<DailyBar> dailyBars(String symbol, LocalDate session, int sessions) {

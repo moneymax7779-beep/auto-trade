@@ -19,6 +19,15 @@ final class CandidateContext {
     }
 
     static Map<String, Object> of(FeatureSnapshot s, SideView side) {
+        return of(s, side, Map.of());
+    }
+
+    /**
+     * {@code peers}: the latest snapshot of every recorded underlying (this one included, skipped); each other index's
+     * move from its day open in % goes in as {@code peerMovePct.<UNDERLYING>} (feature/missing-data: BANKNIFTY and the
+     * other traded index as context).
+     */
+    static Map<String, Object> of(FeatureSnapshot s, SideView side, Map<String, FeatureSnapshot> peers) {
         Map<String, Object> c = new LinkedHashMap<>();
         LocalTime t = s.time().atZone(MarketTime.IST).toLocalTime();
         c.put("minuteOfDay", t.getHour() * 60 + t.getMinute());
@@ -77,6 +86,26 @@ final class CandidateContext {
         put(c, "distPmhAtr", s.structure().distPmhAtr());
         put(c, "distPmlAtr", s.structure().distPmlAtr());
         put(c, "vixChange15m", s.volatility().vixChange15m());
+        if (s.cues() != null) {                                         // features v13 (feature/missing-data)
+            put(c, "giftNiftyChangePct", s.cues().giftNiftyChangePct());
+            put(c, "giftNiftyMovePct", s.cues().giftNiftyMovePct());
+            put(c, "giftNiftyQuoteAgeMin", s.cues().giftNiftyQuoteAgeMin());
+            put(c, "fiiIndexFutLongPct", s.cues().fiiIndexFutLongPct());
+            put(c, "fiiIndexFutLongPctChange", s.cues().fiiIndexFutLongPctChange());
+            put(c, "fiiIndexCallNet", s.cues().fiiIndexCallNet());
+            put(c, "fiiIndexPutNet", s.cues().fiiIndexPutNet());
+            put(c, "clientIndexFutLongPct", s.cues().clientIndexFutLongPct());
+        }
+        for (Map.Entry<String, FeatureSnapshot> peer : peers.entrySet()) {
+            FeatureSnapshot p = peer.getValue();
+            if (peer.getKey().equals(s.underlying()) || p == null) {
+                continue;
+            }
+            double open = p.structure().dayOpen();
+            if (open > 0 && Double.isFinite(p.spot())) {
+                put(c, "peerMovePct." + peer.getKey(), 100.0 * (p.spot() / open - 1));
+            }
+        }
         if (side != null) {
             c.put("stage", side.stage().name());
             put(c, "early", side.earlyScore());

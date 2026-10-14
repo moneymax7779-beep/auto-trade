@@ -31,6 +31,8 @@ public record FeatureSnapshot(
         CompressionFeatures compression,
         GammaFeatures gamma,
         RetestFeatures retest,
+        /** v13: pre-open and positioning cues; EMPTY before v13. */
+        CueFeatures cues,
         String featuresHash,
         String exchangeHash) {
 }

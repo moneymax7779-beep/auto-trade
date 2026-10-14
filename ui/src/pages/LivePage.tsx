@@ -11,6 +11,7 @@ import { LivePositions } from "../components/LivePositions";
 import { MarketCard } from "../components/MarketCard";
 import { splitDecisionKey, storedScores, StrategyMatrix, type MatrixCell } from "../components/strategies";
 import { AlertBanner } from "../components/AlertBanner";
+import { CuesPanel } from "../components/CuesPanel";
 
 export function LivePage() {
   const queryClient = useQueryClient();
@@ -29,6 +30,7 @@ export function LivePage() {
       <div className="space-y-4">
       <AlertBanner />
       <EquityPanel />
+      <CuesPanel />
       <Panel title={s.schedule?.mode === "auto" ? "Waiting for the next trading session" : "No trading session running"}>
         {s.schedule?.mode === "auto" && next ? (
           <p className="text-sm">
@@ -96,6 +98,8 @@ export function LivePage() {
       </Panel>
 
       <EquityPanel today={s} />
+
+      <CuesPanel />
 
       <LiveOverview views={s.strategy ?? {}} positions={s.openPositions ?? []} />
 

@@ -102,7 +102,9 @@ public record FeatureConfig(
         /** v12: previous ISO week's and previous calendar month's high / low (PWH, PWL, PMH, PML) and distances. */
         boolean periodLevels,
         /** v12: robust z-scores of the 5-minute near-ATM call / put OI change against the stored bars' baseline. */
-        boolean oiZscore) {
+        boolean oiZscore,
+        /** v13: pre-open and positioning cues (GIFT Nifty, NSE participant-wise OI); EMPTY when off. */
+        boolean cues) {
 
     public static FeatureConfig from(ThresholdConfig features, ThresholdConfig exchange) {
         Map<String, LocalTime[]> windows = new LinkedHashMap<>();
@@ -185,7 +187,8 @@ public record FeatureConfig(
                 features.has("structure.vwap_basis_minutes") ? features.getInt("structure.vwap_basis_minutes") : 0,
                 features.has("history.bar_backfill") && features.getBoolean("history.bar_backfill"),
                 features.has("structure.period_levels") && features.getBoolean("structure.period_levels"),
-                features.has("options_chain.oi_zscore") && features.getBoolean("options_chain.oi_zscore"));
+                features.has("options_chain.oi_zscore") && features.getBoolean("options_chain.oi_zscore"),
+                features.has("cues.enabled") && features.getBoolean("cues.enabled"));
     }
 
     /** True when the file defines the v3 feature sections. */

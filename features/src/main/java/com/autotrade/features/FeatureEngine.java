@@ -72,6 +72,7 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
     private final FeatureExtensions ext;
     private final VolatilityState volatility;
     private final CasState cas;
+    private final com.autotrade.features.cues.CueState cues;      // v13; null when off
     private final Duration interval;
     private final Instant lastSnapshotAt;
 
@@ -118,6 +119,9 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
         this.cas = ext == null ? null : new CasState(ext, session,
                 history.reference().auctionTurnover(underlying, session, ext.auctionHistorySessions()),
                 config.casSettlementMethod(), config.indexIepAvailable());
+        // v13: positioning of the last published sessions; GIFT quotes re-read through the reference data
+        this.cues = !config.cues() ? null : new com.autotrade.features.cues.CueState(session,
+                history.reference().participantOi(session, 2), () -> history.reference().giftNiftyQuotes(session));
         this.interval = Duration.ofSeconds(config.snapshotIntervalSec());
         this.nextSnapshotAt = open.plus(interval);
         this.lastSnapshotAt = session.atTime(config.derivativesClose())
@@ -262,7 +266,9 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
                 secondsSince(time, spotTime), secondsSince(time, futures.lastTime()),
                 secondsSince(time, options.lastTime()),
                 structureFeatures, futuresFeatures, optionsFeatures, breadthFeatures, regimeFeatures, casFeatures,
-                levels, book, premium, vol, compression, gamma, retest, config.featuresHash(), config.exchangeHash());
+                levels, book, premium, vol, compression, gamma, retest,
+                cues == null ? com.autotrade.features.snapshot.CueFeatures.EMPTY : cues.features(time),
+                config.featuresHash(), config.exchangeHash());
     }
 
     private RegimeFeatures regime(Instant time, double reference, OptionsFeatures chain) {
