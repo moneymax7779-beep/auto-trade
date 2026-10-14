@@ -3,23 +3,27 @@ import { useQuery } from "@tanstack/react-query";
 import { get } from "../api";
 
 /** A price level and the minute (IST "HH:mm") it became knowable: never drawn before then. */
-export interface Level { name: string; group: "prior" | "today"; price: number; from: string }
+export interface Level { name: string; group: "prior" | "today" | "period"; price: number; from: string }
 /** A tested support / resistance zone: from its second confirmed touch until a minute close beyond it. */
 export interface Zone { kind: "support" | "resistance"; lo: number; hi: number; touches: number; from: string; until: string | null }
 export interface LevelsData {
   date: string; underlying: string; levels: Level[]; zones: Zone[];
   lines: { vwap: [string, number][]; ema20: [string, number][] }; tolerancePct: number;
+  /** "bars": a day without the own tick capture, levels from the stored one-minute bars. */
+  source?: "ticks" | "bars";
 }
 
-export interface LevelToggles { prior: boolean; today: boolean; lines: boolean; zones: "strong" | "all" | "off" }
+export interface LevelToggles { prior: boolean; today: boolean; period: boolean; lines: boolean; zones: "strong" | "all" | "off" }
 const KEY = "chart-level-toggles";
-const DEFAULT: LevelToggles = { prior: true, today: true, lines: true, zones: "strong" };
+const DEFAULT: LevelToggles = { prior: true, today: true, period: true, lines: true, zones: "strong" };
 
 /** Distinct from the price line (blue) and from each other; plain hex so both chart kinds can use them. */
 export const LEVEL_COLORS = {
-  prior: "#f59e0b", today: "#14b8a6", vwap: "#ec4899", ema20: "#a78bfa",
+  prior: "#f59e0b", today: "#14b8a6", period: "#60a5fa", vwap: "#ec4899", ema20: "#a78bfa",
   support: "#22c55e", resistance: "#ef4444",
 };
+
+export const levelColor = (group: Level["group"]) => LEVEL_COLORS[group];
 
 /** Short names for the price-axis tags: "ORH / Prior ORL" → "ORH/pORL". */
 export function tagName(name: string) {
@@ -57,7 +61,7 @@ export function visibleZones(zones: Zone[], t: LevelToggles) {
 }
 
 export function visibleLevels(levels: Level[], t: LevelToggles) {
-  return levels.filter((l) => (l.group === "prior" ? t.prior : t.today));
+  return levels.filter((l) => t[l.group]);
 }
 
 /** Levels closer than the tolerance read as one: "ORL / Prior ORL 22,508". */
@@ -69,7 +73,7 @@ export function mergeLevels(levels: Level[], tolerancePct: number): Level[] {
     if (last && Math.abs(l.price - last.price) <= (last.price * tolerancePct) / 100) {
       last.name = `${last.name} / ${l.name}`;
       if (l.from < last.from) last.from = l.from;
-      if (l.group === "today") last.group = "today";
+      if (l.group === "today" || (l.group === "prior" && last.group === "period")) last.group = l.group;
     } else {
       out.push({ ...l });
     }
@@ -92,6 +96,10 @@ export function LevelTogglesBar({ toggles, onChange }: { toggles: LevelToggles; 
       <button type="button" aria-pressed={toggles.today} className={chip(toggles.today)}
         onClick={() => onChange({ ...toggles, today: !toggles.today })}>
         <i className="mr-1.5 inline-block h-0.5 w-3 align-middle" style={{ background: LEVEL_COLORS.today }} />today
+      </button>
+      <button type="button" aria-pressed={toggles.period} className={chip(toggles.period)}
+        onClick={() => onChange({ ...toggles, period: !toggles.period })} title="previous week / month high and low">
+        <i className="mr-1.5 inline-block h-0.5 w-3 align-middle" style={{ background: LEVEL_COLORS.period }} />week/month
       </button>
       <button type="button" aria-pressed={toggles.lines} className={chip(toggles.lines)}
         onClick={() => onChange({ ...toggles, lines: !toggles.lines })}>

@@ -1,8 +1,10 @@
 package com.autotrade.trading;
 
+import java.time.DayOfWeek;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
+import java.time.temporal.TemporalAdjusters;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -25,8 +27,13 @@ import com.autotrade.core.time.MarketTime;
  * <li>today: the day open (09:15), ORH / ORL (09:30);</li>
  * <li>lines: the spot VWAP (futures VWAP minus the 15-minute mean basis), and a 20-period EMA of minute closes;</li>
  * <li>tested zones: swing highs (lows) on minute bars, confirmed 3 minutes later, clustered within a tolerance;
- *     a cluster is a zone from its second touch's confirmation, and ends at a minute close beyond it.</li>
+ *     a cluster is a zone from its second touch's confirmation, and ends at a minute close beyond it;</li>
+ * <li>period: the previous ISO week's and the previous calendar month's high / low (PWH, PWL, PMH, PML; features
+ *     v12 at the open, else the stored one-minute bars), known from 09:15.</li>
  * </ul>
+ * Days without the own tick capture or live features (bar replays, archive days) fall back to the stored one-minute
+ * bars (hist.candle): index bars for the chart, the previous bar session for the prior-day levels, and the nearest
+ * futures contract's VWAP minus its trailing mean basis. {@code source} says which was used.
  * Context for a human, not a strategy input: zone-based rules showed no edge (A-017, A-018, A-025).
  */
 @Component
@@ -74,14 +81,36 @@ class LevelsService {
 
     private Map<String, Object> compute(LocalDate day, String underlying) {
         List<Bar> bars = bars(day, underlying);
+        boolean fromBars = bars.isEmpty();
+        if (fromBars) {
+            bars = candleBars(day, underlying);
+        }
         List<Level> levels = new ArrayList<>();
         Map<String, Double> open = openingFeatures(day, underlying);
+        List<DailyRange> prior = List.of();
+        if (open.get("structure.pdh") == null || open.get("structure.pwh") == null) {
+            prior = priorCandleSessions(day, underlying);
+        }
+        if (open.get("structure.pdh") == null && !prior.isEmpty()) {
+            DailyRange p = prior.getFirst();
+            open.put("structure.pdh", p.high());
+            open.put("structure.pdl", p.low());
+            open.put("structure.prevClose", p.close());
+            open.put("structure.prevOrHigh", p.orHigh());
+            open.put("structure.prevOrLow", p.orLow());
+        }
         add(levels, "PDH", "prior", open.get("structure.pdh"), "09:15");
         add(levels, "PDL", "prior", open.get("structure.pdl"), "09:15");
         add(levels, "Prev close", "prior", open.get("structure.prevClose"), "09:15");
         add(levels, "Prior ORH", "prior", open.get("structure.prevOrHigh"), "09:15");
         add(levels, "Prior ORL", "prior", open.get("structure.prevOrLow"), "09:15");
-        twoDay(day, underlying, open.get("structure.pdh"), open.get("structure.pdl"), levels);
+        if (!twoDay(day, underlying, open.get("structure.pdh"), open.get("structure.pdl"), levels) && prior.size() >= 2
+                && Math.abs(prior.getFirst().high() - open.get("structure.pdh")) <= 1
+                && Math.abs(prior.getFirst().low() - open.get("structure.pdl")) <= 1) {
+            add(levels, "2-day high", "prior", Math.max(prior.get(0).high(), prior.get(1).high()), "09:15");
+            add(levels, "2-day low", "prior", Math.min(prior.get(0).low(), prior.get(1).low()), "09:15");
+        }
+        periodLevels(day, open, prior, levels);
         if (!bars.isEmpty()) {
             add(levels, "Day open", "today", bars.getFirst().open(), bars.getFirst().t().toString());
         }
@@ -100,8 +129,10 @@ class LevelsService {
         out.put("date", day.toString());
         out.put("underlying", underlying);
         out.put("levels", levels);
+        out.put("source", fromBars ? "bars" : "ticks");
         Map<String, Object> lines = new LinkedHashMap<>();
-        lines.put("vwap", vwap(day, underlying));
+        List<Object> vwap = vwap(day, underlying);
+        lines.put("vwap", vwap.isEmpty() ? candleVwap(day, underlying) : vwap);
         lines.put("ema20", ema(bars, 20));
         out.put("lines", lines);
         out.put("zones", zones(bars));
@@ -123,18 +154,77 @@ class LevelsService {
                 underlying, java.sql.Timestamp.from(from), java.sql.Timestamp.from(to));
     }
 
+    /** Index minute bars from the stored one-minute history (bar days, archive days): 09:15-15:29. */
+    private List<Bar> candleBars(LocalDate day, String underlying) {
+        return jdbc.query("select (bar_start at time zone '" + IST + "')::time, open, high, low, close from hist.candle "
+                        + "where underlying = ? and kind = 'INDEX' and bar_start >= ? and bar_start < ? order by bar_start",
+                (rs, i) -> new Bar(rs.getObject(1, LocalTime.class), rs.getDouble(2), rs.getDouble(3), rs.getDouble(4),
+                        rs.getDouble(5)),
+                underlying, ts(day, LocalTime.of(9, 15)), ts(day, LocalTime.of(15, 30)));
+    }
+
+    /** A previous session's range from the stored one-minute bars, newest first. */
+    record DailyRange(LocalDate day, double high, double low, double close, double orHigh, double orLow) {
+    }
+
+    /** Sessions in the stored one-minute bars before {@code day} (up to two months back), newest first. */
+    private List<DailyRange> priorCandleSessions(LocalDate day, String underlying) {
+        return jdbc.query("select (bar_start at time zone '" + IST + "')::date d, max(high), min(low), "
+                        + "(array_agg(close order by bar_start desc))[1], "
+                        + "max(high) filter (where (bar_start at time zone '" + IST + "')::time < '09:30'), "
+                        + "min(low) filter (where (bar_start at time zone '" + IST + "')::time < '09:30') "
+                        + "from hist.candle where underlying = ? and kind = 'INDEX' and bar_start >= ? and bar_start < ? "
+                        + "and (bar_start at time zone '" + IST + "')::time between '09:15' and '15:29' group by 1 order by 1 desc",
+                (rs, i) -> new DailyRange(rs.getObject(1, LocalDate.class), rs.getDouble(2), rs.getDouble(3),
+                        rs.getDouble(4), rs.getDouble(5), rs.getDouble(6)),
+                underlying, ts(day.minusMonths(2).withDayOfMonth(1), LocalTime.MIN), ts(day, LocalTime.MIN));
+    }
+
+    /**
+     * PWH / PWL / PMH / PML: the live features' values at the open (v12), else the previous ISO week (Monday-Friday
+     * before this week) and previous calendar month from the stored bar sessions, as {@code PeriodLevels} defines them.
+     */
+    static void periodLevels(LocalDate day, Map<String, Double> open, List<DailyRange> prior, List<Level> levels) {
+        Double pwh = open.get("structure.pwh"), pwl = open.get("structure.pwl");
+        Double pmh = open.get("structure.pmh"), pml = open.get("structure.pml");
+        if (pwh == null && pmh == null) {
+            LocalDate weekStart = day.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY));
+            LocalDate monthStart = day.withDayOfMonth(1);
+            for (DailyRange r : prior) {
+                if (!r.day().isBefore(weekStart.minusWeeks(1)) && r.day().isBefore(weekStart)) {
+                    pwh = pwh == null ? r.high() : Math.max(pwh, r.high());
+                    pwl = pwl == null ? r.low() : Math.min(pwl, r.low());
+                }
+                if (!r.day().isBefore(monthStart.minusMonths(1)) && r.day().isBefore(monthStart)) {
+                    pmh = pmh == null ? r.high() : Math.max(pmh, r.high());
+                    pml = pml == null ? r.low() : Math.min(pml, r.low());
+                }
+            }
+        }
+        add(levels, "PWH", "period", pwh, "09:15");
+        add(levels, "PWL", "period", pwl, "09:15");
+        add(levels, "PMH", "period", pmh, "09:15");
+        add(levels, "PML", "period", pml, "09:15");
+    }
+
     /** The first live feature snapshot of the day: previous-session levels as the strategies saw them. */
     private Map<String, Double> openingFeatures(LocalDate day, String underlying) {
         Map<String, Double> out = new LinkedHashMap<>();
-        jdbc.query("select features->>'structure.pdh', features->>'structure.pdl', features->>'structure.prevClose', "
-                        + "features->>'structure.prevOrHigh', features->>'structure.prevOrLow' from feat.snapshot s "
+        String[] keys = {"structure.pdh", "structure.pdl", "structure.prevClose", "structure.prevOrHigh",
+                "structure.prevOrLow", "structure.pwh", "structure.pwl", "structure.pmh", "structure.pml"};
+        StringBuilder cols = new StringBuilder();
+        for (String k : keys) {
+            cols.append(cols.isEmpty() ? "" : ", ").append("features->>'").append(k).append("'");
+        }
+        jdbc.query("select " + cols + " from feat.snapshot s "
                         + "join research.run r on r.id = s.run_id where r.kind = 'LIVE_FEATURES' and s.session_date = ? "
                         + "and s.underlying = ? order by s.run_id desc, s.snap_time limit 1",
                 rs -> {
-                    String[] keys = {"structure.pdh", "structure.pdl", "structure.prevClose", "structure.prevOrHigh",
-                            "structure.prevOrLow"};
                     for (int i = 0; i < keys.length; i++) {
-                        out.put(keys[i], parse(rs.getString(i + 1)));
+                        Double v = parse(rs.getString(i + 1));
+                        if (v != null && Double.isFinite(v)) {
+                            out.put(keys[i], v);
+                        }
                     }
                 }, day, underlying);
         return out;
@@ -143,20 +233,22 @@ class LevelsService {
     /**
      * The 2-day high / low: the previous session's high / low (as the features saw them) with the session before
      * it, only when the own capture holds both and its previous session agrees with the features' PDH / PDL.
+     * False when the capture could not give them.
      */
-    private void twoDay(LocalDate day, String underlying, Double pdh, Double pdl, List<Level> levels) {
+    private boolean twoDay(LocalDate day, String underlying, Double pdh, Double pdl, List<Level> levels) {
         if (pdh == null || pdl == null) {
-            return;
+            return false;
         }
         List<double[]> prior = jdbc.query("select max(price), min(price) from md.index_tick where underlying = ? "
                         + "and session_date < ? and (recv_ts at time zone '" + IST + "')::time between '09:15' and '15:30' "
                         + "group by session_date order by session_date desc limit 2",
                 (rs, i) -> new double[] {rs.getDouble(1), rs.getDouble(2)}, underlying, day);
         if (prior.size() < 2 || Math.abs(prior.get(0)[0] - pdh) > 1 || Math.abs(prior.get(0)[1] - pdl) > 1) {
-            return;
+            return false;
         }
         add(levels, "2-day high", "prior", Math.max(pdh, prior.get(1)[0]), "09:15");
         add(levels, "2-day low", "prior", Math.min(pdl, prior.get(1)[1]), "09:15");
+        return true;
     }
 
     /**
@@ -180,6 +272,39 @@ class LevelsService {
                     proxy.add(parse(rs.getString(2)));
                     basis.add(parse(rs.getString(3)));
                 }, day, underlying, day, underlying);
+        return smoothVwap(times, proxy, basis, BASIS_WINDOW);
+    }
+
+    /**
+     * The chart VWAP from the stored one-minute bars: the nearest futures contract's cumulative VWAP (typical price x
+     * volume) minus the futures-index basis averaged over the trailing {@link #BASIS_WINDOW} minutes.
+     */
+    private List<Object> candleVwap(LocalDate day, String underlying) {
+        List<String> times = new ArrayList<>();
+        List<Double> proxy = new ArrayList<>();
+        List<Double> basis = new ArrayList<>();
+        double[] pv = {0, 0};
+        jdbc.query("with near as (select min(expiry) e from hist.candle where underlying = ? and kind = 'FUTURE' "
+                        + "and expiry >= ? and bar_start >= ? and bar_start < ?) "
+                        + "select to_char(f.bar_start at time zone '" + IST + "', 'HH24:MI'), f.high, f.low, f.close, "
+                        + "coalesce(f.volume, 0), i.close from hist.candle f left join hist.candle i on i.underlying = f.underlying "
+                        + "and i.kind = 'INDEX' and i.bar_start = f.bar_start where f.underlying = ? and f.kind = 'FUTURE' "
+                        + "and f.expiry = (select e from near) and f.bar_start >= ? and f.bar_start < ? order by f.bar_start",
+                rs -> {
+                    double typical = (rs.getDouble(2) + rs.getDouble(3) + rs.getDouble(4)) / 3;
+                    long volume = rs.getLong(5);
+                    pv[0] += typical * volume;
+                    pv[1] += volume;
+                    double spot = rs.getDouble(6);
+                    if (rs.wasNull() || pv[1] == 0) {
+                        return;
+                    }
+                    double b = rs.getDouble(4) - spot;
+                    times.add(rs.getString(1));
+                    proxy.add(pv[0] / pv[1] - b);
+                    basis.add(b);
+                }, underlying, day, ts(day, LocalTime.of(9, 15)), ts(day, LocalTime.of(15, 30)),
+                underlying, ts(day, LocalTime.of(9, 15)), ts(day, LocalTime.of(15, 30)));
         return smoothVwap(times, proxy, basis, BASIS_WINDOW);
     }
 
@@ -319,6 +444,10 @@ class LevelsService {
         if (price != null && Double.isFinite(price) && price > 0) {
             levels.add(new Level(name, group, round(price), from));
         }
+    }
+
+    private static java.sql.Timestamp ts(LocalDate day, LocalTime time) {
+        return java.sql.Timestamp.from(day.atTime(time).atZone(MarketTime.IST).toInstant());
     }
 
     private static Double parse(String s) {

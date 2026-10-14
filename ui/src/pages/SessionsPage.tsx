@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
-import { LEVEL_COLORS, LevelTogglesBar, mergeLevels, useLevels, useLevelToggles, visibleLevels, visibleZones } from "../components/levels";
+import { LEVEL_COLORS, LevelTogglesBar, levelColor, mergeLevels, useLevels, useLevelToggles, visibleLevels, visibleZones } from "../components/levels";
 import { Link, useParams } from "react-router";
 import { fixed, get, type DecisionRow, type OrderRow, type SessionRow, type TradePositionRow } from "../api";
 import { TimelineChart } from "../components/TimelineChart";
@@ -168,7 +168,7 @@ export function SessionDetailPage() {
       ...shownLevels.filter((l) => l.price < last).sort((p, q) => q.price - p.price).slice(0, 2),
     ]);
     const flat = shownLevels
-      .map((l) => ({ name: tagged.has(l) ? l.name : "", color: l.group === "prior" ? LEVEL_COLORS.prior : LEVEL_COLORS.today, width: 1 as const,
+      .map((l) => ({ name: tagged.has(l) ? l.name : "", color: levelColor(l.group), width: 1 as const,
         dashed: true, label: tagged.has(l), points: [{ t: l.from, value: l.price }, { t: end, value: l.price }] }));
     const zones = visibleZones(lv.zones, toggles).filter((z) => inRange(z.lo) && z.from <= end).flatMap((z) => {
       const color = z.kind === "support" ? LEVEL_COLORS.support : LEVEL_COLORS.resistance;

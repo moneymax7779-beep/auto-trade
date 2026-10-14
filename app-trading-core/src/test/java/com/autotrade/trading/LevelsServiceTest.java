@@ -52,4 +52,20 @@ class LevelsServiceTest {
         assertThat(LevelsService.ema(bars(1, 2, 3, 4, 5), 5)).hasSize(1);
         assertThat(LevelsService.ema(bars(1, 2, 3, 4), 5)).isEmpty();
     }
+
+    @Test
+    void periodLevelsFromBarSessionsUseThePreviousIsoWeekAndCalendarMonthOnly() {
+        // Wednesday 7 Oct 2026: previous week = Mon 28 Sep - Fri 2 Oct, previous month = September
+        List<LevelsService.DailyRange> prior = List.of(                    // newest first
+                new LevelsService.DailyRange(java.time.LocalDate.of(2026, 10, 6), 999, 1, 0, 0, 0),   // this week: ignored
+                new LevelsService.DailyRange(java.time.LocalDate.of(2026, 10, 1), 120, 90, 0, 0, 0),
+                new LevelsService.DailyRange(java.time.LocalDate.of(2026, 9, 28), 110, 80, 0, 0, 0),
+                new LevelsService.DailyRange(java.time.LocalDate.of(2026, 9, 25), 130, 85, 0, 0, 0),
+                new LevelsService.DailyRange(java.time.LocalDate.of(2026, 8, 31), 500, 2, 0, 0, 0)); // August: ignored
+        List<LevelsService.Level> levels = new ArrayList<>();
+        LevelsService.periodLevels(java.time.LocalDate.of(2026, 10, 7), new java.util.HashMap<>(), prior, levels);
+        assertThat(levels).extracting(LevelsService.Level::name, LevelsService.Level::price).containsExactly(
+                org.assertj.core.groups.Tuple.tuple("PWH", 120.0), org.assertj.core.groups.Tuple.tuple("PWL", 80.0),
+                org.assertj.core.groups.Tuple.tuple("PMH", 130.0), org.assertj.core.groups.Tuple.tuple("PML", 80.0));
+    }
 }

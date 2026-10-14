@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { get } from "../api";
 import { ErrorNote, Loading, Panel } from "./ui";
 import {
-  LEVEL_COLORS, LevelTogglesBar, mergeLevels, tagName, useLevels, useLevelToggles, visibleLevels, visibleZones,
+  LEVEL_COLORS, LevelTogglesBar, levelColor, mergeLevels, tagName, useLevels, useLevelToggles, visibleLevels, visibleZones,
   type LevelToggles, type LevelsData,
 } from "./levels";
 import { presetView, useChartView, useLinkedTime, type View } from "./chartView";
@@ -612,7 +612,7 @@ function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, 
             {/* prior-day and today levels, each from the minute it was known */}
             {drawnLevels.map((l) => (
               <line key={`${l.name}-${l.price}`} x1={X(minutes(l.from))} x2={W - R} y1={Y(l.price)} y2={Y(l.price)}
-                stroke={l.group === "prior" ? LEVEL_COLORS.prior : LEVEL_COLORS.today} strokeWidth="1" strokeDasharray="5 4" opacity={0.85} />
+                stroke={levelColor(l.group)} strokeWidth="1" strokeDasharray="5 4" opacity={0.85} />
             ))}
             {toggles.lines && levels && (["vwap", "ema20"] as const).map((k) => {
               const line = levels.lines[k];
@@ -641,7 +641,7 @@ function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, 
           {/* price-axis tags in the right gutter, nudged apart: levels, VWAP / EMA20 and the last visible price */}
           {nudge([
             ...drawnLevels.map((l) => ({ key: `l-${l.name}`, y: Y(l.price), text: `${tagName(l.name)} ${nf(l.price, 0)}`, full: l.name,
-              color: l.group === "prior" ? LEVEL_COLORS.prior : LEVEL_COLORS.today, fill: false })),
+              color: levelColor(l.group), fill: false })),
             ...(toggles.lines ? (["vwap", "ema20"] as const).flatMap((k) => {
               const v = lineMaps[k].get(minutes(lastShown[0]));
               return v != null && inY(v) ? [{ key: k, y: Y(v), text: `${k === "vwap" ? "VWAP" : "EMA"} ${nf(v, 0)}`, full: k, color: LEVEL_COLORS[k], fill: false }] : [];
