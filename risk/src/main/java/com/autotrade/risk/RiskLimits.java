@@ -71,7 +71,36 @@ public record RiskLimits(
         /** v16 (A-101): each such release raises the day's loss limit by this % of equity. */
         double dailyLossReleaseRaisePct,
         /** v16 (A-101): the application releases it itself for an A-grade entry (false = only the operator, v1-v15). */
-        boolean dailyLossAutoRelease) {
+        boolean dailyLossAutoRelease,
+        /** v17 (A-106): futures time-of-day RVOL at entry from which a single-leg entry's budget is boosted (NaN = off). */
+        double rvolBoostThreshold,
+        /** v17 (A-106): the boost (1 = none). */
+        double rvolBoostFactor) {
+
+    /** v16 shape: no futures-volume boost. */
+    public RiskLimits(String hash, double capital, double dailyLossLimit, int maxOpenPositions, int maxLotsPerUnderlying,
+                      int maxOrdersPerMinute, LocalTime noNewEntriesAfter, LocalTime squareOffAt, int maxFeedAgeSec,
+                      double maxSpreadPct, int entryBufferTicks, int exitBufferTicks, double exitBufferPct,
+                      int entryTimeoutSec, int exitChaseSec, int exitChaseMax, double stopLimitOffsetPct,
+                      int reconcileEverySec, LocalTime casEntryFrom, LocalTime casEntryTo, double maxLossPerTrade,
+                      double deltaRiskPerTrade, boolean equityMode, double startingCapital, double dailyLossPct,
+                      double premiumBudgetFraction, java.time.LocalDate equityFrom, double entryBufferPct,
+                      int entryChaseMax, int entryChaseSec, double entrySliceDepthPct, double entrySliceMaxDriftPct,
+                      double maxParticipationPct, int maxConsecutiveLosses, double expiryReservePct,
+                      int dailyLossReleasesPerDay, double dailyLossReleaseRaisePct, boolean dailyLossAutoRelease) {
+        this(hash, capital, dailyLossLimit, maxOpenPositions, maxLotsPerUnderlying, maxOrdersPerMinute, noNewEntriesAfter,
+                squareOffAt, maxFeedAgeSec, maxSpreadPct, entryBufferTicks, exitBufferTicks, exitBufferPct, entryTimeoutSec,
+                exitChaseSec, exitChaseMax, stopLimitOffsetPct, reconcileEverySec, casEntryFrom, casEntryTo, maxLossPerTrade,
+                deltaRiskPerTrade, equityMode, startingCapital, dailyLossPct, premiumBudgetFraction, equityFrom,
+                entryBufferPct, entryChaseMax, entryChaseSec, entrySliceDepthPct, entrySliceMaxDriftPct,
+                maxParticipationPct, maxConsecutiveLosses, expiryReservePct, dailyLossReleasesPerDay,
+                dailyLossReleaseRaisePct, dailyLossAutoRelease, Double.NaN, 1.0);
+    }
+
+    /** v17 (A-106): the factor a single-leg entry's budget is multiplied by at this futures RVOL (1 = no boost). */
+    public double rvolBoost(double rvolTod) {
+        return !Double.isNaN(rvolBoostThreshold) && rvolTod >= rvolBoostThreshold ? rvolBoostFactor : 1.0;
+    }
 
     /** v14 shape: no operator release of the daily-loss switch. */
     public RiskLimits(String hash, double capital, double dailyLossLimit, int maxOpenPositions, int maxLotsPerUnderlying,
@@ -141,7 +170,7 @@ public record RiskLimits(
                 casEntryFrom, casEntryTo, maxLossPerTrade, deltaRiskPerTrade, equityMode, startingCapital, dailyLossPct,
                 premiumBudgetFraction, equityFrom, entryBufferPct, entryChaseMax, entryChaseSec, entrySliceDepthPct,
                 entrySliceMaxDriftPct, maxParticipationPct, maxConsecutiveLosses, expiryReservePct, dailyLossReleasesPerDay,
-                dailyLossReleaseRaisePct, dailyLossAutoRelease);
+                dailyLossReleaseRaisePct, dailyLossAutoRelease, rvolBoostThreshold, rvolBoostFactor);
     }
 
     /**
@@ -224,6 +253,8 @@ public record RiskLimits(
                 c.has("account.expiry_reserve_pct") ? c.getDouble("account.expiry_reserve_pct") : 0,
                 c.has("account.daily_loss_releases_per_day") ? c.getInt("account.daily_loss_releases_per_day") : 0,
                 c.has("account.daily_loss_release_raise_pct") ? c.getDouble("account.daily_loss_release_raise_pct") : 0,
-                c.has("account.daily_loss_auto_release") && c.getBoolean("account.daily_loss_auto_release"));
+                c.has("account.daily_loss_auto_release") && c.getBoolean("account.daily_loss_auto_release"),
+                c.has("sizing.rvol_boost_threshold") ? c.getDouble("sizing.rvol_boost_threshold") : Double.NaN,
+                c.has("sizing.rvol_boost_factor") ? c.getDouble("sizing.rvol_boost_factor") : 1.0);
     }
 }

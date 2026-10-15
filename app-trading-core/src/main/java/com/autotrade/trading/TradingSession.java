@@ -333,7 +333,16 @@ public final class TradingSession {
                 double stopPct = intent.stopPctOr(slot.factory().premiumStopPct());
                 // risk v5: no more premium than the per-trade loss cap allows at this position's stop
                 double ask = oms.ask(contract.get());
-                double budget = Math.min(budget(slot.factory()), risk.limits().premiumCapForStop(stopPct));
+                // risk v17 (A-106): a larger budget when futures volume confirms (time-of-day RVOL at entry), using only
+                // spare capital: never above 97 % of the free capital (the check prices at the ask plus the entry
+                // buffer) and never below the normal budget, so an entry that fills the capital is exactly v12's
+                double base = budget(slot.factory());
+                double boost = risk.limits().rvolBoost(snapshot.futures().rvolTod());
+                if (boost > 1) {
+                    double free = risk.limits().capital() - oms.premiumInUse(null);
+                    base = Math.max(base, Math.min(base * boost, 0.97 * free));
+                }
+                double budget = Math.min(base, risk.limits().premiumCapForStop(stopPct));
                 // risk v6: the premium whose first stop (structure via delta, or premium) loses the risk per trade
                 budget = Math.min(budget, risk.limits().premiumCapForRisk(stopPct, ask, oms.delta(contract.get()),
                         intent.stopPoints()));
