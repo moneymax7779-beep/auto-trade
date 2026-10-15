@@ -209,4 +209,34 @@ class OpeningDriveTest {
         assertThat(v6.decide(oct14().set("spot", 22750.0).set("breadth.moverBreadth", 55.0).at("09:19"),
                 PositionView.FLAT).orders()).singleElement().satisfies(o -> assertThat(o.reason()).isEqualTo("BREAK_PDH"));
     }
+
+    /** v9 (A-114): a put from the 09:16 PDL break, held at 10:00 with the given futures RVOL and future vs its VWAP. */
+    private static Decision v9At(Strategy v9, String time, double rvol, double futures, double bid) {
+        return v9.decide(open().set("spot", 22900.0).set("futures.rvolTod", rvol).set("futures.price", futures)
+                .set("futures.vwap", 22950.0).at(time), holding(bid));
+    }
+
+    @Test
+    void v9KeepsThePositionPastTenOnlyWithParticipationAndTheFutureOnItsSideOfVwap() {
+        Strategy v9 = load("opening-drive.v9.yaml");
+        v9.decide(open().set("spot", 22975.60).at("09:16"), PositionView.FLAT);
+        Decision at10 = v9At(v9, "10:00", 1.4, 22910.0, 141.75);              // RVOL 1.4, future below VWAP: kept
+        assertThat(at10.orders()).isEmpty();
+        assertThat(at10.state().regime()).contains("/EXTENDED(rvol 1.40");
+        assertThat(v9At(v9, "10:01", 0.5, 22990.0, 142.0).orders()).isEmpty();   // decided once: not re-checked
+        assertThat(v9At(v9, "14:00", 0.5, 22990.0, 150.0).orders()).isEmpty();
+        assertThat(v9At(v9, "15:15", 0.5, 22990.0, 150.0).orders())
+                .singleElement().satisfies(o -> assertThat(o.reason()).isEqualTo("TIME_15:15"));
+    }
+
+    @Test
+    void v9ExitsAtTenAsV3WhenParticipationIsLowTheFutureIsOnTheWrongSideOrRvolIsUnknown() {
+        for (double[] c : new double[][] {{0.8, 22910.0}, {1.4, 22960.0}, {Double.NaN, 22910.0}}) {
+            Strategy v9 = load("opening-drive.v9.yaml");
+            v9.decide(open().set("spot", 22975.60).at("09:16"), PositionView.FLAT);
+            Decision d = v9At(v9, "10:00", c[0], c[1], 141.75);
+            assertThat(d.orders()).singleElement().satisfies(o -> assertThat(o.reason()).isEqualTo("TIME_10:00"));
+            assertThat(d.state().regime()).contains("NOT_EXTENDED");
+        }
+    }
 }

@@ -30,7 +30,15 @@ record OpeningDriveConfig(
         /** v5 (A-097): a level counts only if the day opened at least this % of it away (0 = any distance, v1-v4). */
         double minOpenDistancePct,
         /** v6 (A-098): an entry needs mover breadth at least this far its way (+ calls, - puts; NaN = off, v1-v5). */
-        double breadthMinAgree) {
+        double breadthMinAgree,
+        /**
+         * v9 (A-114): at the time exit a position is kept until this time (the other exits stay) when the futures
+         * RVOL is at least {@link #extendMinRvol} and, with {@link #extendNeedsVwapSide}, the future is on the trade's
+         * side of its VWAP; decided once per position at the first snapshot at or after the time exit (null = off).
+         */
+        LocalTime extendUntil,
+        double extendMinRvol,
+        boolean extendNeedsVwapSide) {
 
     /** v1-v3 shape: no cool-down after a loss. */
     OpeningDriveConfig(String hash, String version, LocalTime triggerFrom, LocalTime triggerUntil, LocalTime timeExit,
@@ -39,7 +47,7 @@ record OpeningDriveConfig(
                        boolean structureStop, double trailActivatePct, double trailGivebackPct, int maxTrades) {
         this(hash, version, triggerFrom, triggerUntil, timeExit, levels, minPreviousSessionMinutes, maxEntryAttempts,
                 strikeOffset, premiumBudget, expiryDayPremiumBudget, premiumStopPct, structureStop, trailActivatePct,
-                trailGivebackPct, maxTrades, 0, 0, Double.NaN);
+                trailGivebackPct, maxTrades, 0, 0, Double.NaN, null, Double.NaN, false);
     }
 
     static OpeningDriveConfig from(ThresholdConfig c) {
@@ -54,7 +62,10 @@ record OpeningDriveConfig(
                 c.has("scope.max_trades") ? c.getInt("scope.max_trades") : 1,
                 c.has("scope.reentry_cooldown_after_loss_min") ? c.getInt("scope.reentry_cooldown_after_loss_min") : 0,
                 c.has("scope.min_open_distance_pct") ? c.getDouble("scope.min_open_distance_pct") : 0,
-                c.has("filters.breadth_min_agree") ? c.getDouble("filters.breadth_min_agree") : Double.NaN);
+                c.has("filters.breadth_min_agree") ? c.getDouble("filters.breadth_min_agree") : Double.NaN,
+                c.has("exits.extend.until") ? c.getTime("exits.extend.until") : null,
+                c.has("exits.extend.min_rvol_tod") ? c.getDouble("exits.extend.min_rvol_tod") : Double.NaN,
+                c.has("exits.extend.futures_vwap_side") && c.getBoolean("exits.extend.futures_vwap_side"));
     }
 
     @SuppressWarnings("unchecked")

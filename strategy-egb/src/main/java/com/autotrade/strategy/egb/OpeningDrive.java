@@ -27,6 +27,8 @@ import com.autotrade.strategy.Strategy;
  * untouched side of), buy the ATM option in the direction of the break, sized to the premium budget.
  * Exits: the executor's resting premium stop; the index back at or beyond the broken level; a trailing
  * stop once the premium has run; the time exit. One trade per underlying and session.
+ * v9 (A-114): at the time exit a position may be kept, once, until a later time when futures participation and the
+ * future's side of its VWAP support it (see {@link OpeningDriveConfig#extendUntil()}).
  * Study: docs/studies/2026-09-28-opening-drive.md (this v1 drops its volume filter).
  */
 final class OpeningDrive implements Strategy {
@@ -51,6 +53,8 @@ final class OpeningDrive implements Strategy {
     private double lastBid = Double.NaN;      // v4: the last bid and average cost seen while held,
     private double lastCost = Double.NaN;     //     to tell a losing trade when it closes
     private Instant lossClosedAt;             // v4 (A-072): when the last losing trade was seen closed
+    private Boolean extended;                 // v9 (A-114): this position's decision at the time exit; null = not yet
+    private String extendNote = "";           // v9: the inputs of that decision, in the market-state regime
 
     OpeningDrive(OpeningDriveConfig config) {
         this.config = config;
@@ -90,8 +94,12 @@ final class OpeningDrive implements Strategy {
             asked = false;
             double bid = position.bid();
             double cost = position.averagePremium();
-            if (!time.isBefore(config.timeExit())) {
-                exitReason = "TIME_" + config.timeExit();
+            if (!time.isBefore(config.timeExit()) && extended == null) {
+                extended = config.extendUntil() != null && extend(snapshot, position.side());
+            }
+            LocalTime until = Boolean.TRUE.equals(extended) ? config.extendUntil() : config.timeExit();
+            if (!time.isBefore(until)) {
+                exitReason = "TIME_" + until;
             } else if (config.structureStop() && traded != null && backThrough(traded, spot)) {
                 exitReason = "STRUCTURE_" + traded.name();
             } else if (Double.isFinite(bid) && Double.isFinite(bestBid)
@@ -125,6 +133,8 @@ final class OpeningDrive implements Strategy {
                 lastBid = Double.NaN;
                 lastCost = Double.NaN;
                 exitSent = false;
+                extended = null;
+                extendNote = "";
                 if (config.maxTrades() != 0 && trades >= config.maxTrades()) {
                     done = true;
                 } else if (levels != null) {
@@ -162,8 +172,21 @@ final class OpeningDrive implements Strategy {
         SideView ce = view(OptionSide.CE, snapshot, position, window, previousComplete, time);
         SideView pe = view(OptionSide.PE, snapshot, position, window, previousComplete, time);
         MarketState state = new MarketState(Double.NaN, Double.NaN, Double.NaN, Double.NaN,
-                traded == null ? "OPENING_DRIVE" : "OPENING_DRIVE/" + traded.name(), null);
+                (traded == null ? "OPENING_DRIVE" : "OPENING_DRIVE/" + traded.name()) + extendNote, null);
         return new Decision(now, snapshot.underlying(), state, ce, pe, List.copyOf(orders));
+    }
+
+    /** v9: keep the position past the time exit? Unknown inputs (no RVOL history, no VWAP) mean no. */
+    private boolean extend(FeatureSnapshot snapshot, OptionSide side) {
+        com.autotrade.features.snapshot.FuturesFeatures f = snapshot.futures();
+        double rvol = f.rvolTod();
+        boolean rvolOk = rvol >= config.extendMinRvol();
+        boolean vwapOk = !config.extendNeedsVwapSide()
+                || (side == OptionSide.CE ? f.price() > f.vwap() : f.price() < f.vwap());
+        boolean keep = rvolOk && vwapOk;
+        extendNote = String.format(java.util.Locale.ROOT, "/%s(rvol %.2f, fut-vwap %.1f)",
+                keep ? "EXTENDED" : "NOT_EXTENDED", rvol, f.price() - f.vwap());
+        return keep;
     }
 
     private List<Level> levels(StructureFeatures st) {
