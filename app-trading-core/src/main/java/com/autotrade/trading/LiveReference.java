@@ -55,6 +55,18 @@ final class LiveReference implements ReferenceData {
         return store.auctionTurnover(underlying, before, sessions);
     }
 
+    /** Features v13 (feature/missing-data): positioning as stored (the collector writes it each evening). */
+    @Override
+    public List<com.autotrade.core.history.ParticipantOi> participantOi(LocalDate session, int sessions) {
+        return store.participantOi(session, sessions);
+    }
+
+    /** Features v13: GIFT Nifty quotes as stored so far; the engine re-reads them once a minute. */
+    @Override
+    public List<com.autotrade.core.history.GiftQuote> giftNiftyQuotes(LocalDate session) {
+        return store.giftNiftyQuotes(session);
+    }
+
     /** Fetches today's VIX minutes and appends the newly completed ones. Never throws. */
     void poll() {
         try {

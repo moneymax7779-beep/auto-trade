@@ -31,9 +31,21 @@ import com.autotrade.core.time.MarketTime;
 public final class BarSessionHistory implements SessionHistory, ReferenceData {
 
     private final JdbcTemplate jdbc;
+    private final ReferenceStore cues;      // features v13: participant OI and GIFT quotes, as stored
 
     public BarSessionHistory(DataSource target) {
         this.jdbc = new JdbcTemplate(target);
+        this.cues = new ReferenceStore(target);
+    }
+
+    @Override
+    public List<com.autotrade.core.history.ParticipantOi> participantOi(LocalDate session, int sessions) {
+        return cues.participantOi(session, sessions);
+    }
+
+    @Override
+    public List<com.autotrade.core.history.GiftQuote> giftNiftyQuotes(LocalDate session) {
+        return cues.giftNiftyQuotes(session);
     }
 
     @Override

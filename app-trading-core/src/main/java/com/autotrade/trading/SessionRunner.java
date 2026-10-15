@@ -176,6 +176,41 @@ class SessionRunner implements ApplicationRunner {
                         summary.candles().values().stream().mapToInt(Integer::intValue).sum(), summary.problems().size());
                 exit(summary.problems().isEmpty() ? 0 : 2);
             }
+            case "fetch-cues" -> {
+                // GIFT Nifty quotes from NSE IX, once (the scheduler polls them when autotrade.cues.enabled)
+                int added = new CueFetcher(new com.autotrade.md.store.ReferenceStore(target)).fetchGiftNifty();
+                log.info("fetch-cues: {} new GIFT Nifty quotes stored", added);
+                exit(0);
+            }
+            case "fetch-participant-oi" -> {
+                // NSE participant-wise OI for each weekday in --from..--to (default: the last 10 days); 404 = no file
+                LocalDate from = LocalDate.parse(first(args, "from", LocalDate.now(MarketTime.IST).minusDays(10).toString()));
+                LocalDate to = LocalDate.parse(first(args, "to", LocalDate.now(MarketTime.IST).toString()));
+                CueFetcher fetcher = new CueFetcher(new com.autotrade.md.store.ReferenceStore(target));
+                int days = 0, missing = 0, failed = 0;
+                for (LocalDate d = from; !d.isAfter(to); d = d.plusDays(1)) {
+                    if (d.getDayOfWeek().getValue() >= 6) {
+                        continue;
+                    }
+                    try {
+                        java.util.Optional<Integer> rows = fetcher.fetchParticipantOi(d);
+                        if (rows.isPresent()) {
+                            days++;
+                            log.info("participant OI {}: {} rows", d, rows.get());
+                        } else {
+                            missing++;
+                            log.info("participant OI {}: no file (holiday or not published)", d);
+                        }
+                    } catch (Exception e) {
+                        failed++;
+                        log.warn("participant OI {}: {}", d, e.getMessage());
+                    }
+                    Thread.sleep(1000);                       // a polite pace for NSE's archive
+                }
+                log.info("fetch-participant-oi {}..{}: {} days stored, {} without a file, {} failed", from, to, days,
+                        missing, failed);
+                exit(failed == 0 ? 0 : 2);
+            }
             case "shadow" -> {
                 // the shadow strategies on a captured day, by hand (the scheduler does this after each live session)
                 LocalDate session = LocalDate.parse(first(args, "session", LocalDate.now(MarketTime.IST).toString()));
