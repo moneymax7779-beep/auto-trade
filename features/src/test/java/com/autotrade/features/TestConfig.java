@@ -25,6 +25,13 @@ public final class TestConfig {
                 ThresholdConfig.load(Path.of("..", "config", "exchange", "nse-bse-sessions.v3.yaml")));
     }
 
+    /** Any repository features file {@code features.<version>.yaml} with the live exchange calendar (v3). */
+    public static FeatureConfig load(String version) {
+        return FeatureConfig.from(
+                ThresholdConfig.load(Path.of("..", "config", "features", "features." + version + ".yaml")),
+                ThresholdConfig.load(Path.of("..", "config", "exchange", "nse-bse-sessions.v3.yaml")));
+    }
+
     public static FeatureConfig load() {
         return FeatureConfig.from(
                 ThresholdConfig.load(Path.of("..", "config", "features", "features.v2.yaml")),

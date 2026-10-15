@@ -96,6 +96,12 @@ final class CandidateContext {
             put(c, "fiiIndexPutNet", s.cues().fiiIndexPutNet());
             put(c, "clientIndexFutLongPct", s.cues().clientIndexFutLongPct());
         }
+        if (s.preopen() != null) {                                      // features v14: the pre-open auction
+            put(c, "preOpenReturnPct", s.preopen().preOpenReturnPct());
+            put(c, "preOpenBreadth", s.preopen().preOpenBreadth());
+            put(c, "preOpenImbalance", s.preopen().preOpenImbalance());
+            put(c, "preOpenCoveragePct", s.preopen().preOpenCoveragePct());
+        }
         for (Map.Entry<String, FeatureSnapshot> peer : peers.entrySet()) {
             FeatureSnapshot p = peer.getValue();
             if (peer.getKey().equals(s.underlying()) || p == null) {

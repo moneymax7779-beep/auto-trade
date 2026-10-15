@@ -33,6 +33,8 @@ public record FeatureSnapshot(
         RetestFeatures retest,
         /** v13: pre-open and positioning cues; EMPTY before v13. */
         CueFeatures cues,
+        /** v14: the constituents' pre-open auction; EMPTY before v14. */
+        PreOpenFeatures preopen,
         String featuresHash,
         String exchangeHash) {
 }

@@ -54,6 +54,17 @@ public final class BreadthState {
         return weights;
     }
 
+    /** Previous close per constituent symbol, where the feed gave one. */
+    public Map<String, Double> previousCloses() {
+        Map<String, Double> closes = new HashMap<>();
+        stocks.forEach((symbol, stock) -> {
+            if (!Double.isNaN(stock.previousClose)) {
+                closes.put(symbol, stock.previousClose);
+            }
+        });
+        return closes;
+    }
+
     public BreadthFeatures snapshot(Instant time) {
         Duration window = Duration.ofMinutes(config.breadthReturnWindowMin());
         double scale = config.breadthReturnScalePct() / 100.0;

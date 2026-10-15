@@ -73,6 +73,7 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
     private final VolatilityState volatility;
     private final CasState cas;
     private final com.autotrade.features.cues.CueState cues;      // v13; null when off
+    private final com.autotrade.features.preopen.PreOpenState preopen;      // v14; null when off
     private final Duration interval;
     private final Instant lastSnapshotAt;
 
@@ -122,6 +123,7 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
         // v13: positioning of the last published sessions; GIFT quotes re-read through the reference data
         this.cues = !config.cues() ? null : new com.autotrade.features.cues.CueState(session,
                 history.reference().participantOi(session, 2), () -> history.reference().giftNiftyQuotes(session));
+        this.preopen = config.preopen() ? new com.autotrade.features.preopen.PreOpenState() : null;
         this.interval = Duration.ofSeconds(config.snapshotIntervalSec());
         this.nextSnapshotAt = open.plus(interval);
         this.lastSnapshotAt = session.atTime(config.derivativesClose())
@@ -170,6 +172,9 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
             case AuctionTick auction -> {
                 if (cas != null && clock.phase(auction.receivedAt()).isCas()) {
                     cas.onAuction(auction);
+                }
+                if (preopen != null) {
+                    preopen.onAuction(auction);                 // v14: only ticks received before 09:15 are kept
                 }
             }
         }
@@ -268,6 +273,8 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
                 structureFeatures, futuresFeatures, optionsFeatures, breadthFeatures, regimeFeatures, casFeatures,
                 levels, book, premium, vol, compression, gamma, retest,
                 cues == null ? com.autotrade.features.snapshot.CueFeatures.EMPTY : cues.features(time),
+                preopen == null ? com.autotrade.features.snapshot.PreOpenFeatures.EMPTY
+                        : preopen.features(time, breadth::weights, breadth::previousCloses),
                 config.featuresHash(), config.exchangeHash());
     }
 

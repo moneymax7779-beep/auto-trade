@@ -104,7 +104,9 @@ public record FeatureConfig(
         /** v12: robust z-scores of the 5-minute near-ATM call / put OI change against the stored bars' baseline. */
         boolean oiZscore,
         /** v13: pre-open and positioning cues (GIFT Nifty, NSE participant-wise OI); EMPTY when off. */
-        boolean cues) {
+        boolean cues,
+        /** v14: the constituents' pre-open call auction (IEP vs previous close, imbalance); EMPTY when off. */
+        boolean preopen) {
 
     public static FeatureConfig from(ThresholdConfig features, ThresholdConfig exchange) {
         Map<String, LocalTime[]> windows = new LinkedHashMap<>();
@@ -188,7 +190,8 @@ public record FeatureConfig(
                 features.has("history.bar_backfill") && features.getBoolean("history.bar_backfill"),
                 features.has("structure.period_levels") && features.getBoolean("structure.period_levels"),
                 features.has("options_chain.oi_zscore") && features.getBoolean("options_chain.oi_zscore"),
-                features.has("cues.enabled") && features.getBoolean("cues.enabled"));
+                features.has("cues.enabled") && features.getBoolean("cues.enabled"),
+                features.has("preopen.enabled") && features.getBoolean("preopen.enabled"));
     }
 
     /** True when the file defines the v3 feature sections. */
