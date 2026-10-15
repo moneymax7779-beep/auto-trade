@@ -73,7 +73,8 @@ class SurgeController {
         result.put("date", day == null ? null : day.toString());
         List<Object> underlyings = new ArrayList<>();
         if (day != null) {
-            for (String underlying : properties.trading().tradeUnderlyingList()) {
+            // every recorded index (BANKNIFTY too, for its chart); the surge alerts read the traded ones only (SurgeAlerter)
+            for (String underlying : properties.trading().underlyings()) {
                 underlyings.add(cached(day, underlying));
             }
         }

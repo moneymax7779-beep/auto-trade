@@ -7,9 +7,12 @@ import { MarketCard } from "../components/MarketCard";
 import { splitDecisionKey, storedScores, StrategyMatrix } from "../components/strategies";
 import { SurgePanel, type DayNav } from "../components/SurgePanel";
 import { TradesTable } from "../components/TradesTable";
+import { PcrPanel } from "../components/PcrPanel";
 import { ErrorNote, Loading, Panel, Pnl } from "../components/ui";
 
-export const INDICES = ["NIFTY", "SENSEX"] as const;
+export const INDICES = ["NIFTY", "SENSEX", "BANKNIFTY"] as const;
+/** Indices recorded for context only (charts, volume, PCR); no strategy trades them. */
+const CONTEXT_ONLY = new Set(["BANKNIFTY"]);
 
 /**
  * One index's dashboard: its market state, the surge chart (levels, premium, volume) and table, every
@@ -64,6 +67,9 @@ export function IndexPage() {
         </div>
         <Link to="/live" className="ml-auto text-xs text-accent hover:underline">← overview</Link>
       </div>
+      {CONTEXT_ONLY.has(underlying) && (
+        <p className="text-xs text-muted">{underlying} is recorded for context (chart, futures volume, PCR, levels); no strategy trades it.</p>
+      )}
 
       {showLive ? <LiveDay underlying={underlying} s={s} nav={nav} /> : day
         ? <PastDay key={day} underlying={underlying} day={day} nav={nav}
@@ -89,6 +95,7 @@ function LiveDay({ underlying, s, nav }: { underlying: string; s: Status; nav: D
           volatility={market.volatility} cas={market.cas} />
       )}
       <SurgePanel live date={s.date} underlying={underlying} nav={nav} />
+      <PcrPanel underlying={underlying} live />
       {entries.length > 0 && (
         <Panel title={`Strategies on ${underlying}`}>
           <StrategyMatrix underlyings={[underlying]} positions={open}
@@ -124,6 +131,7 @@ function PastDay({ underlying, day, sessionId, nav }: { underlying: string; day:
             <Link to={`/sessions/${sessionId}`} className="hover:underline">session #{sessionId}</Link></span></>} />
       )}
       <SurgePanel date={day} underlying={underlying} nav={nav} />
+      <PcrPanel underlying={underlying} date={day} />
       {rows.length > 0 && (
         <Panel title={`How each strategy ended on ${underlying}`}>
           <StrategyMatrix underlyings={[underlying]} cells={rows.map((x) => ({ strategy: x.strategy_id, underlying, time: x.t,

@@ -11,6 +11,7 @@ const NAV = [
   ["/live", "Overview"],
   ["/index/NIFTY", "NIFTY"],
   ["/index/SENSEX", "SENSEX"],
+  ["/index/BANKNIFTY", "BANKNIFTY"],   // recorded for context, never traded (A-108)
   // ["/strategies", "Strategies"],   hidden 2026-10-09 (user: "Hide the Strategies page for now"); StrategiesPage.tsx kept
   ["/sessions", "Sessions"],
   ["/performance", "Performance"],
