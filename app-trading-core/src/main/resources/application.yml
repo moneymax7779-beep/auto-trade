@@ -34,7 +34,9 @@ autotrade:
     account: PAPER-1
     # BANKNIFTY no longer subscribed or recorded (user's decision 2026-09-29: "ignore the capture of
     # BANKNIFTY for now"); it was recorded, never traded, from 28 Sep. Add it back here to record it.
-    underlyings: [NIFTY, SENSEX]
+    # 15 Oct 2026 (A-108, user ~08:29: "Can we deploy these changes BANKNIFTY now on GCP?"): BANKNIFTY recorded again,
+    # never traded (trade-underlyings below).
+    underlyings: [NIFTY, SENSEX, BANKNIFTY]
     # Strategies trade only these (user's decision 2026-09-27).
     trade-underlyings: [NIFTY, SENSEX]
     fill-model: base
