@@ -1,0 +1,33 @@
+# odm-v4 = odm-v3 (A-088, live PAPER forward test A-089) + a peak trail on the held option, the trend rider's A-049
+# values: armed once the bid is 50 % above the average premium, then exit when the bid falls 15 % below its running peak
+# (user 2026-10-13 ~11:00: "have me register and test a profit-protect version", after odm-v3's 13 Oct SENSEX call peaked
+# at +Rs 3.72L at 09:55 and was +Rs 2.08L at 10:53; its exits are only the session-extreme stop and 12:00). Ledger A-091.
+# 13 Oct is the design day (not in the local data). Everything else is odm-v3. v3 notes follow.
+#
+version: odm-v6
+strategy: opening-drive-momentum
+status: UNCALIBRATED
+source: "A-111 (2026-10-15): odm-v4 without the breadth filter (= odm-v1 + the A-091 peak trail)"
+
+scope:
+  entry_from: "09:21"                  # the first 3-minute closes: 09:21, 09:24, 09:27, 09:30
+  last_new_entry: "09:31"              # exclusive
+  flat_by: "12:00"                     # the screen's exit
+  time_stop_min: 0
+  skip_expiring_index: true            # the expiring index (0 DTE) belongs to the expiry strategies
+
+setup:
+  min_move_pct: 0.2                    # at least 0.2 % from the day's open
+  max_pullback_frac: 0.3               # and still in the outer 30 % of the session's range on that side
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 50                 # emergency only; the index stop (session extreme) comes first
+  use_target: false
+  trail_activation_pct: 50             # v4 (A-091): the trail arms when the held option's bid is 50 % above its cost
+  trail_giveback_pct: 15               # v4: then exit when the bid is 15 % below its running peak
+
