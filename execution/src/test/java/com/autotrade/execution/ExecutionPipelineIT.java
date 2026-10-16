@@ -8,6 +8,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.Map;
 
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterAll;
@@ -69,8 +70,15 @@ class ExecutionPipelineIT {
     private static SignalDecision decision(long group, int seq, String time, String strategy, int priority,
                                            SignalDecision.Action action, double price, double budget, int lots,
                                            String reason) {
-        return new SignalDecision(group, 9001, DAY, ist(time), strategy, priority, "SENSEX", action, "CE", null, "CONFIRMED",
-                reason, 1234, "BSE_FO|1234", "SENSEX 73200 CE", 20, price, budget, 500_000, lots, group + ":9001:" + seq);
+        return decision(group, seq, time, strategy, priority, action, "CE", null, price, budget, lots, reason, Map.of());
+    }
+
+    private static SignalDecision decision(long group, int seq, String time, String strategy, int priority,
+                                           SignalDecision.Action action, String side, String legGroup, double price,
+                                           double budget, int lots, String reason, Map<String, Double> context) {
+        return new SignalDecision(group, 9001, DAY, ist(time), strategy, priority, "SENSEX", action, side, legGroup,
+                "CONFIRMED", reason, "CE".equals(side) ? 1234 : 1235, "BSE_FO|1234", "SENSEX 73200 " + side, 20, price,
+                budget, 500_000, lots, group + ":9001:" + seq, context);
     }
 
     @Test
@@ -97,10 +105,12 @@ class ExecutionPipelineIT {
         SignalDecisionStore store = new SignalDecisionStore(dataSource);
         // odb enters SENSEX 73200 CE at 183.81 with a Rs 5L budget (124 lots on the virtual account), exits at 488.19;
         // etr enters the same contract at 300 with Rs 6L, then a second ENTER while held (skipped), then exits at 281
-        assertThat(store.insert(decision(group, 1, "09:25:00", "opening-drive", 2, SignalDecision.Action.ENTER, 183.81,
-                500_000, 124, "BREAK_PRIOR_ORH"))).isTrue();
-        assertThat(store.insert(decision(group, 1, "09:25:00", "opening-drive", 2, SignalDecision.Action.ENTER, 183.81,
-                500_000, 124, "BREAK_PRIOR_ORH"))).isFalse();                              // same key: ignored
+        Map<String, Double> book = Map.of("liquidity_lots", 124.0, "strategy_lots", 1.0, "intended_lots", 1.0);
+        assertThat(store.insert(decision(group, 1, "09:25:00", "opening-drive", 2, SignalDecision.Action.ENTER, "CE", null,
+                183.81, 500_000, 124, "BREAK_PRIOR_ORH", book))).isTrue();
+        assertThat(store.insert(decision(group, 1, "09:25:00", "opening-drive", 2, SignalDecision.Action.ENTER, "CE", null,
+                183.81, 500_000, 124, "BREAK_PRIOR_ORH", book))).isFalse();               // same key: ignored
+        assertThat(store.forSession(9001).getFirst().context()).containsEntry("liquidity_lots", 124.0);
         store.insert(decision(group, 2, "10:00:00", "opening-drive", 2, SignalDecision.Action.EXIT, 488.19, Double.NaN, 124,
                 "TIME_10:00"));
         store.insert(decision(group, 3, "11:40:00", "expiry-trend-rider", 3, SignalDecision.Action.ENTER, 300.0, 600_000,
@@ -150,5 +160,60 @@ class ExecutionPipelineIT {
         assertThat(jdbc.queryForObject("select quantity_requested from exec.order_execution e join exec.trade_intent i "
                 + "on i.id = e.trade_intent_id where i.broker_account_id = ? and e.role = 'ENTRY'", Long.class, small))
                 .isEqualTo(20L);
+    }
+
+    @Test
+    void aStraddleIsSizedAsAPairAndAPlanAddUsesTheEntryScale() {
+        AccountStore accounts = new AccountStore(dataSource);
+        long tenant = accounts.ensureTenant("owner-2");
+        long owner = accounts.ensureUser("kc-owner-2", "owner");
+        accounts.ensureMembership(tenant, owner, "OWNER");
+        long signal = accounts.ensureSignalSourceAccount(tenant, owner, "SIGNAL-2", 500_000, DAY,
+                "config/risk/signal-source.v2.yaml");
+        long group = accounts.ensureCopyGroup(tenant, "SET-2", signal);
+        long id = accounts.ensureFollowerAccount(tenant, owner, "F-2", BrokerType.PAPER, TradeMode.PAPER, 500_000,
+                EquityMode.FIXED, DAY, "../config/risk/follower-risk.v2.yaml", 100);
+        FanOut fanOut = new FanOut(dataSource);
+        fanOut.subscribe(group, id, List.of("expiry-breakout-straddle", "expiry-trend-rider"), 1.0);
+        SignalDecisionStore store = new SignalDecisionStore(dataSource);
+        java.util.function.IntFunction<String> key = n -> "S2:" + n;
+        // ebs straddle Rs 3L: call 150 + put 100 -> Rs 5,000 per lot pair -> 60 lots each leg; exits per leg
+        store.insert(new SignalDecision(group, 9002, DAY, ist("12:57:00"), "expiry-breakout-straddle", 0, "SENSEX",
+                SignalDecision.Action.ENTER, "CE", "ebs@12:57", "CONFIRMED", "BREAK", 1, null, "SENSEX C", 20, 150, 300_000,
+                500_000, 0, key.apply(1), Map.of("call_ask", 150.0, "put_ask", 100.0)));
+        store.insert(new SignalDecision(group, 9002, DAY, ist("12:57:00"), "expiry-breakout-straddle", 0, "SENSEX",
+                SignalDecision.Action.ENTER, "PE", "ebs@12:57", "CONFIRMED", "BREAK", 2, null, "SENSEX P", 20, 100, 300_000,
+                500_000, 0, key.apply(2), Map.of("call_ask", 150.0, "put_ask", 100.0)));
+        store.insert(new SignalDecision(group, 9002, DAY, ist("13:30:00"), "expiry-breakout-straddle", 0, "SENSEX",
+                SignalDecision.Action.EXIT, "CE", "STRADDLE:CE", null, "TARGET", 1, null, "SENSEX C", 20, 210, Double.NaN,
+                500_000, 0, key.apply(3), Map.of()));
+        store.insert(new SignalDecision(group, 9002, DAY, ist("13:30:00"), "expiry-breakout-straddle", 0, "SENSEX",
+                SignalDecision.Action.EXIT, "PE", "STRADDLE:PE", null, "TARGET", 2, null, "SENSEX P", 20, 90, Double.NaN,
+                500_000, 0, key.apply(4), Map.of()));
+        // etr: plan of 4 units, first tranche 1 unit at 50 with Rs 2L -> scale 2L / (4 x 20 x 50) = 50 -> 50 lots;
+        // an add of 2 units -> 100 lots at the same scale
+        store.insert(new SignalDecision(group, 9002, DAY, ist("14:00:00"), "expiry-trend-rider", 3, "SENSEX",
+                SignalDecision.Action.ENTER, "CE", null, "CONFIRMED", "BREAK", 3, null, "SENSEX E", 20, 50, 200_000, 500_000,
+                50, key.apply(5), Map.of("strategy_lots", 1.0, "intended_lots", 4.0)));
+        store.insert(new SignalDecision(group, 9002, DAY, ist("14:05:00"), "expiry-trend-rider", 3, "SENSEX",
+                SignalDecision.Action.ADD, "CE", null, "RUNNER", "ADD", 3, null, "SENSEX E", 20, 55, Double.NaN, 500_000,
+                100, key.apply(6), Map.of("strategy_lots", 2.0)));
+        assertThat(fanOut.fanOut(group, DAY)).isEqualTo(6);
+        CostModel costs = CostModel.from(ThresholdConfig.load(Path.of("..", "config", "costs",
+                "india-index-options-costs.v2.yaml")));
+        BrokerAccount account = accounts.followers(group).getFirst();
+        FollowerSimulator.DayResult day = new FollowerSimulator(dataSource, costs,
+                FollowerRisk.load(Path.of("../config/risk/follower-risk.v2.yaml")), 1e9).run(account, group, DAY);
+        assertThat(day.executed()).isEqualTo(6);
+        List<Map<String, Object>> legs = jdbc.queryForList("select option_side, quantity_open, average_entry, status "
+                + "from exec.position where broker_account_id = ? and strategy_id = 'expiry-breakout-straddle' order by 1", id);
+        assertThat(legs).extracting(r -> r.get("status")).containsOnly("CLOSED");
+        Long ceQty = jdbc.queryForObject("select quantity_requested from exec.order_execution e join exec.trade_intent i "
+                + "on i.id = e.trade_intent_id where i.broker_account_id = ? and i.option_side = 'CE' and e.role = 'ENTRY' "
+                + "and i.strategy_id = 'expiry-breakout-straddle'", Long.class, id);
+        assertThat(ceQty).isEqualTo(60 * 20);
+        assertThat(jdbc.queryForList("select quantity_requested from exec.order_execution e join exec.trade_intent i "
+                + "on i.id = e.trade_intent_id where i.broker_account_id = ? and i.strategy_id = 'expiry-trend-rider' "
+                + "order by e.id", Long.class, id)).containsExactly(50L * 20, 100L * 20);
     }
 }

@@ -514,3 +514,48 @@ The gap by strategy:
 - the live feed tee for the signal source (a bounded queue, never blocking PAPER-1);
 - `app-execution` intent workers with row-lock claiming and the lease;
 - the daily divergence report.
+
+**L1, straddles and sizing parity, 16 Oct 16:10–17:10.**
+
+**Changes:**
+- **Straddles followed.** Both legs are sized as one pair: floor(min(budget, free capital) / ((call + put ask) x lot)),
+  as the OMS sizes a straddle. Each leg exits on its own `STRADDLE:CE/PE` decision.
+- **Same sizing and checks as PAPER-1's risk engine, in its order:**
+  - plan units (BudgetSizing: lots = floor(strategy lots x budget / (intended lots x lot x price)), scale fixed at the
+    entry and used by every add);
+  - the RVOL boost on spare capital;
+  - max 4 open positions, 400 lots per underlying;
+  - the daily loss latched for the day;
+  - capital (premium in use + entry <= equity).
+
+  `config/risk/follower-risk.v2.yaml`; Flyway **V22** adds the sizing context and `exec.position.sizing_scale`.
+- **Replay depth ceiling.** A follower's position never exceeds what the signal account's own position got filled
+  through the same book (its `trade.position` quantity). This is replay only; a live follower's book decides.
+
+**Results, 26 tick days, PAPER-1 at the follower's ₹5L on every day:**
+
+| Check | Result |
+|---|---|
+| PAPER-1 control vs A-114 | identical 26 of 26 (third time) |
+| DRY_RUN = PAPER follower | 26 of 26 |
+| Days within ±₹10K of PAPER-1 | 19 of 26 (first slice: 9) |
+| PAPER follower total vs PAPER-1 | +₹42.17L vs +₹45.00L (−₹2.84L, −6.3 %); 1 Oct alone −₹2.83L, the other 25 days together −₹0.7K |
+
+Trade by trade:
+
+| | Trades | Net difference |
+|---|---|---|
+| same trade, same quantity | 80 | +₹12K (fill prices) |
+| same trade, other quantity | 12 | −₹3.38L |
+| PAPER-1 only | 5 | −₹54K |
+| follower only | 4 | +₹96K |
+
+**The remaining difference is capital timing.**
+- The signal account never refuses, so it publishes an add at the moment it wants it.
+- A capital-limited account is refused then. PAPER-1's strategy re-asks every snapshot and buys a few minutes later,
+  once capital frees (1 Oct: etr's two adds after ma-cross closed, 2,040 vs 680 units).
+- A follower gets each decision once.
+
+**Fix (next):** a follower keeps a capital-refused ENTER or ADD pending while the signal holds that position, and
+retries when its capital frees, priced at the account's own quote. Live and DRY_RUN workers use the broker's quote;
+the replay simulator uses stored option ticks.

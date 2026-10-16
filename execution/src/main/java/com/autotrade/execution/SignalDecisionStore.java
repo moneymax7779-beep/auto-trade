@@ -5,7 +5,11 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
 import java.time.LocalDate;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import javax.sql.DataSource;
 
@@ -25,13 +29,14 @@ public final class SignalDecisionStore {
         return jdbc.update("insert into exec.signal_decision (copy_group_id, signal_session_id, session_date, decided_at, "
                         + "strategy_id, priority, underlying, action, option_side, leg_group, stage, reason, instrument_token, "
                         + "instrument_key, symbol, lot_size, reference_price, premium_budget, reference_capital, lots, "
-                        + "idempotency_key) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                        + "idempotency_key, context) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                        + "?::jsonb) "
                         + "on conflict (idempotency_key) do nothing",
                 d.copyGroupId(), d.signalSessionId(), Date.valueOf(d.sessionDate()), Timestamp.from(d.decidedAt()),
                 d.strategyId(), d.priority(), d.underlying(), d.action().name(), d.optionSide(), d.legGroup(), d.stage(),
                 d.reason(), d.instrumentToken(), d.instrumentKey(), d.symbol(), d.lotSize(), finite(d.referencePrice()),
                 finite(d.premiumBudget()), finite(d.referenceCapital()), d.lots() > 0 ? d.lots() : null,
-                d.idempotencyKey()) == 1;
+                d.idempotencyKey(), d.contextJson()) == 1;
     }
 
     /** One signal session's decisions in the order they were made. */
@@ -50,6 +55,19 @@ public final class SignalDecisionStore {
         return Double.isFinite(value) ? value : null;
     }
 
+    /** Reads the flat {"key": number|null} object written by {@link SignalDecision#contextJson()}. */
+    static Map<String, Double> context(String json) {
+        Map<String, Double> values = new HashMap<>();
+        if (json == null) {
+            return values;
+        }
+        Matcher m = Pattern.compile("\"([^\"]+)\"\\s*:\\s*(null|-?[0-9.Ee+-]+)").matcher(json);
+        while (m.find()) {
+            values.put(m.group(1), "null".equals(m.group(2)) ? Double.NaN : Double.parseDouble(m.group(2)));
+        }
+        return values;
+    }
+
     private static double orNaN(ResultSet rs, String column) throws SQLException {
         double value = rs.getDouble(column);
         return rs.wasNull() ? Double.NaN : value;
@@ -63,6 +81,6 @@ public final class SignalDecisionStore {
                 rs.getString("leg_group"), rs.getString("stage"), rs.getString("reason"), rs.getLong("instrument_token"),
                 rs.getString("instrument_key"), rs.getString("symbol"), rs.getInt("lot_size"),
                 orNaN(rs, "reference_price"), orNaN(rs, "premium_budget"), orNaN(rs, "reference_capital"),
-                rs.getInt("lots"), rs.getString("idempotency_key"));
+                rs.getInt("lots"), rs.getString("idempotency_key"), context(rs.getString("context")));
     }
 }

@@ -389,8 +389,14 @@ public final class TradingSession {
                 if (signals != null && result.approved()) {
                     // the lots published are those the order book allows (risk v12 participation), the follower's ceiling
                     long cap = oms.participationCapQuantity(contract.get()) / contract.get().lotSize();
+                    Map<String, Double> signalSizing = new HashMap<>();
+                    signalSizing.put("strategy_lots", (double) intent.lots());
+                    signalSizing.put("intended_lots", (double) slot.factory().intendedLots());
+                    signalSizing.put("liquidity_lots", cap >= Long.MAX_VALUE / contract.get().lotSize() ? Double.NaN : cap);
+                    signalSizing.put("rvol_tod", snapshot.futures().rvolTod());
+                    signalSizing.put("stop_pct", stopPct);
                     signals.entered(clock.get(), strategyId, underlying, intent.side(), contract.get(), ask, budget,
-                            (int) Math.min(lots, cap), intent.stage().name(), intent.reason(), null);
+                            (int) Math.min(lots, cap), intent.stage().name(), intent.reason(), null, signalSizing);
                 }
             }
             case ENTER_STRADDLE -> {
@@ -415,10 +421,12 @@ public final class TradingSession {
                 candidate(strategyId, underlying, snapshot, decision, intent, result.approved(), result.reason());
                 if (signals != null && result.approved()) {
                     String group = strategyId + "@" + time;
+                    Map<String, Double> legs = Map.of("call_ask", oms.ask(call.get()), "put_ask", oms.ask(put.get()),
+                            "stop_pct", straddleStop);
                     signals.entered(clock.get(), strategyId, underlying, OptionSide.CE, call.get(), oms.ask(call.get()),
-                            straddleBudget, 0, intent.stage().name(), intent.reason(), group);
+                            straddleBudget, 0, intent.stage().name(), intent.reason(), group, legs);
                     signals.entered(clock.get(), strategyId, underlying, OptionSide.PE, put.get(), oms.ask(put.get()),
-                            straddleBudget, 0, intent.stage().name(), intent.reason(), group);
+                            straddleBudget, 0, intent.stage().name(), intent.reason(), group, legs);
                 }
             }
             case ADD -> {
@@ -433,7 +441,8 @@ public final class TradingSession {
                     oms.livePositions().stream()
                             .filter(p -> p.strategy().equals(strategyId) && p.underlying().equals(underlying))
                             .findFirst().ifPresent(p -> signals.added(clock.get(), strategyId, underlying, p.side(),
-                                    p.contract(), oms.ask(p.contract()), lots, intent.stage().name(), intent.reason()));
+                                    p.contract(), oms.ask(p.contract()), lots, intent.stage().name(), intent.reason(),
+                                    Map.of("strategy_lots", (double) intent.lots())));
                 }
             }
             case EXIT -> {

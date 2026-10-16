@@ -51,16 +51,17 @@ final class SignalRecorder {
         this.session = day;
     }
 
+    /** {@code context}: the sizing inputs followers need (V22: strategy_lots, intended_lots, liquidity_lots, ...). */
     void entered(Instant at, String strategyId, String underlying, OptionSide side, Contract contract, double ask,
-                 double budget, int lots, String stage, String reason, String legGroup) {
+                 double budget, int lots, String stage, String reason, String legGroup, Map<String, Double> context) {
         write(at, strategyId, underlying, SignalDecision.Action.ENTER, side, contract, ask, budget, lots, stage, reason,
-                legGroup);
+                legGroup, context);
     }
 
     void added(Instant at, String strategyId, String underlying, OptionSide side, Contract contract, double ask,
-               int lots, String stage, String reason) {
+               int lots, String stage, String reason, Map<String, Double> context) {
         write(at, strategyId, underlying, SignalDecision.Action.ADD, side, contract, ask, Double.NaN, lots, stage, reason,
-                null);
+                null, context);
     }
 
     /** A single-leg position's leg is "" (no leg group); a straddle leg's exit is marked STRADDLE:CE / STRADDLE:PE. */
@@ -69,12 +70,13 @@ final class SignalRecorder {
         write(at, position.strategy(), position.underlying(), SignalDecision.Action.EXIT, position.side(),
                 position.contract(), position.lastBid(), Double.NaN, position.lots(), null,
                 position.exitReason() == null ? "CLOSED" : position.exitReason(),
-                position.leg() == null || position.leg().isEmpty() ? null : "STRADDLE:" + position.leg());
+                position.leg() == null || position.leg().isEmpty() ? null : "STRADDLE:" + position.leg(),
+                Map.of("bought_quantity", (double) position.boughtQuantity()));
     }
 
     private void write(Instant at, String strategyId, String underlying, SignalDecision.Action action, OptionSide side,
                        Contract contract, double price, double budget, int lots, String stage, String reason,
-                       String legGroup) {
+                       String legGroup, Map<String, Double> context) {
         if (sessionId == 0) {
             return;
         }
@@ -84,7 +86,7 @@ final class SignalRecorder {
                     priorities.getOrDefault(strategyId, priorities.size()), underlying, action, side.name(), legGroup,
                     stage, reason == null ? action.name() : reason, contract.token(), contract.instrumentKey(),
                     contract.symbol(), contract.lotSize(), price, budget, referenceCapital, lots,
-                    copyGroupId + ":" + sessionId + ":" + seq));
+                    copyGroupId + ":" + sessionId + ":" + seq, context));
         } catch (RuntimeException e) {
             log.warn("signal decision not recorded ({} {} {} {}): {}", strategyId, underlying, action, side,
                     e.getMessage());

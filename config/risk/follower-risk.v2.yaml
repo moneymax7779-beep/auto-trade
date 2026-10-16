@@ -1,0 +1,25 @@
+# Follower risk v2 (16 Oct 2026, user: "continue L1, follow straddles and fix the sizing parity"): v1 plus the rest of
+# paper-risk v17's entry rules, so a follower sizes and refuses exactly as PAPER-1's risk engine does for the same equity:
+# the RVOL boost (x1.5 when futures RVOL >= 1.5, spare capital only, at most 97 % of free capital), at most 4 open
+# positions (adds excepted) and 400 lots per underlying; the daily loss limit latches for the rest of the day (as the
+# account kill switch). Known difference: the follower's day net is realised only (PAPER-1's includes open positions).
+version: follower-risk-v2
+name: follower-risk
+status: UNCALIBRATED
+
+capital:
+  daily_loss_pct: 22                   # as paper-risk v17
+  max_premium_per_trade_pct: 100
+  max_open_premium_pct: 100            # premium in use + this entry <= equity (paper-risk v17's capital check)
+  broker_funds_buffer_pct: 10
+
+positions:                             # as paper-risk v17
+  max_open_positions: 4
+  max_lots_per_underlying: 400
+
+sizing:                                # as paper-risk v17
+  rvol_boost_threshold: 1.5
+  rvol_boost_factor: 1.5
+
+simulation:
+  adverse_bps: 0                       # as the costs file's base fill model
