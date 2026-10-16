@@ -36,6 +36,7 @@
         <module>marketdata-live</module>
         <module>broker-upstox</module>
         <module>account</module>
+        <module>execution</module>
         <module>app-trading-core</module>
         <module>autotrade-tools</module>
     </modules>
@@ -141,6 +142,11 @@
             <dependency>
                 <groupId>com.autotrade</groupId>
                 <artifactId>account</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.autotrade</groupId>
+                <artifactId>execution</artifactId>
                 <version>${project.version}</version>
             </dependency>
         </dependencies>

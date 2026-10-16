@@ -116,6 +116,8 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                 case "vix-backfill" -> vixBackfill(parsed);
                 case "upstox-feed-check" -> upstoxFeedCheck(parsed);
                 case "account-register-paper" -> accountRegisterPaper(parsed);
+                case "follower-add" -> followerAdd(parsed);
+                case "follow" -> follow(parsed);
                 default -> usage("unknown command: " + parsed.command());
             };
         } catch (IllegalArgumentException e) {
@@ -165,6 +167,12 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                   account-register-paper --subject S --name N [--tenant owner] [--label PAPER-1] [--capital 500000]
                           [--equity-from 2026-10-07] [--risk-file config/risk/paper-risk.v17.yaml]
                                                              register an existing PAPER label as an acct.broker_account (once)
+                  follower-add --label L --capital N --strategies a,b [--broker PAPER|ZERODHA] [--mode PAPER|DRY_RUN]
+                          [--equity-mode FIXED|COMPOUNDING] [--equity-from D] [--size-step 100] [--multiplier 1]
+                          [--copy-group LIVE-SET] [--tenant owner] [--risk-file config/risk/follower-risk.v1.yaml]
+                                                             a follower account subscribed to a copy group (never live)
+                  follow --session D[,D] [--copy-group LIVE-SET] [--tenant owner] [--broker-funds 1e9]
+                                                             fan out the signal source's decisions and run PAPER/DRY_RUN followers
                                                              and count what arrives (one of the 2 allowed connections)
                   vix-backfill [--daily-from D] [--minutes-from D] [--to D]
                                                              India VIX daily and one-minute bars from Upstox's public
@@ -429,6 +437,59 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
         System.out.printf("broker account %d: %s, %s %s, role %s, capital %.0f (%s from %s), risk %s%n", id,
                 account.displayName(), account.brokerType(), account.tradeMode(), account.role(),
                 account.allocatedCapital(), account.equityMode(), account.equityFrom(), account.riskFile());
+        return 0;
+    }
+
+    /** Live execution L1: a PAPER or DRY_RUN follower account subscribed to strategies of a copy group. */
+    private int followerAdd(ToolArgs args) {
+        args.allowOnly(Set.of("label", "capital", "strategies", "broker", "mode", "equity-mode", "equity-from", "size-step",
+                "multiplier", "copy-group", "tenant", "risk-file"));
+        if (!args.has("label") || !args.has("capital") || !args.has("strategies")) {
+            return usage("follower-add needs --label, --capital and --strategies");
+        }
+        com.autotrade.account.AccountStore accounts = new com.autotrade.account.AccountStore(target);
+        long tenant = accounts.ensureTenant(args.get("tenant", "owner"));
+        long group = accounts.copyGroupId(tenant, args.get("copy-group", "LIVE-SET")).orElseThrow(
+                () -> new IllegalArgumentException("no copy group yet: run a signal-source replay first"));
+        long owner = new org.springframework.jdbc.core.JdbcTemplate(target).queryForObject(
+                "select app_user_id from acct.tenant_membership where tenant_id = ? and role = 'OWNER' order by app_user_id "
+                        + "limit 1", Long.class, tenant);
+        long id = accounts.ensureFollowerAccount(tenant, owner, args.get("label", ""),
+                com.autotrade.account.BrokerType.valueOf(args.get("broker", "PAPER")),
+                com.autotrade.account.TradeMode.valueOf(args.get("mode", "PAPER")),
+                Double.parseDouble(args.get("capital", "0")),
+                com.autotrade.account.EquityMode.valueOf(args.get("equity-mode", "FIXED")),
+                LocalDate.parse(args.get("equity-from", LocalDate.now(MarketTime.IST).toString())),
+                args.get("risk-file", "config/risk/follower-risk.v1.yaml"), Double.parseDouble(args.get("size-step", "100")));
+        new com.autotrade.execution.FanOut(target).subscribe(group, id, args.list("strategies", ""),
+                Double.parseDouble(args.get("multiplier", "1")));
+        System.out.printf("follower %d %s subscribed to %s in copy group %d%n", id, args.get("label", ""),
+                args.list("strategies", ""), group);
+        return 0;
+    }
+
+    /** Live execution L1: fans out each day's signal decisions and runs the copy group's PAPER and DRY_RUN followers. */
+    private int follow(ToolArgs args) {
+        args.allowOnly(Set.of("session", "copy-group", "tenant", "broker-funds"));
+        com.autotrade.account.AccountStore accounts = new com.autotrade.account.AccountStore(target);
+        long tenant = accounts.ensureTenant(args.get("tenant", "owner"));
+        long group = accounts.copyGroupId(tenant, args.get("copy-group", "LIVE-SET")).orElseThrow(
+                () -> new IllegalArgumentException("no copy group yet: run a signal-source replay first"));
+        com.autotrade.sim.CostModel costs = com.autotrade.sim.CostModel.from(
+                com.autotrade.config.ThresholdConfig.load(Path.of("config/costs/india-index-options-costs.v2.yaml")));
+        com.autotrade.execution.FanOut fanOut = new com.autotrade.execution.FanOut(target);
+        double funds = Double.parseDouble(args.get("broker-funds", "1e9"));
+        for (LocalDate day : args.dates("session")) {
+            int intents = fanOut.fanOut(group, day);
+            System.out.printf("%s: %d intents%n", day, intents);
+            for (com.autotrade.account.BrokerAccount account : accounts.followers(group)) {
+                com.autotrade.execution.FollowerRisk risk = com.autotrade.execution.FollowerRisk.load(Path.of(account.riskFile()));
+                var result = new com.autotrade.execution.FollowerSimulator(target, costs, risk, funds).run(account, group, day);
+                System.out.printf("  %-10s %-7s executed %d, skipped %d, rejected %d, closed %d, net %.0f  %s%n",
+                        result.account(), account.tradeMode(), result.executed(), result.skipped(), result.rejected(),
+                        result.closed(), result.net(), result.reasons());
+            }
+        }
         return 0;
     }
 

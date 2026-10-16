@@ -60,6 +60,10 @@
             <artifactId>account</artifactId>
         </dependency>
         <dependency>
+            <groupId>com.autotrade</groupId>
+            <artifactId>execution</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-jdbc</artifactId>
         </dependency>

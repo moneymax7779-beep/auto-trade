@@ -766,6 +766,24 @@ public final class OrderManager implements Consumer<OrderUpdate> {
     }
 
     /** risk v12: the premium traded in this option over the last minute (0 without a minute of samples). */
+    /**
+     * Read only (live execution L1): the largest entry quantity risk v12's participation cap allows in {@code contract}
+     * now, in units (whole lots, at least one); {@code Long.MAX_VALUE} when no cap applies. Changes nothing.
+     */
+    public synchronized long participationCapQuantity(Contract contract) {
+        if (!(limits.maxParticipationPct() > 0)) {
+            return Long.MAX_VALUE;
+        }
+        double[] quote = lastQuotes.get(contract.token());
+        double ask = quote != null ? quote[1] : Double.NaN;
+        double traded = tradedPremiumLastMinute(contract.token());
+        if (!(ask > 0) || !(traded > 0)) {
+            return Long.MAX_VALUE;
+        }
+        long lot = contract.lotSize();
+        return Math.max(lot, (long) (traded * limits.maxParticipationPct() / 100.0 / ask) / lot * lot);
+    }
+
     private double tradedPremiumLastMinute(long token) {
         java.util.ArrayDeque<double[]> samples = volumeSamples.get(token);
         if (samples == null || samples.size() < 2) {

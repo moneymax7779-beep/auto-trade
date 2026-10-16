@@ -60,6 +60,59 @@ public final class AccountStore {
                 legacyLabel);
     }
 
+    /**
+     * The virtual signal-source account of a copy group (PAPER broker, role SIGNAL_SOURCE), created once under its
+     * label (SIGNAL-1). Its capital is the reference capital the strategy budgets are published against.
+     */
+    public long ensureSignalSourceAccount(long tenantId, long appUserId, String label, double referenceCapital,
+                                          LocalDate equityFrom, String riskFile) {
+        jdbc.update("insert into acct.broker_account (tenant_id, app_user_id, broker_type, display_name, "
+                        + "legacy_account_label, account_role, connection_status, trade_mode, allocated_capital, "
+                        + "equity_mode, equity_from, risk_file, enabled) values (?, ?, 'PAPER', ?, ?, 'SIGNAL_SOURCE', "
+                        + "'ACTIVE', 'PAPER', ?, 'FIXED', ?, ?, true) on conflict (legacy_account_label) do nothing",
+                tenantId, appUserId, label, label, referenceCapital, Date.valueOf(equityFrom), riskFile);
+        return jdbc.queryForObject("select id from acct.broker_account where legacy_account_label = ?", Long.class, label);
+    }
+
+    /**
+     * A follower account (role FOLLOWER_TRADE, enabled) created once under its label; PAPER broker accounts are PAPER
+     * mode, real-broker accounts start in DRY_RUN or PAPER and are never created live (live is a separate, explicit step).
+     */
+    public long ensureFollowerAccount(long tenantId, long appUserId, String label, BrokerType broker, TradeMode mode,
+                                      double allocatedCapital, EquityMode equityMode, LocalDate equityFrom,
+                                      String riskFile, double sizeStepPct) {
+        if (mode == TradeMode.LIVE) {
+            throw new IllegalArgumentException("a follower is never created live");
+        }
+        jdbc.update("insert into acct.broker_account (tenant_id, app_user_id, broker_type, display_name, "
+                        + "legacy_account_label, account_role, connection_status, trade_mode, allocated_capital, equity_mode, "
+                        + "equity_from, risk_file, size_step_pct, enabled) values (?, ?, ?, ?, ?, 'FOLLOWER_TRADE', ?, ?, ?, ?, "
+                        + "?, ?, ?, true) on conflict (legacy_account_label) do nothing",
+                tenantId, appUserId, broker.name(), label, label, broker == BrokerType.PAPER ? "ACTIVE" : "PENDING_CONNECT",
+                mode.name(), allocatedCapital, equityMode.name(), Date.valueOf(equityFrom), riskFile, sizeStepPct);
+        return jdbc.queryForObject("select id from acct.broker_account where legacy_account_label = ?", Long.class, label);
+    }
+
+    /** Enabled follower accounts subscribed to a copy group (any strategy). */
+    public List<BrokerAccount> followers(long copyGroupId) {
+        return jdbc.query("select " + ACCOUNT_COLUMNS + " from acct.broker_account a where a.account_role = 'FOLLOWER_TRADE' "
+                + "and a.enabled and exists (select 1 from acct.strategy_subscription s where s.broker_account_id = a.id "
+                + "and s.copy_group_id = ? and s.enabled) order by a.id", AccountStore::account, copyGroupId);
+    }
+
+    public Optional<Long> copyGroupId(long tenantId, String name) {
+        return jdbc.queryForList("select id from acct.copy_group where tenant_id = ? and name = ?", Long.class, tenantId,
+                name).stream().findFirst();
+    }
+
+    /** The copy group's id, created once (enabled) for the given signal-source account. */
+    public long ensureCopyGroup(long tenantId, String name, long signalSourceAccountId) {
+        jdbc.update("insert into acct.copy_group (tenant_id, name, signal_source_account_id, enabled) values (?, ?, ?, true) "
+                + "on conflict (tenant_id, name) do nothing", tenantId, name, signalSourceAccountId);
+        return jdbc.queryForObject("select id from acct.copy_group where tenant_id = ? and name = ?", Long.class,
+                tenantId, name);
+    }
+
     public Optional<BrokerAccount> byLegacyLabel(String legacyLabel) {
         return jdbc.query("select " + ACCOUNT_COLUMNS + " from acct.broker_account a where a.legacy_account_label = ?",
                 AccountStore::account, legacyLabel).stream().findFirst();

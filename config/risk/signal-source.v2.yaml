@@ -1,0 +1,48 @@
+# Signal source v2 (16 Oct ~07:55, L1 review): v1 + risk v17's liquidity rules (max_participation_pct 2, entry slices of
+# 0.5 % depth). v1 sized the virtual account to the full budget whatever the book held, so followers copied sizes no
+# order book had (13 Oct: 24,830 NIFTY 22600 CE units vs PAPER-1's 3,510). The participation cap never refuses (it
+# reduces to at least one lot), so the signal still never loses track of a position; its published lots are the
+# followers' ceiling.
+# v1: Signal source v1 (live execution L1, docs/LIVE-TRADING-PLAN.md section 1; 16 Oct 2026, user: "start L1").
+# The risk file of the virtual SIGNAL-1 account that runs the strategies once per copy group. Its decisions fan out to
+# follower accounts, which apply their own capital, risk and broker rules. It must never refuse an entry for capital,
+# loss limits or liquidity, otherwise a strategy would lose track of a position that followers hold. So the account
+# limits are set out of reach, while the data and time rules stay exactly those of paper-risk v17: a signal is never
+# taken on stale or wide quotes, after 14:45, or past the 15:36 square-off. Never used for PAPER-1 or any real account.
+version: signal-source-v2
+name: signal-source
+status: UNCALIBRATED
+
+account:
+  capital: 1000000000                  # Rs 100 Cr: never binds; fixed capital (no equity mode), so budgets are the files'
+  starting_capital: 500000             # the reference capital the strategy files' budgets are written for (published
+                                       # with every decision; a follower scales a budget by its equity / this)
+  daily_loss_limit: 1000000000         # never engages the kill switch
+  max_open_positions: 100
+  max_lots_per_underlying: 1000000
+  max_orders_per_minute: 1000
+
+sizing:
+  max_participation_pct: 2             # v2: as paper-risk v17 (v1: 0, no cap)
+  premium_budget_pct: 100
+
+time:                                  # as paper-risk v17
+  no_new_entries_after: "14:45"
+  square_off_at: "15:36"
+  cas_entry_window: "15:20-15:30"
+
+data:                                  # as paper-risk v17
+  max_feed_age_sec: 5
+  max_spread_pct: 1.5
+
+orders:                                # as paper-risk v17
+  entry_buffer_ticks: 4
+  exit_buffer_ticks: 4
+  exit_buffer_pct: 1.0
+  entry_slice_depth_pct: 0.5           # v2: as paper-risk v17 (v1: 0)
+  entry_slice_max_drift_pct: 2
+  entry_timeout_sec: 10
+  exit_chase_sec: 2
+  exit_chase_max: 6
+  stop_limit_offset_pct: 5
+  reconcile_every_sec: 30

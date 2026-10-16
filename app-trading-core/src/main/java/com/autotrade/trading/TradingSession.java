@@ -128,6 +128,7 @@ public final class TradingSession {
     private volatile String status = "STARTING";
     private com.autotrade.md.store.SnapshotWriter snapshotWriter;
     private final Map<String, FeatureSnapshot> lastSnapshots = new LinkedHashMap<>();
+    private SignalRecorder signals;                       // live execution L1: only on the signal-source session
 
     public TradingSession(Settings settings, LiveFeed feed, TradeStore store) {
         this.settings = settings;
@@ -183,6 +184,9 @@ public final class TradingSession {
                 settings.session(), broker, risk, settings.costs(), primary.premiumStopPct(), clock,
                 new StoreListener());
         status = "RUNNING";
+        if (signals != null) {
+            signals.start(sessionId, settings.session());
+        }
         log.info("trading session {} ({} {}, {}) started on {}", sessionId, settings.mode(), settings.session(),
                 settings.account(), feed.name());
         String error = null;
@@ -213,6 +217,14 @@ public final class TradingSession {
     /** Saves every feature snapshot (the live decision evidence, and later IV history) through {@code writer}. */
     public void recordSnapshots(com.autotrade.md.store.SnapshotWriter writer) {
         this.snapshotWriter = writer;
+    }
+
+    /**
+     * Live execution L1: makes this session a signal source whose approved entries and adds, and every position close,
+     * are recorded as exec.signal_decision rows. Only the signal-source session has one; PAPER-1 never does.
+     */
+    void publishSignals(SignalRecorder recorder) {
+        this.signals = recorder;
     }
 
     private void onEvent(MarketEvent event) {
@@ -374,6 +386,12 @@ public final class TradingSession {
                 }
                 logDecision(strategyId, underlying, intent, lots, result, contract.get());
                 candidate(strategyId, underlying, snapshot, decision, intent, result.approved(), result.reason());
+                if (signals != null && result.approved()) {
+                    // the lots published are those the order book allows (risk v12 participation), the follower's ceiling
+                    long cap = oms.participationCapQuantity(contract.get()) / contract.get().lotSize();
+                    signals.entered(clock.get(), strategyId, underlying, intent.side(), contract.get(), ask, budget,
+                            (int) Math.min(lots, cap), intent.stage().name(), intent.reason(), null);
+                }
             }
             case ENTER_STRADDLE -> {
                 double atm = snapshot.options().atmStrike();
@@ -395,6 +413,13 @@ public final class TradingSession {
                         call.get().symbol(), put.get().symbol(), Math.round(straddleBudget),
                         result.approved() ? "APPROVED" : "REJECTED: " + result.reason());
                 candidate(strategyId, underlying, snapshot, decision, intent, result.approved(), result.reason());
+                if (signals != null && result.approved()) {
+                    String group = strategyId + "@" + time;
+                    signals.entered(clock.get(), strategyId, underlying, OptionSide.CE, call.get(), oms.ask(call.get()),
+                            straddleBudget, 0, intent.stage().name(), intent.reason(), group);
+                    signals.entered(clock.get(), strategyId, underlying, OptionSide.PE, put.get(), oms.ask(put.get()),
+                            straddleBudget, 0, intent.stage().name(), intent.reason(), group);
+                }
             }
             case ADD -> {
                 int lots = sizings.getOrDefault(strategyId + "|" + underlying, NO_BUDGET).lots(intent.lots());
@@ -404,6 +429,12 @@ public final class TradingSession {
                 RiskDecision result = oms.add(strategyId, underlying, lots, intent.stage().name(), market);
                 logDecision(strategyId, underlying, intent, lots, result, null);
                 candidate(strategyId, underlying, snapshot, decision, intent, result.approved(), result.reason());
+                if (signals != null && result.approved()) {
+                    oms.livePositions().stream()
+                            .filter(p -> p.strategy().equals(strategyId) && p.underlying().equals(underlying))
+                            .findFirst().ifPresent(p -> signals.added(clock.get(), strategyId, underlying, p.side(),
+                                    p.contract(), oms.ask(p.contract()), lots, intent.stage().name(), intent.reason()));
+                }
             }
             case EXIT -> {
                 oms.exit(strategyId, underlying, intent.reason());
@@ -782,6 +813,9 @@ public final class TradingSession {
         @Override
         public void closed(ManagedPosition position) {
             store.position(sessionId, position);
+            if (signals != null) {
+                signals.closed(position);
+            }
             log.info("{} {} {} closed: {} net ₹{}", position.closedAt().atZone(MarketTime.IST).toLocalTime().withNano(0),
                     position.underlying(), position.contract().symbol(), position.exitReason(), Math.round(position.net()));
         }

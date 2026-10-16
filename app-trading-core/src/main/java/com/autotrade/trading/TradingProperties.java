@@ -5,7 +5,41 @@ import java.util.List;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
 @ConfigurationProperties(prefix = "autotrade")
-public record TradingProperties(Trading trading, Source source, Upstox upstox) {
+public record TradingProperties(Trading trading, Source source, Upstox upstox, SignalSource signalSource) {
+
+    /**
+     * Live execution L1 (docs/LIVE-TRADING-PLAN.md): {@code autotrade.signal-source.enabled=true} runs the session as the
+     * copy group's signal source: account {@code account} (SIGNAL-1) with {@code riskFile} (signal-source.v2, never
+     * refuses), its approved entries and every close recorded as exec.signal_decision. Absent or false = off (default).
+     * Replay only until the live feed tee exists.
+     */
+    public record SignalSource(Boolean enabled, String account, String riskFile, String copyGroup, String tenant,
+                               String ownerSubject) {
+
+        public boolean on() {
+            return Boolean.TRUE.equals(enabled);
+        }
+
+        public String accountLabel() {
+            return account == null || account.isBlank() ? "SIGNAL-1" : account;
+        }
+
+        public String riskFileOr() {
+            return riskFile == null || riskFile.isBlank() ? "config/risk/signal-source.v2.yaml" : riskFile;
+        }
+
+        public String copyGroupName() {
+            return copyGroup == null || copyGroup.isBlank() ? "LIVE-SET" : copyGroup;
+        }
+
+        public String tenantName() {
+            return tenant == null || tenant.isBlank() ? "owner" : tenant;
+        }
+
+        public String ownerSubjectOr() {
+            return ownerSubject == null || ownerSubject.isBlank() ? "local-owner" : ownerSubject;
+        }
+    }
 
     public record Upstox(String tokenFile, String tokenSource, String instrumentDir, int strikesEachSide, int recenterStrikes) {
     }

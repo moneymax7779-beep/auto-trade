@@ -372,7 +372,14 @@ class SessionRunner implements ApplicationRunner {
         ThresholdConfig featuresFile = ThresholdConfig.load(Path.of(t.featuresFile()));
         ThresholdConfig exchangeFile = ThresholdConfig.load(Path.of(t.exchangeFile()));
         ThresholdConfig costsFile = ThresholdConfig.load(Path.of(t.costsFile()));
-        ThresholdConfig riskFile = ThresholdConfig.load(Path.of(t.riskFile()));
+        // live execution L1: a signal-source session trades the virtual SIGNAL-1 account under signal-source.v1
+        TradingProperties.SignalSource signal = properties.signalSource();
+        boolean signalSource = signal != null && signal.on();
+        if (signalSource && !replay) {
+            throw new IllegalStateException("autotrade.signal-source runs in --mode=replay only (live execution L1)");
+        }
+        String account = signalSource ? signal.accountLabel() : t.account();
+        ThresholdConfig riskFile = ThresholdConfig.load(Path.of(signalSource ? signal.riskFileOr() : t.riskFile()));
         FeatureConfig features = FeatureConfig.from(featuresFile, exchangeFile);
         if (!new SessionClock(features).isTradingDay(session)) {
             log.warn("{} is not a trading day (weekend or exchange holiday); no session", session);
@@ -459,18 +466,31 @@ class SessionRunner implements ApplicationRunner {
         RiskLimits baseRisk = RiskLimits.from(riskFile);
         RiskLimits risk = EquityLedger.apply(baseRisk,
                 replay ? t.replayRealisedNet(baseRisk.startingCapital())
-                        : new EquityLedger(target).realisedNet(t.account(), baseRisk.equityFrom()));
+                        : new EquityLedger(target).realisedNet(account, baseRisk.equityFrom()));
         if (risk.equityMode()) {
             log.info("sizing from equity: capital {} (starting {}), daily loss limit {}, budget scale {}",
                     Math.round(risk.capital()), Math.round(risk.startingCapital()), Math.round(risk.dailyLossLimit()),
                     String.format("%.2f", risk.budgetScale()));
         }
         TradingSession.Settings settings = new TradingSession.Settings(
-                replay ? TradingSession.Mode.PAPER_REPLAY : TradingSession.Mode.PAPER_LIVE, t.account(), session,
+                replay ? TradingSession.Mode.PAPER_REPLAY : TradingSession.Mode.PAPER_LIVE, account, session,
                 t.underlyings(), t.tradeUnderlyingList(), features, history, strategies,
                 risk, CostModel.from(costsFile), FillModel.from(costsFile, t.fillModel()),
                 instruments, hashes, CodeVersion.current());
         TradingSession trading = new TradingSession(settings, feed, new TradeStore(target));
+        if (signalSource) {
+            com.autotrade.account.AccountStore accounts = new com.autotrade.account.AccountStore(target);
+            long tenant = accounts.ensureTenant(signal.tenantName());
+            long owner = accounts.ensureUser(signal.ownerSubjectOr(), "owner");
+            accounts.ensureMembership(tenant, owner, "OWNER");
+            long signalAccount = accounts.ensureSignalSourceAccount(tenant, owner, account, baseRisk.startingCapital(),
+                    session, signal.riskFileOr());
+            long copyGroup = accounts.ensureCopyGroup(tenant, signal.copyGroupName(), signalAccount);
+            trading.publishSignals(new SignalRecorder(new com.autotrade.execution.SignalDecisionStore(target), copyGroup,
+                    baseRisk.startingCapital(), strategies.stream().map(StrategyFactory::id).toList()));
+            log.info("signal source: account {} (risk {}), copy group {} (id {})", account, signal.riskFileOr(),
+                    signal.copyGroupName(), copyGroup);
+        }
         current = trading;
 
         ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor();

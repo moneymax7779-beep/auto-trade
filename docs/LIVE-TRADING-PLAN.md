@@ -465,3 +465,52 @@ market protection, order tag length, postbacks and autoslice.
 - the virtual signal account;
 - batches and intents with workers in `app-execution`;
 - DRY_RUN and PAPER followers on the Mac.
+
+**L1, first slice, 16 Oct 03:00–08:15 (branch, Mac only, nothing on GCP).**
+
+**Built:**
+- `SignalRecorder`: an optional hook on TradingSession; only the signal-source session has one.
+- `autotrade.signal-source.*`: a replay option, run as account SIGNAL-1 under `config/risk/signal-source.v2.yaml`
+  (never refuses for capital or loss; risk v17's liquidity rules).
+- The `execution` module:
+  - `SignalDecisionStore`;
+  - `FanOut` (one batch per decision, one intent per subscribed follower, idempotent);
+  - `FollowerSimulator` (PAPER and DRY_RUN followers: equity sizing, the size step, the signal's lots as the liquidity
+    ceiling, `CapitalPolicy` refusals, skips for positions not held and for straddles);
+  - `config/risk/follower-risk.v1.yaml`.
+- `OrderManager.participationCapQuantity`: read only.
+- CLI: `follower-add`, `follow`.
+- Tests: `ExecutionPipelineIT`; the full build is green.
+- V21 is now applied to the Mac's database (additive; the main-branch serve container ignores it as a future
+  migration). It is still applied nowhere on GCP.
+
+**Checks on the 26 genuine tick days** (`.local/l1`, A-114's days and set):
+
+| Check | Result |
+|---|---|
+| PAPER-1 unchanged: control replays on the branch image vs A-114's control | **identical on 26 of 26 days**, run twice (after each code change) |
+| DRY_RUN follower = PAPER follower (same decisions, rejections, net) | **26 of 26 days** |
+| PAPER follower (₹5L FIXED, all six strategies) vs PAPER-1 | **+₹39.14L vs +₹44.47L (−₹5.33L, −12 %): not yet a match** |
+
+The gap by strategy:
+
+| Strategy | Gap | Cause |
+|---|---|---|
+| ebs | −₹3.05L | straddles not followed in L1 |
+| etr | −₹5.60L | sizing rules differ (PAPER-1's risk engine, including the RVOL boost, vs `CapitalPolicy`); PAPER-1's 14/15 Oct replays used its chained equity (₹10.7L / ₹7.6L), the follower a fixed ₹5L |
+| ma-cross | −₹85K | as above |
+| odb | +₹4.01L | smaller size on 14 Oct and different refusals |
+
+**Two bugs found in this check, fixed:**
+- **Single-leg exits stored as straddle legs.** `ManagedPosition.leg()` is "" for a single-leg position. They are now
+  null, and the 118 recorded rows were corrected.
+- **Signal source v1 had no liquidity rule.** Followers copied sizes no order book had (13 Oct: 24,830 vs 3,510 units).
+  Fixed by `signal-source.v2` and by using the signal's lots as the ceiling.
+
+**To finish L1:**
+- follow straddles (both legs, one group);
+- follower sizing on the same rules as the account's risk file (RVOL boost, budget handling) and a run at equal equity,
+  to close the PAPER-1 gap or explain each remaining trade;
+- the live feed tee for the signal source (a bounded queue, never blocking PAPER-1);
+- `app-execution` intent workers with row-lock claiming and the lease;
+- the daily divergence report.

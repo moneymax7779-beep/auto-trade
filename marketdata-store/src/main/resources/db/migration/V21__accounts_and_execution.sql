@@ -113,17 +113,18 @@ create table acct.copy_group (
     unique (tenant_id, name)
 );
 
--- Which versioned strategy files a follower takes from a copy group, at which size and mode.
+-- Which of the signal source's strategies (by strategy id; the versions are the signal source's files) a follower takes,
+-- at which size and mode.
 create table acct.strategy_subscription (
     id                bigserial     primary key,
     copy_group_id     bigint        not null references acct.copy_group (id),
     broker_account_id bigint        not null references acct.broker_account (id),
-    strategy_file     text          not null,
+    strategy_id       text          not null,
     enabled           boolean       not null default false,
     mode_override     text          check (mode_override in ('PAPER', 'DRY_RUN', 'LIVE')),
     size_multiplier   numeric(6, 3) not null default 1 check (size_multiplier > 0),
     created_at        timestamptz   not null default now(),
-    unique (copy_group_id, broker_account_id, strategy_file)
+    unique (copy_group_id, broker_account_id, strategy_id)
 );
 
 -- ---------------------------------------------------------------- capital and ledger
@@ -161,27 +162,33 @@ create table acct.ledger_day (
 
 -- ---------------------------------------------------------------- execution pipeline
 
--- A broker-neutral decision of a signal source (strategies on a virtual account that is never refused).
+-- A broker-neutral decision of a signal source (strategies on a virtual account that is never refused). ENTER and ADD
+-- are published when the virtual account's risk approves them; EXIT when its position closes, for any reason (strategy
+-- exit, premium stop, trail, square-off, session end). A straddle's two legs share leg_group.
 create table exec.signal_decision (
-    id               bigserial        primary key,
-    copy_group_id    bigint           not null references acct.copy_group (id),
-    session_date     date             not null,
-    decided_at       timestamptz      not null,
-    strategy_id      text             not null,
-    strategy_version text             not null,
-    priority         integer          not null,
-    underlying       text             not null,
-    action           text             not null check (action in ('ENTER', 'EXIT')),
-    option_side      text             not null check (option_side in ('CE', 'PE')),
-    reason           text             not null,
-    instrument_token bigint,
-    symbol           text,
-    expiry           date,
-    strike           double precision,
-    reference_price  double precision,
-    idempotency_key  text             not null unique,
-    context          jsonb            not null default '{}'::jsonb,
-    created_at       timestamptz      not null default now()
+    id                bigserial        primary key,
+    copy_group_id     bigint           not null references acct.copy_group (id),
+    signal_session_id bigint           not null,
+    session_date      date             not null,
+    decided_at        timestamptz      not null,
+    strategy_id       text             not null,
+    priority          integer          not null,
+    underlying        text             not null,
+    action            text             not null check (action in ('ENTER', 'ADD', 'EXIT')),
+    option_side       text             not null check (option_side in ('CE', 'PE')),
+    leg_group         text,
+    stage             text,
+    reason            text             not null,
+    instrument_token  bigint           not null,
+    instrument_key    text,
+    symbol            text             not null,
+    lot_size          integer          not null,
+    reference_price   double precision,
+    premium_budget    double precision,
+    reference_capital double precision,
+    lots              integer,
+    idempotency_key   text             not null unique,
+    created_at        timestamptz      not null default now()
 );
 create index signal_decision_day on exec.signal_decision (copy_group_id, session_date, decided_at);
 
@@ -211,7 +218,7 @@ create table exec.trade_intent (
     strategy_id       text             not null,
     priority          integer          not null,
     underlying        text             not null,
-    action            text             not null check (action in ('ENTER', 'EXIT')),
+    action            text             not null check (action in ('ENTER', 'ADD', 'EXIT')),
     option_side       text             not null check (option_side in ('CE', 'PE')),
     instrument_token  bigint,
     symbol            text,

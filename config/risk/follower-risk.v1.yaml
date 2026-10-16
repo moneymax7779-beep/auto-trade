@@ -1,0 +1,16 @@
+# Follower risk v1 (live execution L1, docs/LIVE-TRADING-PLAN.md section 2; 16 Oct 2026, user: "start L1").
+# Capital limits of a follower account (PAPER, DRY_RUN, later LIVE), each a share of the account's own equity (its
+# allocated capital, FIXED or COMPOUNDING), never of the broker balance. Daily loss as paper-risk v17 (22 %). One entry
+# and all open premium may use the whole equity, as PAPER-1 does; the broker's funds keep a 10 % buffer.
+version: follower-risk-v1
+name: follower-risk
+status: UNCALIBRATED
+
+capital:
+  daily_loss_pct: 22
+  max_premium_per_trade_pct: 100
+  max_open_premium_pct: 100
+  broker_funds_buffer_pct: 10
+
+simulation:                            # PAPER and DRY_RUN fills (L1): the signal's price, moved against the follower
+  adverse_bps: 0                       # as the costs file's base fill model
