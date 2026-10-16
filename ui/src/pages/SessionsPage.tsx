@@ -22,7 +22,7 @@ function feedLabel(feed: string): string {
   return feed;
 }
 
-interface Run { index: number; first: number; size: number; from: string; to: string; net: number }
+interface Run { index: number; first: number; size: number; from: string; to: string; net: number; started: number }
 
 /** The session's config files, sorted ("expiry-trend-rider.v7.yaml,…,paper-risk.v12.yaml"). */
 const configKey = (r: SessionRow) => Object.keys(r.configs ?? {}).sort().join(",");
@@ -38,39 +38,51 @@ function configTags(r: SessionRow): { risk: string | null; strategies: string[];
 }
 
 /**
- * Groups the sessions (newest first) into runs: consecutive sessions with the same mode, feed, code and strategy set,
- * started within 30 minutes of each other (a batch of replays), or the live sessions of one code version.
+ * Groups the sessions (newest first) into runs: sessions with the same mode, feed, code and strategy set, started within
+ * 30 minutes of each other (a batch of replays), or the live sessions of one code version. Runs started at the same time
+ * interleave their session ids (e.g. one replay per risk file and day), so a session joins the newest matching run
+ * whether or not it is next to it in the list. Returns the rows reordered run by run, and each row's run.
  */
-function groupRuns(rows: SessionRow[]): Run[] {
-  const runOf: Run[] = [];
+function groupRuns(sessions: SessionRow[]): { rows: SessionRow[]; runOf: Run[] } {
   // the config files (risk, features, every strategy version) are part of a run's identity: two runs of the same days
   // with different settings are different runs
   const key = (r: SessionRow) => `${r.mode}|${r.feed}|${r.code_version}|${r.strategy_id}|${configKey(r)}`;
   const minutes = (s?: string | null) => (s ? new Date(s.replace(" ", "T")).getTime() / 60000 : NaN);
-  let current: Run = { index: -1, first: 0, size: 0, from: "", to: "", net: 0 };
-  let dates = new Set<string>();
-  for (let i = 0; i < rows.length; i++) {
-    const r = rows[i], prev = rows[i - 1];
-    // a replay run never holds the same day twice: a repeated date starts a new run
-    const sameBatch = prev != null && key(prev) === key(r) && (r.mode === "PAPER_LIVE"
-      || (Math.abs(minutes(prev.started_at) - minutes(r.started_at)) <= 30 && !dates.has(r.session_date)));
-    if (i === 0 || !sameBatch) {
-      current = { index: current.index + 1, first: i, size: 0, from: r.session_date, to: r.session_date, net: 0 };
-      dates = new Set<string>();
+  const groups: { run: Run; rows: SessionRow[]; dates: Set<string> }[] = [];
+  const byKey = new Map<string, typeof groups>();
+  for (const r of sessions) {
+    const k = key(r), started = minutes(r.started_at);
+    const candidates = byKey.get(k) ?? [];
+    // a replay run never holds the same day twice: a repeated date goes to another run
+    let g = r.mode === "PAPER_LIVE"
+      ? candidates[candidates.length - 1]
+      : candidates.find((c) => Math.abs(c.run.started - started) <= 30 && !c.dates.has(r.session_date));
+    if (!g) {
+      g = { run: { index: groups.length, first: 0, size: 0, from: r.session_date, to: r.session_date, net: 0, started },
+        rows: [], dates: new Set<string>() };
+      groups.push(g);
+      byKey.set(k, [...candidates, g]);
     }
-    dates.add(r.session_date);
-    current.size++;
-    if (r.session_date < current.from) current.from = r.session_date;
-    if (r.session_date > current.to) current.to = r.session_date;
-    current.net += Number(r.summary?.net ?? 0);
-    runOf.push(current);
+    g.rows.push(r);
+    g.dates.add(r.session_date);
+    const run = g.run;
+    run.size++;
+    run.started = started;   // the run's oldest start so far: the next (older) session must be within 30 minutes of it
+    if (r.session_date < run.from) run.from = r.session_date;
+    if (r.session_date > run.to) run.to = r.session_date;
+    run.net += Number(r.summary?.net ?? 0);
   }
-  return runOf;
+  const rows: SessionRow[] = [], runOf: Run[] = [];
+  for (const g of groups) {
+    g.run.first = rows.length;
+    for (const r of g.rows) { rows.push(r); runOf.push(g.run); }
+  }
+  return { rows, runOf };
 }
 
 export function SessionsPage() {
   const sessions = useQuery({ queryKey: ["sessions"], queryFn: () => get<SessionRow[]>("/api/sessions") });
-  const runs = useMemo(() => groupRuns(sessions.data ?? []), [sessions.data]);
+  const { rows, runOf: runs } = useMemo(() => groupRuns(sessions.data ?? []), [sessions.data]);
   if (sessions.isLoading) return <Loading what="sessions" />;
   if (sessions.error) return <ErrorNote error={sessions.error} />;
   return (
@@ -80,7 +92,7 @@ export function SessionsPage() {
         sessions of one code version. The line above each band says what the run was.
       </p>
       <Table
-        rows={sessions.data!}
+        rows={rows}
         rowStyle={(_, i) => ({ background: RUN_TINTS[runs[i].index % RUN_TINTS.length] })}
         before={(r, i) => {
           const run = runs[i];
