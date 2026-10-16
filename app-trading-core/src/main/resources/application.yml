@@ -63,7 +63,7 @@ autotrade:
       # unseen days; removing it measured +Rs 76,835 over 22 tick days with every other strategy's trades unchanged (A-074).
       # Its file and code stay; it returns only through a new registered test.
       - config/strategy/ma-cross.v1.yaml                   # mac-v1 forward test in PAPER (A-067, user 2026-10-09 20:40: "run it in paper"); A-066 test PASS, held-out FAIL on one trade; never the expiring index; Rs 2.5L budget; last, so the others take the capital first
-      - config/strategy/opening-drive-momentum.v4.yaml     # odm-v4 live from 14 Oct (A-093) = odm-v3 (A-089) + peak trail (arm +50 %, exit 15 % off the peak; A-091 PASS, thin): never worse than v3 on 23 tick days (+Rs 1.55L), 13 Oct +Rs 35K; last, so the others take the capital first
+      - config/strategy/opening-drive-momentum.v7.yaml     # odm-v7 live from 19 Oct (A-116, user 16 Oct ~19:40: "put odm-v7 in PAPER and keep size at 1.0") = odm-v4 + exit on a 3-minute close back through the session VWAP; A-115 FAIL as registered (bar days -Rs 1.14L, odm 5 -> 1 wins) but 16 Oct -Rs 22,813 vs -Rs 5,16,984; review after 10 sessions. Before: odm-v4 live from 14 Oct (A-093) = odm-v3 (A-089) + peak trail (arm +50 %, exit 15 % off the peak; A-091 PASS, thin): never worse than v3 on 23 tick days (+Rs 1.55L), 13 Oct +Rs 35K; last, so the others take the capital first
     features-file: config/features/features.v12.yaml   # v12 from 14 Oct (A-090 PASS, A-093): v11 + bar backfill of spot history, weekly/monthly levels, OI-change z-scores; no trade changed on 23 tick days. v11 (A-030) live 2-13 Oct
     exchange-file: config/exchange/nse-bse-sessions.v3.yaml
     costs-file: config/costs/india-index-options-costs.v2.yaml   # v2: Upstox Plus brokerage Rs 30/order from 2026-09-01 (A-044, user 2026-10-06)
@@ -94,6 +94,8 @@ autotrade:
       # 2026-10-13 (A-093): odm-v5, the opening drive also on the expiring index (A-092 INCONCLUSIVE: no extra trade on 23
       # tick days; 13 Oct would have taken the NIFTY 0DTE call +Rs 2.50L); odm-v3 stays in shadow (odm-v4 is live).
       - config/strategy/opening-drive-momentum.v5.yaml
+      # 16 Oct (A-116): odm-v4, replaced in the live set by odm-v7, replays each day in shadow for the 10-session review.
+      - config/strategy/opening-drive-momentum.v4.yaml
       # 2026-10-15 ~23:55 (A-114, user: "yes register A-114 and put odb-v9 in shadow"): odb-v3 + the 10:00 exit extended
       # to 15:15 only with futures RVOL >= 1 and the future on the trade's side of VWAP; own session, judged forward.
       - config/strategy/opening-drive.v9.yaml
