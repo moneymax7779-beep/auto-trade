@@ -75,6 +75,31 @@ services:
     mem_limit: 3g
     restart: unless-stopped
 
+  # Live execution L1: the execution workers. Opt-in only (docker compose --profile execution up -d execution);
+  # PAPER and DRY_RUN followers, LIVE refused until L2. No market-data connection; never migrates the schema.
+  execution:
+    profiles: ["execution"]
+    build:
+      context: .
+      dockerfile: app-execution/Dockerfile
+      args:
+        CODE_VERSION: ${AUTOTRADE_CODE_VERSION:-dev}
+    image: autotrade-execution:${AUTOTRADE_CODE_VERSION:-latest}
+    container_name: autotrade-execution
+    environment:
+      AUTOTRADE_DB_URL: jdbc:postgresql://postgres:5432/autotrade
+      AUTOTRADE_DB_PASSWORD: ${AUTOTRADE_DB_PASSWORD:-autotrade}
+      SERVER_ADDRESS: 0.0.0.0        # inside the container; the published port below is loopback-only
+    ports:
+      - "127.0.0.1:8096:8096"
+    volumes:
+      - ./config:/app/config:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 768m
+    restart: unless-stopped
+
   valkey:
     image: valkey/valkey:8-alpine
     container_name: autotrade-valkey

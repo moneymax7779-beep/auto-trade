@@ -13,6 +13,7 @@
         follower account, intent claiming. No broker calls.</description>
     <dependencies>
         <dependency><groupId>org.springframework</groupId><artifactId>spring-jdbc</artifactId></dependency>
+        <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId></dependency>
         <dependency>
             <groupId>com.autotrade</groupId>
             <artifactId>account</artifactId>

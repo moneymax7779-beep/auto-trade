@@ -1,0 +1,33 @@
+# Execution workers (live execution L1). Reads and writes acct.* / exec.*; reads trade.* (the signal session's fills,
+# replay depth) and md.option_tick (retry quotes). Never migrates the schema (trading-core does) and never opens a
+# market-data connection.
+spring:
+  application:
+    name: autotrade-execution
+  datasource:
+    url: ${AUTOTRADE_DB_URL:jdbc:postgresql://127.0.0.1:5500/autotrade}
+    username: ${AUTOTRADE_DB_USER:autotrade}
+    password: ${AUTOTRADE_DB_PASSWORD:autotrade}
+    hikari:
+      maximum-pool-size: 12           # one held connection per leased account + the loop's own
+      pool-name: execution
+  flyway:
+    enabled: false
+
+server:
+  address: 127.0.0.1
+  port: ${AUTOTRADE_EXECUTION_PORT:8096}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+autotrade:
+  execution:
+    tenant: owner
+    copy-group: LIVE-SET
+    poll-ms: 1000
+    costs-file: config/costs/india-index-options-costs.v2.yaml
+    broker-funds: 1000000000         # DRY_RUN in L1: simulated broker funds (L2 reads the broker)

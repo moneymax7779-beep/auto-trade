@@ -89,6 +89,17 @@ public final class FollowerSimulator {
         this.quotes = quotes;
     }
 
+    private String workerId;                     // set by an execution worker: claim intents before running them
+    private Long leaseEpoch;                     // the worker's lease epoch, recorded on every order (fencing)
+    private final Map<String, Day> days = new java.util.HashMap<>();   // per account and date, across worker ticks
+
+    /** Makes this an execution worker's simulator: intents are claimed by {@code id} and orders carry the epoch. */
+    public FollowerSimulator asWorker(String id, long epoch) {
+        this.workerId = id;
+        this.leaseEpoch = epoch;
+        return this;
+    }
+
     /** A capital-refused add waiting for capital: the add's decision and the position it belongs to. */
     private record Retry(Pending add, long positionId) {
     }
@@ -115,8 +126,13 @@ public final class FollowerSimulator {
         }
     }
 
+    /**
+     * Runs the account's not yet run intents of the day. Called once for a replayed day, or on every worker tick: the
+     * day's state (the daily loss latch, pending retries) lives on between calls and is rebuilt from the database the
+     * first time (after a restart).
+     */
     public DayResult run(BrokerAccount account, long copyGroupId, LocalDate date) {
-        Day day = new Day(account, date);
+        Day day = days.computeIfAbsent(account.id() + ":" + date, k -> restore(new Day(account, date), copyGroupId));
         int executed = 0, skipped = 0, rejected = 0, closed = 0;
         Map<String, Integer> reasons = new LinkedHashMap<>();
         List<Pending> pending = pending(account.id(), copyGroupId, date);
@@ -159,6 +175,26 @@ public final class FollowerSimulator {
         executed += day.retried.getOrDefault("EXECUTED_RETRY", 0);
         rejected -= day.retried.getOrDefault("EXECUTED_RETRY", 0);
         return new DayResult(account.displayName(), executed, skipped, rejected, closed, day.todayNet(), reasons);
+    }
+
+    /** A day met again after a restart: the latched daily loss and the adds still waiting for capital. */
+    private Day restore(Day day, long copyGroupId) {
+        Integer latched = jdbc.queryForObject("select count(*) from exec.trade_intent i join exec.trade_batch b "
+                + "on b.id = i.trade_batch_id join exec.signal_decision d on d.id = b.signal_decision_id "
+                + "where i.broker_account_id = ? and d.session_date = ? and i.reject_code = 'DAILY_LOSS'", Integer.class,
+                day.account.id(), Date.valueOf(day.date));
+        day.dailyLossLatched = latched != null && latched > 0;
+        if (quotes != null) {
+            for (Pending add : query(PENDING + "where i.broker_account_id = ? and d.copy_group_id = ? and d.session_date = ? "
+                    + "and i.state = 'REJECTED' and i.reject_code = 'CAPITAL' and d.action = 'ADD' "
+                    + "order by d.decided_at, d.priority, d.id", day.account.id(), copyGroupId, Date.valueOf(day.date))) {
+                Map<String, Object> position = openPosition(day.account.id(), add.strategyId(), add.underlying(), null);
+                if (position != null) {
+                    day.retries.add(new Retry(add, ((Number) position.get("id")).longValue()));
+                }
+            }
+        }
+        return day;
     }
 
     // ---------------------------------------------------------------- entries
@@ -390,7 +426,7 @@ public final class FollowerSimulator {
             }
             double average = ((Number) position.get("average_entry")).doubleValue();
             long total = held + quantity;
-            order(day.account, p, "ENTRY", "BUY", quantity, price);
+            order(day.account, p, "ENTRY", "BUY", quantity, price, 2);
             jdbc.update("update exec.position set quantity_open = ?, average_entry = ?, charges = charges + ? where id = ?",
                     total, (average * held + price * quantity) / total,
                     charge(day.date, p.underlying(), Side.BUY, price, quantity), r.positionId());
@@ -414,12 +450,18 @@ public final class FollowerSimulator {
     }
 
     private void order(BrokerAccount account, Pending p, String role, String side, long quantity, double price) {
+        order(account, p, role, side, quantity, price, 1);
+    }
+
+    /** The broker tag (the idempotency key) is deterministic: F + intent id + role initial + attempt, <= 20 chars. */
+    private void order(BrokerAccount account, Pending p, String role, String side, long quantity, double price,
+                       int attempt) {
         jdbc.update("insert into exec.order_execution (tenant_id, trade_intent_id, broker_account_id, broker_type, role, "
                         + "client_tag, attempt_no, order_side, order_type, quantity_requested, quantity_filled, limit_price, "
-                        + "average_fill_price, status, raw_status) values (?, ?, ?, ?, ?, ?, 1, ?, 'LIMIT', ?, ?, ?, ?, "
-                        + "'FILLED', ?)", account.tenantId(), p.intentId(), account.id(), account.brokerType().name(), role,
-                "F" + p.intentId() + "A1", side, quantity, quantity, price, price,
-                p.mode().equals("DRY_RUN") ? "DRY_RUN_SIMULATED" : "PAPER_SIMULATED");
+                        + "average_fill_price, status, raw_status, lease_epoch) values (?, ?, ?, ?, ?, ?, ?, ?, 'LIMIT', ?, ?, "
+                        + "?, ?, 'FILLED', ?, ?)", account.tenantId(), p.intentId(), account.id(), account.brokerType().name(),
+                role, "F" + p.intentId() + role.charAt(0) + attempt, attempt, side, quantity, quantity, price,
+                price, p.mode().equals("DRY_RUN") ? "DRY_RUN_SIMULATED" : "PAPER_SIMULATED", leaseEpoch);
     }
 
     private String done(Pending p, long quantity) {
@@ -497,26 +539,42 @@ public final class FollowerSimulator {
         return net == null ? 0 : net;
     }
 
+    private static final String PENDING = "select i.id, i.execution_mode, d.action, d.strategy_id, d.underlying, "
+            + "d.option_side, d.instrument_token, d.symbol, d.lot_size, d.reference_price, d.premium_budget, "
+            + "d.reference_capital, d.lots, d.leg_group, d.decided_at, d.reason, coalesce(s.size_multiplier, 1) as size_multiplier, "
+            + "(d.context->>'strategy_lots')::float8 as strategy_lots, (d.context->>'intended_lots')::float8 as intended_lots, "
+            + "(d.context->>'liquidity_lots')::float8 as liquidity_lots, (d.context->>'rvol_tod')::float8 as rvol_tod, "
+            + "(d.context->>'call_ask')::float8 as call_ask, (d.context->>'put_ask')::float8 as put_ask, "
+            // replay depth ceiling: what the signal account's own position got filled through the same book
+            + "(select tp.quantity from trade.position tp where tp.session_id = d.signal_session_id "
+            + "and tp.strategy_id = d.strategy_id and tp.underlying = d.underlying and tp.symbol = d.symbol "
+            + "and tp.opened_at <= d.decided_at + interval '60 seconds' "
+            + "and (tp.closed_at is null or tp.closed_at >= d.decided_at) "
+            + "order by abs(extract(epoch from tp.opened_at - d.decided_at)) limit 1) as book_quantity "
+            + "from exec.trade_intent i join exec.trade_batch b on b.id = i.trade_batch_id "
+            + "join exec.signal_decision d on d.id = b.signal_decision_id "
+            + "left join acct.strategy_subscription s on s.copy_group_id = d.copy_group_id "
+            + "and s.broker_account_id = i.broker_account_id and s.strategy_id = d.strategy_id ";
+
     private List<Pending> pending(long accountId, long copyGroupId, LocalDate day) {
-        return jdbc.query("select i.id, i.execution_mode, d.action, d.strategy_id, d.underlying, d.option_side, "
-                + "d.instrument_token, d.symbol, d.lot_size, d.reference_price, d.premium_budget, d.reference_capital, "
-                + "d.lots, d.leg_group, d.decided_at, d.reason, coalesce(s.size_multiplier, 1) as size_multiplier, "
-                + "(d.context->>'strategy_lots')::float8 as strategy_lots, (d.context->>'intended_lots')::float8 as intended_lots, "
-                + "(d.context->>'liquidity_lots')::float8 as liquidity_lots, (d.context->>'rvol_tod')::float8 as rvol_tod, "
-                + "(d.context->>'call_ask')::float8 as call_ask, (d.context->>'put_ask')::float8 as put_ask, "
-                // replay depth ceiling: what the signal account's own position got filled through the same book
-                + "(select tp.quantity from trade.position tp where tp.session_id = d.signal_session_id "
-                + "and tp.strategy_id = d.strategy_id and tp.underlying = d.underlying and tp.symbol = d.symbol "
-                + "and tp.opened_at <= d.decided_at + interval '60 seconds' "
-                + "and (tp.closed_at is null or tp.closed_at >= d.decided_at) "
-                + "order by abs(extract(epoch from tp.opened_at - d.decided_at)) limit 1) as book_quantity "
-                + "from exec.trade_intent i join exec.trade_batch b on b.id = i.trade_batch_id "
-                + "join exec.signal_decision d on d.id = b.signal_decision_id "
-                + "left join acct.strategy_subscription s on s.copy_group_id = d.copy_group_id "
-                + "and s.broker_account_id = i.broker_account_id and s.strategy_id = d.strategy_id "
-                + "where i.broker_account_id = ? and d.copy_group_id = ? and d.session_date = ? and i.state = 'CREATED' "
-                + "and i.execution_mode in ('PAPER', 'DRY_RUN') order by d.decided_at, d.priority, d.id",
-                FollowerSimulator::pendingRow, accountId, copyGroupId, Date.valueOf(day));
+        if (workerId != null) {
+            // a worker claims what it runs (the lease already makes it the account's only writer; this is the second lock)
+            jdbc.update("update exec.trade_intent set claimed_by = ?, claimed_at = now() where id in (select i.id "
+                    + "from exec.trade_intent i where i.broker_account_id = ? and i.state = 'CREATED' "
+                    + "and i.execution_mode in ('PAPER', 'DRY_RUN') and (i.claimed_by is null or i.claimed_by = ? "
+                    + "or i.claimed_at < now() - interval '60 seconds') for update skip locked)", workerId, accountId,
+                    workerId);
+            return query(PENDING + "where i.broker_account_id = ? and d.copy_group_id = ? and d.session_date = ? "
+                    + "and i.state = 'CREATED' and i.claimed_by = ? and i.execution_mode in ('PAPER', 'DRY_RUN') "
+                    + "order by d.decided_at, d.priority, d.id", accountId, copyGroupId, Date.valueOf(day), workerId);
+        }
+        return query(PENDING + "where i.broker_account_id = ? and d.copy_group_id = ? and d.session_date = ? "
+                + "and i.state = 'CREATED' and i.execution_mode in ('PAPER', 'DRY_RUN') order by d.decided_at, d.priority, d.id",
+                accountId, copyGroupId, Date.valueOf(day));
+    }
+
+    private List<Pending> query(String sql, Object... args) {
+        return jdbc.query(sql, FollowerSimulator::pendingRow, args);
     }
 
     private static double orNaN(ResultSet rs, String column) throws SQLException {

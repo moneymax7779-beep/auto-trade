@@ -38,6 +38,7 @@
         <module>account</module>
         <module>execution</module>
         <module>app-trading-core</module>
+        <module>app-execution</module>
         <module>autotrade-tools</module>
     </modules>
 

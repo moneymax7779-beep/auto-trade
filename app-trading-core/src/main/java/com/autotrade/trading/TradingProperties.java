@@ -11,13 +11,21 @@ public record TradingProperties(Trading trading, Source source, Upstox upstox, S
      * Live execution L1 (docs/LIVE-TRADING-PLAN.md): {@code autotrade.signal-source.enabled=true} runs the session as the
      * copy group's signal source: account {@code account} (SIGNAL-1) with {@code riskFile} (signal-source.v2, never
      * refuses), its approved entries and every close recorded as exec.signal_decision. Absent or false = off (default).
-     * Replay only until the live feed tee exists.
      */
     public record SignalSource(Boolean enabled, String account, String riskFile, String copyGroup, String tenant,
-                               String ownerSubject) {
+                               String ownerSubject, Boolean tee) {
 
         public boolean on() {
             return Boolean.TRUE.equals(enabled);
+        }
+
+        /**
+         * Live: the signal source always runs alongside the session on a {@link TeeFeed} of its feed. Replay:
+         * {@code tee=true} does the same (the live wiring, testable offline); absent, the replayed session itself is the
+         * signal source.
+         */
+        public boolean teeOn() {
+            return Boolean.TRUE.equals(tee);
         }
 
         public String accountLabel() {

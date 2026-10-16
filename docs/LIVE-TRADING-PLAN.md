@@ -601,3 +601,43 @@ trade difference is one of the kinds listed above.
 - the live feed tee for the signal source;
 - `app-execution` workers (row-lock claiming, lease);
 - the daily divergence report.
+
+**L1, live feed tee and execution workers, 16 Oct 17:20–18:00.**
+
+**Built:**
+- **`TeeFeed` + `QueueFeed`** (trading-core):
+  - The session's feed is handed to the session first, then offered to a bounded queue drained on the signal session's
+    thread.
+  - Live, a full queue fails only the signal source; replay blocks, so runs stay deterministic.
+  - With `autotrade.signal-source.enabled` (default off) the signal source always runs **alongside** live, and in replay
+    with `tee=true`. It has its own thread and heartbeat, no capture and no snapshots, and ends with the feed.
+- **`AccountLease`:**
+  - a Postgres advisory lock per account on a held connection;
+  - `exec.account_lease` (Flyway **V23**), whose epoch grows at each takeover and is recorded on every order
+    (`order_execution.lease_epoch`, fencing);
+  - a heartbeat detects a lost lease.
+- **`ExecutionLoop`:**
+  - each tick fans out once (a transaction advisory lock), then runs every follower on its own single-thread lane
+    (busy lanes are skipped);
+  - intents are claimed (`for update skip locked`);
+  - the follower state (daily-loss latch, pending retries) survives restarts, rebuilt from the database;
+  - broker tags are deterministic (intent + role + attempt);
+  - LIVE is refused in L1.
+- **`app-execution`:**
+  - a Spring Boot service on 127.0.0.1:8096 with `/api/execution/status`;
+  - never migrates, and refuses to start below V23;
+  - no market-data connection;
+  - Dockerfile, and compose service `execution` under profile `execution` (opt-in; `docker compose up` does not start
+    it).
+
+**Checks (Mac, offline):**
+
+| Check | Result |
+|---|---|
+| PAPER-1 with the tee vs control (1, 13, 15 Oct) | identical: +9,27,883 / +7,18,070 / +5,35,029 |
+| Teed signal decisions vs the separate signal replays | identical (time, side, contract, lots, price, sizing context); exits now also carry `bought_quantity` |
+| Worker IT (Testcontainers) | incremental ticks; a second worker refused while the lease is held; takeover with epoch 2; orders carry the epoch |
+| Streaming run: worker container + a 16 Oct own-capture tee replay | DRY-TEE (worker, live as decisions arrived) = PAPER-TEE (offline): same 2 trades, prices and net −₹2,01,624, same 3 daily-loss refusals; decision to order: average 0.63 s, worst 0.92 s (1 s poll) |
+
+**L1 is complete except the daily divergence report.** L2 (the Zerodha adapter: auth, orders, the broker's quotes and
+funds, the order stream, a broker-side stop, recovery) comes next.

@@ -94,6 +94,8 @@ class SessionRunner implements ApplicationRunner {
     private final AlertService alerts;
     private volatile Thread shadowThread;
 
+    private volatile Thread signalWorker;                 // live execution L1: the signal source alongside, if any
+
     SessionRunner(TradingProperties properties, DataSource target, ConfigurableApplicationContext context,
                   AlertService alerts) {
         this.properties = properties;
@@ -226,6 +228,10 @@ class SessionRunner implements ApplicationRunner {
                     return;
                 }
                 replay.worker().join();
+                Thread signalThread = signalWorker;                // live execution L1: let the signal source drain
+                if (signalThread != null) {
+                    signalThread.join();
+                }
                 exit("DONE".equals(replay.session().status().get("status")) ? 0 : 1);
             }
             default -> {
@@ -374,10 +380,10 @@ class SessionRunner implements ApplicationRunner {
         ThresholdConfig costsFile = ThresholdConfig.load(Path.of(t.costsFile()));
         // live execution L1: a signal-source session trades the virtual SIGNAL-1 account under signal-source.v1
         TradingProperties.SignalSource signal = properties.signalSource();
-        boolean signalSource = signal != null && signal.on();
-        if (signalSource && !replay) {
-            throw new IllegalStateException("autotrade.signal-source runs in --mode=replay only (live execution L1)");
-        }
+        boolean signalOn = signal != null && signal.on();
+        // alongside: the signal source runs next to this session on a tee of its feed (always live; replay with tee)
+        boolean alongside = signalOn && (!replay || signal.teeOn());
+        boolean signalSource = signalOn && !alongside;      // replay without tee: this session is the signal source
         String account = signalSource ? signal.accountLabel() : t.account();
         ThresholdConfig riskFile = ThresholdConfig.load(Path.of(signalSource ? signal.riskFileOr() : t.riskFile()));
         FeatureConfig features = FeatureConfig.from(featuresFile, exchangeFile);
@@ -453,6 +459,13 @@ class SessionRunner implements ApplicationRunner {
             capture = new LiveCapture(target, session, "UPSTOX_V3_LIVE", CodeVersion.current());
             feed = new CapturingFeed(feed, capture);
         }
+        // live execution L1: the signal source's branch of this feed (this session first, the branch never blocks it live)
+        QueueFeed signalFeed = null;
+        if (alongside) {
+            signalFeed = new QueueFeed(feed.name() + "+signal", replay ? QueueFeed.Overflow.BLOCK : QueueFeed.Overflow.FAIL,
+                    200_000, feed.replay());
+            feed = new TeeFeed(feed, signalFeed);
+        }
         ReferenceStore referenceStore = new ReferenceStore(target);
         LiveReference liveReference = replay ? null : new LiveReference(referenceStore, session, new UpstoxCandles());
         SessionHistory history = bars
@@ -490,6 +503,10 @@ class SessionRunner implements ApplicationRunner {
                     baseRisk.startingCapital(), strategies.stream().map(StrategyFactory::id).toList()));
             log.info("signal source: account {} (risk {}), copy group {} (id {})", account, signal.riskFileOr(),
                     signal.copyGroupName(), copyGroup);
+        }
+        if (alongside) {
+            startSignalAlongside(signal, signalFeed, session, replay, t, features, history, strategies, costsFile,
+                    instruments, hashes);
         }
         current = trading;
 
@@ -567,6 +584,56 @@ class SessionRunner implements ApplicationRunner {
         Running started = new Running(session, trading, worker, timer);
         running = started;
         return started;
+    }
+
+    /**
+     * Live execution L1: starts the copy group's signal source next to the session, on its own thread and heartbeat,
+     * fed by {@code feed} (the tee's branch). It trades the virtual account (SIGNAL-1, signal-source risk) with the same
+     * strategies, features and history, records decisions only (no capture, no feature snapshots) and ends when the
+     * session's feed ends. A failure stops it alone; the session is never touched.
+     */
+    private void startSignalAlongside(TradingProperties.SignalSource signal, QueueFeed feed, LocalDate session,
+                                      boolean replay, TradingProperties.Trading t, FeatureConfig features,
+                                      SessionHistory history, List<StrategyFactory> strategies,
+                                      ThresholdConfig costsFile, InstrumentMaster instruments,
+                                      Map<String, String> hashes) {
+        ThresholdConfig riskFile = ThresholdConfig.load(Path.of(signal.riskFileOr()));
+        RiskLimits risk = RiskLimits.from(riskFile);
+        Map<String, String> signalHashes = new LinkedHashMap<>(hashes);
+        signalHashes.put(riskFile.sourceName(), riskFile.contentHash());
+        TradingSession.Settings settings = new TradingSession.Settings(
+                replay ? TradingSession.Mode.PAPER_REPLAY : TradingSession.Mode.PAPER_LIVE, signal.accountLabel(), session,
+                t.underlyings(), t.tradeUnderlyingList(), features, history, strategies, risk, CostModel.from(costsFile),
+                FillModel.from(costsFile, t.fillModel()), instruments, signalHashes, CodeVersion.current());
+        TradingSession signalSession = new TradingSession(settings, feed, new TradeStore(target));
+        com.autotrade.account.AccountStore accounts = new com.autotrade.account.AccountStore(target);
+        long tenant = accounts.ensureTenant(signal.tenantName());
+        long owner = accounts.ensureUser(signal.ownerSubjectOr(), "owner");
+        accounts.ensureMembership(tenant, owner, "OWNER");
+        long signalAccount = accounts.ensureSignalSourceAccount(tenant, owner, signal.accountLabel(),
+                risk.startingCapital(), session, signal.riskFileOr());
+        long copyGroup = accounts.ensureCopyGroup(tenant, signal.copyGroupName(), signalAccount);
+        signalSession.publishSignals(new SignalRecorder(new com.autotrade.execution.SignalDecisionStore(target), copyGroup,
+                risk.startingCapital(), strategies.stream().map(StrategyFactory::id).toList()));
+        ScheduledExecutorService signalTimer = Executors.newSingleThreadScheduledExecutor();
+        if (!replay) {
+            signalTimer.scheduleAtFixedRate(safe(signalSession::heartbeat), 1, 1, TimeUnit.SECONDS);
+        }
+        signalWorker = Thread.ofPlatform().name("signal-source-" + session).start(() -> {
+            try {
+                Map<String, Object> summary = signalSession.run();
+                log.info("signal source summary: {}", summary);
+            } catch (RuntimeException e) {
+                log.error("signal source failed (the session continues): {}", e.getMessage());
+            } finally {
+                signalTimer.shutdownNow();
+                if (feed.failure() != null) {
+                    log.error("signal source stopped: {}", feed.failure());
+                }
+            }
+        });
+        log.info("signal source alongside: account {} (risk {}), copy group {} (id {}), tee {}", signal.accountLabel(),
+                signal.riskFileOr(), signal.copyGroupName(), copyGroup, feed.name());
     }
 
     /**

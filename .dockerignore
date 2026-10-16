@@ -1,4 +1,5 @@
-# Only what the trading-core image needs; everything else stays out of the build context.
+# Only what the images need (trading-core: its jar and the UI; execution: its jar); everything else stays out.
 *
 !app-trading-core/target/app-trading-core-0.1.0-SNAPSHOT.jar
 !ui/dist
+!app-execution/target/app-execution-0.1.0-SNAPSHOT.jar
