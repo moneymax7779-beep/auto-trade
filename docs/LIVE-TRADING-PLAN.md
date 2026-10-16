@@ -559,3 +559,45 @@ Trade by trade:
 **Fix (next):** a follower keeps a capital-refused ENTER or ADD pending while the signal holds that position, and
 retries when its capital frees, priced at the account's own quote. Live and DRY_RUN workers use the broker's quote;
 the replay simulator uses stored option ticks.
+
+**L1, retry for capital-refused adds, 16 Oct 17:00–17:20.**
+
+**Change:**
+- An add refused for capital stays pending while its position is open.
+- Whenever an exit frees capital, the add is retried. It is re-sized at the position's scale (and the replay depth
+  ceiling), priced at that moment's ask, and checked again. This mirrors PAPER-1's strategies, which re-ask every
+  snapshot.
+- Prices come from `QuoteSource`. In replay that is `StoredQuotes`: own capture `md.option_tick`, else the local
+  `zt_archive`. Live and DRY_RUN workers will ask the broker.
+- Entries are not retried: their re-attempt rules differ per strategy.
+
+**Results, 26 tick days at equal ₹5L equity:**
+
+| Check | Result |
+|---|---|
+| Follower vs PAPER-1, total | +₹44,97,728 vs +₹45,00,314 (**−₹2,586, −0.06 %**) |
+| 1 Oct | −₹1,872 (before the retry: −₹2,82,805; one retry over all 26 days) |
+| Days within ±₹10K | 20 of 26 |
+| DRY_RUN = PAPER follower | 26 of 26 |
+
+Trade by trade:
+
+| | Trades | Net difference |
+|---|---|---|
+| same trade, same quantity | 84 | +₹10K (fill prices) |
+| other quantity | 8 | −₹61K |
+| PAPER-1 only | 5 | −₹54K |
+| follower only | 3 | +₹1.02L |
+
+**Remaining differences, offsetting:**
+- entries refused for capital (not retried);
+- the daily loss counting open positions in PAPER-1 (realised only in the follower);
+- depth at slightly different moments.
+
+**L1 gate, part 1 (PAPER follower ≈ PAPER-1 within the expected capital-refusal differences): met.** Every remaining
+trade difference is one of the kinds listed above.
+
+**Left in L1:**
+- the live feed tee for the signal source;
+- `app-execution` workers (row-lock claiming, lease);
+- the daily divergence report.

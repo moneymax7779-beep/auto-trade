@@ -479,12 +479,21 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                 com.autotrade.config.ThresholdConfig.load(Path.of("config/costs/india-index-options-costs.v2.yaml")));
         com.autotrade.execution.FanOut fanOut = new com.autotrade.execution.FanOut(target);
         double funds = Double.parseDouble(args.get("broker-funds", "1e9"));
+        // retries price from stored ticks: own capture, else the configured zt source (point it at the local zt_archive)
+        DataSource archive = null;
+        try {
+            archive = source.dataSource();
+        } catch (Exception e) {
+            System.err.println("no zt source for retry quotes (" + e.getMessage() + "): own capture only");
+        }
+        com.autotrade.execution.StoredQuotes quotes = new com.autotrade.execution.StoredQuotes(target, archive);
         for (LocalDate day : args.dates("session")) {
             int intents = fanOut.fanOut(group, day);
             System.out.printf("%s: %d intents%n", day, intents);
             for (com.autotrade.account.BrokerAccount account : accounts.followers(group)) {
                 com.autotrade.execution.FollowerRisk risk = com.autotrade.execution.FollowerRisk.load(Path.of(account.riskFile()));
-                var result = new com.autotrade.execution.FollowerSimulator(target, costs, risk, funds).run(account, group, day);
+                var result = new com.autotrade.execution.FollowerSimulator(target, costs, risk, funds, quotes)
+                        .run(account, group, day);
                 System.out.printf("  %-10s %-7s executed %d, skipped %d, rejected %d, closed %d, net %.0f  %s%n",
                         result.account(), account.tradeMode(), result.executed(), result.skipped(), result.rejected(),
                         result.closed(), result.net(), result.reasons());

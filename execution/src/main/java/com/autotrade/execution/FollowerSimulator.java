@@ -43,6 +43,8 @@ import com.autotrade.sim.Side;
  *   <li><b>EXIT</b>: closes the matching position (a straddle leg by its side) at the signal's price; skipped when the
  *       account holds none.</li>
  * </ul>
+ * <b>Retry</b>: an add refused for capital stays pending while its position is open and is retried whenever an exit
+ * frees capital, at that moment's ask (as PAPER-1's strategies re-ask every snapshot; entries are not retried).
  * <b>Replay depth ceiling</b>: a position (entry plus adds, each straddle leg) never exceeds what the signal account's
  * own position got filled through the same order book (its trade.position quantity: PAPER-1's rules slice entries to
  * the visible depth and cancel the rest after the entry timeout). This stands in for depth in replays only; a live
@@ -70,13 +72,25 @@ public final class FollowerSimulator {
     private final CostModel costs;
     private final FollowerRisk risk;
     private final double simulatedBrokerFunds;
+    private final QuoteSource quotes;            // null: capital-refused adds are not retried
 
     public FollowerSimulator(DataSource dataSource, CostModel costs, FollowerRisk risk, double simulatedBrokerFunds) {
+        this(dataSource, costs, risk, simulatedBrokerFunds, null);
+    }
+
+    /** With {@code quotes}, a capital-refused add is retried when the account's capital frees (see {@link #retry}). */
+    public FollowerSimulator(DataSource dataSource, CostModel costs, FollowerRisk risk, double simulatedBrokerFunds,
+                             QuoteSource quotes) {
         this.jdbc = new JdbcTemplate(dataSource);
         this.accounts = new AccountStore(dataSource);
         this.costs = costs;
         this.risk = risk;
         this.simulatedBrokerFunds = simulatedBrokerFunds;
+        this.quotes = quotes;
+    }
+
+    /** A capital-refused add waiting for capital: the add's decision and the position it belongs to. */
+    private record Retry(Pending add, long positionId) {
     }
 
     /** The state of one account's day while its intents run. */
@@ -86,6 +100,8 @@ public final class FollowerSimulator {
         final CapitalPolicy policy = new CapitalPolicy(risk.limits());
         final double equity;
         boolean dailyLossLatched;
+        final List<Retry> retries = new ArrayList<>();
+        final Map<String, Integer> retried = new LinkedHashMap<>();
 
         Day(BrokerAccount account, LocalDate date) {
             this.account = account;
@@ -138,6 +154,10 @@ public final class FollowerSimulator {
                 }
             }
         }
+        // a retried add counts once as refused (when refused) and once more here when it later filled
+        day.retried.forEach((outcome, n) -> reasons.merge(outcome, n, Integer::sum));
+        executed += day.retried.getOrDefault("EXECUTED_RETRY", 0);
+        rejected -= day.retried.getOrDefault("EXECUTED_RETRY", 0);
         return new DayResult(account.displayName(), executed, skipped, rejected, closed, day.todayNet(), reasons);
     }
 
@@ -215,6 +235,9 @@ public final class FollowerSimulator {
         double price = buyPrice(p.price());
         String refused = check(day, p, true, 0, lots, quantity * price);
         if (refused != null) {
+            if (refused.equals("REJECTED_CAPITAL") && quotes != null) {
+                day.retries.add(new Retry(p, ((Number) position.get("id")).longValue()));
+            }
             return refused;
         }
         double average = ((Number) position.get("average_entry")).doubleValue();
@@ -315,10 +338,68 @@ public final class FollowerSimulator {
         double average = ((Number) position.get("average_entry")).doubleValue();
         double charges = charge(day.date, p.underlying(), Side.SELL, price, quantity);
         order(day.account, p, "EXIT", "SELL", quantity, price);
+        long positionId = ((Number) position.get("id")).longValue();
         jdbc.update("update exec.position set quantity_open = 0, closed_at = ?, exit_reason = ?, realised_gross = ?, "
                         + "charges = charges + ?, status = 'CLOSED' where id = ?", Timestamp.from(p.at()), p.reason(),
-                (price - average) * quantity, charges, ((Number) position.get("id")).longValue());
-        return done(p, quantity);
+                (price - average) * quantity, charges, positionId);
+        String outcome = done(p, quantity);
+        day.retries.removeIf(r -> r.positionId() == positionId);       // its pending adds die with the position
+        retry(day, p.at());                                            // this exit freed capital
+        return outcome;
+    }
+
+    /**
+     * Capital-refused adds, retried when an exit frees capital, as PAPER-1's strategies re-ask every snapshot: each
+     * pending add whose position is still open is re-sized at the position's scale (and the replay depth ceiling),
+     * priced at the contract's ask at that moment (stored ticks), and checked again; a retry still refused for capital
+     * stays pending, any other refusal or a missing quote drops it.
+     */
+    private void retry(Day day, Instant at) {
+        for (Retry r : List.copyOf(day.retries)) {
+            Pending p = r.add();
+            Map<String, Object> position = jdbc.queryForList("select id, quantity_open, average_entry, sizing_scale, status "
+                    + "from exec.position where id = ?", r.positionId()).getFirst();
+            if (!"OPEN".equals(position.get("status"))) {
+                day.retries.remove(r);
+                continue;
+            }
+            double ask = quotes.askAt(day.date, p.underlying(), p.token(), at);
+            if (!(ask > 0)) {
+                day.retries.remove(r);
+                day.retried.merge("RETRY_NO_QUOTE", 1, Integer::sum);
+                continue;
+            }
+            double scale = ((Number) position.get("sizing_scale")).doubleValue();
+            long held = ((Number) position.get("quantity_open")).longValue();
+            long lots = Math.max(1, (long) Math.floor(p.strategyLots() * scale));
+            if (p.bookQuantity() >= 0) {
+                lots = Math.min(lots, (long) (p.bookQuantity() - held) / p.lotSize());
+            }
+            if (lots < 1) {
+                day.retries.remove(r);
+                continue;
+            }
+            long quantity = lots * p.lotSize();
+            double price = buyPrice(ask);
+            String refused = check(day, p, true, 0, lots, quantity * price);
+            if (refused != null) {
+                if (!refused.equals("REJECTED_CAPITAL")) {
+                    day.retries.remove(r);
+                }
+                continue;
+            }
+            double average = ((Number) position.get("average_entry")).doubleValue();
+            long total = held + quantity;
+            order(day.account, p, "ENTRY", "BUY", quantity, price);
+            jdbc.update("update exec.position set quantity_open = ?, average_entry = ?, charges = charges + ? where id = ?",
+                    total, (average * held + price * quantity) / total,
+                    charge(day.date, p.underlying(), Side.BUY, price, quantity), r.positionId());
+            jdbc.update("update exec.trade_intent set state = 'EXECUTED', quantity = ?, attempts = attempts + 1, "
+                    + "reject_code = 'CAPITAL_RETRIED', reject_reason = ?, updated_at = now() where id = ?", quantity,
+                    "filled on retry at " + at + " for " + price, p.intentId());
+            day.retries.remove(r);
+            day.retried.merge("EXECUTED_RETRY", 1, Integer::sum);
+        }
     }
 
     // ---------------------------------------------------------------- records

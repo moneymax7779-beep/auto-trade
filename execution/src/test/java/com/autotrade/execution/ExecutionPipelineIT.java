@@ -216,4 +216,52 @@ class ExecutionPipelineIT {
                 + "on i.id = e.trade_intent_id where i.broker_account_id = ? and i.strategy_id = 'expiry-trend-rider' "
                 + "order by e.id", Long.class, id)).containsExactly(50L * 20, 100L * 20);
     }
+
+    @Test
+    void aCapitalRefusedAddIsRetriedWhenAnExitFreesCapital() {
+        AccountStore accounts = new AccountStore(dataSource);
+        long tenant = accounts.ensureTenant("owner-3");
+        long owner = accounts.ensureUser("kc-owner-3", "owner");
+        accounts.ensureMembership(tenant, owner, "OWNER");
+        long signal = accounts.ensureSignalSourceAccount(tenant, owner, "SIGNAL-3", 500_000, DAY,
+                "config/risk/signal-source.v2.yaml");
+        long group = accounts.ensureCopyGroup(tenant, "SET-3", signal);
+        long id = accounts.ensureFollowerAccount(tenant, owner, "F-3", BrokerType.PAPER, TradeMode.PAPER, 500_000,
+                EquityMode.FIXED, DAY, "../config/risk/follower-risk.v2.yaml", 100);
+        FanOut fanOut = new FanOut(dataSource);
+        fanOut.subscribe(group, id, List.of("ma-cross", "expiry-trend-rider"), 1.0);
+        SignalDecisionStore store = new SignalDecisionStore(dataSource);
+        java.util.function.IntFunction<String> key = n -> "S3:" + n;
+        // ma-cross holds Rs 2.4L; etr enters 1 of 4 units with Rs 4L at 100 (scale 4L / (4 x 20 x 100) = 50 -> 50 lots =
+        // Rs 1L); its add of 2 units (100 lots at 110 = Rs 2.2L) does not fit (2.4L + 1L + 2.2L > 5L) until ma-cross exits
+        store.insert(new SignalDecision(group, 9003, DAY, ist("12:00:00"), "ma-cross", 4, "SENSEX", SignalDecision.Action.ENTER,
+                "PE", null, "CONFIRMED", "CROSS", 7, null, "SENSEX M", 20, 120, 240_000, 500_000, 100, key.apply(1),
+                Map.of("strategy_lots", 1.0, "intended_lots", 1.0)));
+        store.insert(new SignalDecision(group, 9003, DAY, ist("12:20:00"), "expiry-trend-rider", 3, "SENSEX",
+                SignalDecision.Action.ENTER, "CE", null, "CONFIRMED", "BREAK", 8, null, "SENSEX E", 20, 100, 400_000, 500_000,
+                50, key.apply(2), Map.of("strategy_lots", 1.0, "intended_lots", 4.0)));
+        store.insert(new SignalDecision(group, 9003, DAY, ist("12:22:00"), "expiry-trend-rider", 3, "SENSEX",
+                SignalDecision.Action.ADD, "CE", null, "RUNNER", "ADD", 8, null, "SENSEX E", 20, 110, Double.NaN, 500_000,
+                100, key.apply(3), Map.of("strategy_lots", 2.0)));
+        store.insert(new SignalDecision(group, 9003, DAY, ist("12:30:00"), "ma-cross", 4, "SENSEX", SignalDecision.Action.EXIT,
+                "PE", null, null, "TARGET", 7, null, "SENSEX M", 20, 150, Double.NaN, 500_000, 0, key.apply(4), Map.of()));
+        store.insert(new SignalDecision(group, 9003, DAY, ist("14:00:00"), "expiry-trend-rider", 3, "SENSEX",
+                SignalDecision.Action.EXIT, "CE", null, null, "TRAIL", 8, null, "SENSEX E", 20, 200, Double.NaN, 500_000, 0,
+                key.apply(5), Map.of()));
+        fanOut.fanOut(group, DAY);
+        CostModel costs = CostModel.from(ThresholdConfig.load(Path.of("..", "config", "costs",
+                "india-index-options-costs.v2.yaml")));
+        FollowerRisk risk = FollowerRisk.load(Path.of("../config/risk/follower-risk.v2.yaml"));
+        BrokerAccount account = accounts.followers(group).getFirst();
+        // the etr contract quotes 125 at 12:30 when ma-cross exits
+        FollowerSimulator.DayResult day = new FollowerSimulator(dataSource, costs, risk, 1e9,
+                (d, u, token, at) -> token == 8 && at.equals(ist("12:30:00")) ? 125.0 : Double.NaN).run(account, group, DAY);
+        assertThat(day.reasons()).containsEntry("REJECTED_CAPITAL", 1).containsEntry("EXECUTED_RETRY", 1);
+        assertThat(jdbc.queryForList("select quantity_requested || '@' || average_fill_price from exec.order_execution e "
+                + "join exec.trade_intent i on i.id = e.trade_intent_id where i.broker_account_id = ? "
+                + "and i.strategy_id = 'expiry-trend-rider' and e.role = 'ENTRY' order by e.id", String.class, id))
+                .containsExactly("1000@100", "2000@125");                              // the add filled at 12:30's ask
+        assertThat(jdbc.queryForObject("select reject_code from exec.trade_intent where broker_account_id = ? "
+                + "and action = 'ADD'", String.class, id)).isEqualTo("CAPITAL_RETRIED");
+    }
 }
