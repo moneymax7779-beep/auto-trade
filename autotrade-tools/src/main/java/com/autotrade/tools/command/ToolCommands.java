@@ -115,6 +115,7 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                 case "upstox-status" -> upstoxStatus(parsed);
                 case "vix-backfill" -> vixBackfill(parsed);
                 case "upstox-feed-check" -> upstoxFeedCheck(parsed);
+                case "account-register-paper" -> accountRegisterPaper(parsed);
                 default -> usage("unknown command: " + parsed.command());
             };
         } catch (IllegalArgumentException e) {
@@ -161,6 +162,9 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                   upstox-status                              check zt-tiger-v2's Upstox token (used first, read-only)
                                                              and auto-trade's own against the profile API
                   upstox-feed-check [--seconds 20]           connect the Upstox feed briefly with the zt-tiger-v2 token
+                  account-register-paper --subject S --name N [--tenant owner] [--label PAPER-1] [--capital 500000]
+                          [--equity-from 2026-10-07] [--risk-file config/risk/paper-risk.v17.yaml]
+                                                             register an existing PAPER label as an acct.broker_account (once)
                                                              and count what arrives (one of the 2 allowed connections)
                   vix-backfill [--daily-from D] [--minutes-from D] [--to D]
                                                              India VIX daily and one-minute bars from Upstox's public
@@ -402,6 +406,30 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                 Double.parseDouble(args.get("target-pct", "30")), LocalTime.parse(args.get("exit-by", "15:20")),
                 Integer.parseInt(args.get("lots", "1")),
                 Path.of(args.get("costs-file", "config/costs/india-index-options-costs.v1.yaml"))));
+    }
+
+    /**
+     * Live execution L0: registers an existing PAPER account label (PAPER-1) as a broker account under a tenant and app
+     * user, once. Nothing about the PAPER session changes: the row is PAPER, role DISABLED, and receives no intents.
+     */
+    private int accountRegisterPaper(ToolArgs args) {
+        args.allowOnly(Set.of("subject", "name", "tenant", "label", "capital", "equity-from", "risk-file"));
+        if (!args.has("subject") || !args.has("name")) {
+            return usage("account-register-paper needs --subject (the Keycloak subject) and --name");
+        }
+        com.autotrade.account.AccountStore accounts = new com.autotrade.account.AccountStore(target);
+        long tenant = accounts.ensureTenant(args.get("tenant", "owner"));
+        long user = accounts.ensureUser(args.get("subject", ""), args.get("name", ""));
+        accounts.ensureMembership(tenant, user, "OWNER");
+        String label = args.get("label", "PAPER-1");
+        long id = accounts.registerLegacyPaperAccount(tenant, user, label, label,
+                Double.parseDouble(args.get("capital", "500000")), LocalDate.parse(args.get("equity-from", "2026-10-07")),
+                args.get("risk-file", "config/risk/paper-risk.v17.yaml"));
+        com.autotrade.account.BrokerAccount account = accounts.byLegacyLabel(label).orElseThrow();
+        System.out.printf("broker account %d: %s, %s %s, role %s, capital %.0f (%s from %s), risk %s%n", id,
+                account.displayName(), account.brokerType(), account.tradeMode(), account.role(),
+                account.allocatedCapital(), account.equityMode(), account.equityFrom(), account.riskFile());
+        return 0;
     }
 
     private int instruments(ToolArgs args) throws Exception {

@@ -5,6 +5,10 @@ support for my own multi brokers account ... give me the best implementation pla
 account until the gates in section 9 pass and the user says so. It replaces phases 5–7 of `IMPLEMENTATION-PLAN.md`
 for the owner's own accounts. Accounts belonging to other people stay out of scope (section 7).
 
+**Revised 16 Oct ~01:40 (user: "go with option A, Zerodha first ... start on a new branch document the revised plan and
+start working"):** option A; the first live broker is Zerodha (Kite Connect); work on branch `feature/live-execution`.
+Section 11 records the decisions, section 12 the Zerodha specifics, and the L0 row in section 9 its revised scope.
+
 ## 0. The fact that decides the first step
 
 Upstox rules since 1 April 2026 (from Upstox's community notice; confirm on the developer page "Algo Registration &
@@ -321,8 +325,8 @@ health).
 
 | Phase | Builds | Done when (gate) |
 |---|---|---|
-| **L0** (1–2 wk) | `acct.*` / `exec.*` schemas with user tenancy and roles, ledger, capital rules; PAPER-1 registered as an account row (its code path untouched); signal-source publisher behind a flag (off) | 26 tick days replay identical with the flag off and on; ledger equals today's equity; nothing deployed to GCP |
-| **L1** (1–2 wk) | signal source on a virtual account; batches and intents; `app-execution` workers; DRY_RUN and PAPER followers; lease; divergence report | 5 sessions where the PAPER follower matches PAPER-1 within the expected capital-refusal differences, and DRY_RUN intents equal the PAPER follower's; bus gap handling tested |
+| **L0** (1–2 wk) | `acct.*` / `exec.*` schemas (Flyway V21) with tenancy, roles, broker accounts, sessions, copy groups, subscriptions, capital and ledger, batches, intents and executions; an `account` module with the capital rules (allocation, FIXED / COMPOUNDING equity, free capital, broker-funds check, daily loss) and ledger arithmetic; PAPER-1 registered as an account row by a tool command (its code path untouched) | migration tested on a fresh Postgres (Testcontainers); full build green; trading-core not changed; nothing deployed to GCP |
+| **L1** (1–2 wk) | signal-source publisher in trading-core behind a flag (default off); signal source on a virtual account; batches and intents; `app-execution` workers; DRY_RUN and PAPER followers; lease; divergence report | 5 sessions where the PAPER follower matches PAPER-1 within the expected capital-refusal differences, and DRY_RUN intents equal the PAPER follower's; bus gap handling tested |
 | **L2** (2 wk) | broker adapter #1 (section 3), fault-injection suite, recovery, broker-side stops, EOD broker reconciliation | every section-4 scenario green in tests; sandbox chaos day clean |
 | **L3** (1 wk) | Keycloak, Secret Manager, static IP, daily login flow, flatten-all (UI and Telegram), watchdog, runbooks | a full rehearsal from login to EOD ledger in sandbox or DRY_RUN |
 | **L4** pilot | LIVE-A: **1 lot**, 1–2 strategies, small allocation (your number), 10 sessions | zero unreconciled differences; every order tagged; slippage vs PAPER-1 measured; no unhandled incident |
@@ -387,12 +391,77 @@ and its code.
   broker-side stop and order postbacks, is the strongest option-A candidate. Check Zerodha's current app and
   static-IP rules first.
 
-## 11. Decisions needed from you
+## 11. Decisions
 
-1. Option **A** (live on a separate account of yours, recommended) or **B** (the same Upstox account, which changes
-   zt-tiger-v2's app setup).
-2. For A: which broker or account goes first. The adapter is built for that broker's API.
-3. Allocated capital for the pilot, and FIXED or COMPOUNDING.
-4. Which 1–2 strategies go first in the pilot (suggestion: the ones with the most live PAPER history and the most
-   liquid strikes).
-5. Whether Telegram may carry the authenticated flatten-all command.
+| # | Decision | Status |
+|---|---|---|
+| 1 | Option A: live on a separate account; the Upstox primary stays market data + PAPER | **Decided 16 Oct** |
+| 2 | First live broker: Zerodha (Kite Connect) | **Decided 16 Oct** |
+| 3 | Pilot allocated capital, FIXED or COMPOUNDING | open (needed by L4) |
+| 4 | First 1–2 pilot strategies | open (needed by L4) |
+| 5 | Telegram may carry the authenticated flatten-all command | open (needed by L3) |
+| 6 | Egress IP for orders: the new execution VM's own reserved IP, or the project's existing Cloud NAT IP (if zt-tiger-v2 already registered it with Zerodha, the two systems share one registration) | open (needed by L3) |
+
+## 12. Zerodha (Kite Connect) specifics
+
+From Zerodha's support pages and Kite Connect forum staff replies; verify against the live developer docs when L2
+starts.
+
+- **Static IP for orders only.**
+  - Orders come only from the registered IP: one primary plus one optional secondary. The IP list belongs to the
+    Kite Connect developer account, not to each app, and can be changed once a calendar week.
+  - Market data, order book and positions can be read from any IP.
+- **Apps.** Several apps can sit under one developer account (each family member's client id added to an app). The
+  IPs must be used only by you or your immediate family.
+- **Our app.** auto-trade gets its **own Kite Connect app**: its own API key and its own daily access token. It never
+  uses an app or token of zt-tiger-v2's.
+- **Rate.** At most 10 orders a second; more gets HTTP 429. Above 10 a second the strategy needs exchange
+  registration. Our limiter stays well below: slices are capped at 10 per order, so freeze-quantity slicing never
+  exceeds it.
+- **Market orders need market protection;** protection 0 is rejected. We send limit orders (marketable limit with a
+  buffer, as the OMS does now). Market-protected orders only on the emergency path.
+- **Tag:** up to 20 alphanumeric characters. The intent id plus attempt number is encoded to fit.
+- **Order updates.**
+  - Postbacks (per app) and WebSocket order updates are the trigger. The order book is the truth: pull it on each
+    update and on a timer.
+  - A 200 on place means accepted, not filled.
+  - Postbacks report trades, not positions, so positions are pulled.
+- **Protective stop at the broker:**
+  - **Primary:** a resting SL-limit order at the premium stop.
+  - **Alternative:** a GTT.
+  - Forum threads report missed GTT postbacks, so either way the order book is polled.
+  - Under the long-option rule, a failed stop placement means an emergency exit.
+- **Slicing.** The OMS slices to the freeze quantity from the contract master. Kite's autoslice is not used: one
+  parent with child errors is harder to reconcile than our own children.
+- **Login.** Kite's daily request-token flow, through a link that comes to you by Telegram. Nothing is automated with
+  a password or TOTP (zt-tiger-v2's headless login is not copied).
+- **Market data.** Never taken from Kite. The Kite app needs no market-data subscription. Executable bid and ask come
+  from the Kite quote API (a read call), only before an order.
+
+Sources: Zerodha support "Static IP" and "Kite Connect API FAQs"; kite.trade forum threads on SEBI's retail algo rules,
+market protection, order tag length, postbacks and autoslice.
+
+## 13. Status
+
+**L0, 16 Oct ~02:30 (branch `feature/live-execution`): built, not deployed anywhere.**
+- **Flyway `V21__accounts_and_execution.sql`.** Additive only: new tables in `acct` and in a new `exec` schema; no
+  existing table changed. The table itself enforces two guards: live trading needs LIVE mode, a real broker and
+  credentials; a PAPER account can never be LIVE.
+- **Module `account`:**
+  - `CapitalPolicy`: equity FIXED / COMPOUNDING; entry checks for daily loss, per-trade cap, free capital and, in
+    DRY_RUN/LIVE, broker funds with a buffer. Unknown funds refuse; a refusal never shrinks the order.
+  - `Sizing`: the follower budget from its equity and multiplier; the one-lot pilot step and ladder steps.
+  - `LedgerDay`: the broker difference that blocks the next live start.
+  - `AccountStore`: tenant-scoped reads; PAPER-1 registration; capital movements; ledger.
+- **CLI:** `bin/autotrade account-register-paper --subject S --name N` registers PAPER-1 (defaults from risk v17:
+  ₹5,00,000 from 7 Oct) as a PAPER, DISABLED account. Not yet run on any database.
+- **Tests:** 12 new (`AccountStoreIT` runs V21 on a fresh TimescaleDB). The full build with every test is green.
+- **Unchanged:** trading-core, the GCP deploy and the Mac's database (V21 is applied nowhere yet). When the branch
+  merges, the deploy check `flyway: 20` becomes `21`.
+
+**Next, L1:**
+- the signal-source publisher in trading-core behind `autotrade.signal-source.enabled` (default off), with the 26-day
+  identity replay off and on;
+- the virtual signal account;
+- batches and intents with workers in `app-execution`;
+- DRY_RUN and PAPER followers on the Mac.
