@@ -118,6 +118,7 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                 case "account-register-paper" -> accountRegisterPaper(parsed);
                 case "follower-add" -> followerAdd(parsed);
                 case "follow" -> follow(parsed);
+                case "divergence-report" -> divergenceReport(parsed);
                 default -> usage("unknown command: " + parsed.command());
             };
         } catch (IllegalArgumentException e) {
@@ -173,6 +174,9 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                                                              a follower account subscribed to a copy group (never live)
                   follow --session D[,D] [--copy-group LIVE-SET] [--tenant owner] [--broker-funds 1e9]
                                                              fan out the signal source's decisions and run PAPER/DRY_RUN followers
+                  divergence-report --session D[,D] [--copy-group LIVE-SET] [--tenant owner] [--paper-session ID] [--out DIR]
+                                                             L1 daily report: each follower vs the signal source, PAPER followers
+                                                             vs PAPER-1 (gate: every one-sided trade explained); Markdown
                                                              and count what arrives (one of the 2 allowed connections)
                   vix-backfill [--daily-from D] [--minutes-from D] [--to D]
                                                              India VIX daily and one-minute bars from Upstox's public
@@ -498,6 +502,40 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                         result.account(), account.tradeMode(), result.executed(), result.skipped(), result.rejected(),
                         result.closed(), result.net(), result.reasons());
             }
+        }
+        return 0;
+    }
+
+    /** Live execution L1: the daily divergence report for each day, printed and optionally written per day. */
+    private int divergenceReport(ToolArgs args) throws java.io.IOException {
+        args.allowOnly(Set.of("session", "copy-group", "tenant", "paper-session", "out"));
+        com.autotrade.account.AccountStore accounts = new com.autotrade.account.AccountStore(target);
+        long tenant = accounts.ensureTenant(args.get("tenant", "owner"));
+        String groupName = args.get("copy-group", "LIVE-SET");
+        long group = accounts.copyGroupId(tenant, groupName).orElseThrow(
+                () -> new IllegalArgumentException("no copy group " + groupName));
+        Long paper1 = args.has("paper-session") ? Long.parseLong(args.get("paper-session", "")) : null;
+        com.autotrade.execution.DivergenceReport reports = new com.autotrade.execution.DivergenceReport(target);
+        int days = 0, within = 0;
+        for (LocalDate day : args.dates("session")) {
+            com.autotrade.execution.DivergenceReport.Report report = reports.build(group, day, paper1);
+            String markdown = com.autotrade.execution.DivergenceReport.markdown(report, groupName);
+            System.out.println(markdown);
+            if (args.has("out")) {
+                Path dir = Path.of(args.get("out", "."));
+                java.nio.file.Files.createDirectories(dir);
+                java.nio.file.Files.writeString(dir.resolve("divergence-" + groupName + "-" + day + ".md"), markdown);
+            }
+            // a day counts for the gate when a PAPER follower ran; it holds when every follower that ran is within
+            var ran = report.paper1().stream().filter(c -> c.followerRan()).toList();
+            if (!ran.isEmpty()) {
+                days++;
+                within += ran.stream().allMatch(c -> c.withinGate()) ? 1 : 0;
+            }
+        }
+        if (days > 0) {
+            System.out.printf("Gate L1: PAPER followers within PAPER-1 (every one-sided trade explained) on %d of %d days%n",
+                    within, days);
         }
         return 0;
     }

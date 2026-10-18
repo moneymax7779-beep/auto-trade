@@ -639,5 +639,22 @@ trade difference is one of the kinds listed above.
 | Worker IT (Testcontainers) | incremental ticks; a second worker refused while the lease is held; takeover with epoch 2; orders carry the epoch |
 | Streaming run: worker container + a 16 Oct own-capture tee replay | DRY-TEE (worker, live as decisions arrived) = PAPER-TEE (offline): same 2 trades, prices and net −₹2,01,624, same 3 daily-loss refusals; decision to order: average 0.63 s, worst 0.92 s (1 s poll) |
 
-**L1 is complete except the daily divergence report.** L2 (the Zerodha adapter: auth, orders, the broker's quotes and
+**L1, daily divergence report, 19 Oct 00:40–01:10 (branch, Mac only).**
+
+- `DivergenceReport` (execution module, reads only) and CLI `divergence-report --session D[,D] [--copy-group G]
+  [--paper-session ID] [--out DIR]` (Markdown per day):
+  1. **signal source vs each follower:** every ENTER decision, the follower's outcome (executed, or the intent's skip /
+     reject code), its lots against the signal's, the entry and exit fills against the signal's reference prices
+     (slippage %), its net;
+  2. **PAPER follower vs PAPER-1:** positions matched by strategy, underlying, side, contract and entry time (90 s);
+     quantity includes adds on both sides; a one-sided trade is *explained* by the follower's refusal or skip, or by
+     PAPER-1's risk refusal (trade.rejection), else *unexplained*. Gate for the day: the follower ran and nothing is
+     unexplained. A follower that processed none of the day's intents is "not run this day" and not counted.
+- PAPER-1's session: the same mode and code version as the signal session (the tee runs both), else the day's latest.
+- Tests: `DivergenceReportIT` (3: matched / explained / unexplained / not run / no decisions).
+- **On the Mac's stored runs: LIVE-SET (PAPER-F2) within the gate on 26 of 26 tick days**; daily follower − PAPER-1
+  from −₹50,120 to +₹33,954, all from matched trades (sizing and fill timing) or explained ones; TEE-TEST (PAPER-TEE,
+  streaming worker) within on 16 Oct, its only run day. Reports in `.local/l1/divergence/`.
+
+**L1 is complete; its gate is met.** L2 (the Zerodha adapter: auth, orders, the broker's quotes and
 funds, the order stream, a broker-side stop, recovery) comes next.
