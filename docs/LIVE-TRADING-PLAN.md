@@ -651,10 +651,20 @@ trade difference is one of the kinds listed above.
      PAPER-1's risk refusal (trade.rejection), else *unexplained*. Gate for the day: the follower ran and nothing is
      unexplained. A follower that processed none of the day's intents is "not run this day" and not counted.
 - PAPER-1's session: the same mode and code version as the signal session (the tee runs both), else the day's latest.
-- Tests: `DivergenceReportIT` (3: matched / explained / unexplained / not run / no decisions).
+- Tests: `DivergenceReportIT` (4: matched / explained / unexplained / not run / no decisions; adds: the entry's own
+  fill, quantity with adds, a refused add explaining a size divergence, the depth ceiling).
+- **Review fixes (19 Oct 01:00):** one signal session throughout (intents, positions and "ran" from the day's newest
+  signal session only, no longer the whole day); ADD decisions in part 1 (executed adds counted, refused ones listed as
+  `ADD_<state>_<code>`); a matched trade whose quantities differ by more than 25 % is a **size divergence**, explained
+  by a refused or skipped add or the replay depth ceiling, else unexplained; the refusal lookup checks the contract;
+  three queries per follower instead of three per decision; `--paper-session` only with one day.
 - **On the Mac's stored runs: LIVE-SET (PAPER-F2) within the gate on 26 of 26 tick days**; daily follower − PAPER-1
-  from −₹50,120 to +₹33,954, all from matched trades (sizing and fill timing) or explained ones; TEE-TEST (PAPER-TEE,
-  streaming worker) within on 16 Oct, its only run day. Reports in `.local/l1/divergence/`.
+  from −₹50,120 to +₹33,954; TEE-TEST (PAPER-TEE, streaming worker) within on 16 Oct, its only run day. Reports in
+  `.local/l1/divergence/`. The size check found 3 ma-cross entries (24, 25, 28 Sep) where PAPER-1 took ×1.5
+  (risk v17's RVOL boost) and the follower took the signal account's unboosted fill (2,145 vs 3,250; 680 vs 1,020;
+  460 vs 620; net −₹5K across them). They are explained by the replay depth ceiling, but it is a **parity gap**:
+  signal-source v2 has no RVOL boost, so in a replay its fill caps a boosted follower. Live has no such ceiling. Fix
+  (not done): a signal-source v3 with the boost, then re-run those days.
 
 **L1 is complete; its gate is met.** L2 (the Zerodha adapter: auth, orders, the broker's quotes and
 funds, the order stream, a broker-side stop, recovery) comes next.

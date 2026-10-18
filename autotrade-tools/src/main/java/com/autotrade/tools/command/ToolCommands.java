@@ -515,9 +515,13 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
         long group = accounts.copyGroupId(tenant, groupName).orElseThrow(
                 () -> new IllegalArgumentException("no copy group " + groupName));
         Long paper1 = args.has("paper-session") ? Long.parseLong(args.get("paper-session", "")) : null;
+        List<LocalDate> dates = args.dates("session");
+        if (paper1 != null && dates.size() != 1) {
+            return usage("divergence-report --paper-session is one day's PAPER-1 session: give one --session day");
+        }
         com.autotrade.execution.DivergenceReport reports = new com.autotrade.execution.DivergenceReport(target);
         int days = 0, within = 0;
-        for (LocalDate day : args.dates("session")) {
+        for (LocalDate day : dates) {
             com.autotrade.execution.DivergenceReport.Report report = reports.build(group, day, paper1);
             String markdown = com.autotrade.execution.DivergenceReport.markdown(report, groupName);
             System.out.println(markdown);
@@ -534,7 +538,7 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
             }
         }
         if (days > 0) {
-            System.out.printf("Gate L1: PAPER followers within PAPER-1 (every one-sided trade explained) on %d of %d days%n",
+            System.out.printf("Gate L1: PAPER followers within PAPER-1 (every divergence explained) on %d of %d days%n",
                     within, days);
         }
         return 0;

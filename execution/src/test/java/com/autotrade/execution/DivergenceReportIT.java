@@ -214,6 +214,87 @@ class DivergenceReportIT {
     }
 
     @Test
+    void addsCountInTheQuantityAndARefusedAddExplainsASizeDivergence() {
+        AccountStore accounts = new AccountStore(dataSource);
+        long tenant = accounts.ensureTenant("owner");
+        long owner = accounts.ensureUser("kc-owner", "owner");
+        accounts.ensureMembership(tenant, owner, "OWNER");
+        long signal = accounts.ensureSignalSourceAccount(tenant, owner, "SIGNAL-3", 500_000, DAY,
+                "config/risk/signal-source.v2.yaml");
+        long group = accounts.ensureCopyGroup(tenant, "ADDS", signal);
+        String risk = "../config/risk/follower-risk.v1.yaml";
+        long follower = accounts.ensureFollowerAccount(tenant, owner, "PAPER-ADDS", BrokerType.PAPER, TradeMode.PAPER, 500_000,
+                EquityMode.FIXED, DAY, risk, 100);
+        FanOut fanOut = new FanOut(dataSource);
+        fanOut.subscribe(group, follower, List.of("opening-drive"), 1.0);
+        long signalSession = session(null, "SIGNAL-3", "it3");
+        Map<String, Double> sizing = Map.of("liquidity_lots", 1000.0, "strategy_lots", 1.0, "intended_lots", 1.0);
+        SignalDecisionStore store = new SignalDecisionStore(dataSource);
+        String[][] rows = {{"09:25:00", "ENTER", "100"}, {"09:40:00", "ADD", "110"}, {"09:50:00", "ADD", "50000"},
+                {"10:30:00", "EXIT", "120"}};
+        for (int i = 0; i < rows.length; i++) {
+            SignalDecision.Action action = SignalDecision.Action.valueOf(rows[i][1]);
+            store.insert(new SignalDecision(group, signalSession, DAY, ist(rows[i][0]), "opening-drive", 2, "SENSEX", action,
+                    "CE", null, "CONFIRMED", "IT", 1234, "BSE_FO|CE", "SENSEX 73200 CE", 20, Double.parseDouble(rows[i][2]),
+                    action == SignalDecision.Action.ENTER ? 100_000 : Double.NaN, 500_000, 0,
+                    group + ":" + signalSession + ":" + (i + 1), action == SignalDecision.Action.EXIT ? Map.of() : sizing));
+        }
+        fanOut.fanOut(group, DAY);
+        CostModel costs = CostModel.from(ThresholdConfig.load(Path.of("..", "config", "costs",
+                "india-index-options-costs.v2.yaml")));
+        BrokerAccount account = accounts.followers(group).stream().filter(a -> a.id() == follower).findFirst().orElseThrow();
+        new FollowerSimulator(dataSource, costs, FollowerRisk.load(Path.of(risk)), 1e9).run(account, group, DAY);
+        // the entry's own order (the first ENTRY fill) and everything filled as ENTRY (entry + the executed add)
+        Map<String, Object> entryOrder = jdbc.queryForMap("select e.quantity_filled, e.average_fill_price from exec.order_execution e "
+                + "where e.broker_account_id = ? and e.role = 'ENTRY' order by e.id limit 1", follower);
+        long entryQuantity = ((Number) entryOrder.get("quantity_filled")).longValue();
+        double entryPrice = ((Number) entryOrder.get("average_fill_price")).doubleValue();
+        long filled = jdbc.queryForObject("select sum(quantity_filled) from exec.order_execution where broker_account_id = ? "
+                + "and role = 'ENTRY'", Long.class, follower);
+        assertThat(filled).as("the 09:40 add executed").isGreaterThan(entryQuantity);
+
+        long paper1 = session(null, "PAPER-1", "it3");
+        paper1Position(paper1, "opening-drive", "CE", "09:25:05", filled + entryQuantity, 30_000);   // took both adds
+
+        DivergenceReport.Report report = new DivergenceReport(dataSource).build(group, DAY, paper1);
+        DivergenceReport.FollowerSummary f = report.followers().getFirst();
+        assertThat(f.ran()).isTrue();
+        assertThat(f.entries()).isEqualTo(1);
+        assertThat(f.executed()).isEqualTo(1);
+        assertThat(f.addsExecuted()).isEqualTo(1);
+        assertThat(f.notFollowed()).hasSize(1).allSatisfy((outcome, n) -> assertThat(outcome).startsWith("ADD_REJECTED_"));
+        DivergenceReport.FollowerTrade entry = f.trades().stream().filter(t -> t.action().equals("ENTER")).findFirst()
+                .orElseThrow();
+        assertThat(entry.lots()).as("the entry's lots, not entry + add").isEqualTo((int) (entryQuantity / 20));
+        assertThat(entry.entryFill()).as("the entry's own fill, not the average after the add").isEqualTo(entryPrice);
+        assertThat(entry.entrySlipPct()).isLessThan(2.0);
+
+        DivergenceReport.Paper1Comparison c = report.paper1().getFirst();
+        assertThat(c.sizeDivergences()).isEqualTo(1);
+        assertThat(c.rows()).singleElement().satisfies(m -> {
+            assertThat(m.kind()).isEqualTo("SIZE");
+            assertThat(m.followerQuantity()).as("entry + the executed add").isEqualTo(filled);
+            assertThat(m.explanation()).startsWith("follower ADD REJECTED").endsWith("09:50");
+        });
+        assertThat(c.withinGate()).isTrue();
+        assertThat(DivergenceReport.markdown(report, "ADDS")).contains("| SIZE |", "follower ADD REJECTED", "| ADD |");
+
+        // without the refused add the size divergence is unexplained, unless the follower holds exactly the signal
+        // account's fill (the replay depth ceiling)
+        jdbc.update("delete from exec.trade_intent where broker_account_id = ? and state = 'REJECTED'", follower);
+        assertThat(new DivergenceReport(dataSource).build(group, DAY, paper1).paper1().getFirst().unexplained()).isEqualTo(1);
+        paper1Position(signalSession, "opening-drive", "CE", "09:25:00", filled, 20_000);
+        assertThat(new DivergenceReport(dataSource).build(group, DAY, paper1).paper1().getFirst().rows()).singleElement()
+                .satisfies(m -> assertThat(m.explanation()).startsWith("replay depth ceiling: the signal account filled"));
+
+        // PAPER-1 with the follower's quantity: matched
+        jdbc.update("update trade.position set quantity = ? where session_id = ?", filled, paper1);
+        DivergenceReport.Paper1Comparison same = new DivergenceReport(dataSource).build(group, DAY, paper1).paper1().getFirst();
+        assertThat(same.matched()).isEqualTo(1);
+        assertThat(same.sizeDivergences()).isZero();
+    }
+
+    @Test
     void aDayWithoutSignalDecisionsSaysSo() {
         DivergenceReport.Report report = new DivergenceReport(dataSource).build(999_999, DAY.plusDays(1), null);
         assertThat(report.signalSessionId()).isNull();
