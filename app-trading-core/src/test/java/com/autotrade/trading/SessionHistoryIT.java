@@ -124,4 +124,46 @@ class SessionHistoryIT {
         assertThat(new JdbcTemplate(dataSource).queryForObject("select orders from trade.decision where session_id = ?",
                 String.class, id)).isEqualTo("ENTER_STRADDLE:CE+PE:500000:BREAKOUT_DOWN");
     }
+    /**
+     * The Sessions page's runs: a batch's zt days and own-capture days are one run, its bar days another; a re-run day counts
+     * once with its latest net; a different config file set is a different run; the run filter returns exactly its sessions.
+     */
+    @Test
+    void sessionRunsGroupABatchAcrossTickFeedsAndTheFilterReturnsItsSessions() {
+        TradeStore store = new TradeStore(dataSource);
+        HistoryController history = new HistoryController(dataSource);
+        Map<String, String> v1 = Map.of("runs-test.v1.yaml", "sha256:a", "paper-risk.v17.yaml", "sha256:r");
+        Map<String, String> v2 = Map.of("runs-test.v2.yaml", "sha256:b", "paper-risk.v17.yaml", "sha256:r");
+        long zt = store.startSession("PAPER-1", "PAPER_REPLAY", LocalDate.of(2026, 9, 2), "replay-as-live:zt-tiger-v2",
+                "runs-test", "sha256:x", v1, "runs1");
+        long ztAgain = store.startSession("PAPER-1", "PAPER_REPLAY", LocalDate.of(2026, 9, 2), "replay-as-live:zt-tiger-v2",
+                "runs-test", "sha256:x", v1, "runs1");
+        long own = store.startSession("PAPER-1", "PAPER_REPLAY", LocalDate.of(2026, 10, 14), "replay-as-live:own-capture",
+                "runs-test", "sha256:x", v1, "runs1");
+        long bars = store.startSession("PAPER-1", "PAPER_REPLAY", LocalDate.of(2026, 3, 2), "replay-as-live:bars",
+                "runs-test", "sha256:x", v1, "runs1");
+        long other = store.startSession("PAPER-1", "PAPER_REPLAY", LocalDate.of(2026, 9, 2), "replay-as-live:zt-tiger-v2",
+                "runs-test", "sha256:x", v2, "runs1");
+        store.endSession(zt, "DONE", Map.of("net", 100), null);
+        store.endSession(ztAgain, "DONE", Map.of("net", 250), null);
+        store.endSession(own, "DONE", Map.of("net", -50), null);
+        store.endSession(bars, "DONE", Map.of("net", 7), null);
+        store.endSession(other, "DONE", Map.of("net", 9), null);
+
+        List<Map<String, Object>> runs = history.sessionRuns().stream().filter(r -> "runs1".equals(r.get("code_version"))).toList();
+        assertThat(runs).hasSize(3);
+        Map<String, Object> ticks = runs.stream().filter(r -> "ticks".equals(r.get("data"))
+                && r.get("configs").toString().contains("runs-test.v1")).findFirst().orElseThrow();
+        assertThat(((Number) ticks.get("days")).intValue()).isEqualTo(2);
+        assertThat(((Number) ticks.get("sessions")).intValue()).isEqualTo(3);
+        assertThat(((Number) ticks.get("net")).intValue()).as("the re-run day counts once, latest net").isEqualTo(200);
+        assertThat(ticks.get("date_from")).isEqualTo("2026-09-02");
+        assertThat(ticks.get("date_to")).isEqualTo("2026-10-14");
+
+        List<Map<String, Object>> sessions = history.sessions("runs1", "runs-test", (String) ticks.get("config_key"),
+                "PAPER_REPLAY", "ticks");
+        assertThat(sessions).extracting(r -> ((Number) r.get("id")).longValue()).containsExactly(own, ztAgain, zt);
+        assertThat(history.sessions("runs1", null, null, null, "bars")).extracting(r -> ((Number) r.get("id")).longValue())
+                .containsExactly(bars);
+    }
 }

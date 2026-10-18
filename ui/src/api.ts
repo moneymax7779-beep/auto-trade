@@ -107,6 +107,25 @@ export interface SessionRow {
   error: string | null;
 }
 
+/** One run on the Sessions page's dropdown (GET /api/sessions/runs): sessions with the same mode, code, strategy set,
+ * config files and data kind; a re-run day counts once. */
+export interface SessionRunRow {
+  mode: string;
+  code_version: string;
+  strategy_id: string;
+  /** hash of the config files: the run filter's {@code configs} parameter */
+  config_key: string;
+  data: "bars" | "ticks";
+  configs?: Record<string, string>;
+  feeds: string;
+  days: number;
+  sessions: number;
+  date_from: string;
+  date_to: string;
+  net: number;
+  last_started: string;
+}
+
 export interface Scores { stage: string; early: number; confirm: number; runner: number }
 
 export interface DecisionRow {

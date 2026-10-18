@@ -43,14 +43,74 @@ class HistoryController {
         this.jdbc = new JdbcTemplate(dataSource);
     }
 
+    private static final String SESSION_COLUMNS = "select id, account, mode, session_date::text, feed, strategy_id, "
+            + "left(strategy_hash, 19) strategy_hash, code_version, " + ist("started_at") + ", " + ist("ended_at") + ", status, "
+            + "summary::text summary, error, configs::text configs from trade.session ";
+
+    /**
+     * The sessions list. Without filters: every live session (the charts' day list) plus the newest 200 of any kind (replays
+     * pile up). With the Sessions page's run or strategy filter ({@code code}, {@code strategy}, {@code configs} = the
+     * config key of {@link #sessionRuns}, {@code mode}, {@code data} = bars / ticks): every matching session, newest first,
+     * at most 2,000.
+     */
     @GetMapping("/sessions")
-    List<Map<String, Object>> sessions() {
-        return query("select id, account, mode, session_date::text, feed, strategy_id, left(strategy_hash, 19) strategy_hash, "
-                + "code_version, " + ist("started_at") + ", " + ist("ended_at") + ", status, summary::text summary, error, "
-                + "configs::text configs "
-                // every live session (the charts' day list) plus the newest 200 of any kind (replays pile up)
-                + "from trade.session where mode = 'PAPER_LIVE' or id > (select coalesce(max(id), 0) - 200 from trade.session) "
-                + "order by id desc");
+    List<Map<String, Object>> sessions(@RequestParam(required = false) String code,
+            @RequestParam(required = false) String strategy, @RequestParam(required = false) String configs,
+            @RequestParam(required = false) String mode, @RequestParam(required = false) String data) {
+        if (code == null && strategy == null && configs == null && mode == null && data == null) {
+            return query(SESSION_COLUMNS + "where mode = 'PAPER_LIVE' or id > (select coalesce(max(id), 0) - 200 from trade.session) "
+                    + "order by id desc");
+        }
+        StringBuilder where = new StringBuilder("where true");
+        List<Object> args = new ArrayList<>();
+        if (code != null) {
+            where.append(" and code_version = ?");
+            args.add(code);
+        }
+        if (strategy != null) {
+            where.append(" and strategy_id = ?");
+            args.add(strategy);
+        }
+        if (configs != null) {
+            where.append(" and " + CONFIG_KEY + " = ?");
+            args.add(configs);
+        }
+        if (mode != null) {
+            where.append(" and mode = ?");
+            args.add(mode);
+        }
+        if (data != null) {
+            where.append(" and " + DATA_KIND + " = ?");
+            args.add(data);
+        }
+        return query(SESSION_COLUMNS + where + " order by id desc limit 2000", args.toArray());
+    }
+
+    /** A run's config identity: the hash of its config files (risk, features, every strategy version). */
+    private static final String CONFIG_KEY = "md5(coalesce(configs::text, ''))";
+    /** The data a session ran on: "bars" (Upstox one-minute bars, coarse) or "ticks" (live, zt or own tick capture). */
+    private static final String DATA_KIND = "case when feed like '%bars%' then 'bars' else 'ticks' end";
+
+    /**
+     * Every run, newest first (at most 500), for the Sessions page's dropdowns: the sessions with the same mode, code version,
+     * strategy set, config files and data kind (bars or ticks; a replay batch's zt days and own-capture days are one run). A day
+     * replayed twice counts once, with its latest session's net.
+     */
+    @GetMapping("/sessions/runs")
+    List<Map<String, Object>> sessionRuns() {
+        return query("with s as (select id, mode, code_version, strategy_id, configs, " + CONFIG_KEY + " config_key, "
+                + DATA_KIND + " data, session_date, feed, started_at, (summary ->> 'net')::numeric net from trade.session), "
+                + "latest as (select distinct on (mode, code_version, strategy_id, config_key, data, session_date) * from s "
+                + "order by mode, code_version, strategy_id, config_key, data, session_date, id desc), "
+                + "counts as (select mode, code_version, strategy_id, config_key, data, count(*) sessions, max(id) last_id, "
+                + "max(started_at) last_started from s group by 1, 2, 3, 4, 5) "
+                + "select l.mode, l.code_version, l.strategy_id, l.config_key, l.data, "
+                + "(array_agg(l.configs::text order by l.id desc))[1] configs, string_agg(distinct l.feed, ',') feeds, count(*) days, "
+                + "c.sessions, min(l.session_date)::text date_from, max(l.session_date)::text date_to, coalesce(sum(l.net), 0) net, "
+                + "to_char(c.last_started at time zone '" + IST + "', 'YYYY-MM-DD HH24:MI:SS') last_started "
+                + "from latest l join counts c using (mode, code_version, strategy_id, config_key, data) "
+                + "group by l.mode, l.code_version, l.strategy_id, l.config_key, l.data, c.sessions, c.last_id, c.last_started "
+                + "order by c.last_id desc limit 500");
     }
 
     /** One underlying's decisions; {@code strategy} selects one strategy when several traded (default: all). */
