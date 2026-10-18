@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Live execution L3 watchdog check (plan section 4: "VM down / app-execution crash"): exits 0 when the execution
+# worker answers and its loop ticked recently, 1 otherwise, printing why. Meant for a scheduler the user sets up
+# (launchd on the Mac, an uptime check on GCP); this script sends nothing itself.
+#   bin/execution-watchdog [http://127.0.0.1:8096]
+set -u
+URL="${1:-http://127.0.0.1:8096}/api/execution/status"
+body=$(curl -fsS --max-time 5 "$URL" 2>&1) || { echo "DOWN: $URL unreachable: $body"; exit 1; }
+python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+bad = [a["account"] + " " + a["state"] for a in d.get("accounts", []) if a.get("state") not in ("RUNNING", "REFUSED", "LEASE_HELD_ELSEWHERE")]
+if d.get("stale"):
+    print("STALE: worker %s last tick %s" % (d.get("worker"), d.get("lastTick"))); sys.exit(1)
+if bad:
+    print("ACCOUNTS: " + ", ".join(bad)); sys.exit(1)
+print("OK: worker %s, %d accounts, last tick %s" % (d.get("worker"), len(d.get("accounts", [])), d.get("lastTick")))
+' "$body"

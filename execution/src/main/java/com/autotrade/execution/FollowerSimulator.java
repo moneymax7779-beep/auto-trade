@@ -61,7 +61,7 @@ public final class FollowerSimulator {
                             Map<String, Integer> reasons) {
     }
 
-    private record Pending(long intentId, String mode, String action, String strategyId, String underlying,
+    private record Pending(long intentId, long copyGroupId, String mode, String action, String strategyId, String underlying,
                            String side, long token, String instrumentKey, String symbol, int lotSize, double price,
                            double budget, double referenceCapital, int lots, String legGroup, Instant at, String reason,
                            double sizeMultiplier, double strategyLots, double intendedLots, double liquidityLots,
@@ -278,7 +278,10 @@ public final class FollowerSimulator {
             scale = scale * step / 100;
         }
         if (p.liquidityLots() > 0) {
-            lots = Math.min(lots, (long) p.liquidityLots());                            // what the book allowed
+            lots = Math.min(lots, (long) Math.floor(p.liquidityLots() * liquidityShare(day, p)));   // what the book allowed
+            if (lots < 1) {
+                return reject(p, "LIQUIDITY_SHARE", "this account's share of the book is under one lot");
+            }
         }
         if (p.bookQuantity() >= 0) {                                                    // replay depth ceiling
             if (p.bookQuantity() < p.lotSize()) {
@@ -405,6 +408,10 @@ public final class FollowerSimulator {
         if (day.dailyLossLatched) {
             return reject(p, "DAILY_LOSS", "the daily loss limit was reached earlier today");
         }
+        String combined = combinedRefusal(day, p, lots, premium);
+        if (combined != null) {
+            return reject(p, combined.substring(0, combined.indexOf(':')), combined.substring(combined.indexOf(':') + 2));
+        }
         EntryDecision capital = day.policy.checkEntry(TradeMode.valueOf(p.mode()), day.equity, premium,
                 openPremium(day.account.id()), day.todayNet(), funds(day.account, p.mode()));
         if (!capital.approved() && capital.code().equals("DAILY_LOSS")) {
@@ -421,6 +428,57 @@ public final class FollowerSimulator {
             return reject(p, capital.code(), capital.reason());
         }
         return null;
+    }
+
+    /** The tenant's broker-routed accounts (DRY_RUN, LIVE) that the combined limits cover. */
+    private static final String TENANT_BROKER_ACCOUNTS = "select id from acct.broker_account where tenant_id = ? "
+            + "and enabled and account_role = 'FOLLOWER_TRADE' and trade_mode in ('DRY_RUN', 'LIVE')";
+
+    /**
+     * L6 cross-account limits (risk v4 {@code combined}, broker-routed accounts only): COMBINED_PREMIUM when the tenant's
+     * broker-routed premium in use + this entry exceeds the % of their combined allocation, COMBINED_LOTS when lots of
+     * this contract across them would exceed the cap; null = within.
+     */
+    private String combinedRefusal(Day day, Pending p, long lots, double premium) {
+        FollowerRisk.Combined c = risk.combined();
+        if (c == null || !venue.broker()) {
+            return null;
+        }
+        Map<String, Object> t = jdbc.queryForMap("select coalesce(sum(p.quantity_open * p.average_entry), 0) premium, "
+                        + "coalesce(sum(case when p.instrument_key = ? then p.quantity_open else 0 end), 0) contract_quantity, "
+                        + "(select coalesce(sum(allocated_capital), 0) from acct.broker_account where id in ("
+                        + TENANT_BROKER_ACCOUNTS + ")) allocations from exec.position p where p.status = 'OPEN' "
+                        + "and p.broker_account_id in (" + TENANT_BROKER_ACCOUNTS + ")", p.instrumentKey(),
+                day.account.tenantId(), day.account.tenantId());
+        double inUse = ((Number) t.get("premium")).doubleValue();
+        double allowed = ((Number) t.get("allocations")).doubleValue() * c.maxOpenPremiumPct() / 100;
+        if (inUse + premium > allowed) {
+            return String.format(java.util.Locale.ROOT, "COMBINED_PREMIUM: the tenant's broker accounts hold %.0f, + %.0f "
+                    + "is over %.0f", inUse, premium, allowed);
+        }
+        long heldLots = ((Number) t.get("contract_quantity")).longValue() / Math.max(1, p.lotSize());
+        if (heldLots + lots > c.maxLotsPerContract()) {
+            return "COMBINED_LOTS: " + heldLots + " lots of " + p.symbol() + " held across the tenant's accounts, + " + lots
+                    + " is over " + c.maxLotsPerContract();
+        }
+        return null;
+    }
+
+    /**
+     * L6 liquidity allocator (risk v4 {@code share_liquidity}): the account's share of a decision's usable depth = its
+     * allocation over the allocations of the tenant's broker-routed accounts subscribed to the strategy in the copy
+     * group (several accounts buying one strike at the same second compete for one book). 1 otherwise.
+     */
+    private double liquidityShare(Day day, Pending p) {
+        FollowerRisk.Combined c = risk.combined();
+        if (c == null || !c.shareLiquidity() || !venue.broker()) {
+            return 1;
+        }
+        Double all = jdbc.queryForObject("select coalesce(sum(a.allocated_capital), 0) from acct.broker_account a "
+                + "join acct.strategy_subscription s on s.broker_account_id = a.id and s.enabled where s.copy_group_id = ? "
+                + "and s.strategy_id = ? and a.id in (" + TENANT_BROKER_ACCOUNTS + ")", Double.class, p.copyGroupId(),
+                p.strategyId(), day.account.tenantId());
+        return all == null || all <= 0 ? 1 : Math.min(1, day.account.allocatedCapital() / all);
     }
 
     private double scaledBudget(Day day, Pending p) {
@@ -854,7 +912,7 @@ public final class FollowerSimulator {
         return net == null ? 0 : net;
     }
 
-    private static final String PENDING = "select i.id, i.execution_mode, d.action, d.strategy_id, d.underlying, "
+    private static final String PENDING = "select i.id, d.copy_group_id, i.execution_mode, d.action, d.strategy_id, d.underlying, "
             + "d.option_side, d.instrument_token, d.instrument_key, d.symbol, d.lot_size, d.reference_price, d.premium_budget, "
             + "d.reference_capital, d.lots, d.leg_group, d.decided_at, d.reason, coalesce(s.size_multiplier, 1) as size_multiplier, "
             + "(d.context->>'strategy_lots')::float8 as strategy_lots, (d.context->>'intended_lots')::float8 as intended_lots, "
@@ -905,7 +963,7 @@ public final class FollowerSimulator {
     }
 
     private static Pending pendingRow(ResultSet rs, int i) throws SQLException {
-        return new Pending(rs.getLong("id"), rs.getString("execution_mode"), rs.getString("action"),
+        return new Pending(rs.getLong("id"), rs.getLong("copy_group_id"), rs.getString("execution_mode"), rs.getString("action"),
                 rs.getString("strategy_id"), rs.getString("underlying"), rs.getString("option_side"),
                 rs.getLong("instrument_token"), InstrumentKeys.normalize(rs.getString("instrument_key"),
                         rs.getLong("instrument_token")), rs.getString("symbol"), rs.getInt("lot_size"),

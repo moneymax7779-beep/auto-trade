@@ -806,6 +806,31 @@ and a DRY_RUN account's orders go to a local Kite simulator.
     - The local chaos drill was clean.
     - Still open: Kite's real sandbox (the plan says sandbox; Kite has none, so the drill used the local simulator) and
       a real-broker DRY_RUN read path. Both need the Kite app and the user's go-ahead.
+**L6 first slice and L3 pieces, 19 Oct ~02:15 (branch, Mac only).**
+- **Cross-account limits and the liquidity allocator** (plan section 2a, "Fan-out at scale"), in a new
+  **`follower-risk.v4.yaml`** = v3 + `combined`. It counts the tenant's broker-routed accounts only (DRY_RUN and LIVE;
+  PAPER trades no real book):
+  - **COMBINED_PREMIUM:** their premium in use + the entry must stay within `max_open_premium_pct` of their combined
+    allocation.
+  - **COMBINED_LOTS:** lots of one contract across them must stay within `max_lots_per_contract`.
+  - **`share_liquidity`:** a decision's usable depth (liquidity_lots) is split across the tenant's broker-routed
+    accounts following it, pro rata to allocation. An account whose share is under one lot is refused
+    LIQUIDITY_SHARE.
+  - The placeholder values (100 %, 400 lots, sharing on) bind only where several accounts compete.
+  - **v4 is attached to no account: choosing it is yours.**
+  - Not yet: staggered slices across accounts.
+- Tests: `BrokerVenueIT` 15 (+ allocator 20 / 10 of 30 lots at 5L / 2.5L; combined lots and premium refusals).
+- **Watchdog signal:** `/api/execution/status` gains `lastTick` and `stale` (no tick for 10 poll intervals).
+  `bin/execution-watchdog` exits 1 when the worker is DOWN, STALE or an account is in error. It sends nothing;
+  scheduling it (launchd, a GCP uptime check) and where it alerts are yours to set.
+- **Runbook:** `docs/runbooks/live-execution.md` (start/stop, kill switches, flatten, session loss, reconciliation,
+  crash recovery, drills).
+- **Blocked tonight: the Kite daily login flow and the secret store.**
+  - The plan was a request-token redirect endpoint, file secrets locally and Secret Manager later, and
+    acct.broker_session rows.
+  - Writing the code that stores broker access tokens was refused by the session's safety classifier ("Secret-Store
+    Writes"). It is not built; it needs your go-ahead.
+  - Until then, `account-session` / `POST .../session` mark a session after a login done elsewhere.
 - **Not done yet (L2/L3):**
   - Kite's WebSocket order updates (polling only).
   - The real daily login flow and token store: Secret Manager, the Telegram link, a redirect endpoint.

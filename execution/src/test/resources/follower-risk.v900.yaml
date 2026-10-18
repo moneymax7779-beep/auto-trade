@@ -1,0 +1,41 @@
+# Test only: follower-risk v4 with a binding combined limit.
+version: follower-risk-v900
+name: follower-risk
+status: UNCALIBRATED
+
+capital:
+  daily_loss_pct: 22                   # as paper-risk v17
+  max_premium_per_trade_pct: 100
+  max_open_premium_pct: 100            # premium in use + this entry <= equity (paper-risk v17's capital check)
+  broker_funds_buffer_pct: 10          # the broker's available funds must exceed the entry premium by 10 %
+
+positions:                             # as paper-risk v17
+  max_open_positions: 4
+  max_lots_per_underlying: 400
+
+sizing:                                # as paper-risk v17
+  rvol_boost_threshold: 1.5
+  rvol_boost_factor: 1.5
+
+simulation:                            # PAPER followers (simulated fills) only
+  adverse_bps: 0
+
+orders:                                # as paper-risk v17 orders (PAPER-1's OMS)
+  entry_buffer_ticks: 4                # marketable limit: the broker's ask + 4 ticks
+  entry_timeout_sec: 10                # what is unfilled after this is cancelled; the position is what filled
+  exit_buffer_ticks: 4                 # sell limit: bid − max(4 ticks, exit_buffer_pct of the bid)
+  exit_buffer_pct: 1.0
+  exit_chase_sec: 2                    # an unfilled exit is re-priced at the new touch after this
+  exit_chase_max: 6                    # re-pricings before the exit crosses exit_cross_pct through the touch
+  exit_cross_pct: 5
+  tick: 0.05                           # index option price step
+  poll_ms: 250                         # how often the order book is pulled while an order works
+
+broker_stop:                           # plan section 3: catastrophic stop resting at the broker after every entry fill
+  default_stop_pct: 25                 # when the signal carries no stop_pct (the strategies publish theirs)
+  limit_offset_pct: 5                  # its limit this far below the trigger (paper-risk v17 stop_limit_offset_pct)
+
+combined:                              # L6: across the tenant's broker-routed accounts
+  max_open_premium_pct: 100
+  max_lots_per_contract: 25
+  share_liquidity: false

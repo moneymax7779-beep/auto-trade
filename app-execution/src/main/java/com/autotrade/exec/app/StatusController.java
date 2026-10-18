@@ -6,7 +6,10 @@ import java.util.Map;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RestController;
 
-/** {@code /api/execution/status}: this worker and each follower account's last turn (lease, state, result). */
+/**
+ * {@code /api/execution/status}: this worker, its heartbeat ({@code lastTick}, {@code stale}) and each follower
+ * account's last turn (route, lease, state, result).
+ */
 @RestController
 class StatusController {
 
@@ -23,6 +26,12 @@ class StatusController {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("worker", properties.workerId());
         out.put("copyGroup", properties.copyGroup());
+        out.put("day", service.day().toString());
+        java.time.Instant last = service.lastTick();
+        long age = last == null ? -1 : java.time.Duration.between(last, java.time.Instant.now()).toSeconds();
+        out.put("lastTick", last == null ? null : last.toString());
+        // the watchdog's signal: no finished tick for 10 poll intervals (or none yet)
+        out.put("stale", last == null || age * 1000 > 10 * properties.pollMs());
         out.put("accounts", service.status());
         return out;
     }

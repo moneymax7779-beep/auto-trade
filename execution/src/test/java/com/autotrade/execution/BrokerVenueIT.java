@@ -466,4 +466,82 @@ class BrokerVenueIT {
         assertThat(kills.engaged(s.broker(), "opening-drive", KEY)).startsWith("INSTRUMENT");
         kills.release(mine, s.broker().tenantId(), "it");
     }
+
+    // ------------------------------------------------------------------ L6: several accounts of one tenant
+
+    /** Two ZERODHA DRY_RUN accounts of one new tenant on {@code riskFile}, following opening-drive in one group. */
+    private record Pair(long group, long session, BrokerAccount a, BrokerAccount b) {
+    }
+
+    private Pair pair(String riskFile, double capitalA, double capitalB) {
+        int n = ++seq;
+        AccountStore accounts = new AccountStore(dataSource);
+        long tenant = accounts.ensureTenant("pair-" + n);
+        long owner = accounts.ensureUser("kc-pair-" + n, "pair");
+        accounts.ensureMembership(tenant, owner, "OWNER");
+        long signal = accounts.ensureSignalSourceAccount(tenant, owner, "SIG-P" + n, 500_000, DAY,
+                "config/risk/signal-source.v2.yaml");
+        long group = accounts.ensureCopyGroup(tenant, "PAIR-" + n, signal);
+        long a = accounts.ensureFollowerAccount(tenant, owner, "PA-" + n, BrokerType.ZERODHA, TradeMode.DRY_RUN, capitalA,
+                EquityMode.FIXED, DAY, riskFile, 100);
+        long b = accounts.ensureFollowerAccount(tenant, owner, "PB-" + n, BrokerType.ZERODHA, TradeMode.DRY_RUN, capitalB,
+                EquityMode.FIXED, DAY, riskFile, 100);
+        new FanOut(dataSource).subscribe(group, a, List.of("opening-drive"), 1.0);
+        new FanOut(dataSource).subscribe(group, b, List.of("opening-drive"), 1.0);
+        long session = jdbc.queryForObject("insert into trade.session (account, mode, session_date, feed, strategy_id, "
+                + "strategy_hash, configs, code_version, status) values (?, 'PAPER_REPLAY', ?, 'it', 'live-set', 'sha256:it', "
+                + "'{}'::jsonb, 'it', 'DONE') returning id", Long.class, "SIG-P" + n, DAY);
+        return new Pair(group, session, account(a), account(b));
+    }
+
+    private void enterDecision(Pair p, double budget, double liquidityLots) {
+        new SignalDecisionStore(dataSource).insert(new SignalDecision(p.group(), p.session(), DAY, ist("09:25:00"),
+                "opening-drive", 2, "NIFTY", SignalDecision.Action.ENTER, "PE", null, "CONFIRMED", "IT", 3000047168L, KEY,
+                SYMBOL, LOT, 100, budget, 500_000, 0, p.group() + ":" + p.session() + ":1", Map.of("strategy_lots", 1.0,
+                "intended_lots", 1.0, "liquidity_lots", liquidityLots, "stop_pct", 25.0)));
+        new FanOut(dataSource).fanOut(p.group(), DAY);
+    }
+
+    private FollowerSimulator follower(String riskFile) {
+        FollowerRisk risk = FollowerRisk.load(Path.of(riskFile));
+        return new FollowerSimulator(dataSource, costs, risk, new BrokerVenue(dataSource, gateway, risk.orders().fast(),
+                (k, u) -> FREEZE, o -> {
+                    sim.clock(o::at);
+                    sim.quote(KEY, 100, 1_000_000, 100, 1_000_000, 100);
+                }), null);
+    }
+
+    @Test
+    void aDecisionsBookIsSharedAcrossATenantsBrokerAccountsProRataToAllocation() throws Exception {
+        brokerFollower();                                                // the simulator and gateway
+        Pair p = pair("../config/risk/follower-risk.v4.yaml", 500_000, 250_000);
+        enterDecision(p, 500_000, 30);                                   // the book allows 30 lots in all
+        follower("../config/risk/follower-risk.v4.yaml").run(p.a(), p.group(), DAY);
+        follower("../config/risk/follower-risk.v4.yaml").run(p.b(), p.group(), DAY);
+        assertThat(position(p.a()).get("quantity_open")).as("2/3 of 30 lots").isEqualTo(20L * LOT);
+        assertThat(position(p.b()).get("quantity_open")).as("1/3 of 30 lots").isEqualTo(10L * LOT);
+    }
+
+    @Test
+    void combinedLimitsAcrossATenantsBrokerAccountsRefuseTheEntryThatWouldPassThem() throws Exception {
+        brokerFollower();
+        Pair lots = pair("classpath-lots", 500_000, 500_000);
+        String lotsFile = Path.of("src/test/resources/follower-risk.v900.yaml").toString();
+        jdbc.update("update acct.broker_account set risk_file = ? where id in (?, ?)", lotsFile, lots.a().id(), lots.b().id());
+        enterDecision(lots, 130_000, 1000);                               // 20 lots each; the tenant's cap is 25
+        follower(lotsFile).run(account(lots.a().id()), lots.group(), DAY);
+        follower(lotsFile).run(account(lots.b().id()), lots.group(), DAY);
+        assertThat(position(lots.a()).get("quantity_open")).isEqualTo(20L * LOT);
+        assertThat(intentState(lots.b(), "ENTER")).isEqualTo("REJECTED_COMBINED_LOTS");
+
+        Pair premium = pair("classpath-premium", 500_000, 500_000);
+        String premiumFile = Path.of("src/test/resources/follower-risk.v901.yaml").toString();
+        jdbc.update("update acct.broker_account set risk_file = ? where id in (?, ?)", premiumFile, premium.a().id(),
+                premium.b().id());
+        enterDecision(premium, 130_000, 1000);                            // 1.3L each; 20 % of 10L = 2L for both
+        follower(premiumFile).run(account(premium.a().id()), premium.group(), DAY);
+        follower(premiumFile).run(account(premium.b().id()), premium.group(), DAY);
+        assertThat(position(premium.a()).get("quantity_open")).isEqualTo(20L * LOT);
+        assertThat(intentState(premium.b(), "ENTER")).isEqualTo("REJECTED_COMBINED_PREMIUM");
+    }
 }

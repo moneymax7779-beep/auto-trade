@@ -35,6 +35,7 @@ class ExecutionService implements DisposableBean {
     private final DataSource dataSource;
     private final ExecutionProperties properties;
     private volatile ExecutionLoop loop;
+    private volatile java.time.Instant lastTick;
 
     ExecutionService(DataSource dataSource, ExecutionProperties properties) {
         this.dataSource = dataSource;
@@ -64,6 +65,7 @@ class ExecutionService implements DisposableBean {
         ExecutionLoop current = loop;
         if (current != null) {
             current.tick(day(), properties.pollMs() * 5);
+            lastTick = java.time.Instant.now();
         }
     }
 
@@ -88,6 +90,11 @@ class ExecutionService implements DisposableBean {
             return List.of("the worker has not started");
         }
         return current.flatten(accountId, actor, reason, day);
+    }
+
+    /** When the loop last finished a tick (null before the first): the watchdog's heartbeat. */
+    java.time.Instant lastTick() {
+        return lastTick;
     }
 
     List<ExecutionLoop.AccountStatus> status() {

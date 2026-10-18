@@ -1,0 +1,51 @@
+# Follower risk v4 (live execution L6, 19 Oct 2026, user: "work on rest of the implementation for multi user and multi
+# broker support"): v3 plus the cross-account limits of plan section 2a ("Fan-out at scale") for a tenant with several
+# broker-routed accounts (DRY_RUN and LIVE; PAPER accounts trade no real book and are not counted). Not attached to any
+# account: choosing it, and these values, is the user's decision. The values are placeholders chosen to bind only in
+# the cases they exist for (they never shrink a single account below what v3 lets it take):
+#   max_open_premium_pct 100 = all the tenant's broker accounts together never hold more premium than their combined
+#     allocated capital (each one alone is already capped at its own);
+#   max_lots_per_contract 400 = paper-risk v17's per-underlying lot cap, here per contract across accounts;
+#   share_liquidity: a decision's usable depth (the signal's liquidity_lots, risk v12's participation cap) is split
+#     across the tenant's broker accounts following it, pro rata to allocation, so together they take what one would.
+# UNCALIBRATED.
+version: follower-risk-v4
+name: follower-risk
+status: UNCALIBRATED
+
+capital:
+  daily_loss_pct: 22                   # as paper-risk v17
+  max_premium_per_trade_pct: 100
+  max_open_premium_pct: 100            # premium in use + this entry <= equity (paper-risk v17's capital check)
+  broker_funds_buffer_pct: 10          # the broker's available funds must exceed the entry premium by 10 %
+
+positions:                             # as paper-risk v17
+  max_open_positions: 4
+  max_lots_per_underlying: 400
+
+sizing:                                # as paper-risk v17
+  rvol_boost_threshold: 1.5
+  rvol_boost_factor: 1.5
+
+simulation:                            # PAPER followers (simulated fills) only
+  adverse_bps: 0
+
+orders:                                # as paper-risk v17 orders (PAPER-1's OMS)
+  entry_buffer_ticks: 4                # marketable limit: the broker's ask + 4 ticks
+  entry_timeout_sec: 10                # what is unfilled after this is cancelled; the position is what filled
+  exit_buffer_ticks: 4                 # sell limit: bid − max(4 ticks, exit_buffer_pct of the bid)
+  exit_buffer_pct: 1.0
+  exit_chase_sec: 2                    # an unfilled exit is re-priced at the new touch after this
+  exit_chase_max: 6                    # re-pricings before the exit crosses exit_cross_pct through the touch
+  exit_cross_pct: 5
+  tick: 0.05                           # index option price step
+  poll_ms: 250                         # how often the order book is pulled while an order works
+
+broker_stop:                           # plan section 3: catastrophic stop resting at the broker after every entry fill
+  default_stop_pct: 25                 # when the signal carries no stop_pct (the strategies publish theirs)
+  limit_offset_pct: 5                  # its limit this far below the trigger (paper-risk v17 stop_limit_offset_pct)
+
+combined:                              # L6: across the tenant's broker-routed accounts
+  max_open_premium_pct: 100
+  max_lots_per_contract: 400
+  share_liquidity: true
