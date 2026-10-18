@@ -1,8 +1,8 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { LEVEL_COLORS, LevelTogglesBar, levelColor, mergeLevels, useLevels, useLevelToggles, visibleLevels, visibleZones } from "../components/levels";
-import { Link, useParams } from "react-router";
-import { fixed, get, type DecisionRow, type OrderRow, type SessionRow, type TradePositionRow } from "../api";
+import { Link, useParams, useSearchParams } from "react-router";
+import { fixed, get, type DecisionRow, type OrderRow, type SessionRow, type SessionRunRow, type TradePositionRow } from "../api";
 import { TimelineChart } from "../components/TimelineChart";
 import { ErrorNote, Loading, Panel, Pnl, StageBadge, Table } from "../components/ui";
 import { chartTrades, TradesTable } from "../components/TradesTable";
@@ -22,13 +22,16 @@ function feedLabel(feed: string): string {
   return feed;
 }
 
-interface Run { index: number; first: number; size: number; from: string; to: string; net: number; started: number }
+interface Run { index: number; first: number; size: number; from: string; to: string; net: number; started: number; feeds: Set<string> }
+
+/** The data a session ran on: one-minute bars, or ticks (live, zt or own capture). A batch's tick feeds are one run. */
+const dataKind = (feed: string) => (feed.includes("bars") ? "bars" : "ticks");
 
 /** The session's config files, sorted ("expiry-trend-rider.v7.yaml,…,paper-risk.v12.yaml"). */
 const configKey = (r: SessionRow) => Object.keys(r.configs ?? {}).sort().join(",");
 
 /** The risk file's version ("risk v13") and each strategy file as "ODB v4"; {@code all} = every config file. */
-function configTags(r: SessionRow): { risk: string | null; strategies: string[]; all: string[] } {
+function configTags(r: Pick<SessionRow, "configs">): { risk: string | null; strategies: string[]; all: string[] } {
   const files = Object.keys(r.configs ?? {}).sort().map((f) => f.replace(/\.yaml$/, ""));
   const risk = files.find((f) => f.startsWith("paper-risk."));
   const strategies = files
@@ -38,7 +41,8 @@ function configTags(r: SessionRow): { risk: string | null; strategies: string[];
 }
 
 /**
- * Groups the sessions (newest first) into runs: sessions with the same mode, feed, code and strategy set, started within
+ * Groups the sessions (newest first) into runs: sessions with the same mode, data (bars or ticks: a batch's zt days and
+ * own-capture days are one run), code and strategy set, started within
  * 30 minutes of each other (a batch of replays), or the live sessions of one code version. Runs started at the same time
  * interleave their session ids (e.g. one replay per risk file and day), so a session joins the newest matching run
  * whether or not it is next to it in the list. Returns the rows reordered run by run, and each row's run.
@@ -46,7 +50,7 @@ function configTags(r: SessionRow): { risk: string | null; strategies: string[];
 function groupRuns(sessions: SessionRow[]): { rows: SessionRow[]; runOf: Run[] } {
   // the config files (risk, features, every strategy version) are part of a run's identity: two runs of the same days
   // with different settings are different runs
-  const key = (r: SessionRow) => `${r.mode}|${r.feed}|${r.code_version}|${r.strategy_id}|${configKey(r)}`;
+  const key = (r: SessionRow) => `${r.mode}|${dataKind(r.feed)}|${r.code_version}|${r.strategy_id}|${configKey(r)}`;
   const minutes = (s?: string | null) => (s ? new Date(s.replace(" ", "T")).getTime() / 60000 : NaN);
   const groups: { run: Run; rows: SessionRow[]; dates: Set<string> }[] = [];
   const byKey = new Map<string, typeof groups>();
@@ -58,7 +62,8 @@ function groupRuns(sessions: SessionRow[]): { rows: SessionRow[]; runOf: Run[] }
       ? candidates[candidates.length - 1]
       : candidates.find((c) => Math.abs(c.run.started - started) <= 30 && !c.dates.has(r.session_date));
     if (!g) {
-      g = { run: { index: groups.length, first: 0, size: 0, from: r.session_date, to: r.session_date, net: 0, started },
+      g = { run: { index: groups.length, first: 0, size: 0, from: r.session_date, to: r.session_date, net: 0, started,
+        feeds: new Set<string>() },
         rows: [], dates: new Set<string>() };
       groups.push(g);
       byKey.set(k, [...candidates, g]);
@@ -67,6 +72,7 @@ function groupRuns(sessions: SessionRow[]): { rows: SessionRow[]; runOf: Run[] }
     g.dates.add(r.session_date);
     const run = g.run;
     run.size++;
+    run.feeds.add(feedLabel(r.feed));
     run.started = started;   // the run's oldest start so far: the next (older) session must be within 30 minutes of it
     if (r.session_date < run.from) run.from = r.session_date;
     if (r.session_date > run.to) run.to = r.session_date;
@@ -80,16 +86,79 @@ function groupRuns(sessions: SessionRow[]): { rows: SessionRow[]; runOf: Run[] }
   return { rows, runOf };
 }
 
+/** A run's dropdown value: everything the sessions filter needs. */
+const runValue = (r: SessionRunRow) => [r.mode, r.code_version, r.strategy_id, r.config_key, r.data].join("|");
+
+/** "zq3 · QP v4 · risk v17 · ticks · 27 days 2026-09-02 – 2026-10-16 · +₹9.62L" */
+function runLabel(r: SessionRunRow): string {
+  const tags = configTags(r);
+  const what = r.mode === "PAPER_LIVE" ? "Live PAPER" : r.data === "bars" ? "bars" : "ticks";
+  const days = r.date_from === r.date_to ? r.date_from : `${r.date_from} – ${r.date_to}`;
+  return [r.code_version, tags.strategies.join(" + ") || r.strategy_id, tags.risk, what,
+    `${r.days} day${r.days === 1 ? "" : "s"} ${days}`, compactRupees(Number(r.net))].filter(Boolean).join(" · ");
+}
+
+/** The strategy dropdown's label for a strategy set ("Quiet positioning", or "6 strategies: ETR + MAC + …"). */
+function strategyLabel(id: string): string {
+  const ids = id.split("+").filter(Boolean);
+  if (ids.length === 1) return STRATEGY_INFO[id]?.name ?? id;
+  return `${ids.length} strategies: ${ids.map(strategyShort).join(" + ")}`;
+}
+
 export function SessionsPage() {
-  const sessions = useQuery({ queryKey: ["sessions"], queryFn: () => get<SessionRow[]>("/api/sessions") });
+  const [params, setParams] = useSearchParams();
+  const pickedStrategy = params.get("strategy") ?? "";
+  const pickedRun = params.get("run") ?? "";
+  const runList = useQuery({ queryKey: ["session-runs"], queryFn: () => get<SessionRunRow[]>("/api/sessions/runs") });
+  const path = useMemo(() => {
+    if (pickedRun) {
+      const [mode, code, strategy, configs, data] = pickedRun.split("|");
+      return `/api/sessions?${new URLSearchParams({ mode, code, strategy, configs, data })}`;
+    }
+    return pickedStrategy ? `/api/sessions?${new URLSearchParams({ strategy: pickedStrategy })}` : "/api/sessions";
+  }, [pickedRun, pickedStrategy]);
+  const sessions = useQuery({ queryKey: ["sessions", path], queryFn: () => get<SessionRow[]>(path) });
   const { rows, runOf: runs } = useMemo(() => groupRuns(sessions.data ?? []), [sessions.data]);
-  if (sessions.isLoading) return <Loading what="sessions" />;
+  const strategies = useMemo(() => {
+    const count = new Map<string, number>();
+    for (const r of runList.data ?? []) count.set(r.strategy_id, (count.get(r.strategy_id) ?? 0) + 1);
+    return [...count].sort((a, b) => strategyLabel(a[0]).localeCompare(strategyLabel(b[0])));
+  }, [runList.data]);
+  const runChoices = (runList.data ?? []).filter((r) => !pickedStrategy || r.strategy_id === pickedStrategy);
+  const pick = (strategy: string, run: string) => {
+    const next = new URLSearchParams();
+    if (strategy) next.set("strategy", strategy);
+    if (run) next.set("run", run);
+    setParams(next);
+  };
+  const filters = (
+    <div className="flex flex-wrap items-center gap-2 text-sm">
+      <select aria-label="Strategy" value={pickedStrategy} onChange={(e) => pick(e.target.value, "")}
+        className="max-w-72 rounded border border-line bg-panel px-2 py-1">
+        <option value="">All strategies</option>
+        {strategies.map(([id, n]) => <option key={id} value={id}>{strategyLabel(id)} ({n} run{n === 1 ? "" : "s"})</option>)}
+      </select>
+      <select aria-label="Run" value={pickedRun} onChange={(e) => pick(pickedStrategy, e.target.value)}
+        className="max-w-[36rem] rounded border border-line bg-panel px-2 py-1">
+        <option value="">{pickedStrategy ? "All runs of this strategy" : "Newest sessions (all runs)"}</option>
+        {runChoices.map((r) => <option key={runValue(r)} value={runValue(r)}>{runLabel(r)}</option>)}
+      </select>
+      {(pickedRun || pickedStrategy) && (
+        <button type="button" onClick={() => pick("", "")} className="rounded border border-line px-2 py-1 text-muted hover:text-text">
+          Clear
+        </button>
+      )}
+    </div>
+  );
+  if (sessions.isLoading) return <Panel title="Trading sessions (PAPER)" right={filters}><Loading what="sessions" /></Panel>;
   if (sessions.error) return <ErrorNote error={sessions.error} />;
   return (
-    <Panel title="Trading sessions (PAPER)">
+    <Panel title="Trading sessions (PAPER)" right={filters}>
       <p className="mb-2 text-xs text-muted">
-        Each colour band is one run: a batch of replays started together (same data, code and strategies), or the live
-        sessions of one code version. The line above each band says what the run was.
+        Each colour band is one run: a batch of replays started together (same data, code and strategies; a batch's zt and
+        own-capture tick days are one run), or the live sessions of one code version. The line above each band says what the
+        run was. {pickedRun || pickedStrategy ? "Filtered: every matching session (at most 2,000)." :
+          "Without a filter: the live sessions and the newest 200; pick a strategy or run to see older ones."}
       </p>
       <Table
         rows={rows}
@@ -103,7 +172,7 @@ export function SessionsPage() {
               <span className="inline-block h-2.5 w-2.5 rounded-full" style={{ background: RUN_DOTS[run.index % RUN_DOTS.length] }} />
               <span className="font-semibold">{r.mode === "PAPER_LIVE" ? "Live PAPER sessions" : "Replay run"}</span>
               <span className="text-muted">· {run.size} session{run.size === 1 ? "" : "s"} · {run.from === run.to ? run.from : `${run.from} – ${run.to}`}</span>
-              <span className="text-muted">· {feedLabel(r.feed)}</span>
+              <span className="text-muted">· {[...run.feeds].join(" + ")}</span>
               <span className="text-muted" title={configTags(r).all.join("\n")}>
                 · {n > 1 ? `${n} strategies` : STRATEGY_INFO[r.strategy_id]?.name ?? r.strategy_id}
                 {" "}({configTags(r).strategies.join(" · ")})
