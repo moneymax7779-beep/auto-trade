@@ -200,6 +200,8 @@ public final class ExecutionLoop implements AutoCloseable {
                         // the session is gone: the simulator below refuses entries and keeps exits for the next login
                         jdbc.update("update acct.broker_account set connection_status = 'TOKEN_EXPIRED', updated_at = now() "
                                 + "where id = ?", account.id());
+                        new KillSwitches(dataSource).audit(account, workerId, "BROKER_SESSION_LOST",
+                                Map.of("message", String.valueOf(e.getMessage()), "during", "reconciliation"));
                         check = ", BROKER SESSION LOST (" + e.getMessage() + ")";
                     }
                     reconciled.put(account.id(), Instant.now());

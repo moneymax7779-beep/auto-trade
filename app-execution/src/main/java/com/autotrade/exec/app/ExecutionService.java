@@ -54,14 +54,22 @@ class ExecutionService implements DisposableBean {
                 new StoredQuotes(dataSource, null), properties.brokerFunds());
         log.info("execution worker {} serving copy group {} (tenant {}), every {} ms", properties.workerId(),
                 properties.copyGroup(), properties.tenant(), properties.pollMs());
+        if (properties.day() != null) {
+            log.warn("DRILL: serving session date {} instead of today", properties.day());
+        }
     }
 
     @Scheduled(fixedDelayString = "${autotrade.execution.poll-ms:1000}", initialDelay = 5000)
     void tick() {
         ExecutionLoop current = loop;
         if (current != null) {
-            current.tick(LocalDate.now(IST), properties.pollMs() * 5);
+            current.tick(day(), properties.pollMs() * 5);
         }
+    }
+
+    /** Today, or the drill day (a replayed day streamed through the worker). */
+    LocalDate day() {
+        return properties.day() == null ? LocalDate.now(IST) : LocalDate.parse(properties.day());
     }
 
     /** After the close (15:45 IST, weekdays): every broker-routed account this worker holds is reconciled. */
@@ -69,7 +77,7 @@ class ExecutionService implements DisposableBean {
     void endOfDay() {
         ExecutionLoop current = loop;
         if (current != null) {
-            current.endOfDay(LocalDate.now(IST)).forEach(d -> log.info("end of day account {}: difference {}, {} contracts "
+            current.endOfDay(day()).forEach(d -> log.info("end of day account {}: difference {}, {} contracts "
                     + "differ", d.ledger().brokerAccountId(), d.ledger().difference(), d.differences().size()));
         }
     }

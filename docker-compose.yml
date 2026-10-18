@@ -75,8 +75,10 @@ services:
     mem_limit: 3g
     restart: unless-stopped
 
-  # Live execution L1: the execution workers. Opt-in only (docker compose --profile execution up -d execution);
-  # PAPER and DRY_RUN followers, LIVE refused until L2. No market-data connection; never migrates the schema.
+  # Live execution: the execution workers. Opt-in only (docker compose --profile execution up -d execution);
+  # PAPER and DRY_RUN followers (a ZERODHA DRY_RUN account on follower-risk v3 trades through the Kite adapter against
+  # a local simulator inside the container); LIVE refused. No market-data connection; never migrates the schema.
+  # AUTOTRADE_EXECUTION_COPY_GROUP: one copy group, a comma list, or * (every enabled group of every tenant).
   execution:
     profiles: ["execution"]
     build:
@@ -89,6 +91,8 @@ services:
     environment:
       AUTOTRADE_DB_URL: jdbc:postgresql://postgres:5432/autotrade
       AUTOTRADE_DB_PASSWORD: ${AUTOTRADE_DB_PASSWORD:-autotrade}
+      AUTOTRADE_EXECUTION_COPY_GROUP: ${AUTOTRADE_EXECUTION_COPY_GROUP:-LIVE-SET}
+      AUTOTRADE_EXECUTION_DAY: ${AUTOTRADE_EXECUTION_DAY:-}      # drills only: a replayed session date instead of today
       SERVER_ADDRESS: 0.0.0.0        # inside the container; the published port below is loopback-only
     ports:
       - "127.0.0.1:8096:8096"

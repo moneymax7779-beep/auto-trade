@@ -62,7 +62,7 @@ class ExecutionApiIT {
                 EquityMode.FIXED, DAY, "../config/risk/follower-risk.v3.yaml", 100);
         bobAccount = accounts.ensureFollowerAccount(tb, bob, "BOB-1", BrokerType.PAPER, TradeMode.PAPER, 500_000,
                 EquityMode.FIXED, DAY, "../config/risk/follower-risk.v3.yaml", 100);
-        ExecutionService service = new ExecutionService(dataSource, new ExecutionProperties(null, "*", 0, null, 0, "it"));
+        ExecutionService service = new ExecutionService(dataSource, new ExecutionProperties(null, "*", 0, null, 0, "it", null));
         api = new AccountsController(new Access(dataSource), dataSource, service);
     }
 

@@ -781,6 +781,31 @@ and a DRY_RUN account's orders go to a local Kite simulator.
   - The difference is the spread, and it appears only on own-capture days (from 28 Sep; earlier days fall back to the
     signal price). 8 Oct alone is −₹24,122.
   - Bought = sold (1,93,955). All 184 stops were cancelled before their exits, none sold, nothing left open.
+- **Chaos drill in local Docker (19 Oct 02:00–02:10; `.local/l2/chaos/`).** Copy group CHAOS; KITE-CHAOS (ZERODHA
+  DRY_RUN, v3, the Kite path inside the app-execution container) and its twin PAPER-CHAOS. trading-core
+  (`autotrade-trading-core:l2d`) replayed own-capture days with the signal source teed into CHAOS. The worker
+  (`autotrade-execution:l2d`) served them with the drill day override. Faults were injected through the simulator's
+  `/sim/*` drill endpoints (127.0.0.1 inside the container only).
+  - **15 Oct, worker killed (`docker kill`) mid-day** while holding 760 SENSEX 74000 CE with its stop resting:
+    - On restart the lease was retaken (epoch 4), the new simulator was seeded with the 760, and the stale stop row was
+      closed ("not in the broker's order book") and a new stop placed. There was no reconciliation kill.
+    - The remaining 3 adds, 1 entry and 2 exits ran. KITE-CHAOS ended with the same 5 positions and adds (2 executed,
+      1 refused for capital) as PAPER-CHAOS: +₹4,05,112 against +₹4,02,338, the difference being fills at the stored
+      spread.
+    - Bought = sold (5,735); all stops cancelled before their exits; nothing open.
+  - **16 Oct, token expired before the open, then a login and four place faults:**
+    - The worker's reconciliation found the session lost, and the 09:21 straddle entries were refused BROKER_SESSION.
+    - The session was marked ACTIVE (API `/accounts/94/session`, plus the simulator's `/sim/login`), with a timeout
+      after processing, a 429, a 500 after processing and a timeout before processing queued on the next places.
+    - The 13:00–15:03 trades then ran: 9 orders at the broker for 3 entries, 3 exits and 3 stops, so no duplicate.
+      The account ended flat.
+  - Divergence report (CHAOS): PAPER-CHAOS within the gate on both days; KITE-CHAOS median entry slip −0.03 %.
+  - Kill switches engaged: none. Gap found and fixed: a session loss seen by the worker's reconciliation is now audited.
+  - **L2 gate:**
+    - Every section-4 scenario that L2 owns is green in tests (`KiteGatewayTest`, `BrokerVenueIT`, `ExecutionLoopIT`).
+    - The local chaos drill was clean.
+    - Still open: Kite's real sandbox (the plan says sandbox; Kite has none, so the drill used the local simulator) and
+      a real-broker DRY_RUN read path. Both need the Kite app and the user's go-ahead.
 - **Not done yet (L2/L3):**
   - Kite's WebSocket order updates (polling only).
   - The real daily login flow and token store: Secret Manager, the Telegram link, a redirect endpoint.

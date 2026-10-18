@@ -238,6 +238,15 @@ public final class KiteSimulator implements AutoCloseable {
             fault = fault == Fault.NONE ? null : fault;
         }
         try {
+            if (path.startsWith("/sim/")) {                          // drills: faults from inside the host only
+                String result = drill(path, query);
+                byte[] bytes = result.getBytes(StandardCharsets.UTF_8);
+                ex.sendResponseHeaders(200, bytes.length);
+                try (OutputStream out = ex.getResponseBody()) {
+                    out.write(bytes);
+                }
+                return;
+            }
             if (path.equals("/instruments")) {
                 byte[] csv = instrumentsCsv().getBytes(StandardCharsets.UTF_8);
                 ex.getResponseHeaders().set("Content-Type", "text/csv");
@@ -286,6 +295,40 @@ public final class KiteSimulator implements AutoCloseable {
         } catch (RuntimeException e) {
             respond(ex, 400, error("InputException", String.valueOf(e.getMessage())));
         }
+    }
+
+    /**
+     * Drill endpoints (the simulator listens on 127.0.0.1 only): {@code /sim/fault?op=place&fault=TIMEOUT_PROCESSED},
+     * {@code /sim/expire-token}, {@code /sim/login}, {@code /sim/partial?fraction=0.5}, {@code /sim/stop-fills-on-cancel?on=true},
+     * {@code /sim/state} (orders and net quantities).
+     */
+    private synchronized String drill(String path, Map<String, List<String>> query) {
+        return switch (path) {
+            case "/sim/fault" -> {
+                failNext(query.getOrDefault("op", List.of("place")).getFirst(),
+                        Fault.valueOf(query.getOrDefault("fault", List.of("NONE")).getFirst()));
+                yield "queued\n";
+            }
+            case "/sim/expire-token" -> {
+                expireToken();
+                yield "token expired\n";
+            }
+            case "/sim/login" -> {                                  // the day's new login: the session is valid again
+                tokenExpired = false;
+                yield "token valid\n";
+            }
+            case "/sim/partial" -> {
+                partialFills(Double.parseDouble(query.getOrDefault("fraction", List.of("1")).getFirst()));
+                yield "partial fills " + partialFraction + "\n";
+            }
+            case "/sim/stop-fills-on-cancel" -> {
+                fillStopOnCancel(Boolean.parseBoolean(query.getOrDefault("on", List.of("true")).getFirst()));
+                yield "stop fills on cancel " + fillStopOnCancel + "\n";
+            }
+            case "/sim/state" -> "orders " + orders.size() + ", net " + netQuantities() + ", token "
+                    + (tokenExpired ? "expired" : "valid") + "\n";
+            default -> "unknown drill " + path + "\n";
+        };
     }
 
     private static String operation(String method, String path) {
