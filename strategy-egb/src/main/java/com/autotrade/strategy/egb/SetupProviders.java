@@ -94,6 +94,13 @@ public final class SetupProviders {
         }
     }
 
+    public static final class ZoneBreakFlowProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "zone-break-flow";
+        }
+    }
+
     public static final class AuctionPressureProvider extends Base {
         @Override
         public String strategyKey() {
