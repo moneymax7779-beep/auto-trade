@@ -525,23 +525,43 @@ class BrokerVenueIT {
     @Test
     void combinedLimitsAcrossATenantsBrokerAccountsRefuseTheEntryThatWouldPassThem() throws Exception {
         brokerFollower();
-        Pair lots = pair("classpath-lots", 500_000, 500_000);
-        String lotsFile = Path.of("src/test/resources/follower-risk.v900.yaml").toString();
-        jdbc.update("update acct.broker_account set risk_file = ? where id in (?, ?)", lotsFile, lots.a().id(), lots.b().id());
+        String lotsFile = "src/test/resources/follower-risk.v900.yaml";
+        Pair lots = pair(lotsFile, 500_000, 500_000);
         enterDecision(lots, 130_000, 1000);                               // 20 lots each; the tenant's cap is 25
-        follower(lotsFile).run(account(lots.a().id()), lots.group(), DAY);
-        follower(lotsFile).run(account(lots.b().id()), lots.group(), DAY);
+        follower(lotsFile).run(lots.a(), lots.group(), DAY);
+        follower(lotsFile).run(lots.b(), lots.group(), DAY);
         assertThat(position(lots.a()).get("quantity_open")).isEqualTo(20L * LOT);
         assertThat(intentState(lots.b(), "ENTER")).isEqualTo("REJECTED_COMBINED_LOTS");
 
-        Pair premium = pair("classpath-premium", 500_000, 500_000);
-        String premiumFile = Path.of("src/test/resources/follower-risk.v901.yaml").toString();
-        jdbc.update("update acct.broker_account set risk_file = ? where id in (?, ?)", premiumFile, premium.a().id(),
-                premium.b().id());
+        String premiumFile = "src/test/resources/follower-risk.v901.yaml";
+        Pair premium = pair(premiumFile, 500_000, 500_000);
         enterDecision(premium, 130_000, 1000);                            // 1.3L each; 20 % of 10L = 2L for both
-        follower(premiumFile).run(account(premium.a().id()), premium.group(), DAY);
-        follower(premiumFile).run(account(premium.b().id()), premium.group(), DAY);
+        follower(premiumFile).run(premium.a(), premium.group(), DAY);
+        follower(premiumFile).run(premium.b(), premium.group(), DAY);
         assertThat(position(premium.a()).get("quantity_open")).isEqualTo(20L * LOT);
         assertThat(intentState(premium.b(), "ENTER")).isEqualTo("REJECTED_COMBINED_PREMIUM");
+    }
+
+    @Test
+    void aKilledAccountGivesUpItsShareAndParallelLanesStayWithinTheCombinedCap() throws Exception {
+        brokerFollower();
+        Pair p = pair("../config/risk/follower-risk.v4.yaml", 500_000, 250_000);
+        new KillSwitches(dataSource).engageAccount(p.b(), "drill", "it");
+        enterDecision(p, 500_000, 30);
+        follower("../config/risk/follower-risk.v4.yaml").run(p.a(), p.group(), DAY);
+        assertThat(position(p.a()).get("quantity_open")).as("all 30 lots: B cannot take its share").isEqualTo(30L * LOT);
+
+        String lotsFile = "src/test/resources/follower-risk.v900.yaml";
+        Pair q = pair(lotsFile, 500_000, 500_000);
+        enterDecision(q, 130_000, 1000);                                  // 20 lots each, cap 25: one of them only
+        FollowerSimulator a = follower(lotsFile), b = follower(lotsFile);
+        var pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        var fa = pool.submit(() -> a.run(q.a(), q.group(), DAY));
+        var fb = pool.submit(() -> b.run(q.b(), q.group(), DAY));
+        fa.get();
+        fb.get();
+        pool.shutdown();
+        assertThat(jdbc.queryForObject("select coalesce(sum(quantity_open), 0) from exec.position where broker_account_id in "
+                + "(?, ?)", Long.class, q.a().id(), q.b().id())).isEqualTo(20L * LOT);
     }
 }

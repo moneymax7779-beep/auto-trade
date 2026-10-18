@@ -818,8 +818,18 @@ and a DRY_RUN account's orders go to a local Kite simulator.
     LIQUIDITY_SHARE.
   - The placeholder values (100 %, 400 lots, sharing on) bind only where several accounts compete.
   - **v4 is attached to no account: choosing it is yours.**
+  - Review fixes:
+    - Limits are counted per trade mode, so a DRY_RUN rehearsal never uses a LIVE account's room.
+    - The share counts only accounts that can take the trade (connected, not killed).
+    - Adds are shared too (v4 only, so PAPER is unchanged).
+    - A tenant's entries are serialised in the worker while combined limits apply; parallel lanes no longer race past
+      a cap. **A tenant's accounts must be served by one worker.**
   - Not yet: staggered slices across accounts.
-- Tests: `BrokerVenueIT` 15 (+ allocator 20 / 10 of 30 lots at 5L / 2.5L; combined lots and premium refusals).
+- Tests: `BrokerVenueIT` 16:
+  - the allocator: 20 / 10 of 30 lots at 5L / 2.5L;
+  - combined lots and premium refusals;
+  - a killed account gives up its share;
+  - two parallel lanes stay within the cap.
 - **Watchdog signal:** `/api/execution/status` gains `lastTick` and `stale` (no tick for 10 poll intervals).
   `bin/execution-watchdog` exits 1 when the worker is DOWN, STALE or an account is in error. It sends nothing;
   scheduling it (launchd, a GCP uptime check) and where it alerts are yours to set.

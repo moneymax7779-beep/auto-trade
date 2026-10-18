@@ -178,6 +178,12 @@ public final class FollowerSimulator {
                     outcomes.add("PENDING_BROKER_SESSION");
                 }
             } else {
+                java.util.concurrent.locks.ReentrantLock tenantLock = risk.combined() != null && venue.broker()
+                        && !p.action().equals("EXIT") ? TENANT_ENTRY_LOCKS.computeIfAbsent(account.tenantId(),
+                        t -> new java.util.concurrent.locks.ReentrantLock()) : null;
+                if (tenantLock != null) {
+                    tenantLock.lock();
+                }
                 try {
                     if (p.legGroup() != null && p.action().equals("ENTER")) {
                         Pending other = pending.stream().filter(q -> q.intentId() != p.intentId()
@@ -203,6 +209,10 @@ public final class FollowerSimulator {
                     // by tag); an entry that sent nothing is refused
                     outcomes.add(p.action().equals("EXIT") || hasOrders(p.intentId()) ? "PENDING_BROKER_SESSION"
                             : reject(p, "BROKER_SESSION", e.getMessage()));
+                } finally {
+                    if (tenantLock != null) {
+                        tenantLock.unlock();
+                    }
                 }
             }
             for (String outcome : outcomes) {
@@ -322,6 +332,12 @@ public final class FollowerSimulator {
         }
         long lots = Math.max(1, (long) Math.floor(p.strategyLots() * scale));
         long held = ((Number) position.get("quantity_open")).longValue();
+        if (risk.combined() != null && risk.combined().shareLiquidity() && venue.broker() && p.liquidityLots() > 0) {
+            lots = Math.min(lots, (long) Math.floor(p.liquidityLots() * liquidityShare(day, p)));   // v4: the add's book share
+            if (lots < 1) {
+                return skip(p, "LIQUIDITY_SHARE", "this account's share of the add's book is under one lot");
+            }
+        }
         if (p.bookQuantity() >= 0) {                                    // replay depth ceiling: entry + adds
             lots = Math.min(lots, (long) (p.bookQuantity() - held) / p.lotSize());
             if (lots < 1) {
@@ -432,12 +448,22 @@ public final class FollowerSimulator {
 
     /** The tenant's broker-routed accounts (DRY_RUN, LIVE) that the combined limits cover. */
     private static final String TENANT_BROKER_ACCOUNTS = "select id from acct.broker_account where tenant_id = ? "
-            + "and enabled and account_role = 'FOLLOWER_TRADE' and trade_mode in ('DRY_RUN', 'LIVE')";
+            + "and enabled and account_role = 'FOLLOWER_TRADE' and trade_mode = ?";
+    /** The same, only those that can take the trade now: connected and not killed. */
+    private static final String TENANT_BROKER_ACCOUNTS_TAKING = TENANT_BROKER_ACCOUNTS
+            + " and connection_status not in ('TOKEN_EXPIRED', 'TOKEN_REJECTED', 'DISCONNECTED') and not exists (select 1 "
+            + "from exec.kill_switch k where k.scope = 'ACCOUNT' and k.broker_account_id = acct.broker_account.id "
+            + "and k.released_at is null)";
+    /** One entry at a time per tenant in this worker while combined limits apply (check, order and booking together). */
+    private static final Map<Long, java.util.concurrent.locks.ReentrantLock> TENANT_ENTRY_LOCKS =
+            new java.util.concurrent.ConcurrentHashMap<>();
 
     /**
-     * L6 cross-account limits (risk v4 {@code combined}, broker-routed accounts only): COMBINED_PREMIUM when the tenant's
-     * broker-routed premium in use + this entry exceeds the % of their combined allocation, COMBINED_LOTS when lots of
-     * this contract across them would exceed the cap; null = within.
+     * L6 cross-account limits (risk v4 {@code combined}, broker-routed accounts only, counted per trade mode so a DRY_RUN
+     * rehearsal never uses a LIVE account's room): COMBINED_PREMIUM when the tenant's premium in use + this entry exceeds
+     * the % of their combined allocation, COMBINED_LOTS when lots of this contract across them would exceed the cap;
+     * null = within. Entries of a tenant are serialised in this worker while these apply ({@link #TENANT_ENTRY_LOCKS});
+     * a tenant's accounts must be served by one worker.
      */
     private String combinedRefusal(Day day, Pending p, long lots, double premium) {
         FollowerRisk.Combined c = risk.combined();
@@ -449,7 +475,8 @@ public final class FollowerSimulator {
                         + "(select coalesce(sum(allocated_capital), 0) from acct.broker_account where id in ("
                         + TENANT_BROKER_ACCOUNTS + ")) allocations from exec.position p where p.status = 'OPEN' "
                         + "and p.broker_account_id in (" + TENANT_BROKER_ACCOUNTS + ")", p.instrumentKey(),
-                day.account.tenantId(), day.account.tenantId());
+                day.account.tenantId(), day.account.tradeMode().name(), day.account.tenantId(),
+                day.account.tradeMode().name());
         double inUse = ((Number) t.get("premium")).doubleValue();
         double allowed = ((Number) t.get("allocations")).doubleValue() * c.maxOpenPremiumPct() / 100;
         if (inUse + premium > allowed) {
@@ -466,8 +493,9 @@ public final class FollowerSimulator {
 
     /**
      * L6 liquidity allocator (risk v4 {@code share_liquidity}): the account's share of a decision's usable depth = its
-     * allocation over the allocations of the tenant's broker-routed accounts subscribed to the strategy in the copy
-     * group (several accounts buying one strike at the same second compete for one book). 1 otherwise.
+     * allocation over the allocations of the tenant's broker-routed accounts of the same mode subscribed to the strategy in
+     * the copy group that can take it now (connected, not killed): several accounts buying one strike at the same second
+     * compete for one book. 1 otherwise.
      */
     private double liquidityShare(Day day, Pending p) {
         FollowerRisk.Combined c = risk.combined();
@@ -476,8 +504,8 @@ public final class FollowerSimulator {
         }
         Double all = jdbc.queryForObject("select coalesce(sum(a.allocated_capital), 0) from acct.broker_account a "
                 + "join acct.strategy_subscription s on s.broker_account_id = a.id and s.enabled where s.copy_group_id = ? "
-                + "and s.strategy_id = ? and a.id in (" + TENANT_BROKER_ACCOUNTS + ")", Double.class, p.copyGroupId(),
-                p.strategyId(), day.account.tenantId());
+                + "and s.strategy_id = ? and a.id in (" + TENANT_BROKER_ACCOUNTS_TAKING + ")", Double.class, p.copyGroupId(),
+                p.strategyId(), day.account.tenantId(), day.account.tradeMode().name());
         return all == null || all <= 0 ? 1 : Math.min(1, day.account.allocatedCapital() / all);
     }
 
