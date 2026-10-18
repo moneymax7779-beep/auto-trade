@@ -108,7 +108,9 @@ function strategyLabel(id: string): string {
 export function SessionsPage() {
   const [params, setParams] = useSearchParams();
   const pickedStrategy = params.get("strategy") ?? "";
-  const pickedRun = params.get("run") ?? "";
+  // a run value has exactly five parts (mode|code|strategy|config key|data); anything else in the URL is ignored
+  const runParts = (params.get("run") ?? "").split("|");
+  const pickedRun = runParts.length === 5 && runParts.every(Boolean) ? runParts.join("|") : "";
   const runList = useQuery({ queryKey: ["session-runs"], queryFn: () => get<SessionRunRow[]>("/api/sessions/runs") });
   const path = useMemo(() => {
     if (pickedRun) {
@@ -117,7 +119,9 @@ export function SessionsPage() {
     }
     return pickedStrategy ? `/api/sessions?${new URLSearchParams({ strategy: pickedStrategy })}` : "/api/sessions";
   }, [pickedRun, pickedStrategy]);
-  const sessions = useQuery({ queryKey: ["sessions", path], queryFn: () => get<SessionRow[]>(path) });
+  // the unfiltered list shares its cache with the Live, Index and Performance pages (same key, same request)
+  const sessions = useQuery({ queryKey: path === "/api/sessions" ? ["sessions"] : ["sessions", path],
+    queryFn: () => get<SessionRow[]>(path) });
   const { rows, runOf: runs } = useMemo(() => groupRuns(sessions.data ?? []), [sessions.data]);
   const strategies = useMemo(() => {
     const count = new Map<string, number>();
@@ -125,6 +129,8 @@ export function SessionsPage() {
     return [...count].sort((a, b) => strategyLabel(a[0]).localeCompare(strategyLabel(b[0])));
   }, [runList.data]);
   const runChoices = (runList.data ?? []).filter((r) => !pickedStrategy || r.strategy_id === pickedStrategy);
+  // a run picked from a bookmark that is no longer among the newest runs still shows as selected
+  const pickedMissing = pickedRun !== "" && runList.isSuccess && !runChoices.some((r) => runValue(r) === pickedRun);
   const pick = (strategy: string, run: string) => {
     const next = new URLSearchParams();
     if (strategy) next.set("strategy", strategy);
@@ -141,6 +147,8 @@ export function SessionsPage() {
       <select aria-label="Run" value={pickedRun} onChange={(e) => pick(pickedStrategy, e.target.value)}
         className="max-w-[36rem] rounded border border-line bg-panel px-2 py-1">
         <option value="">{pickedStrategy ? "All runs of this strategy" : "Newest sessions (all runs)"}</option>
+        {runList.isError && <option value="" disabled>Run list unavailable</option>}
+        {pickedMissing && <option value={pickedRun}>{`${pickedRun.split("|")[1]} · run from the link (not in the run list)`}</option>}
         {runChoices.map((r) => <option key={runValue(r)} value={runValue(r)}>{runLabel(r)}</option>)}
       </select>
       {(pickedRun || pickedStrategy) && (
@@ -151,7 +159,8 @@ export function SessionsPage() {
     </div>
   );
   if (sessions.isLoading) return <Panel title="Trading sessions (PAPER)" right={filters}><Loading what="sessions" /></Panel>;
-  if (sessions.error) return <ErrorNote error={sessions.error} />;
+  // keep the filters on an error, so a bad filter can be changed or cleared
+  if (sessions.error) return <Panel title="Trading sessions (PAPER)" right={filters}><ErrorNote error={sessions.error} /></Panel>;
   return (
     <Panel title="Trading sessions (PAPER)" right={filters}>
       <p className="mb-2 text-xs text-muted">
