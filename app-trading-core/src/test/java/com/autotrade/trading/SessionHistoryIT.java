@@ -160,10 +160,18 @@ class SessionHistoryIT {
         assertThat(ticks.get("date_from")).isEqualTo("2026-09-02");
         assertThat(ticks.get("date_to")).isEqualTo("2026-10-14");
 
-        List<Map<String, Object>> sessions = history.sessions("runs1", "runs-test", (String) ticks.get("config_key"),
-                "PAPER_REPLAY", "ticks");
+        List<Map<String, Object>> sessions = history.sessions(new HistoryController.SessionFilter("runs1", "runs-test",
+                (String) ticks.get("config_key"), "PAPER_REPLAY", "ticks"));
         assertThat(sessions).extracting(r -> ((Number) r.get("id")).longValue()).containsExactly(own, ztAgain, zt);
-        assertThat(history.sessions("runs1", null, null, null, "bars")).extracting(r -> ((Number) r.get("id")).longValue())
-                .containsExactly(bars);
+        assertThat(history.sessions(new HistoryController.SessionFilter("runs1", null, null, null, "bars")))
+                .extracting(r -> ((Number) r.get("id")).longValue()).containsExactly(bars);
+        // blank values are absent: "?code=runs1&data=" is the code filter alone
+        assertThat(history.sessions(new HistoryController.SessionFilter("runs1", " ", "", null, "")))
+                .extracting(r -> ((Number) r.get("id")).longValue()).containsExactlyInAnyOrder(zt, ztAgain, own, bars, other);
+        // an unknown value matches nothing (no error)
+        assertThat(history.sessions(new HistoryController.SessionFilter("runs1", null, null, null, "minutes"))).isEmpty();
+        // all blank = the unfiltered list (live sessions + the newest 200), as before
+        assertThat(history.sessions(new HistoryController.SessionFilter("", null, " ", null, null)))
+                .extracting(r -> ((Number) r.get("id")).longValue()).contains(zt, ztAgain, own, bars, other);
     }
 }
