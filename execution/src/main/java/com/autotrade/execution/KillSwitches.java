@@ -17,7 +17,8 @@ import tools.jackson.databind.json.JsonMapper;
 /**
  * The kill switches of live plan section 4 (exec.kill_switch, V24) and the audit log. An engaged switch refuses entries
  * and adds; exits are never blocked. GLOBAL_LIVE covers every LIVE account; ACCOUNT one account; STRATEGY a tenant's
- * strategy on all its accounts; INSTRUMENT one contract everywhere. Every engage and release is in exec.audit_log.
+ * strategy on all its accounts; INSTRUMENT one contract on a tenant's accounts (every tenant's when engaged without a
+ * tenant, by an ADMIN). Every engage and release is in exec.audit_log.
  */
 public final class KillSwitches {
 
@@ -40,8 +41,10 @@ public final class KillSwitches {
         List<String> reasons = jdbc.queryForList("select scope || ': ' || reason from exec.kill_switch where released_at is null "
                         + "and ((scope = 'GLOBAL_LIVE' and ?) or (scope = 'ACCOUNT' and broker_account_id = ?) "
                         + "or (scope = 'STRATEGY' and tenant_id = ? and strategy_id = ?) "
-                        + "or (scope = 'INSTRUMENT' and instrument_key = ?)) order by engaged_at limit 1", String.class,
-                account.tradeMode() == TradeMode.LIVE, account.id(), account.tenantId(), strategy, instrumentKey);
+                        + "or (scope = 'INSTRUMENT' and instrument_key = ? and (tenant_id is null or tenant_id = ?))) "
+                        + "order by engaged_at limit 1", String.class,
+                account.tradeMode() == TradeMode.LIVE, account.id(), account.tenantId(), strategy, instrumentKey,
+                account.tenantId());
         return reasons.isEmpty() ? null : reasons.getFirst();
     }
 

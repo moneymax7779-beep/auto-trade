@@ -118,6 +118,20 @@ public final class AccountStore {
                 id).stream().findFirst();
     }
 
+    /** The broker connection status of each account of a tenant (acct.broker_account.connection_status). */
+    public java.util.Map<Long, String> connectionStatuses(long tenantId) {
+        java.util.Map<Long, String> out = new java.util.HashMap<>();
+        jdbc.query("select id, connection_status from acct.broker_account where tenant_id = ?",
+                rs -> { out.put(rs.getLong(1), rs.getString(2)); }, tenantId);
+        return out;
+    }
+
+    /** Sets the broker connection status (ACTIVE after the day's login, TOKEN_EXPIRED on a session error, ...). */
+    public void setConnectionStatus(long accountId, String status) {
+        jdbc.update("update acct.broker_account set connection_status = ?, updated_at = now() where id = ?", status,
+                accountId);
+    }
+
     /** A tenant's accounts (the API's per-tenant view). */
     public List<BrokerAccount> ofTenant(long tenantId) {
         return jdbc.query("select " + ACCOUNT_COLUMNS + " from acct.broker_account a where a.tenant_id = ? order by a.id",

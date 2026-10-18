@@ -28,8 +28,8 @@ import com.autotrade.zerodha.KiteSimulator;
  *   <li>DRY_RUN whose risk file has no order rules (v1, v2): simulated fills, as in L1.</li>
  *   <li>DRY_RUN on ZERODHA with order rules (v3): the whole live path, HTTP included, against a <b>local Kite
  *       simulator</b> of its own (one per account, 127.0.0.1, random port): {@link KiteGateway} + {@link BrokerVenue}.
- *       Its book is set to the signal's price before every order (DRY_RUN fills equal the PAPER follower's), so the
- *       difference is only what the broker path adds (slicing, stops, timeouts, errors).</li>
+ *       Before every order its book is the stored bid and ask of that moment (own capture), else the signal's price;
+ *       a new simulator is given the account's open positions (a restart), so reconciliation and stops see them.</li>
  *   <li>DRY_RUN on another broker: refused (no adapter yet).</li>
  *   <li>LIVE: refused. A LIVE route needs a real Kite session from Secret Manager, the registered static IP and the
  *       user's explicit go-ahead (L3/L4); no code path here sends an order to a real broker.</li>
@@ -78,8 +78,23 @@ public final class BrokerConnections implements AutoCloseable {
             http.accessToken("dry-run");
             KiteInstruments instruments = new KiteInstruments(List.of());
             KiteGateway gateway = new KiteGateway(config, http, instruments);
-            BrokerVenue venue = new BrokerVenue(dataSource, gateway, risk.orders(), freeze::of,
-                    new SimulatorMarket(sim, instruments));
+            SimulatorMarket market = new SimulatorMarket(sim, instruments, dataSource);
+            // a new simulator holds what the account still holds (a restart), so the reconciliation and the stops
+            // see the broker as it would be
+            for (Map<String, Object> pos : new org.springframework.jdbc.core.JdbcTemplate(dataSource).queryForList(
+                    "select p.instrument_key, p.instrument_token, p.symbol, p.underlying, p.quantity_open, p.average_entry, "
+                            + "d.lot_size from exec.position p join exec.trade_intent i on i.id = p.entry_trade_intent_id "
+                            + "join exec.trade_batch b on b.id = i.trade_batch_id join exec.signal_decision d "
+                            + "on d.id = b.signal_decision_id where p.broker_account_id = ? and p.status = 'OPEN' "
+                            + "and p.quantity_open > 0", account.id())) {
+                String key = InstrumentKeys.normalize((String) pos.get("instrument_key"),
+                        ((Number) pos.get("instrument_token")).longValue());
+                market.list(key, (String) pos.get("symbol"), (String) pos.get("underlying"),
+                        ((Number) pos.get("lot_size")).intValue());
+                sim.holding(key, ((Number) pos.get("quantity_open")).longValue(),
+                        ((Number) pos.get("average_entry")).doubleValue());
+            }
+            BrokerVenue venue = new BrokerVenue(dataSource, gateway, risk.orders(), freeze::of, market);
             log.info("account {} ({}): DRY_RUN orders go to a local Kite simulator at {}", account.id(),
                     account.displayName(), sim.baseUri());
             return new Route(venue, gateway, "Kite simulator " + sim.baseUri());
@@ -111,18 +126,33 @@ public final class BrokerConnections implements AutoCloseable {
 
     /**
      * Before each order of a DRY_RUN replay or worker: the contract is listed (simulator and the gateway's instrument
-     * map, by the exchange token in our key), the simulator's clock is the decision's time and its book is the order's
-     * price (bid = ask = last, deep), so a marketable limit fills at the signal's price as the PAPER follower does.
+     * map, by the exchange token in our key), the simulator's clock is the decision's time, and its book is the stored
+     * bid and ask of that moment (own capture md.option_tick, the last minute), else the order's price on both sides.
+     * Depth is not modelled (deep book): the replay depth ceiling already caps sizes.
      */
     static final class SimulatorMarket implements java.util.function.Consumer<FollowerVenue.OrderSpec> {
 
         private static final long DEPTH_LOTS = 100_000;
         private final KiteSimulator sim;
         private final KiteInstruments instruments;
+        private final org.springframework.jdbc.core.JdbcTemplate jdbc;
 
-        SimulatorMarket(KiteSimulator sim, KiteInstruments instruments) {
+        SimulatorMarket(KiteSimulator sim, KiteInstruments instruments, DataSource dataSource) {
             this.sim = sim;
             this.instruments = instruments;
+            this.jdbc = new org.springframework.jdbc.core.JdbcTemplate(dataSource);
+        }
+
+        void list(String key, String symbol, String underlying, int lotSize) {
+            if (key == null || key.indexOf('|') < 0 || sim.byKey(key) != null) {
+                return;
+            }
+            String exchange = key.startsWith("BSE_FO") ? "BFO" : "NFO";
+            long token = Long.parseLong(key.substring(key.indexOf('|') + 1));
+            String tradingSymbol = symbol.replaceAll("[^A-Za-z0-9]", "");
+            sim.list(new KiteSimulator.Listing(token, exchange, tradingSymbol, underlying, "", 0, "CE", lotSize, 0.05));
+            instruments.add(new KiteInstruments.Contract(token * 256, exchange, token, tradingSymbol, underlying, null, 0,
+                    "CE", lotSize, 0.05));
         }
 
         @Override
@@ -131,17 +161,20 @@ public final class BrokerConnections implements AutoCloseable {
             if (key == null || key.indexOf('|') < 0) {
                 return;
             }
-            String exchange = key.startsWith("BSE_FO") ? "BFO" : "NFO";
-            long token = Long.parseLong(key.substring(key.indexOf('|') + 1));
-            if (sim.byKey(key) == null) {
-                String symbol = o.symbol().replaceAll("[^A-Za-z0-9]", "");
-                sim.list(new KiteSimulator.Listing(token, exchange, symbol, o.underlying(), "", 0, "CE", o.lotSize(), 0.05));
-                instruments.add(new KiteInstruments.Contract(token * 256, exchange, token, symbol, o.underlying(), null, 0,
-                        "CE", o.lotSize(), 0.05));
-            }
+            list(key, o.symbol(), o.underlying(), o.lotSize());
             sim.clock(o::at);
-            if (o.price() > 0) {
-                sim.quote(key, o.price(), DEPTH_LOTS * o.lotSize(), o.price(), DEPTH_LOTS * o.lotSize(), o.price());
+            long depth = DEPTH_LOTS * o.lotSize();
+            List<Map<String, Object>> tick = jdbc.queryForList("select bid_px[1] bid, ask_px[1] ask, ltp from md.option_tick "
+                    + "where instrument_token = ? and recv_ts <= ? and recv_ts > ? order by recv_ts desc limit 1", o.token(),
+                    java.sql.Timestamp.from(o.at()), java.sql.Timestamp.from(o.at().minusSeconds(60)));
+            if (!tick.isEmpty() && tick.getFirst().get("bid") != null && tick.getFirst().get("ask") != null
+                    && ((Number) tick.getFirst().get("bid")).doubleValue() > 0
+                    && ((Number) tick.getFirst().get("ask")).doubleValue() > 0) {
+                Map<String, Object> t = tick.getFirst();
+                sim.quote(key, ((Number) t.get("bid")).doubleValue(), depth, ((Number) t.get("ask")).doubleValue(), depth,
+                        ((Number) t.get("ltp")).doubleValue());
+            } else if (o.price() > 0) {
+                sim.quote(key, o.price(), depth, o.price(), depth, o.price());
             }
         }
     }

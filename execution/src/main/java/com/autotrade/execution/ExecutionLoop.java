@@ -246,18 +246,26 @@ public final class ExecutionLoop implements AutoCloseable {
         }
         java.util.concurrent.Callable<List<String>> task = () -> {
             AccountLease lease = leases.get(account.id());
-            if (lease == null) {
+            boolean borrowed = lease == null;                  // not an account this worker trades: given back after
+            if (borrowed) {
                 java.util.Optional<AccountLease> acquired = AccountLease.tryAcquire(dataSource, account.id(), workerId);
                 if (acquired.isEmpty()) {
                     return List.of("not flattened here: another worker holds the account (flatten there)");
                 }
                 lease = acquired.get();
-                leases.put(account.id(), lease);
             }
-            long epoch = lease.epoch();
-            FollowerSimulator simulator = simulators.computeIfAbsent(account.id(), id -> new FollowerSimulator(dataSource,
-                    costs, risk, route.venue(), quotes).asWorker(workerId, epoch));
-            return simulator.flatten(account, day, this::flattenPrice, "FLATTEN");
+            try {
+                long epoch = lease.epoch();
+                FollowerSimulator simulator = borrowed
+                        ? new FollowerSimulator(dataSource, costs, risk, route.venue(), quotes).asWorker(workerId, epoch)
+                        : simulators.computeIfAbsent(account.id(), id -> new FollowerSimulator(dataSource, costs, risk,
+                                route.venue(), quotes).asWorker(workerId, epoch));
+                return simulator.flatten(account, day, this::flattenPrice, "FLATTEN");
+            } finally {
+                if (borrowed) {
+                    lease.close();
+                }
+            }
         };
         return lanes.computeIfAbsent(account.id(), id -> Executors.newSingleThreadExecutor(
                 Thread.ofPlatform().name("exec-account-" + id).daemon(true).factory())).submit(task)

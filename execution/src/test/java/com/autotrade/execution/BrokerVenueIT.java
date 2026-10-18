@@ -414,4 +414,56 @@ class BrokerVenueIT {
         assertThat(kills.engaged(s.broker(), "opening-drive", KEY)).as("GLOBAL_LIVE covers LIVE accounts only").isNull();
         kills.release(global, null, "it");
     }
+
+    @Test
+    void aRestartWithAnEmptyBrokerBookReArmsTheStopsAndTheExitStillGoesOut() throws Exception {
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        brokerFollower().run(s.broker(), s.group(), DAY);
+        sim.close();
+        // a new process: a fresh simulator that holds the position (as BrokerConnections seeds it), but none of the
+        // old stops; the old stop rows still say OPEN
+        FollowerSimulator restarted = brokerFollower();
+        sim.holding(KEY, 2600, 100);
+        decide(s, "10:00:00", SignalDecision.Action.EXIT, 120);
+        restarted.run(s.broker(), s.group(), DAY);
+        assertThat(intentState(s.broker(), "EXIT")).isEqualTo("EXECUTED");
+        assertThat(position(s.broker()).get("status")).isEqualTo("CLOSED");
+        assertThat(orders(s.broker())).filteredOn(r -> r.get("role").equals("STOP"))
+                .allSatisfy(r -> assertThat(r.get("status")).isEqualTo("CANCELLED"))
+                .hasSize(4);                                             // two stale, two re-armed then taken off
+        assertThat(sim.netQuantities()).containsEntry("NIFTY26O2023100PE", 0L);
+    }
+
+    @Test
+    void aSessionLostWhileAnEntryWorksKeepsTheIntentAndResumesItByTagAfterTheLogin() throws Exception {
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        jdbc.update("update exec.signal_decision set premium_budget = 130000 where copy_group_id = ?", s.group());
+        FollowerSimulator kite = brokerFollower();
+        sim.failNext("orders", Fault.TOKEN_EXPIRED);                  // placed, then the first order-book read fails
+        FollowerSimulator.DayResult r = kite.run(s.broker(), s.group(), DAY);
+        assertThat(r.reasons()).containsKey("PENDING_BROKER_SESSION");
+        assertThat(intentState(s.broker(), "ENTER")).isEqualTo("CREATED");
+        assertThat(sim.netQuantities()).containsEntry("NIFTY26O2023100PE", 1300L);
+        jdbc.update("update acct.broker_account set connection_status = 'ACTIVE' where id = ?", s.broker().id());
+        int before = sim.orderCount();
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(intentState(s.broker(), "ENTER")).isEqualTo("EXECUTED");
+        assertThat(position(s.broker()).get("quantity_open")).isEqualTo(1300L);
+        assertThat(sim.orderCount() - before).as("no second entry: only the stop is new").isEqualTo(1);
+    }
+
+    @Test
+    void anInstrumentKillSwitchOfOneTenantDoesNotReachAnother() {
+        Setup s = setup(false);
+        KillSwitches kills = new KillSwitches(dataSource);
+        long other = new AccountStore(dataSource).ensureTenant("someone-else");
+        long id = kills.engage(other, "INSTRUMENT", null, null, KEY, "their drill", "it");
+        assertThat(kills.engaged(s.broker(), "opening-drive", KEY)).isNull();
+        kills.release(id, other, "it");
+        long mine = kills.engage(s.broker().tenantId(), "INSTRUMENT", null, null, KEY, "my drill", "it");
+        assertThat(kills.engaged(s.broker(), "opening-drive", KEY)).startsWith("INSTRUMENT");
+        kills.release(mine, s.broker().tenantId(), "it");
+    }
 }

@@ -101,6 +101,7 @@ public final class FollowerSimulator {
     private String workerId;                     // set by an execution worker: claim intents before running them
     private Long leaseEpoch;                     // the worker's lease epoch, recorded on every order (fencing)
     private final Map<String, Day> days = new java.util.HashMap<>();   // per account and date, across worker ticks
+    private final Set<String> protectionChecked = new HashSet<>();       // account:date whose stops were verified
 
     /** Makes this an execution worker's simulator: intents are claimed by {@code id} and orders carry the epoch. */
     public FollowerSimulator asWorker(String id, long epoch) {
@@ -160,6 +161,9 @@ public final class FollowerSimulator {
                 }
             }
         }
+        if (venue.broker() && !sessionLost && protectionChecked.add(account.id() + ":" + date)) {
+            sessionLost = ensureProtected(day);             // recovery: every open position has its broker stop
+        }
         List<Pending> pending = pending(account.id(), copyGroupId, date);
         Set<Long> handled = new HashSet<>();
         for (Pending p : pending) {
@@ -195,7 +199,9 @@ public final class FollowerSimulator {
                     }
                     sessionLost = true;
                     loseSession(account, e.getMessage());
-                    outcomes.add(p.action().equals("EXIT") ? "PENDING_BROKER_SESSION"
+                    // an exit, or an entry with an order already at the broker, waits for the next login (it resumes
+                    // by tag); an entry that sent nothing is refused
+                    outcomes.add(p.action().equals("EXIT") || hasOrders(p.intentId()) ? "PENDING_BROKER_SESSION"
                             : reject(p, "BROKER_SESSION", e.getMessage()));
                 }
             }
@@ -592,7 +598,41 @@ public final class FollowerSimulator {
      * position comes off first (so nothing is sold twice), then what is left is sold, and the account's entries stop.
      */
     private void protect(Day day, Pending p, long positionId) {
-        protect(day, p, positionId, p.symbol());
+        try {
+            protect(day, p, positionId, p.symbol());
+        } catch (BrokerException e) {
+            if (e.kind() != BrokerException.Kind.SESSION) {
+                throw e;
+            }
+            // the fill is booked; the stop is placed at the next login (ensureProtected), entries wait till then
+            loseSession(day.account, e.getMessage());
+        }
+    }
+
+    /**
+     * Every open position of the account has its broker stop (after a restart, a takeover or a login): stops are
+     * re-armed where missing, sales by stops booked. Returns true when the session turned out to be lost.
+     */
+    private boolean ensureProtected(Day day) {
+        for (Map<String, Object> pos : jdbc.queryForList("select id, symbol from exec.position where broker_account_id = ? "
+                + "and status = 'OPEN' and quantity_open > 0 order by id", day.account.id())) {
+            try {
+                protect(day, null, ((Number) pos.get("id")).longValue(), (String) pos.get("symbol"));
+            } catch (BrokerException e) {
+                if (e.kind() != BrokerException.Kind.SESSION) {
+                    throw e;
+                }
+                loseSession(day.account, e.getMessage());
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean hasOrders(long intentId) {
+        Integer n = jdbc.queryForObject("select count(*) from exec.order_execution where trade_intent_id = ?", Integer.class,
+                intentId);
+        return n != null && n > 0;
     }
 
     /** {@code p} null (flatten): a stop that cannot be placed is reported, not followed by another exit. */
@@ -729,10 +769,11 @@ public final class FollowerSimulator {
     private boolean sessionLost(BrokerAccount account) {
         String status = jdbc.queryForObject("select connection_status from acct.broker_account where id = ?", String.class,
                 account.id());
-        return "TOKEN_EXPIRED".equals(status) || "TOKEN_REJECTED".equals(status);
+        return "TOKEN_EXPIRED".equals(status) || "TOKEN_REJECTED".equals(status) || "DISCONNECTED".equals(status);
     }
 
     private void loseSession(BrokerAccount account, String message) {
+        protectionChecked.removeIf(k -> k.startsWith(account.id() + ":"));   // stops are verified again after the login
         jdbc.update("update acct.broker_account set connection_status = 'TOKEN_EXPIRED', updated_at = now() where id = ?",
                 account.id());
         kills.audit(account, "execution", "BROKER_SESSION_LOST", Map.of("message", String.valueOf(message)));

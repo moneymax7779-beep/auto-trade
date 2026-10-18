@@ -87,11 +87,12 @@ public final class BrokerReconciler {
         Map<String, double[]> ours = new TreeMap<>();      // key -> bought qty, bought value, sold qty, sold value
         // every fill of the day by its decision's contract (a stop or emergency exit belongs to its entry's intent)
         jdbc.query("select d.instrument_key, e.order_side, sum(e.quantity_filled), "
-                        + "sum(e.quantity_filled * e.average_fill_price) from exec.order_execution e "
+                        + "sum(e.quantity_filled * e.average_fill_price), d.instrument_token from exec.order_execution e "
                         + "join exec.trade_intent i on i.id = e.trade_intent_id join exec.trade_batch b on b.id = i.trade_batch_id "
                         + "join exec.signal_decision d on d.id = b.signal_decision_id where e.broker_account_id = ? "
-                        + "and e.quantity_filled > 0 and d.session_date = ? group by 1, 2", rs -> {
-                    String key = keyOf(rs.getString(1));
+                        + "and e.quantity_filled > 0 and d.session_date = ? group by 1, 2, 5", rs -> {
+                    // the exchange key, as the broker reports it (a zt replay's ZT|<token> normalised)
+                    String key = keyOf(InstrumentKeys.normalize(rs.getString(1), rs.getLong(5)));
                     double[] v = ours.computeIfAbsent(key, k -> new double[4]);
                     int i = "BUY".equals(rs.getString(2)) ? 0 : 2;
                     v[i] += rs.getLong(3);

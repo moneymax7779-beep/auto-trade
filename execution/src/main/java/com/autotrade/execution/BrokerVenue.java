@@ -319,9 +319,8 @@ public final class BrokerVenue implements FollowerVenue {
                 String tag = (String) s.get("client_tag");
                 Optional<BrokerOrder> b = book.stream().filter(o -> tag.equals(o.clientTag())).findFirst();
                 if (b.isEmpty()) {
-                    if (List.of("CREATED", "UNKNOWN").contains(s.get("status"))) {
-                        setStatus(account.id(), tag, "CANCELLED", "never reached the broker");
-                    }
+                    // not in today's order book (never placed, a previous day's, or a lost simulator): not working
+                    setStatus(account.id(), tag, "CANCELLED", "not in the broker's order book");
                     continue;
                 }
                 record(account.id(), b.get());
@@ -333,6 +332,8 @@ public final class BrokerVenue implements FollowerVenue {
                 }
                 if (!b.get().status().isTerminal()) {
                     s.put("quantity_filled", b.get().filledQuantity());
+                    s.put("remaining", b.get().quantity() - b.get().filledQuantity());
+                    s.put("broker_trigger", b.get().triggerPrice());
                     active.add(s);
                 }
             }
@@ -352,6 +353,12 @@ public final class BrokerVenue implements FollowerVenue {
             int lotSize = ((Number) pos.get("lot_size")).intValue();
             long perOrder = maxQuantityPerOrder.applyAsLong(key, (String) pos.get("underlying"));
             long maxPerOrder = perOrder <= 0 ? open : Math.max(lotSize, perOrder / lotSize * lotSize);
+            long covered = active.stream().mapToLong(x -> ((Number) x.get("remaining")).longValue()).sum();
+            boolean sameTrigger = active.stream().allMatch(x -> Math.abs(((Number) x.get("broker_trigger")).doubleValue()
+                    - trigger) < rules.tick() / 2);
+            if (!active.isEmpty() && covered == open && sameTrigger) {
+                return Protection.ARMED;                                           // already right: nothing to send
+            }
             if (active.size() == 1 && open <= maxPerOrder) {                     // one stop: re-sized in place
                 String tag = (String) active.getFirst().get("client_tag");
                 long already = ((Number) active.getFirst().get("quantity_filled")).longValue();
@@ -432,19 +439,28 @@ public final class BrokerVenue implements FollowerVenue {
         long intent = jdbc.queryForObject("select entry_trade_intent_id from exec.position where id = ?", Long.class,
                 positionId);
         List<Map<String, Object>> stops = stops(account.id(), intent);
-        List<Part> sold = new ArrayList<>();
-        Instant at = null;
+        if (stops.isEmpty()) {
+            return Release.NONE;
+        }
+        // the order book is read, not looked up per tag: an unreadable book means "not confirmed", never "absent"
+        List<BrokerOrder> book;
+        try {
+            book = broker.orders();
+        } catch (BrokerException e) {
+            if (e.kind() == Kind.SESSION) {
+                throw e;
+            }
+            return new Release(List.of(), null, true, "order book unreadable: " + e.getMessage());
+        }
+        List<Map<String, Object>> working = new ArrayList<>();
         for (Map<String, Object> s : stops) {
             String tag = (String) s.get("client_tag");
-            Optional<BrokerOrder> before = lookUp(tag);
-            if (before.isEmpty()) {
-                if (List.of("CREATED", "UNKNOWN").contains(s.get("status"))) {
-                    setStatus(account.id(), tag, "CANCELLED", "never reached the broker");
-                    continue;
-                }
-                return new Release(List.of(), null, true, "stop " + tag + " is not in the broker's order book");
+            Optional<BrokerOrder> b = book.stream().filter(o -> tag.equals(o.clientTag())).findFirst();
+            if (b.isEmpty()) {
+                setStatus(account.id(), tag, "CANCELLED", "not in the broker's order book");
+                continue;
             }
-            if (!before.get().status().isTerminal()) {
+            if (!b.get().status().isTerminal()) {
                 try {
                     broker.cancel(tag);
                 } catch (BrokerException e) {
@@ -457,10 +473,30 @@ public final class BrokerVenue implements FollowerVenue {
                     }                                                 // TERMINAL: it ended meanwhile (filled?) - look
                 }
             }
-            Optional<BrokerOrder> now = lookUp(tag);
+            working.add(s);
+        }
+        List<Part> sold = new ArrayList<>();
+        Instant at = null;
+        if (!working.isEmpty()) {
+            try {
+                book = broker.orders();
+            } catch (BrokerException e) {
+                if (e.kind() == Kind.SESSION) {
+                    throw e;
+                }
+                return new Release(List.of(), null, true, "order book unreadable after the cancel: " + e.getMessage());
+            }
+        }
+        for (Map<String, Object> s : working) {                  // every stop must have ended before anything is booked
+            String tag = (String) s.get("client_tag");
+            Optional<BrokerOrder> now = book.stream().filter(o -> tag.equals(o.clientTag())).findFirst();
             if (now.isEmpty() || !now.get().status().isTerminal()) {
                 return new Release(List.of(), null, true, "stop " + tag + " not yet cancelled at the broker");
             }
+        }
+        for (Map<String, Object> s : working) {
+            String tag = (String) s.get("client_tag");
+            Optional<BrokerOrder> now = book.stream().filter(o -> tag.equals(o.clientTag())).findFirst();
             record(account.id(), now.get());
             long newly = now.get().filledQuantity() - ((Number) s.get("booked_quantity")).longValue();
             if (newly > 0) {

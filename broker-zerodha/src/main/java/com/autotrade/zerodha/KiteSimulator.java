@@ -93,7 +93,7 @@ public final class KiteSimulator implements AutoCloseable {
     private final Map<String, Order> orders = new LinkedHashMap<>();
     private final List<Trade> trades = new ArrayList<>();
     private final Map<String, Deque<Fault>> faults = new HashMap<>();
-    private final AtomicLong ids = new AtomicLong(260_101_000_000_000L);
+    private final AtomicLong ids = new AtomicLong(System.currentTimeMillis() * 1000);   // unique across instances, as Kite's
     private final long timeoutMillis;
     private volatile Supplier<Instant> clock = Instant::now;
     private String token;
@@ -156,6 +156,19 @@ public final class KiteSimulator implements AutoCloseable {
         long token = Long.parseLong(instrumentKey.substring(bar + 1));
         return listings.values().stream().filter(l -> l.exchange().equals(exchange) && l.exchangeToken() == token)
                 .findFirst().orElse(null);
+    }
+
+    /**
+     * A holding the broker already has (a worker restarted: the simulator is new, the account's open positions are
+     * not): recorded as a filled buy, without an order.
+     */
+    public synchronized void holding(String instrumentKey, long quantity, double price) {
+        Listing l = byKey(instrumentKey);
+        if (l == null) {
+            throw new IllegalArgumentException("not listed: " + instrumentKey);
+        }
+        trades.add(new Trade(Long.toString(ids.incrementAndGet()), "0", l.exchange(), l.tradingSymbol(), "BUY", quantity,
+                price, clock.get()));
     }
 
     public synchronized void failNext(String operation, Fault fault) {

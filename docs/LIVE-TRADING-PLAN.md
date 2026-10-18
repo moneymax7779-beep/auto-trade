@@ -755,6 +755,32 @@ and a DRY_RUN account's orders go to a local Kite simulator.
     orders sliced to the freeze quantity.
   - KITE-DRY bought and sold the same quantity (1,92,955). Every stop (179) was cancelled before its exit, no stop
     sold, and nothing was left open.
+- **Review fixes (19 Oct ~02:00, code review of 7d7ae5f):**
+  - A session lost while an entry works no longer refuses an intent that already has an order at the broker: it waits
+    and resumes by tag after the login.
+  - A stop that cannot be placed because the session dropped is placed at the next login: on the first turn after a
+    restart, takeover or login, every open position's stop is verified.
+  - A stop row the broker's order book does not have (a previous day's, a lost simulator) is closed, not waited on
+    forever. `release` reads the book once and treats an unreadable book as "not confirmed", never as "absent".
+  - Stops are not re-sent when already right.
+  - A new DRY_RUN simulator is given the account's open positions, so a restart is no longer a reconciliation kill.
+  - An INSTRUMENT kill switch is per tenant (no tenant: ADMIN, every tenant).
+  - The end-of-day keys are normalised.
+  - A lease borrowed by flatten is returned.
+  - Connection statuses are read in one query.
+  - `account-session` (CLI) and `POST /api/execution/accounts/{id}/session` mark the session ACTIVE after the day's
+    login. Nothing cleared TOKEN_EXPIRED before.
+  - Simulator order ids are unique across instances.
+  - `follow` takes each account's lease: an account a running worker holds is skipped.
+  - The DRY_RUN simulator's book is now the **stored bid and ask** of the order's moment (own capture), else the
+    signal's price. DRY_RUN therefore tests spreads; it is no longer equal to PAPER by construction.
+  - Tests: `BrokerVenueIT` 13 (+ restart with an empty broker book, session lost mid-entry then resumed, per-tenant
+    INSTRUMENT switch). Full build 373 green.
+- **KITE-DRY again on the 26 days with stored quotes:**
+  - Same 95 trades. Gross ₹45,27,343 (−₹27,412 against PAPER), charges ₹59,946, net **₹44,67,397 (−₹30,330, −0.7 %)**.
+  - The difference is the spread, and it appears only on own-capture days (from 28 Sep; earlier days fall back to the
+    signal price). 8 Oct alone is −₹24,122.
+  - Bought = sold (1,93,955). All 184 stops were cancelled before their exits, none sold, nothing left open.
 - **Not done yet (L2/L3):**
   - Kite's WebSocket order updates (polling only).
   - The real daily login flow and token store: Secret Manager, the Telegram link, a redirect endpoint.

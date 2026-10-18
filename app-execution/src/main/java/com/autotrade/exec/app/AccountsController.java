@@ -66,14 +66,34 @@ class AccountsController {
         service.status().forEach(s -> turns.put(s.accountId(), s));
         List<AccountView> out = new ArrayList<>();
         for (long tenant : user.tenants()) {
+            Map<Long, String> connections = accounts.connectionStatuses(tenant);
             for (BrokerAccount a : accounts.ofTenant(tenant)) {
-                String connection = jdbc.queryForObject("select connection_status from acct.broker_account where id = ?",
-                        String.class, a.id());
                 out.add(new AccountView(a.id(), a.tenantId(), a.displayName(), a.brokerType().name(), a.tradeMode().name(),
-                        a.role().name(), a.enabled(), a.allocatedCapital(), a.riskFile(), connection, turns.get(a.id())));
+                        a.role().name(), a.enabled(), a.allocatedCapital(), a.riskFile(), connections.get(a.id()),
+                        turns.get(a.id())));
             }
         }
         return out;
+    }
+
+    record Session(String status) {
+    }
+
+    /**
+     * The account's broker session after the day's login (ACTIVE: entries resume, waiting exits go out, stops are
+     * verified) or taken down (DISCONNECTED). The Kite request-token exchange itself is L3 (Secret Manager); until then
+     * the owner logs in and marks the session here.
+     */
+    @PostMapping("/api/execution/accounts/{id}/session")
+    Map<String, Object> session(@RequestHeader(value = Access.HEADER, required = false) String subject,
+                                @PathVariable long id, @RequestBody Session body) {
+        Access.User user = access.user(subject);
+        BrokerAccount a = own(user, id);
+        String status = body.status() == null ? "" : body.status();
+        Access.require(status.equals("ACTIVE") || status.equals("DISCONNECTED"), "status: ACTIVE or DISCONNECTED");
+        accounts.setConnectionStatus(a.id(), status);
+        kills.audit(a, user.subject(), "SESSION_" + status, Map.of());
+        return Map.of("account", a.displayName(), "connection", status);
     }
 
     @GetMapping("/api/execution/kill-switches")

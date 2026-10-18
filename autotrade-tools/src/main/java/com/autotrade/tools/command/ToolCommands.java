@@ -118,6 +118,7 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                 case "account-register-paper" -> accountRegisterPaper(parsed);
                 case "follower-add" -> followerAdd(parsed);
                 case "follow" -> follow(parsed);
+                case "account-session" -> accountSession(parsed);
                 case "divergence-report" -> divergenceReport(parsed);
                 default -> usage("unknown command: " + parsed.command());
             };
@@ -174,9 +175,11 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                                                              a follower account subscribed to a copy group (never live)
                   follow --session D[,D] [--copy-group LIVE-SET] [--tenant owner] [--broker-funds 1e9]
                                                              fan out the signal source's decisions and run PAPER/DRY_RUN followers
+                  account-session --label L --status ACTIVE|DISCONNECTED [--tenant owner]
+                                                             mark a broker account's session after the day's login (audited)
                   divergence-report --session D[,D] [--copy-group LIVE-SET] [--tenant owner] [--paper-session ID] [--out DIR]
                                                              L1 daily report: each follower vs the signal source, PAPER followers
-                                                             vs PAPER-1 (gate: every one-sided trade explained); Markdown
+                                                             vs PAPER-1 (gate: every divergence explained); Markdown
                                                              and count what arrives (one of the 2 allowed connections)
                   vix-backfill [--daily-from D] [--minutes-from D] [--to D]
                                                              India VIX daily and one-minute bars from Upstox's public
@@ -472,8 +475,26 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
         return 0;
     }
 
+    /** Live execution L2: a broker account's session status after the day's login (entries resume, stops re-verified). */
+    private int accountSession(ToolArgs args) {
+        args.allowOnly(Set.of("label", "status", "tenant"));
+        String status = args.get("status", "");
+        if (!args.has("label") || !(status.equals("ACTIVE") || status.equals("DISCONNECTED"))) {
+            return usage("account-session needs --label and --status ACTIVE|DISCONNECTED");
+        }
+        com.autotrade.account.AccountStore accounts = new com.autotrade.account.AccountStore(target);
+        long tenant = accounts.ensureTenant(args.get("tenant", "owner"));
+        com.autotrade.account.BrokerAccount account = accounts.ofTenant(tenant).stream()
+                .filter(a -> a.displayName().equals(args.get("label", ""))).findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("no account " + args.get("label", "") + " in this tenant"));
+        accounts.setConnectionStatus(account.id(), status);
+        new com.autotrade.execution.KillSwitches(target).audit(account, "cli", "SESSION_" + status, Map.of());
+        System.out.printf("account %d %s: connection %s%n", account.id(), account.displayName(), status);
+        return 0;
+    }
+
     /** Live execution L1: fans out each day's signal decisions and runs the copy group's PAPER and DRY_RUN followers. */
-    private int follow(ToolArgs args) {
+    private int follow(ToolArgs args) throws java.sql.SQLException {
         args.allowOnly(Set.of("session", "copy-group", "tenant", "broker-funds"));
         com.autotrade.account.AccountStore accounts = new com.autotrade.account.AccountStore(target);
         long tenant = accounts.ensureTenant(args.get("tenant", "owner"));
@@ -493,6 +514,8 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
         com.autotrade.execution.StoredQuotes quotes = new com.autotrade.execution.StoredQuotes(target, archive);
         // each account's venue from the broker registry: simulated fills, or (a ZERODHA DRY_RUN account on a v3 risk
         // file) the Kite adapter against its own local simulator; LIVE is refused there
+        // each account only under its lease (one writer per account): an account a running worker holds is skipped
+        Map<Long, com.autotrade.execution.AccountLease> leases = new java.util.HashMap<>();
         try (com.autotrade.execution.BrokerConnections connections =
                      new com.autotrade.execution.BrokerConnections(target, funds)) {
             Map<Long, com.autotrade.execution.FollowerSimulator> followers = new java.util.HashMap<>();
@@ -500,6 +523,14 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                 int intents = fanOut.fanOut(group, day);
                 System.out.printf("%s: %d intents%n", day, intents);
                 for (com.autotrade.account.BrokerAccount account : accounts.followers(group)) {
+                    if (!leases.containsKey(account.id())) {
+                        var lease = com.autotrade.execution.AccountLease.tryAcquire(target, account.id(), "cli-follow");
+                        if (lease.isEmpty()) {
+                            System.out.printf("  %-10s skipped: a worker holds its lease%n", account.displayName());
+                            continue;
+                        }
+                        leases.put(account.id(), lease.get());
+                    }
                     com.autotrade.execution.FollowerRisk risk =
                             com.autotrade.execution.FollowerRisk.load(Path.of(account.riskFile()));
                     var route = connections.route(account, risk);
@@ -515,6 +546,8 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                             result.closed(), result.net(), result.reasons());
                 }
             }
+        } finally {
+            leases.values().forEach(com.autotrade.execution.AccountLease::close);
         }
         return 0;
     }

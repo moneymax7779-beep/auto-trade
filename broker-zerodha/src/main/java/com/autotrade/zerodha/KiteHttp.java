@@ -164,8 +164,4 @@ public final class KiteHttp {
         String v = value.length() > 19 ? value.substring(0, 19) : value;
         return LocalDateTime.parse(v.replace('T', ' '), TIME).atZone(IST).toInstant();
     }
-
-    JsonMapper json() {
-        return json;
-    }
 }

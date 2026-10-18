@@ -2,7 +2,6 @@ package com.autotrade.zerodha;
 
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -345,10 +344,5 @@ public final class KiteGateway implements BrokerConnection {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
         }
-    }
-
-    /** For tests: what this gateway has placed. */
-    Map<String, String> placed() {
-        return new HashMap<>(brokerIdByTag);
     }
 }
