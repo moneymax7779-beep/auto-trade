@@ -1,0 +1,36 @@
+# v9 (A-141, user 18 Oct after the 15 / 16 Oct morning charts: "add day open and ORL reclaim levels and run on tick days"): zbf-v2 + the day open as a
+# level both ways + ORL reclaimed from below as an up-level. Everything else v2 (same-minute flow and volume, stop back inside the level, 15:15).
+# v2: the stop 'Back inside the level' (user 18 Oct: "run all 3 stop replays"); everything else v1.
+# Zone break with OI flow and a futures volume surge, v1 (user 2026-10-17 on 7 Sep / 1 Oct NIFTY: "support and resistances
+# are dynamically formed ... came near ORL and broke, can we combine this with OI change at that or 1 to 3 minutes point
+# in time to identify the trend and immediately trade?"; "do replay on tick days only"; ledger A-131). Entry = the event
+# study's "flow agrees + volume >= 3x" group (docs/studies/2026-10-17-break-oi-volume-study.md). Stop and exit are the
+# user's choices (17 Oct): "Level back + OI reversed", "Hold to 15:15". Both indices, every day.
+version: zbf-v9
+strategy: zone-break-flow
+status: UNCALIBRATED
+source: "user-request-2026-10-17 (A-141, v9 = v2 + the day open both ways and ORL reclaimed from below; A-133, v2 = v1 with the stop 'Back inside the level'; entry values from the event study, stop/exit chosen by the user, fixed at registration)"
+
+scope:
+  entry_from: "09:30"
+  last_new_entry: "14:30"              # exclusive
+  flat_by: "15:15"
+  time_stop_min: 0
+  skip_expiring_index: false
+
+setup:
+  zone_tolerance_atr: 0.3              # pivots within 0.3 ATR(3m) form a zone (the study's)
+  zone_min_pivots: 3                   # 3x+ touches
+  volume_surge_x: 3.0                  # futures 1-min volume >= 3x the day's median since 09:20
+  day_open_level: true                 # v9: the day open is a level both ways (user 18 Oct)
+  orl_reclaim: true                    # v9: ORL reclaimed from below is an up-level (user 18 Oct)
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 30                 # emergency only (the platform's standard resting stop)
+  use_target: false                    # user: hold to 15:15
+  stop_mode: level                     # v2 (user 18 Oct: "run all 3 stop replays"): exit on the close back through the level (qpb: the range's far side), no OI condition

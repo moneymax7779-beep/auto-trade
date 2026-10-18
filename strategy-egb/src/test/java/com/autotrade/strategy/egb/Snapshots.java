@@ -120,7 +120,7 @@ final class Snapshots {
         LocalTime t = LocalTime.parse(time);
         String phase = t.isBefore(LocalTime.of(11, 15)) ? "TREND_WINDOW" : t.isBefore(LocalTime.of(13, 15)) ? "MIDDAY"
                 : t.isBefore(LocalTime.of(14, 30)) ? "AFTERNOON" : t.isBefore(LocalTime.of(15, 15)) ? "LATE" : "CAS_REFERENCE";
-        return new FeatureSnapshot(instant, "NIFTY", SESSION, (String) values.getOrDefault("phase", phase),
+        return new FeatureSnapshot(instant, (String) values.getOrDefault("underlying", "NIFTY"), SESSION, (String) values.getOrDefault("phase", phase),
                 (double) values.getOrDefault("spot", Double.NaN), 0, 0, 0,
                 build(StructureFeatures.class, "structure."), build(FuturesFeatures.class, "futures."),
                 build(OptionsFeatures.class, "options."), build(BreadthFeatures.class, "breadth."),
