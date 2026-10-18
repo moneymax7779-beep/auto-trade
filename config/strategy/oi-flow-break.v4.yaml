@@ -1,0 +1,35 @@
+# OI flow break, v4 (user 2026-10-17: "please come up with the best solution for this"; ledger A-123).
+# v4 = v2 (A-121: entry on the OI flow, 1-ATR stop, VWAP trail, 15:15) + one trade per index per day: the first flow
+# signal sets the day's direction. Evidence (in-sample, 27 tick days): v2's first trade on each index each day: 25 trades,
+# 10 wins, +Rs 12.27L; every later same-index trade (11) lost, -Rs 3.21L, all whipsaws on two-way days. v3's level+OI
+# reversal exit (A-122) cut the trend-day winners, so v2's exits stay. Validated out of sample on the 169 Upstox bar days
+# Jan-Sep (option and futures OI per minute), never used for this rule family. v2 notes follow.
+#
+version: ofb-v4
+strategy: oi-flow-break
+status: UNCALIBRATED
+source: "user-request-2026-10-17 (A-123 = A-121 + one trade per index per day; user's values, fixed at registration)"
+
+scope:
+  entry_from: "09:30"
+  last_new_entry: "14:30"              # exclusive
+  flat_by: "15:15"
+  time_stop_min: 0
+  skip_expiring_index: true
+
+setup:
+  min_futures_rvol: 1.0                # user: relax participation to 1x normal
+  stop_atr_inside: 0.5                 # v1 only (unused when no level is required)
+  require_level_break: false           # v2: no level break needed
+  one_trade_per_day: true              # v4: the first flow signal is the index's only trade of the day
+  stop_atr_from_entry: 1.0             # v2: index stop 1 ATR(3m) from the entry
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 30                 # emergency only
+  vwap_trail_3m: true                  # exit on a 3-minute close back through the session VWAP
+  use_target: false

@@ -413,4 +413,512 @@ class SetupFamiliesTest {
             u = u.plusMinutes(1);
         }
     }
+
+    /**
+     * A-119: 16 Oct NIFTY. Low 22,917 at 09:36; base under a call wall at 23,000 (OI building) over put support at
+     * 22,900 (OI building); 09:57 closes at 23,011 with near-ATM call OI falling: the call. Without the call unwind: no trade.
+     */
+    @Test
+    void oiWallBreakBuysTheCallWhenTheWallBreaksAndCallWritersCover() {
+        for (boolean unwinding : new boolean[] {true, false}) {
+            Day d = new Day("oi-wall-break.v1.yaml", Map.of("structure.vwapSpotProxy", 22960.0, "futures.rvolTod", 2.0,
+                    "options.putSupportStrike", 22900.0, "options.putFloorOiChangePct", 3.0));
+            d.dte = 1;
+            LocalTime t = LocalTime.of(9, 16);
+            for (; t.isBefore(LocalTime.of(9, 57)); t = t.plusMinutes(1)) {
+                double spot = t.isBefore(LocalTime.of(9, 36)) ? 22960 - (t.getMinute() - 16) * 2.0
+                        : t.equals(LocalTime.of(9, 36)) ? 22917 : 22950 + (t.getMinute() % 3) * 10;
+                assertThat(d.at(t.toString(), spot, PositionView.FLAT, "options.callBarrierStrike", 23000.0,
+                        "options.callWallOiChangePct", 5.0, "options.ceOiChange3m", 100000.0).orders()).isEmpty();
+            }
+            Decision brk = d.at("09:57", 23011, PositionView.FLAT, "options.callBarrierStrike", 23050.0,
+                    "options.callWallOiChangePct", 2.0, "options.ceOiChange3m", unwinding ? -500000.0 : 100000.0);
+            if (unwinding) {
+                assertThat(brk.orders()).singleElement().satisfies(o -> {
+                    assertThat(o.side()).isEqualTo(OptionSide.CE);
+                    assertThat(o.reason()).isEqualTo("OI_WALL_BREAK_UP");
+                });
+            } else {
+                assertThat(brk.orders()).as("call OI still building: no trade").isEmpty();
+            }
+        }
+    }
+
+    /**
+     * A-120: a fresh 1-minute break of the ORH (23,076) and the swing high (23,090) with puts building, calls unwinding
+     * and fresh futures longs buys the call; the same break with a neutral futures OI state does not.
+     */
+    @Test
+    void oiFlowBreakBuysAFreshLevelBreakWhenOneSideBuildsAndTheOtherUnwinds() {
+        for (String state : new String[] {"FRESH_LONG", "NEUTRAL"}) {
+            Map<String, Object> levels = new java.util.HashMap<>(Map.of("structure.orComplete", true,
+                    "structure.orHigh", 23076.0, "structure.pdh", 23300.0, "structure.prevOrHigh", 23500.0,
+                    "structure.pwh", 23400.0, "structure.vwapSpotProxy", 23000.0, "structure.lastSwingHigh", 23090.0,
+                    "options.callBarrierStrike", 23150.0, "futures.rvolTod", 1.2));
+            Day d = new Day("oi-flow-break.v1.yaml", levels);
+            d.dte = 1;
+            Object[] flow = {"options.peOiChange1m", 500000.0, "options.ceOiChange1m", -500000.0, "futures.oiState", state};
+            LocalTime t = LocalTime.of(9, 31);
+            for (; t.isBefore(LocalTime.of(10, 15)); t = t.plusMinutes(1)) {
+                assertThat(d.at(t.toString(), 23050 + (t.getMinute() % 2) * 10, PositionView.FLAT, flow).orders()).isEmpty();
+            }
+            Decision brk = d.at("10:15", 23102, PositionView.FLAT, flow);
+            if (state.equals("FRESH_LONG")) {
+                assertThat(brk.orders()).singleElement().satisfies(o -> {
+                    assertThat(o.side()).isEqualTo(OptionSide.CE);
+                    assertThat(o.reason()).isEqualTo("OI_FLOW_BREAK_UP");
+                });
+            } else {
+                assertThat(brk.orders()).as("futures OI neutral: no trade").isEmpty();
+            }
+        }
+    }
+
+    /** A-121: ofb-v2 needs no level break: flow, futures OI state, volume and the VWAP side are enough. */
+    @Test
+    void oiFlowBreakV2EntersOnFlowWithoutALevelBreak() {
+        Map<String, Object> levels = Map.of("structure.orComplete", true, "structure.orHigh", 23300.0,
+                "structure.vwapSpotProxy", 23000.0, "futures.rvolTod", 1.1);
+        Object[] flat = {"options.peOiChange1m", 0.0, "options.ceOiChange1m", 0.0, "options.peOiChange3m", 0.0,
+                "options.ceOiChange3m", 0.0, "futures.oiState", "NEUTRAL"};
+        Object[] flow = {"options.peOiChange1m", 500000.0, "options.ceOiChange1m", -500000.0, "futures.oiState", "FRESH_LONG"};
+        for (String version : new String[] {"v1", "v2"}) {
+            Day d = new Day("oi-flow-break." + version + ".yaml", levels);
+            d.dte = 1;
+            for (LocalTime t = LocalTime.of(9, 31); t.isBefore(LocalTime.of(10, 0)); t = t.plusMinutes(1)) {
+                d.at(t.toString(), 23050, PositionView.FLAT, flat);
+            }
+            Decision at = d.at("10:00", 23055, PositionView.FLAT, flow);    // no level crossed (ORH 23,300)
+            if (version.equals("v2")) {
+                assertThat(at.orders()).singleElement().extracting(OrderIntent::side).isEqualTo(OptionSide.CE);
+            } else {
+                assertThat(at.orders()).as("v1 needs a level break").isEmpty();
+            }
+        }
+    }
+
+    /**
+     * A-122: ofb-v3 holds a put through a bounce above the last swing high while the OI flow still favours the put, and
+     * exits when the price is above the swing high and the put OI is building with call OI unwinding.
+     */
+    @Test
+    void oiFlowBreakV3ExitsOnlyWhenALevelOrSwingBreaksAgainstWithOiReversed() {
+        Map<String, Object> levels = Map.of("structure.orComplete", true, "structure.orHigh", 22600.0,
+                "structure.vwapSpotProxy", 22480.0, "structure.lastSwingHigh", 22455.0, "futures.rvolTod", 1.2);
+        Object[] down = {"options.ceOiChange1m", 500000.0, "options.peOiChange1m", -500000.0, "futures.oiState", "FRESH_SHORT"};
+        Object[] up = {"options.ceOiChange1m", -500000.0, "options.peOiChange1m", 500000.0, "futures.oiState", "SHORT_COVERING"};
+        Day d = new Day("oi-flow-break.v3.yaml", levels);
+        d.dte = 1;
+        for (LocalTime t = LocalTime.of(9, 31); t.isBefore(LocalTime.of(10, 42)); t = t.plusMinutes(1)) {
+            d.at(t.toString(), 22440, PositionView.FLAT, "options.ceOiChange1m", 0.0, "options.peOiChange1m", 0.0,
+                    "options.ceOiChange3m", 0.0, "options.peOiChange3m", 0.0, "futures.oiState", "NEUTRAL");
+        }
+        assertThat(d.at("10:42", 22434, PositionView.FLAT, down).orders()).singleElement()
+                .extracting(OrderIntent::side).isEqualTo(OptionSide.PE);
+        PositionView put = new PositionView(true, OptionSide.PE, 1, 50, null, 52);
+        assertThat(d.at("10:48", 22458, put, down).orders()).as("above the swing high but the flow still bearish: hold").isEmpty();
+        assertThat(d.at("10:49", 22459, put, up).orders()).singleElement()
+                .extracting(OrderIntent::reason).isEqualTo("LEVEL_OI_REVERSAL");
+    }
+
+    /** A-123: ofb-v4 takes the first flow signal of the day only; the later opposite signal is ignored (v2 takes it). */
+    @Test
+    void oiFlowBreakV4TakesOnlyTheFirstSignalOfTheDay() {
+        Map<String, Object> levels = Map.of("structure.orComplete", true, "structure.orHigh", 23300.0,
+                "structure.orLow", 22800.0, "structure.vwapSpotProxy", 23000.0, "futures.rvolTod", 1.1);
+        Object[] up = {"options.peOiChange1m", 500000.0, "options.ceOiChange1m", -500000.0, "futures.oiState", "FRESH_LONG"};
+        Object[] down = {"options.ceOiChange1m", 500000.0, "options.peOiChange1m", -500000.0, "futures.oiState", "FRESH_SHORT"};
+        for (String version : new String[] {"v2", "v4"}) {
+            Day d = new Day("oi-flow-break." + version + ".yaml", levels);
+            d.dte = 1;
+            assertThat(d.at("09:31", 23050, PositionView.FLAT, up).orders()).singleElement()
+                    .extracting(OrderIntent::side).isEqualTo(OptionSide.CE);
+            Decision later = d.at("11:10", 22950, PositionView.FLAT, down);      // flat again, below VWAP, flow down
+            if (version.equals("v2")) {
+                assertThat(later.orders()).singleElement().extracting(OrderIntent::side).isEqualTo(OptionSide.PE);
+            } else {
+                assertThat(later.orders()).as("v4: one trade per index per day").isEmpty();
+            }
+        }
+    }
+
+    /** A-124: ofb-v5 arms the lock at +5 % premium, rides on, and exits when the bid falls back to +5 %. */
+    @Test
+    void profitLockArmsAtFivePercentAndExitsWhenTheGainFallsBackToFivePercent() {
+        Map<String, Object> levels = Map.of("structure.orComplete", true, "structure.orHigh", 23300.0,
+                "structure.vwapSpotProxy", 23000.0, "futures.rvolTod", 1.1);
+        Object[] up = {"options.peOiChange1m", 500000.0, "options.ceOiChange1m", -500000.0, "futures.oiState", "FRESH_LONG"};
+        Day d = new Day("oi-flow-break.v5.yaml", levels);
+        d.dte = 1;
+        assertThat(d.at("09:31", 23050, PositionView.FLAT, up).orders()).singleElement()
+                .extracting(OrderIntent::side).isEqualTo(OptionSide.CE);
+        assertThat(d.at("09:40", 23060, new PositionView(true, OptionSide.CE, 1, 100, null, 104), up).orders())
+                .as("+4 %: not armed").isEmpty();
+        assertThat(d.at("09:50", 23080, new PositionView(true, OptionSide.CE, 1, 100, null, 112), up).orders())
+                .as("+12 %: armed, keeps running").isEmpty();
+        assertThat(d.at("10:00", 23070, new PositionView(true, OptionSide.CE, 1, 100, null, 104.5), up).orders())
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("PROFIT_LOCK");
+    }
+
+    /**
+     * A-127: odm-v10 buys 12 Oct's 09:24 put, holds through a rise above the day open while OI still favours the put and
+     * through a rise above the old session-high stop (no index stop), and exits when the index is above the day open with
+     * put OI building and call OI unwinding over 10 minutes.
+     */
+    @Test
+    void odmV10ExitsOnlyWhenALevelBreaksAgainstAndOiReverses() {
+        Day d = new Day("opening-drive-momentum.v10.yaml", Map.of("structure.dayOpen", 22593.0,
+                "breadth.moverBreadth", -93.0));
+        d.dte = 1;
+        double[] path = {22633, 22644, 22635, 22610, 22588, 22586, 22585, 22560};   // 09:16 .. 09:23
+        LocalTime t = LocalTime.of(9, 16);
+        for (double spot : path) {
+            d.at(t.toString(), spot);
+            t = t.plusMinutes(1);
+        }
+        assertThat(d.at("09:24", 22524).orders()).singleElement().extracting(OrderIntent::side).isEqualTo(OptionSide.PE);
+        PositionView put = new PositionView(true, OptionSide.PE, 1, 100, null, 95);
+        Object[] stillBearish = {"options.ceOiChange5m", 900000.0, "options.peOiChange5m", -300000.0,
+                "options.ceOiChange10m", 900000.0, "options.peOiChange10m", -300000.0};
+        Object[] reversed = {"options.ceOiChange5m", 100000.0, "options.peOiChange5m", 400000.0,
+                "options.ceOiChange10m", -500000.0, "options.peOiChange10m", 800000.0};
+        assertThat(d.at("09:45", 22600, put, stillBearish).orders()).as("above the open, OI still bearish: hold").isEmpty();
+        assertThat(d.at("09:48", 22660, put, stillBearish).orders()).as("above the old session-high stop: no index stop").isEmpty();
+        assertThat(d.at("09:51", 22610, put, reversed).orders()).singleElement()
+                .extracting(OrderIntent::reason).isEqualTo("LEVEL_OI_REVERSAL");
+    }
+
+    /**
+     * A-128: 16 Oct NIFTY. The 09:21 put (22,978) breaks the ORL (22,942) at 09:33, NIFTY reclaims it by 09:42 while call
+     * OI still grows faster than put OI (hold), and the put exits at 09:48 once put OI grows faster (OI no longer confirms).
+     */
+    @Test
+    void odmV11ExitsWhenABrokenOrlIsReclaimedAndOiStopsConfirming() {
+        Day d = new Day("opening-drive-momentum.v11.yaml", Map.of("structure.dayOpen", 23065.0,
+                "breadth.moverBreadth", -93.0, "structure.orComplete", true, "structure.orLow", 22942.0));
+        d.dte = 1;
+        double[] path = {23040, 23020, 23000, 22990, 22985};                    // 09:16 .. 09:20
+        LocalTime t = LocalTime.of(9, 16);
+        for (double spot : path) {
+            d.at(t.toString(), spot);
+            t = t.plusMinutes(1);
+        }
+        assertThat(d.at("09:21", 22978).orders()).singleElement().extracting(OrderIntent::side).isEqualTo(OptionSide.PE);
+        PositionView put = new PositionView(true, OptionSide.PE, 1, 100, null, 104);
+        Object[] confirming = {"options.ceOiChange5m", 4580000.0, "options.peOiChange5m", 4000000.0,
+                "options.ceOiChange10m", 7190000.0, "options.peOiChange10m", 4320000.0};
+        Object[] notConfirming = {"options.ceOiChange5m", 2300000.0, "options.peOiChange5m", 4850000.0,
+                "options.ceOiChange10m", 6680000.0, "options.peOiChange10m", 9350000.0};
+        assertThat(d.at("09:33", 22934, put, confirming).orders()).as("below the ORL: in favour").isEmpty();
+        assertThat(d.at("09:42", 22965, put, confirming).orders()).as("ORL reclaimed but OI still confirms: hold").isEmpty();
+        assertThat(d.at("09:48", 22954, put, notConfirming).orders()).singleElement()
+                .extracting(OrderIntent::reason).isEqualTo("LEVEL_OI_REVERSAL");
+    }
+
+    /**
+     * A-129: 13 Oct SENSEX-like call. Entry at 09:21; at 10:03 the index is 37 points under the PDH with the call wall at the
+     * PDH strike and its OI rising: take profit. Without writers at the level (wall OI falling), the call keeps running.
+     */
+    @Test
+    void odmV12TakesProfitAtAMajorLevelDefendedByCallWriters() {
+        for (double wallOi : new double[] {8.0, -5.0}) {
+            Day d = new Day("opening-drive-momentum.v12.yaml", Map.of("structure.dayOpen", 22000.0,
+                    "breadth.moverBreadth", 80.0, "structure.pdh", 22632.0, "options.strikeStep", 100.0));
+            d.dte = 2;
+            double[] path = {22010, 22030, 22050, 22060, 22070};                // 09:16 .. 09:20
+            LocalTime t = LocalTime.of(9, 16);
+            for (double spot : path) {
+                d.at(t.toString(), spot);
+                t = t.plusMinutes(1);
+            }
+            assertThat(d.at("09:21", 22080).orders()).singleElement().extracting(OrderIntent::side).isEqualTo(OptionSide.CE);
+            PositionView call = new PositionView(true, OptionSide.CE, 1, 458, null, 750);
+            Decision at = d.at("10:03", 22585, call, "structure.atr3m", 74.0, "options.callBarrierStrike", 22600.0, "options.callWallOiChangePct", wallOi,
+                    "options.ceOiChange5m", 900000.0, "options.peOiChange5m", 300000.0);
+            if (wallOi > 0) {
+                assertThat(at.orders()).singleElement().extracting(OrderIntent::reason).isEqualTo("DEFENDED_LEVEL");
+            } else {
+                assertThat(at.orders()).as("wall OI falling: not defended, keep running").isEmpty();
+            }
+        }
+    }
+
+    /**
+     * A-130: 29 Sep NIFTY-like top. ATR 20, VWAP 22,640: at 12:03 the index is 22,745 (5.25 ATR above VWAP) and the 3-minute
+     * close turns down from 12:00: the put, target the VWAP, also on the expiring index (dte 0).
+     */
+    @Test
+    void stretchReversionFadesAFourAtrStretchAfterTheTurnEvenOnExpiryDay() {
+        Day d = new Day("stretch-reversion.v1.yaml", Map.of("structure.vwapSpotProxy", 22640.0, "structure.orComplete", true,
+                "structure.orHigh", 22745.0, "structure.orLow", 22625.0));
+        d.dte = 0;
+        LocalTime t = LocalTime.of(11, 45);
+        for (; t.isBefore(LocalTime.of(12, 3)); t = t.plusMinutes(1)) {
+            assertThat(d.at(t.toString(), 22700 + (t.getMinute() - 45 + 15) % 60 * 2.5).orders()).isEmpty();
+        }
+        d.at("12:00", 22748);
+        d.at("12:01", 22750);
+        d.at("12:02", 22748);
+        Decision turn = d.at("12:03", 22745);
+        assertThat(turn.orders()).singleElement().satisfies(o -> {
+            assertThat(o.side()).isEqualTo(OptionSide.PE);
+            assertThat(o.reason()).isEqualTo("STRETCH_REVERSION_DOWN");
+        });
+    }
+    /**
+     * A-131: 1 Oct NIFTY-like. ORL 22,508 (ATR 20). Quiet minutes around 22,540 with futures volume 1,000 a minute; at 12:07
+     * the close breaks below ORL with call OI building, put OI unwinding and 5,000 futures volume (5x): the put. It is held
+     * while the index stays below ORL; back above ORL with put OI building and call OI unwinding it exits.
+     */
+    @Test
+    void zoneBreakFlowBuysThePutOnABreakWithFlowAndVolumeThenExitsOnLevelBackWithOiReversed() {
+        Map<String, Object> lv = Map.of("structure.orComplete", true, "structure.orHigh", 22589.0, "structure.orLow", 22508.0);
+        Day d = new Day("zone-break-flow.v1.yaml", lv);
+        LocalTime t = LocalTime.of(9, 20);
+        for (int i = 0; t.isBefore(LocalTime.of(12, 6)); t = t.plusMinutes(1), i++) {
+            assertThat(d.at(t.toString(), 22540 + (i % 5) * 3.0, PositionView.FLAT, "futures.volumeLastMinute", 1000L)
+                    .orders()).isEmpty();
+        }
+        assertThat(d.at("12:06", 22512, PositionView.FLAT, "futures.volumeLastMinute", 5000L,
+                "options.ceOiChange1m", -300000.0, "options.peOiChange1m", 200000.0).orders())
+                .as("no break yet, flow the other way").isEmpty();
+        Decision entry = d.at("12:07", 22503, PositionView.FLAT, "futures.volumeLastMinute", 5000L,
+                "options.ceOiChange1m", 300000.0, "options.peOiChange1m", -700000.0);
+        assertThat(entry.orders()).singleElement().satisfies(o -> {
+            assertThat(o.side()).isEqualTo(OptionSide.PE);
+            assertThat(o.reason()).isEqualTo("ZONE_BREAK_FLOW_DOWN");
+        });
+        PositionView holding = new PositionView(true, OptionSide.PE, 1, 50, null, 52);
+        assertThat(d.at("12:20", 22515, holding, "options.ceOiChange1m", 300000.0, "options.peOiChange1m", -100000.0).orders())
+                .as("above ORL but the flow is still bearish: hold").isEmpty();
+        assertThat(d.at("12:21", 22490, holding, "options.ceOiChange1m", -300000.0, "options.peOiChange1m", 400000.0).orders())
+                .as("flow reversed but below ORL: hold").isEmpty();
+        assertThat(d.at("12:22", 22516, holding, "options.ceOiChange1m", -300000.0, "options.peOiChange1m", 400000.0).orders())
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("LEVEL_BACK_OI_REVERSED");
+    }
+
+    /**
+     * A-132: 1 Oct NIFTY 10:45-11:15-like. ATR 20. From 10:45 two 15-minute intervals drift down 5 points each (quiet) with
+     * call OI up and put OI down every minute: the put at 11:15; above the run's highest close (22,560) with the flow reversed
+     * it exits.
+     */
+    @Test
+    void quietPositioningBuysThePutAfterThirtyMinutesOfOneSidedPositioning() {
+        Day d = new Day("quiet-positioning.v1.yaml", Map.of());
+        LocalTime t = LocalTime.of(9, 30);
+        for (; t.isBefore(LocalTime.of(10, 45)); t = t.plusMinutes(1)) {
+            assertThat(d.at(t.toString(), 22560).orders()).isEmpty();          // no OI change: no signature
+        }
+        Decision last = null;
+        for (int i = 0; i <= 30; i++, t = t.plusMinutes(1)) {
+            last = d.at(t.toString(), 22560 - i / 3.0, PositionView.FLAT, "options.ceOiChange1m", 50000.0,
+                    "options.peOiChange1m", -40000.0);
+            if (i < 30) {
+                assertThat(last.orders()).as(t.toString()).isEmpty();
+            }
+        }
+        assertThat(last.orders()).singleElement().satisfies(o -> {
+            assertThat(o.side()).isEqualTo(OptionSide.PE);
+            assertThat(o.reason()).isEqualTo("QUIET_POSITIONING_DOWN");
+        });
+        PositionView holding = new PositionView(true, OptionSide.PE, 1, 50, null, 52);
+        assertThat(d.at("11:30", 22562, holding, "options.ceOiChange1m", 50000.0, "options.peOiChange1m", -40000.0).orders())
+                .as("above the range, flow still bearish").isEmpty();
+        assertThat(d.at("11:31", 22562, holding, "options.ceOiChange1m", -50000.0, "options.peOiChange1m", 40000.0).orders())
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("RANGE_BACK_OI_REVERSED");
+    }
+    /** A-133: the same 1 Oct-like break; v2 exits on the close back above ORL without the OI condition, v3 on 1 ATR. */
+    @Test
+    void zoneBreakFlowStopModes() {
+        Map<String, Object> lv = Map.of("structure.orComplete", true, "structure.orHigh", 22589.0, "structure.orLow", 22508.0);
+        for (String v : new String[] {"v2", "v3"}) {
+            Day d = new Day("zone-break-flow." + v + ".yaml", lv);
+            LocalTime t = LocalTime.of(9, 20);
+            for (int i = 0; t.isBefore(LocalTime.of(12, 7)); t = t.plusMinutes(1), i++) {
+                d.at(t.toString(), 22540 + (i % 5) * 3.0, PositionView.FLAT, "futures.volumeLastMinute", 1000L);
+            }
+            assertThat(d.at("12:07", 22503, PositionView.FLAT, "futures.volumeLastMinute", 5000L,
+                    "options.ceOiChange1m", 300000.0, "options.peOiChange1m", -700000.0).orders()).hasSize(1);
+            PositionView holding = new PositionView(true, OptionSide.PE, 1, 50, null, 52);
+            if (v.equals("v2")) {
+                assertThat(d.at("12:20", 22515, holding, "options.ceOiChange1m", 300000.0, "options.peOiChange1m", -100000.0)
+                        .orders()).singleElement().extracting(OrderIntent::reason).isEqualTo("LEVEL_BACK");
+            } else {
+                assertThat(d.at("12:20", 22515, holding).orders()).as("above ORL, inside 1 ATR (22,523)").isEmpty();
+                assertThat(d.at("12:21", 22524, holding).orders()).singleElement()
+                        .extracting(OrderIntent::reason).isEqualTo("STOP");
+            }
+        }
+    }
+    /** A-135: zbf-v4 takes profit at 2 ATR (22,503 - 40 = 22,463) below the entry. */
+    @Test
+    void zoneBreakFlowTwoAtrTarget() {
+        Day d = new Day("zone-break-flow.v4.yaml", Map.of("structure.orComplete", true, "structure.orHigh", 22589.0,
+                "structure.orLow", 22508.0));
+        LocalTime t = LocalTime.of(9, 20);
+        for (int i = 0; t.isBefore(LocalTime.of(12, 7)); t = t.plusMinutes(1), i++) {
+            d.at(t.toString(), 22540 + (i % 5) * 3.0, PositionView.FLAT, "futures.volumeLastMinute", 1000L);
+        }
+        assertThat(d.at("12:07", 22503, PositionView.FLAT, "futures.volumeLastMinute", 5000L,
+                "options.ceOiChange1m", 300000.0, "options.peOiChange1m", -700000.0).orders()).hasSize(1);
+        PositionView holding = new PositionView(true, OptionSide.PE, 1, 50, null, 52);
+        assertThat(d.at("12:15", 22470, holding).orders()).isEmpty();
+        assertThat(d.at("12:16", 22462, holding).orders()).singleElement().extracting(OrderIntent::reason).isEqualTo("TARGET");
+    }
+    /**
+     * A-136 zbf-v5: ORL 22,508 breaks at 12:07 without flow; the bearish flow and RVOL 2.5 arrive at 12:09 (within 3 closes,
+     * still below ORL): the put. Armed once 1 ATR (20) in favour; three closes in a row of bullish OI flow exit it.
+     */
+    @Test
+    void zoneBreakFlowV5ConfirmsWithinThreeClosesAndProtectsTheProfit() {
+        Day d = new Day("zone-break-flow.v5.yaml", Map.of("structure.orComplete", true, "structure.orHigh", 22589.0,
+                "structure.orLow", 22508.0));
+        LocalTime t = LocalTime.of(9, 20);
+        for (int i = 0; t.isBefore(LocalTime.of(12, 7)); t = t.plusMinutes(1), i++) {
+            d.at(t.toString(), 22540 + (i % 5) * 3.0);
+        }
+        assertThat(d.at("12:07", 22503).orders()).as("the break, no flow, no volume").isEmpty();
+        assertThat(d.at("12:08", 22500, PositionView.FLAT, "options.ceOiChange1m", 300000.0, "options.peOiChange1m", -700000.0)
+                .orders()).as("flow, but RVOL unknown").isEmpty();
+        assertThat(d.at("12:09", 22498, PositionView.FLAT, "options.ceOiChange1m", 300000.0, "options.peOiChange1m", -700000.0,
+                "futures.rvolTod", 2.5).orders()).singleElement().extracting(OrderIntent::reason).isEqualTo("ZONE_BREAK_FLOW_DOWN");
+        PositionView holding = new PositionView(true, OptionSide.PE, 1, 50, null, 52);
+        assertThat(d.at("12:15", 22470, holding).orders()).as("28 in favour: armed").isEmpty();
+        Object[] against = {"options.ceOiChange1m", -300000.0, "options.peOiChange1m", 400000.0};
+        assertThat(d.at("12:16", 22475, holding, against).orders()).isEmpty();
+        assertThat(d.at("12:17", 22476, holding, against).orders()).isEmpty();
+        assertThat(d.at("12:18", 22477, holding, against).orders()).singleElement()
+                .extracting(OrderIntent::reason).isEqualTo("PROTECT_OI_AGAINST");
+
+        Day reclaim = new Day("zone-break-flow.v5.yaml", Map.of("structure.pdl", 22500.0));
+        reclaim.at("09:40", 22495);
+        assertThat(reclaim.at("09:41", 22503, PositionView.FLAT, "options.ceOiChange1m", -300000.0, "options.peOiChange1m",
+                400000.0, "futures.rvolTod", 2.2).orders()).singleElement().extracting(OrderIntent::reason)
+                .as("PDL reclaimed from below").isEqualTo("ZONE_BREAK_FLOW_UP");
+    }
+    /** A-137 zbf-v6: on the index's expiry day (dte 0) the same three closes of OI flow against the put do not exit it. */
+    @Test
+    void zoneBreakFlowV6KeepsTheExpiryDayRunner() {
+        Day d = new Day("zone-break-flow.v6.yaml", Map.of("structure.orComplete", true, "structure.orHigh", 22589.0,
+                "structure.orLow", 22508.0));
+        d.dte = 0;
+        LocalTime t = LocalTime.of(9, 20);
+        for (int i = 0; t.isBefore(LocalTime.of(12, 7)); t = t.plusMinutes(1), i++) {
+            d.at(t.toString(), 22540 + (i % 5) * 3.0);
+        }
+        assertThat(d.at("12:07", 22503, PositionView.FLAT, "options.ceOiChange1m", 300000.0, "options.peOiChange1m", -700000.0,
+                "futures.rvolTod", 2.5).orders()).singleElement().extracting(OrderIntent::reason).isEqualTo("ZONE_BREAK_FLOW_DOWN");
+        PositionView holding = new PositionView(true, OptionSide.PE, 1, 50, null, 52);
+        d.at("12:15", 22470, holding);
+        Object[] against = {"options.ceOiChange1m", -300000.0, "options.peOiChange1m", 400000.0};
+        for (String m : new String[] {"12:16", "12:17", "12:18", "12:19"}) {
+            assertThat(d.at(m, 22476, holding, against).orders()).as(m).isEmpty();
+        }
+        assertThat(d.at("12:20", 22510, holding).orders()).singleElement().extracting(OrderIntent::reason).isEqualTo("LEVEL_BACK");
+    }
+    /**
+     * A-139 ocb-v1: 16 Oct-like. ORL 22,942 breaks down at 09:32 below VWAP (put); the close back above ORL at 09:50 stops
+     * it; the reclaim of the day open 23,065 above VWAP at 10:02 is the second, opposite entry; a third break is refused.
+     */
+    @Test
+    void openingClusterBreakTakesTheShakeoutThenTheOppositeLeg() {
+        Day d = new Day("opening-cluster-break.v1.yaml", Map.of("structure.orComplete", true, "structure.orHigh", 23076.0,
+                "structure.orLow", 22942.0, "structure.dayOpen", 23065.0, "structure.pdh", 23200.0, "structure.pdl", 22800.0,
+                "structure.prevClose", 23050.0));
+        d.at("09:31", 22950, PositionView.FLAT, "structure.vwapSpotProxy", 23000.0);
+        assertThat(d.at("09:32", 22938, PositionView.FLAT, "structure.vwapSpotProxy", 23000.0).orders()).singleElement()
+                .extracting(OrderIntent::reason).isEqualTo("CLUSTER_BREAK_DOWN");
+        PositionView put = new PositionView(true, OptionSide.PE, 1, 50, null, 52);
+        assertThat(d.at("09:45", 22930, put, "structure.vwapSpotProxy", 22990.0).orders()).isEmpty();
+        assertThat(d.at("09:50", 22950, put, "structure.vwapSpotProxy", 22985.0).orders()).singleElement()
+                .extracting(OrderIntent::reason).isEqualTo("LEVEL_BACK");
+        d.at("10:01", 23040, PositionView.FLAT, "structure.vwapSpotProxy", 22995.0);   // below the prev close 23,050 and the open
+        assertThat(d.at("10:02", 23068, PositionView.FLAT, "structure.vwapSpotProxy", 22995.0).orders()).singleElement()
+                .extracting(OrderIntent::reason).isEqualTo("CLUSTER_BREAK_UP");
+        PositionView call = new PositionView(true, OptionSide.CE, 1, 50, null, 52);
+        assertThat(d.at("10:05", 23080, call, "structure.vwapSpotProxy", 23000.0).orders()).as("ORH also broke: holding").isEmpty();
+        assertThat(d.at("10:20", 23070, PositionView.FLAT, "structure.vwapSpotProxy", 23010.0).orders()).isEmpty();
+        d.at("10:21", 23040, PositionView.FLAT, "structure.vwapSpotProxy", 23050.0);
+        assertThat(d.at("10:22", 22940, PositionView.FLAT, "structure.vwapSpotProxy", 23050.0).orders())
+                .as("two entries used").isEmpty();
+    }
+
+    /**
+     * A-140 cbk-v1: sixty quiet closes between 22,530 and 22,610 (RVOL 0.6); the close below the box at 12:07 breaks it,
+     * the bearish flow and RVOL 2.5 confirm at 12:08 (within 3 closes, still below): the put; a close back inside exits.
+     */
+    @Test
+    void compressionBreakBuysThePutWhenAQuietBoxBreaksWithVolumeAndFlow() {
+        Day d = new Day("compression-break.v1.yaml", Map.of());
+        LocalTime t = LocalTime.of(11, 0);
+        for (int i = 0; i < 66; i++, t = t.plusMinutes(1)) {
+            assertThat(d.at(t.toString(), 22540 + (i % 8) * 10.0, PositionView.FLAT, "futures.rvolTod", 0.6).orders()).isEmpty();
+        }
+        assertThat(d.at("12:07", 22522, PositionView.FLAT, "futures.rvolTod", 0.9).orders()).as("break, no surge yet").isEmpty();
+        assertThat(d.at("12:08", 22518, PositionView.FLAT, "futures.rvolTod", 2.5, "options.ceOiChange1m", 300000.0,
+                "options.peOiChange1m", -700000.0).orders()).singleElement().extracting(OrderIntent::reason)
+                .isEqualTo("COMPRESSION_BREAK_DOWN");
+        PositionView put = new PositionView(true, OptionSide.PE, 1, 50, null, 52);
+        assertThat(d.at("12:20", 22500, put).orders()).isEmpty();
+        assertThat(d.at("12:21", 22545, put).orders()).singleElement().extracting(OrderIntent::reason).isEqualTo("BOX_BACK");
+
+        Day loud = new Day("compression-break.v1.yaml", Map.of());
+        t = LocalTime.of(11, 0);
+        for (int i = 0; i < 66; i++, t = t.plusMinutes(1)) {
+            loud.at(t.toString(), 22540 + (i % 8) * 10.0, PositionView.FLAT, "futures.rvolTod", 1.8);
+        }
+        assertThat(loud.at("12:07", 22518, PositionView.FLAT, "futures.rvolTod", 2.5, "options.ceOiChange1m", 300000.0,
+                "options.peOiChange1m", -700000.0).orders()).as("the box was not quiet").isEmpty();
+    }
+    /**
+     * A-141 zbf-v9: 16 Oct-like. The close back above ORL 22,942 from below is a call break; so is the close above the day
+     * open 23,065. Each needs the same-minute bullish flow and 3x volume of v2.
+     */
+    @Test
+    void zoneBreakFlowV9CountsTheOrlReclaimAndTheDayOpen() {
+        Map<String, Object> lv = Map.of("structure.orComplete", true, "structure.orHigh", 23200.0, "structure.orLow", 22942.0,
+                "structure.dayOpen", 23065.0);
+        Object[] bull = {"options.ceOiChange1m", -300000.0, "options.peOiChange1m", 400000.0, "futures.volumeLastMinute", 5000L};
+        Day reclaim = new Day("zone-break-flow.v9.yaml", lv);
+        LocalTime t = LocalTime.of(9, 20);
+        for (int i = 0; t.isBefore(LocalTime.of(9, 40)); t = t.plusMinutes(1), i++) {
+            reclaim.at(t.toString(), 22930 - (i % 3) * 2.0, PositionView.FLAT, "futures.volumeLastMinute", 1000L);
+        }
+        assertThat(reclaim.at("09:40", 22950, PositionView.FLAT, bull).orders()).singleElement()
+                .extracting(OrderIntent::reason).isEqualTo("ZONE_BREAK_FLOW_UP");
+
+        Day open = new Day("zone-break-flow.v9.yaml", lv);
+        t = LocalTime.of(9, 20);
+        for (int i = 0; t.isBefore(LocalTime.of(10, 7)); t = t.plusMinutes(1), i++) {
+            open.at(t.toString(), 23050 + (i % 3) * 2.0, PositionView.FLAT, "futures.volumeLastMinute", 1000L);
+        }
+        assertThat(open.at("10:07", 23068, PositionView.FLAT, bull).orders()).singleElement()
+                .extracting(OrderIntent::reason).isEqualTo("ZONE_BREAK_FLOW_UP");
+
+        Day v2 = new Day("zone-break-flow.v2.yaml", lv);
+        t = LocalTime.of(9, 20);
+        for (int i = 0; t.isBefore(LocalTime.of(10, 7)); t = t.plusMinutes(1), i++) {
+            v2.at(t.toString(), 23050 + (i % 3) * 2.0, PositionView.FLAT, "futures.volumeLastMinute", 1000L);
+        }
+        assertThat(v2.at("10:07", 23068, PositionView.FLAT, bull).orders()).as("v2: the day open is not a level").isEmpty();
+    }
+    /** A-145 zbf-v10: the v5 entry on NIFTY; the same minutes on SENSEX do not enter (NIFTY only, set in the file). */
+    @Test
+    void zoneBreakFlowV10TradesNiftyOnly() {
+        for (String u : new String[] {"NIFTY", "SENSEX"}) {
+            Day d = new Day("zone-break-flow.v10.yaml", Map.of("structure.orComplete", true, "structure.orHigh", 22589.0,
+                    "structure.orLow", 22508.0, "underlying", u));
+            LocalTime t = LocalTime.of(9, 20);
+            for (int i = 0; t.isBefore(LocalTime.of(12, 7)); t = t.plusMinutes(1), i++) {
+                d.at(t.toString(), 22540 + (i % 5) * 3.0);
+            }
+            var orders = d.at("12:07", 22503, PositionView.FLAT, "options.ceOiChange1m", 300000.0, "options.peOiChange1m",
+                    -700000.0, "futures.rvolTod", 2.5).orders();
+            if (u.equals("NIFTY")) {
+                assertThat(orders).singleElement().extracting(OrderIntent::reason).isEqualTo("ZONE_BREAK_FLOW_DOWN");
+            } else {
+                assertThat(orders).as("SENSEX: not traded").isEmpty();
+            }
+        }
+    }
 }

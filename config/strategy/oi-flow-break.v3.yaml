@@ -1,0 +1,34 @@
+# OI flow break, v3 (user 2026-10-17: "who defined stop loss?" -> "I think VWAP stop is a bad idea, any level broke or
+# structure is changing supported by OI changes in reverse"; ledger A-122). v3 = v2's entry (no level needed) with the user's
+# exit: at a 1-minute close, the index back through a level that was on the far side at entry (puts: the nearest of ORH,
+# PDH, prior ORH, PWH, the call barrier above the entry) or through the latest swing (puts: above the last swing high),
+# AND option OI reversed at that close (puts: put OI building, call OI unwinding). No ATR stop, no VWAP trail; the 30 %
+# premium stop and 15:15 remain. Replaces the 1-ATR stop I had set for v2 without asking. v2 notes follow.
+#
+version: ofb-v3
+strategy: oi-flow-break
+status: UNCALIBRATED
+source: "user-request-2026-10-17 (A-122 = A-121 entry + user exit; user's values, fixed at registration)"
+
+scope:
+  entry_from: "09:30"
+  last_new_entry: "14:30"              # exclusive
+  flat_by: "15:15"
+  time_stop_min: 0
+  skip_expiring_index: true
+
+setup:
+  min_futures_rvol: 1.0                # user: relax participation to 1x normal
+  stop_atr_inside: 0.5                 # v1 only (unused when no level is required)
+  require_level_break: false           # v2: no level break needed
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 30                 # emergency only
+  vwap_trail_3m: false                 # v3: no VWAP exit (user)
+  level_oi_reversal: true              # v3: exit = level or structure broken against AND option OI reversed
+  use_target: false

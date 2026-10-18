@@ -1,0 +1,36 @@
+# odm-v8 = odm-v4 (live) + the 5 % premium profit lock (user 2026-10-17 ~13:58: "try the 5% lock on odm-v4"; ledger A-125):
+# once the held option's bid is 5 % above the average premium the lock is armed and the trade runs on under odm-v4's exits
+# (session-extreme stop, 50/15 peak trail, 12:00); if the bid falls back to +5 % it exits (PROFIT_LOCK). Everything else
+# is odm-v4. A-124 (the same lock on ofb-v2): smoother, fewer big winners, less net. odm-v4 notes follow.
+#
+version: odm-v8
+strategy: opening-drive-momentum
+status: UNCALIBRATED
+source: "user-request-2026-10-17 (A-125 = odm-v4 + 5 % profit lock; values from the Jan-Jun index screen, fixed at registration)"
+
+scope:
+  entry_from: "09:21"                  # the first 3-minute closes: 09:21, 09:24, 09:27, 09:30
+  last_new_entry: "09:31"              # exclusive
+  flat_by: "12:00"                     # the screen's exit
+  time_stop_min: 0
+  skip_expiring_index: true            # the expiring index (0 DTE) belongs to the expiry strategies
+
+setup:
+  min_move_pct: 0.2                    # at least 0.2 % from the day's open
+  max_pullback_frac: 0.3               # and still in the outer 30 % of the session's range on that side
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 50                 # emergency only; the index stop (session extreme) comes first
+  use_target: false
+  trail_activation_pct: 50             # v4 (A-091): the trail arms when the held option's bid is 50 % above its cost
+  trail_giveback_pct: 15               # v4: then exit when the bid is 15 % below its running peak
+  profit_lock_arm_pct: 5                # v8 (A-125): the lock arms once the bid is 5 % above the average premium
+  profit_lock_floor_pct: 5              # v8: then exit if the bid falls back to +5 %
+
+filters:
+  breadth_min_agree: 50                   # A-088: breadth filter: enter only with mover breadth >= 50 in the trade's direction (calls +50, puts -50)

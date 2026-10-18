@@ -1,0 +1,35 @@
+# v5: zbf-v2 (stop 'Back inside the level', hold to 15:15) + the four fixes (user 18 Oct after the 9 / 12 / 16 Oct charts:
+# "build all four fixes and replay on tick days"; volume baseline and profit exit: "choose the best"). Ledger A-136.
+# Zone break with OI flow and a futures volume surge (user 2026-10-17 on 7 Sep / 1 Oct NIFTY; ledger A-131 for v1).
+version: zbf-v5
+strategy: zone-break-flow
+status: UNCALIBRATED
+source: "user-request-2026-10-18 (A-136 = v2 + confirmation window, time-of-day RVOL, reclaimed PDL / lost PDH, profit protection; values fixed at registration)"
+
+scope:
+  entry_from: "09:30"
+  last_new_entry: "14:30"              # exclusive
+  flat_by: "15:15"
+  time_stop_min: 0
+  skip_expiring_index: false
+
+setup:
+  zone_tolerance_atr: 0.3              # pivots within 0.3 ATR(3m) form a zone (the study's)
+  zone_min_pivots: 3                   # 3x+ touches
+  volume_surge_x: 3.0                  # v1-v4 only (unused: min_rvol_tod set)
+  confirm_minutes: 3                   # fix 1: flow and volume may confirm up to 3 closes after the break (user's "1 to 3 minutes")
+  min_rvol_tod: 2.0                    # fix 2: futures volume >= 2x the same time slot's median over the past 20 sessions
+  reclaim_levels: true                 # fix 3: PDL reclaimed from below / PDH lost from above count as breaks
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 30                 # emergency only (the platform's standard resting stop)
+  use_target: false                    # hold to 15:15 unless the stop or the protection exits
+  stop_mode: level                     # v2's stop: the close back through the broken level
+  protect_arm_atr: 1.0                 # fix 4: armed once the index is 1 ATR(3m) in favour
+  protect_flow_minutes: 3              # then exit on the OI flow against the trade 3 closes in a row
+  protect_giveback_atr: 1.5            # or a 1.5 ATR giveback from the best close

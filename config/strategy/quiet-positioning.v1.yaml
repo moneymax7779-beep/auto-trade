@@ -1,0 +1,29 @@
+# Quiet price with one-sided option positioning, v1 (user 2026-10-17 after the 1 Oct NIFTY PCR / build-up table:
+# 10:45-11:30 flat price, call OI up, put OI down, then the 12:07 break; "do replay on tick days only"; ledger A-132).
+# Entry = the follow-up study's loosened definition (quiet <= 1.5 ATR per 15 min, no futures condition, 30 minutes),
+# chosen after the registered one occurred once. Stop and exit are the user's choices (17 Oct): "Level back + OI
+# reversed" (the far side of the 30-minute range), "Hold to 15:15". Both indices, every day.
+version: qpb-v1
+strategy: quiet-positioning
+status: UNCALIBRATED
+source: "user-request-2026-10-17 (A-132; entry values from the follow-up study, stop/exit chosen by the user, fixed at registration)"
+
+scope:
+  entry_from: "09:45"                  # the first 15-minute interval ends 09:45
+  last_new_entry: "14:31"              # exclusive: the 14:30 boundary is the last
+  flat_by: "15:15"
+  time_stop_min: 0
+  skip_expiring_index: false
+
+setup:
+  quiet_max_atr: 1.5                   # |index move| per 15 minutes <= 1.5 ATR(3m)
+  intervals: 2                         # two 15-minute intervals in a row (30 minutes)
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 30                 # emergency only (the platform's standard resting stop)
+  use_target: false                    # user: hold to 15:15

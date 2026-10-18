@@ -1,0 +1,31 @@
+# Stretch reversion, v1 (user 2026-10-17 ~19:45: "what are the other strategies that catch and trade at these zones?" ->
+# "not just on expiry day, it should be general to trade on those zones expiry or non-expiry day"; ledger A-130).
+# From the 13-day feature screen (9 Oct, docs in memory ma-cross-and-stretch-reversion): distance from ORL/VWAP/ORH in
+# ATR(3m) had negative IC at +30 min in every group of days; > 4 ATR below ORL -> calls +13.5 % (CE-PE) over 30 min, > 4 ATR
+# above -> -10.5 %. 29 Sep NIFTY (the user's chart): the 10:00 base ~5 ATR below VWAP, the 12:00 top ~6 ATR above.
+# Both indices, every day, the expiring index included. Values from the screen or round numbers, fixed at registration.
+version: sr-v1
+strategy: stretch-reversion
+status: UNCALIBRATED
+source: "user-request-2026-10-17 (A-130; values from the 13-day screen or round numbers, fixed at registration)"
+
+scope:
+  entry_from: "09:45"                  # opening range complete and ATR settled
+  last_new_entry: "14:31"              # exclusive: the 14:30 close is the last
+  flat_by: "15:15"
+  time_stop_min: 30                    # the screen's horizon
+  skip_expiring_index: false           # user: expiry or non-expiry day
+
+setup:
+  min_stretch_atr: 4.0                 # at least 4 ATR(3m) beyond VWAP or beyond ORL / ORH (the screen's extreme quintile)
+  stop_atr_beyond: 0.5                 # stop 0.5 ATR beyond the day's extreme (a new extreme: the stretch kept going)
+  # the turn: this 3-minute close back toward VWAP versus the previous 3-minute close
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 30                 # emergency only
+  use_target: true                     # target = the VWAP at entry (the reversion)

@@ -1,0 +1,35 @@
+# OI flow break, v1 (user 2026-10-17: "the rule should relax the future volume participation make 1x, also if 30 sec,
+# 1 min, 2 min huge OI changes long buildup and long unwinding and at least one level break"; "catching the momentum
+# consistently and rapidly enter"; "this can be continuation trend up or down should trade, one side OI buildup and other
+# side OI unwinding"). Ledger A-120, docs/studies/2026-10-17-oi-wall-break.md (A-120 section).
+# Every 1-minute close, either direction, non-expiring index: a fresh break of at least one level (ORH/ORL, PDH/PDL,
+# prior ORH/ORL, PWH/PWL, VWAP, the call barrier / put support strike, the last swing high/low); one side's near-ATM OI
+# building and the other's unwinding over 1 minute (3 minutes when the 1-minute change is zero: BSE cadence); futures OI
+# state agreeing (fresh long / short covering for calls; fresh short / long unwinding for puts); futures volume >= 1x
+# normal; on the VWAP side. Stop 0.5 ATR back inside the highest (lowest) level broken; VWAP trail; 15:15.
+# 30-second OI is not measurable (option OI arrives about once a minute on NSE, every 2-3 minutes on BSE).
+version: ofb-v1
+strategy: oi-flow-break
+status: UNCALIBRATED
+source: "user-request-2026-10-17 (A-120; user's values, fixed at registration)"
+
+scope:
+  entry_from: "09:30"
+  last_new_entry: "14:30"              # exclusive
+  flat_by: "15:15"
+  time_stop_min: 0
+  skip_expiring_index: true
+
+setup:
+  min_futures_rvol: 1.0                # user: relax participation to 1x normal
+  stop_atr_inside: 0.5                 # index stop 0.5 ATR(3m) back inside the broken level
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 30                 # emergency only
+  vwap_trail_3m: true                  # exit on a 3-minute close back through the session VWAP
+  use_target: false

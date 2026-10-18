@@ -1,0 +1,35 @@
+# OI wall break, v1 (user 2026-10-17: "register and test that OI rule on tick days"; ledger A-119,
+# docs/studies/2026-10-17-oi-wall-break.md). Designed from 16 Oct NIFTY (design day, reported apart): after the 09:36
+# low, put writers built support at 22,900 and call writers a wall at 23,000-23,050 (both sides added OI 09:39-09:55);
+# at 09:57 the index closed above 23,000 on 6x futures volume and the call OI near the money started to fall (writers
+# covering, -26 lakh at 10:00), and NIFTY ran to the opening-range high (10:15) and 23,150. The rule buys that break
+# (puts: the mirror, a break of the put support after a session high). Differs from the wall-break rider (A-057/A-058,
+# FAIL), which entered on the wall's OI falling before any break. Values are round numbers fixed at registration.
+version: owb-v1
+strategy: oi-wall-break
+status: UNCALIBRATED
+source: "user-request-2026-10-17 (A-119; values fixed at registration, not tuned)"
+
+scope:
+  entry_from: "09:30"                  # after the opening range
+  last_new_entry: "14:30"              # exclusive
+  flat_by: "15:15"
+  time_stop_min: 0                     # no time stop: the VWAP decides
+  skip_expiring_index: true            # the expiring index belongs to the expiry strategies
+
+setup:
+  base_min: 15                         # the session low (high) is at least 15 minutes old at the break
+  min_futures_rvol: 1.5                # futures volume >= 1.5x normal for the time of day at the break
+  stop_atr_inside: 0.5                 # index stop 0.5 ATR(3m) back inside the broken strike: a failed break
+  # wall built / support written: the barrier's (support's) OI up over 10 minutes at the previous 3-minute close
+  # writers covering: near-ATM call (put) OI down over the last 3 minutes at the break
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 30                 # emergency only; the index stop and the VWAP trail come first
+  vwap_trail_3m: true                  # exit on a 3-minute close back through the session VWAP
+  use_target: false                    # no target: ride the break

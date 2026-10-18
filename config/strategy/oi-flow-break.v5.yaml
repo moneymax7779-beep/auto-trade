@@ -1,0 +1,34 @@
+# OI flow break, v5 (user 2026-10-17 ~13:15: "try the target at 5% initially and let it go further if it reverts exit at 5%";
+# ledger A-124). v5 = v2 (A-121) + a premium profit lock: once the option's bid is 5 % above the average premium paid the
+# lock is armed and the trade keeps running (1-ATR stop, VWAP trail, 15:15 unchanged); if the bid then falls back to +5 %
+# it exits (PROFIT_LOCK). The exit sells at the bid minus the exit buffer, so the realised gain can be below 5 %. v2 notes follow.
+#
+version: ofb-v5
+strategy: oi-flow-break
+status: UNCALIBRATED
+source: "user-request-2026-10-17 (A-124 = A-121 + 5 % profit lock; user's values, fixed at registration)"
+
+scope:
+  entry_from: "09:30"
+  last_new_entry: "14:30"              # exclusive
+  flat_by: "15:15"
+  time_stop_min: 0
+  skip_expiring_index: true
+
+setup:
+  min_futures_rvol: 1.0                # user: relax participation to 1x normal
+  stop_atr_inside: 0.5                 # v1 only (unused when no level is required)
+  require_level_break: false           # v2: no level break needed
+  stop_atr_from_entry: 1.0             # v2: index stop 1 ATR(3m) from the entry
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 30                 # emergency only
+  vwap_trail_3m: true                  # exit on a 3-minute close back through the session VWAP
+  use_target: false
+  profit_lock_arm_pct: 5                # v5: armed once the bid is 5 % above the average premium
+  profit_lock_floor_pct: 5              # v5: then exit if the bid falls back to +5 %

@@ -43,6 +43,11 @@ abstract class SetupStrategy implements Strategy {
     private final double ivPercentileMin;
     /** A-088: the entry needs mover breadth at least this far in its direction (+ for calls, - for puts; NaN = off). */
     private final double breadthMinAgree;
+    /** A-124: once the option's bid is this % above the average premium, the lock is armed (NaN = off). */
+    private final double profitLockArmPct;
+    /** A-124: an armed position exits when the bid falls back to this % above the average premium. */
+    private final double profitLockFloorPct;
+    private boolean profitLockArmed;
     /** A-103: inside [quietFrom, quietUntil) an entry needs the A-grade (IV and breadth below); null = no quiet window. */
     private final LocalTime quietFrom;
     private final LocalTime quietUntil;
@@ -79,6 +84,8 @@ abstract class SetupStrategy implements Strategy {
         this.timeStopMin = config.getInt("scope.time_stop_min");
         this.ivPercentileMin = config.has("filters.iv_percentile_min") ? config.getDouble("filters.iv_percentile_min") : Double.NaN;
         this.breadthMinAgree = config.has("filters.breadth_min_agree") ? config.getDouble("filters.breadth_min_agree") : Double.NaN;
+        this.profitLockArmPct = config.has("exits.profit_lock_arm_pct") ? config.getDouble("exits.profit_lock_arm_pct") : Double.NaN;
+        this.profitLockFloorPct = config.has("exits.profit_lock_floor_pct") ? config.getDouble("exits.profit_lock_floor_pct") : Double.NaN;
         this.skipExpiringIndex = config.getBoolean("scope.skip_expiring_index");
         this.premiumStopPct = config.getDouble("exits.premium_stop_pct");
         this.strikeOffset = config.getInt("position.strike_offset");
@@ -150,6 +157,16 @@ abstract class SetupStrategy implements Strategy {
         List<OrderIntent> orders = new ArrayList<>();
         if (position.open()) {
             String exit = exitReason(position.side(), spot, now, time, s.structure().vwapSpotProxy());
+            if (exit == null) {
+                exit = customExit(s, position.side(), time);       // a family's own exit (A-122); none by default
+            }
+            if (exit == null && !Double.isNaN(profitLockArmPct) && position.averagePremium() > 0 && position.bid() > 0) {
+                double gainPct = (position.bid() / position.averagePremium() - 1) * 100.0;   // A-124 profit lock
+                profitLockArmed |= gainPct >= profitLockArmPct;
+                if (profitLockArmed && gainPct <= profitLockFloorPct) {
+                    exit = "PROFIT_LOCK";
+                }
+            }
             String trail = trailExit(position);                          // A-091: after the index exits
             if (exit == null) {
                 exit = trail;
@@ -160,6 +177,7 @@ abstract class SetupStrategy implements Strategy {
             }
         } else {
             exitSent = false;
+            profitLockArmed = false;
             trailPeak = Double.NaN;
             if (entry != null) {
                 orders.add(new OrderIntent(OrderIntent.Action.ENTER, entry.side(), 1, Stage.CONFIRMED, entry.reason(),
@@ -189,6 +207,11 @@ abstract class SetupStrategy implements Strategy {
         }
         trailPeak = Math.max(trailPeak, position.bid());
         return position.bid() <= trailPeak * (1 - trailGivebackPct / 100.0) ? "TRAIL_" + Math.round(trailGivebackPct) : null;
+    }
+
+    /** A family's own exit signal for an open position, checked after the frame's exits; null = none (default). */
+    protected String customExit(FeatureSnapshot s, OptionSide side, LocalTime time) {
+        return null;
     }
 
     private String exitReason(OptionSide side, double spot, Instant now, LocalTime time, double vwap) {

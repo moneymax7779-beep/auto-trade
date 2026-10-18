@@ -1,0 +1,41 @@
+# odm-v12 = odm-v11 (A-128) + take profit at a defended major level (user 2026-10-17 ~18:15: "build odm-v12 and run tick days";
+# ledger A-129), after 13 Oct: the SENSEX call stalled 37 points under PDH/PWH (72,632) at 10:03 while calls were written at
+# 72,600 and 72,700, and the 50/15 trail sold it at 10:33 (+Rs 1.01L; ~Rs 1.5L at the stall). v12: at a 3-minute close, in profit
+# on the index, within 1 ATR(3m) short of the nearest major level ahead (calls PDH/PWH/PMH, puts PDL/PWL/PML; no 2-day
+# high feature exists) with the strongest call (put) wall within one strike of it and its OI up over 10 minutes: exit
+# (DEFENDED_LEVEL). If the level breaks first, the trade runs on. Everything else as v11. The band is 1 ATR, not 0.5: on 13 Oct
+# the 3-minute closes at the stall were 0.65-0.8 ATR (ATR ~74) under PDH, set before any replay. v11 notes follow.
+#
+version: odm-v12
+strategy: opening-drive-momentum
+status: UNCALIBRATED
+source: "user-request-2026-10-17 (A-129 = A-128 + take profit at a defended major level; values from the Jan-Jun index screen, fixed at registration)"
+
+scope:
+  entry_from: "09:21"                  # the first 3-minute closes: 09:21, 09:24, 09:27, 09:30
+  last_new_entry: "09:31"              # exclusive
+  flat_by: "12:00"                     # the screen's exit
+  time_stop_min: 0
+  skip_expiring_index: true            # the expiring index (0 DTE) belongs to the expiry strategies
+
+setup:
+  min_move_pct: 0.2                    # at least 0.2 % from the day's open
+  max_pullback_frac: 0.3               # and still in the outer 30 % of the session's range on that side
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 50                 # emergency only; the index stop (session extreme) comes first
+  use_target: false
+  trail_activation_pct: 50             # v4 (A-091): the trail arms when the held option's bid is 50 % above its cost
+  trail_giveback_pct: 15               # v4: then exit when the bid is 15 % below its running peak
+  level_oi_exit: true                  # v10 (A-127): exit = real level broken against AND OI reversed over 5 or 10 min
+  reclaim_levels: true                 # v11 (A-128): a level broken in the trade's favour and then reclaimed also counts
+  oi_not_confirming: true              # v11 (option C): OI no longer confirming over 5 min also meets the OI condition
+  defended_level_atr: 1.0              # v12 (A-129): take profit within 1 ATR short of PDH/PWH/PMH (PDL/PWL/PML) defended by writers
+
+filters:
+  breadth_min_agree: 50                   # A-088: breadth filter: enter only with mover breadth >= 50 in the trade's direction (calls +50, puts -50)

@@ -94,6 +94,55 @@ public final class SetupProviders {
         }
     }
 
+    public static final class OiWallBreakProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "oi-wall-break";
+        }
+    }
+
+    public static final class OiFlowBreakProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "oi-flow-break";
+        }
+    }
+
+    public static final class StretchReversionProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "stretch-reversion";
+        }
+    }
+
+    public static final class ZoneBreakFlowProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "zone-break-flow";
+        }
+    }
+
+    public static final class QuietPositioningProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "quiet-positioning";
+        }
+    }
+
+    public static final class OpeningClusterBreakProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "opening-cluster-break";
+        }
+    }
+
+    public static final class CompressionBreakProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "compression-break";
+        }
+    }
+
     public static final class AuctionPressureProvider extends Base {
         @Override
         public String strategyKey() {

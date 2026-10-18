@@ -1,0 +1,40 @@
+# odm-v11 = odm-v10 (A-127) with the user's option C (user 2026-10-17 ~17:30: "C, build odm-v11 and run tick days"; ledger
+# A-128), after 16 Oct: the put did not exit when NIFTY reclaimed the ORL at ~09:42 (ORL was below the entry, not in v10's
+# level list) and OI showed writers on both sides, not a reversal, until 10:00. v11: (1) the level break also counts a
+# level broken in the trade's favour after entry and then reclaimed (puts: ORL, PDL, prior ORL, PWL, the put wall at entry;
+# calls mirrored); (2) the OI condition is met when the OI no longer confirms the trade (puts: call OI no longer growing
+# faster than put OI over 5 minutes) or on v10's 5/10-minute reversal. Exit at a 3-minute close when (1) and (2) hold.
+# Everything else as v10 / odm-v4. v10 notes follow.
+#
+version: odm-v11
+strategy: opening-drive-momentum
+status: UNCALIBRATED
+source: "user-request-2026-10-17 (A-128 = A-127 + reclaimed levels + OI not confirming; values from the Jan-Jun index screen, fixed at registration)"
+
+scope:
+  entry_from: "09:21"                  # the first 3-minute closes: 09:21, 09:24, 09:27, 09:30
+  last_new_entry: "09:31"              # exclusive
+  flat_by: "12:00"                     # the screen's exit
+  time_stop_min: 0
+  skip_expiring_index: true            # the expiring index (0 DTE) belongs to the expiry strategies
+
+setup:
+  min_move_pct: 0.2                    # at least 0.2 % from the day's open
+  max_pullback_frac: 0.3               # and still in the outer 30 % of the session's range on that side
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 50                 # emergency only; the index stop (session extreme) comes first
+  use_target: false
+  trail_activation_pct: 50             # v4 (A-091): the trail arms when the held option's bid is 50 % above its cost
+  trail_giveback_pct: 15               # v4: then exit when the bid is 15 % below its running peak
+  level_oi_exit: true                  # v10 (A-127): exit = real level broken against AND OI reversed over 5 or 10 min
+  reclaim_levels: true                 # v11 (A-128): a level broken in the trade's favour and then reclaimed also counts
+  oi_not_confirming: true              # v11 (option C): OI no longer confirming over 5 min also meets the OI condition
+
+filters:
+  breadth_min_agree: 50                   # A-088: breadth filter: enter only with mover breadth >= 50 in the trade's direction (calls +50, puts -50)

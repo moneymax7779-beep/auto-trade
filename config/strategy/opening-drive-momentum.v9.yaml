@@ -1,0 +1,35 @@
+# odm-v9 = odm-v4 (live) + a profit lock armed at +30 % premium that exits if the bid falls back to +10 % (user 2026-10-17
+# ~15:55: "try the lock at +30% arm and +10% exit"; ledger A-126), after A-125: the 5 % lock (odm-v8) saved 16 Oct but sold
+# 12 Oct at +5 % (-Rs 3.10L on the tick days). Everything else is odm-v4 (session-extreme stop, 50/15 peak trail, 12:00).
+#
+version: odm-v9
+strategy: opening-drive-momentum
+status: UNCALIBRATED
+source: "user-request-2026-10-17 (A-126 = odm-v4 + 30/10 profit lock; values from the Jan-Jun index screen, fixed at registration)"
+
+scope:
+  entry_from: "09:21"                  # the first 3-minute closes: 09:21, 09:24, 09:27, 09:30
+  last_new_entry: "09:31"              # exclusive
+  flat_by: "12:00"                     # the screen's exit
+  time_stop_min: 0
+  skip_expiring_index: true            # the expiring index (0 DTE) belongs to the expiry strategies
+
+setup:
+  min_move_pct: 0.2                    # at least 0.2 % from the day's open
+  max_pullback_frac: 0.3               # and still in the outer 30 % of the session's range on that side
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 50                 # emergency only; the index stop (session extreme) comes first
+  use_target: false
+  trail_activation_pct: 50             # v4 (A-091): the trail arms when the held option's bid is 50 % above its cost
+  trail_giveback_pct: 15               # v4: then exit when the bid is 15 % below its running peak
+  profit_lock_arm_pct: 30               # v9 (A-126): the lock arms once the bid is 30 % above the average premium
+  profit_lock_floor_pct: 10             # v9: then exit if the bid falls back to +10 %
+
+filters:
+  breadth_min_agree: 50                   # A-088: breadth filter: enter only with mover breadth >= 50 in the trade's direction (calls +50, puts -50)

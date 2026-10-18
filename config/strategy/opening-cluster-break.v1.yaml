@@ -1,0 +1,31 @@
+# Opening-cluster break, v1 (user 2026-10-18, charts of 16 Oct, 23 Sep, 12 Oct, 15 Oct: "what do you understand" -> the
+# day's directional leg leaving the opening cluster 09:30-10:30; "build both and run on tick days"). Ledger A-139.
+# Between odm-v4's 09:16-09:25 window and ORB's 10:15 candle nothing trades the 09:30-10:30 break of the opening cluster.
+# Entry: the first 1-minute close of the day beyond ORH / ORL, the day open, PDH / PDL, the previous close or the prior
+# day's ORH / ORL, on the VWAP side of the break. Up to two entries per index per day, the second only the opposite way
+# (the 16 Oct / 23 Sep shape: a failed first leg, then the real one). Stop: a close back through the broken level (the best
+# stop of A-133). Exit: hold to 15:15. Stop and exit chosen by me after the user's "choose the best"; fixed at registration.
+version: ocb-v1
+strategy: opening-cluster-break
+status: UNCALIBRATED
+source: "user-request-2026-10-18 (A-139; entry from the user's charts, stop / exit chosen by me, fixed at registration)"
+
+scope:
+  entry_from: "09:30"
+  last_new_entry: "10:31"              # exclusive: the 10:30 close is the last
+  flat_by: "15:15"
+  time_stop_min: 0
+  skip_expiring_index: false           # both indices, every day (15 Oct SENSEX, 16 Oct were marked)
+
+setup:
+  max_entries: 2                       # the second only opposite to the first (a stopped first leg)
+  require_vwap_side: true              # calls above the session VWAP, puts below
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 30                 # emergency only
+  use_target: false                    # hold to 15:15 unless the level-back stop

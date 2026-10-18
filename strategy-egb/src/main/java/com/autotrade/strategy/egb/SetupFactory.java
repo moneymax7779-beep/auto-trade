@@ -23,7 +23,14 @@ public final class SetupFactory implements StrategyFactory {
             Map.entry("opening-range-continuation", OpeningRangeContinuation::new),   // A-076
             Map.entry("trend-state", TrendState::new),   // A-081
             Map.entry("opening-range-breakout", OpeningRangeBreakout::new),   // A-082
-            Map.entry("opening-drive-momentum", OpeningDriveMomentum::new));   // A-085
+            Map.entry("opening-drive-momentum", OpeningDriveMomentum::new),   // A-085
+            Map.entry("oi-wall-break", OiWallBreak::new),   // A-119
+            Map.entry("oi-flow-break", OiFlowBreak::new),   // A-120
+            Map.entry("stretch-reversion", StretchReversion::new),   // A-130
+            Map.entry("zone-break-flow", ZoneBreakFlow::new),   // A-131
+            Map.entry("quiet-positioning", QuietPositioning::new),   // A-132
+            Map.entry("opening-cluster-break", OpeningClusterBreak::new),   // A-139
+            Map.entry("compression-break", CompressionBreak::new));   // A-140
 
     private final ThresholdConfig config;
     private final Function<ThresholdConfig, Strategy> family;

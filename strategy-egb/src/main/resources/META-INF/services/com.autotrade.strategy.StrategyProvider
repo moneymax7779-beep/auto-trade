@@ -17,3 +17,10 @@ com.autotrade.strategy.egb.SetupProviders$OpeningRangeContinuationProvider
 com.autotrade.strategy.egb.SetupProviders$TrendStateProvider
 com.autotrade.strategy.egb.SetupProviders$OpeningRangeBreakoutProvider
 com.autotrade.strategy.egb.SetupProviders$OpeningDriveMomentumProvider
+com.autotrade.strategy.egb.SetupProviders$OiWallBreakProvider
+com.autotrade.strategy.egb.SetupProviders$OiFlowBreakProvider
+com.autotrade.strategy.egb.SetupProviders$StretchReversionProvider
+com.autotrade.strategy.egb.SetupProviders$ZoneBreakFlowProvider
+com.autotrade.strategy.egb.SetupProviders$QuietPositioningProvider
+com.autotrade.strategy.egb.SetupProviders$OpeningClusterBreakProvider
+com.autotrade.strategy.egb.SetupProviders$CompressionBreakProvider
