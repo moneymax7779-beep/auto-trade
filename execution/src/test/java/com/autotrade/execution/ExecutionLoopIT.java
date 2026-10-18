@@ -115,4 +115,82 @@ class ExecutionLoopIT {
         assertThat(jdbc.queryForObject("select status from exec.position where broker_account_id = ?", String.class,
                 follower)).isEqualTo("CLOSED");
     }
+
+    @Test
+    void everyTenantsCopyGroupIsServedEachAccountOnItsOwnRouteAndFlattenClosesThroughTheBroker() throws Exception {
+        // today: a flatten sells now, and the end-of-day reconciliation reads the day's broker trades
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
+        AccountStore accounts = new AccountStore(dataSource);
+        CostModel costs = CostModel.from(ThresholdConfig.load(Path.of("..", "config", "costs",
+                "india-index-options-costs.v2.yaml")));
+        jdbc.update("insert into ref.instrument_snapshot (id, snapshot_date, source, file_sha256, instruments) values "
+                + "(900, ?, 'it', 'it', 1) on conflict do nothing", java.sql.Date.valueOf(today));
+        jdbc.update("insert into ref.instrument (snapshot_id, instrument_key, exchange_token, segment, exchange, type, "
+                + "underlying, trading_symbol, expiry, strike, lot_size, tick_size, freeze_quantity, weekly) values (900, "
+                + "'NSE_FO|47168', '47168', 'NSE_FO', 'NSE', 'PE', 'NIFTY', 'NIFTY 23100 PE', ?, 23100, 65, 0.05, 1755, true) "
+                + "on conflict do nothing", java.sql.Date.valueOf(today.plusDays(4)));
+        // two users, each their own tenant, copy group and follower
+        long[] groups = new long[2];
+        long[] followers = new long[3];
+        String[] names = {"alice", "bob"};
+        for (int i = 0; i < 2; i++) {
+            long tenant = accounts.ensureTenant("t-" + names[i]);
+            long user = accounts.ensureUser("kc-" + names[i], names[i]);
+            accounts.ensureMembership(tenant, user, "OWNER");
+            long signal = accounts.ensureSignalSourceAccount(tenant, user, "SIG-" + names[i], 500_000, today,
+                    "config/risk/signal-source.v2.yaml");
+            groups[i] = accounts.ensureCopyGroup(tenant, "SET-" + names[i], signal);
+            followers[i] = i == 0
+                    ? accounts.ensureFollowerAccount(tenant, user, "ALICE-PAPER", BrokerType.PAPER, TradeMode.PAPER, 500_000,
+                            EquityMode.FIXED, today, "../config/risk/follower-risk.v3.yaml", 100)
+                    : accounts.ensureFollowerAccount(tenant, user, "BOB-KITE", BrokerType.ZERODHA, TradeMode.DRY_RUN, 500_000,
+                            EquityMode.FIXED, today, "../config/risk/follower-risk.v3.yaml", 100);
+            new FanOut(dataSource).subscribe(groups[i], followers[i], List.of("opening-drive"), 1.0);
+            if (i == 1) {
+                followers[2] = accounts.ensureFollowerAccount(tenant, user, "BOB-UPSTOX", BrokerType.UPSTOX,
+                        TradeMode.DRY_RUN, 500_000, EquityMode.FIXED, today, "../config/risk/follower-risk.v3.yaml", 100);
+                new FanOut(dataSource).subscribe(groups[i], followers[2], List.of("opening-drive"), 1.0);
+            }
+            new SignalDecisionStore(dataSource).insert(new SignalDecision(groups[i], 9200 + i, today, java.time.Instant.now().minusSeconds(60),
+                    "opening-drive", 2, "NIFTY", SignalDecision.Action.ENTER, "PE", null, "CONFIRMED", "IT", 3000047168L,
+                    "NSE_FO|47168", "NIFTY 23100 PE", 65, 100, 130_000, 500_000, 20, "M:" + i,
+                    Map.of("strategy_lots", 1.0, "intended_lots", 1.0, "stop_pct", 25.0)));
+        }
+        QuoteSource none = (d, u, t, at) -> Double.NaN;
+        try (ExecutionLoop loop = new ExecutionLoop(dataSource, "ignored", "*", "worker-M", costs, none, 1e9)) {
+            assertThat(loop.groups()).contains(groups[0], groups[1]);
+            loop.tick(today, 20_000);
+            Map<Long, ExecutionLoop.AccountStatus> byId = new java.util.HashMap<>();
+            loop.status().forEach(st -> byId.put(st.accountId(), st));
+            assertThat(byId.get(followers[0]).route()).isEqualTo("simulated fills");
+            assertThat(byId.get(followers[1]).route()).startsWith("Kite simulator http://127.0.0.1:");
+            assertThat(byId.get(followers[1]).lastResult()).contains("executed 1");
+            assertThat(byId.get(followers[2])).satisfies(st -> {
+                assertThat(st.state()).isEqualTo("REFUSED");
+                assertThat(st.route()).contains("no order adapter for UPSTOX");
+            });
+            assertThat(jdbc.queryForObject("select count(*) from exec.order_execution where broker_account_id = ? "
+                    + "and role = 'STOP' and status = 'OPEN'", Integer.class, followers[1])).isEqualTo(1);
+            // each tenant sees only its own accounts
+            assertThat(accounts.visibleTo("kc-alice")).extracting(a -> a.displayName()).contains("ALICE-PAPER")
+                    .doesNotContain("BOB-KITE", "BOB-UPSTOX");
+
+            List<String> flattened = loop.flatten(followers[1], "kc-bob", "drill", today);
+            assertThat(flattened).singleElement().asString().contains("1300 sold");
+            assertThat(jdbc.queryForObject("select status || ':' || exit_reason from exec.position where broker_account_id = ?",
+                    String.class, followers[1])).isEqualTo("CLOSED:FLATTEN");
+            assertThat(jdbc.queryForList("select role || ':' || status from exec.order_execution where broker_account_id = ? "
+                    + "order by id", String.class, followers[1]))
+                    .containsExactly("ENTRY:FILLED", "STOP:CANCELLED", "EMERGENCY_EXIT:FILLED");
+            assertThat(loop.connections().simulator(followers[1]).netQuantities()).containsValue(0L);
+            assertThat(new KillSwitches(dataSource).engaged(accounts.byId(followers[1]).orElseThrow(), "opening-drive",
+                    "NSE_FO|47168")).startsWith("ACCOUNT: FLATTEN by kc-bob");
+
+            List<BrokerReconciler.EndOfDay> eod = loop.endOfDay(today);
+            assertThat(eod).singleElement().satisfies(d -> {
+                assertThat(d.differences()).isEmpty();
+                assertThat(d.ledger().difference()).isZero();
+            });
+        }
+    }
 }

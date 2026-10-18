@@ -668,3 +668,100 @@ trade difference is one of the kinds listed above.
 
 **L1 is complete; its gate is met.** L2 (the Zerodha adapter: auth, orders, the broker's quotes and
 funds, the order stream, a broker-side stop, recovery) comes next.
+
+**L2, first slice, 19 Oct 01:00–02:00 (branch, Mac only; user: "work on rest of the implementation for multi user and
+multi broker support ... deploy in local docker only").** Nothing here can reach a real broker: LIVE stays refused,
+and a DRY_RUN account's orders go to a local Kite simulator.
+
+- **broker-api:** an error taxonomy on `BrokerException` (RETRYABLE, TERMINAL, SESSION, UNKNOWN); `BrokerConnection`
+  (the gateway plus funds, the executable quote, order and trade books, `poll()`); `BrokerCapabilities` with the
+  update channel, funds API, login flow and static-IP slots; `BrokerPosition` with our instrument key and day values.
+- **New module `broker-zerodha`** (no SDK: java.net.http + Jackson):
+  - `KiteAuth`: the login URL and the request token → access token exchange, checksum SHA-256(api_key +
+    request_token + api_secret). No password or TOTP anywhere; the token is never logged.
+  - `KiteHttp`: v3 headers and envelope; error types mapped onto the taxonomy (TokenException / PermissionException →
+    SESSION, 429 / 5xx / NetworkException → RETRYABLE, Input / Order / Margin → TERMINAL, timeout → UNKNOWN).
+  - `KiteGateway`: LIMIT and SL only, tags ≤ 20 alphanumerics, tick rounding (buy up, sell down), product MIS. An
+    idempotent place: an unknown outcome is looked up by tag and adopted, re-placed only when absent; 429s are retried.
+    Orders are limited to 8 a second, quotes to 1 a second. `poll()` diffs the order book, ignoring late or repeated
+    reports.
+  - `KiteInstruments`: Kite's instrument CSV, mapped from our key by exchange token (NSE_FO → NFO, BSE_FO → BFO).
+  - `KiteSimulator`: a local Kite v3 server (JDK HttpServer). It fills limits against the book in lots and triggers
+    SL on the last price. Faults: 429, 500 before or after processing, timeout before or after processing, expired
+    token, InputException, funds rejection, partial fills, a stop that fills as its cancel arrives, a stale order book.
+- **Execution:**
+  - `FollowerVenue`: the follower simulator sizes, checks and books as before; the venue works the orders.
+  - `SimulatedVenue` is L1's in-place fill.
+  - `BrokerVenue` routes to a broker:
+    - **Entry:** a marketable limit at ask + 4 ticks, sliced to the freeze quantity (`FreezeQuantities` from
+      ref.instrument). What is unfilled is cancelled after 10 s; the position is what filled.
+    - **Exit:** bid − max(4 ticks, 1 %), chased every 2 s, 6 times, then 5 % through the touch.
+    - **Stop:** a resting SL sell for the whole open quantity at the signal's stop_pct (default 25 %), limit 5 % under
+      the trigger. It is re-sized after adds, cancelled before every exit, and what it sold is booked instead of
+      sending an exit, so nothing is sold twice. Stops that sell while held are found every turn.
+    - **Recovery:** an order row is written before its place call; a restart resumes it by tag.
+    - The values are paper-risk v17's orders, in a new versioned **`follower-risk.v3.yaml`** (sizing as v2).
+  - Charges are per executed child order (the broker's per-order brokerage).
+  - `BrokerConnections` (the broker registry):
+    - PAPER, and DRY_RUN on v1/v2: simulated.
+    - ZERODHA DRY_RUN on v3: its own local Kite simulator, the book set to the signal's price before each order.
+    - Other brokers: refused (no adapter).
+    - LIVE: refused.
+  - `KillSwitches` (V24 `exec.kill_switch`, `exec.audit_log`):
+    - Scopes: GLOBAL_LIVE (LIVE accounts), ACCOUNT, STRATEGY, INSTRUMENT. An engaged switch refuses entries and adds,
+      never exits.
+    - Engaged automatically on: a refused stop (emergency exit first), an exit that cannot fill (the stop is re-armed
+      for the rest), an order with an unknown outcome, a reconciliation difference, flatten.
+  - **Session loss:** the account goes TOKEN_EXPIRED; its entries are refused and its exits wait for the next login.
+  - `BrokerReconciler`:
+    - **Intraday:** broker net quantity against our open positions, at lease takeover and every 30 s. Any difference,
+      a manual trade included, kills the account's entries; nothing is auto-flattened.
+    - **End of day:** broker trades against our fills, contract by contract, and the ledger row with the difference.
+      Scheduled at 15:45 IST.
+  - `InstrumentKeys`: a zt replay's `ZT|<token>` becomes the exchange key (token = segment offset + exchange token).
+- **Multiple users:**
+  - `ExecutionLoop` serves one copy group, a list, or `*` (every enabled copy group of every tenant). One lane per
+    account runs all the groups it follows.
+  - An account whose mode, broker or risk file changes gets a new route.
+  - app-execution API, scoped to the caller's tenant memberships:
+    - accounts;
+    - kill switches: list, engage, release;
+    - flatten one account (confirm "FLATTEN") and flatten all (confirm "FLATTEN ALL");
+    - the audit log.
+  - OWNER, ADMIN and TRADER act; VIEWER and AUDITOR read. GLOBAL_LIVE is ADMIN only. Another tenant's account is a 404.
+  - The caller is the `X-Autotrade-User` header (the Keycloak subject to be). **It is not authentication.** The
+    service binds 127.0.0.1 only until Keycloak (L3).
+- **Tests:**
+  - `KiteGatewayTest` (10): login, fills, unknown outcomes (four kinds), error classes, partial fill, stops, stop
+    filled on cancel, stale book, rate, ticks, mapping.
+  - `BrokerVenueIT` (10): PAPER vs Kite parity, unknown place, partial entry, stop filled on cancel (no exit sent,
+    never short), stop sold while held, expired token then login, refused stop → emergency exit + kill, exit that
+    cannot fill → stop re-armed + kill, restart mid-order resumed by tag + manual trade → reconciliation kill, kill
+    switch scopes.
+  - `ExecutionLoopIT` (+1): two tenants served by `*`, routes per account (simulated / Kite simulator / UPSTOX
+    refused), tenant isolation, flatten through the broker, end-of-day ledger difference 0.
+  - `ExecutionApiIT` (2): isolation, roles, GLOBAL_LIVE ADMIN only, flatten confirmation.
+  - Full build: 370 tests green.
+- **On the Mac's 26 stored LIVE-SET days** (`follow` now routes through the registry; V24 applied on the Mac DB only):
+
+  | Account | Path | Trades | Gross | Charges | Net |
+  |---|---|---|---|---|---|
+  | PAPER-F2 | L1 code | 95 | ₹45,54,755 | ₹57,027 | ₹44,97,727 |
+  | PARITY-P (new) | new code, PAPER | 95 | ₹45,54,755 | ₹57,027 | ₹44,97,727 |
+  | KITE-DRY (new) | ZERODHA DRY_RUN, Kite adapter → simulator | 95 | ₹45,54,755 | ₹59,682 | ₹44,95,072 |
+
+  - PARITY-P equals PAPER-F2 on every day: the refactor changed nothing for PAPER.
+  - KITE-DRY took the same 95 trades at the same gross. Its charges are ₹2,655 higher: per-order brokerage on child
+    orders sliced to the freeze quantity.
+  - KITE-DRY bought and sold the same quantity (1,92,955). Every stop (179) was cancelled before its exit, no stop
+    sold, and nothing was left open.
+- **Not done yet (L2/L3):**
+  - Kite's WebSocket order updates (polling only).
+  - The real daily login flow and token store: Secret Manager, the Telegram link, a redirect endpoint.
+  - A real Kite session for LIVE: needs the user's go-ahead, the static IP and decision 6.
+  - Keycloak.
+  - Telegram flatten (decision 5).
+  - The watchdog.
+  - The sandbox chaos day.
+  - A UI page for the new API.
+  - The cross-account limits and liquidity allocator (L6).

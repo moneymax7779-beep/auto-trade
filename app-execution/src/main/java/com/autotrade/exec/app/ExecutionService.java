@@ -30,7 +30,7 @@ class ExecutionService implements DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(ExecutionService.class);
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
-    static final int REQUIRED_SCHEMA = 23;
+    static final int REQUIRED_SCHEMA = 24;
 
     private final DataSource dataSource;
     private final ExecutionProperties properties;
@@ -62,6 +62,24 @@ class ExecutionService implements DisposableBean {
         if (current != null) {
             current.tick(LocalDate.now(IST), properties.pollMs() * 5);
         }
+    }
+
+    /** After the close (15:45 IST, weekdays): every broker-routed account this worker holds is reconciled. */
+    @Scheduled(cron = "0 45 15 * * MON-FRI", zone = "Asia/Kolkata")
+    void endOfDay() {
+        ExecutionLoop current = loop;
+        if (current != null) {
+            current.endOfDay(LocalDate.now(IST)).forEach(d -> log.info("end of day account {}: difference {}, {} contracts "
+                    + "differ", d.ledger().brokerAccountId(), d.ledger().difference(), d.differences().size()));
+        }
+    }
+
+    List<String> flatten(long accountId, String actor, String reason, LocalDate day) throws Exception {
+        ExecutionLoop current = loop;
+        if (current == null) {
+            return List.of("the worker has not started");
+        }
+        return current.flatten(accountId, actor, reason, day);
     }
 
     List<ExecutionLoop.AccountStatus> status() {

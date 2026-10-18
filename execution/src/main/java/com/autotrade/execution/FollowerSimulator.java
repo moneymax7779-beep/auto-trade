@@ -22,6 +22,7 @@ import com.autotrade.account.BrokerAccount;
 import com.autotrade.account.CapitalPolicy;
 import com.autotrade.account.EntryDecision;
 import com.autotrade.account.TradeMode;
+import com.autotrade.broker.BrokerException;
 import com.autotrade.sim.CostModel;
 import com.autotrade.sim.Side;
 
@@ -61,18 +62,19 @@ public final class FollowerSimulator {
     }
 
     private record Pending(long intentId, String mode, String action, String strategyId, String underlying,
-                           String side, long token, String symbol, int lotSize, double price, double budget,
-                           double referenceCapital, int lots, String legGroup, Instant at, String reason,
+                           String side, long token, String instrumentKey, String symbol, int lotSize, double price,
+                           double budget, double referenceCapital, int lots, String legGroup, Instant at, String reason,
                            double sizeMultiplier, double strategyLots, double intendedLots, double liquidityLots,
-                           double rvol, double callAsk, double putAsk, double bookQuantity) {
+                           double rvol, double callAsk, double putAsk, double bookQuantity, double stopPct) {
     }
 
     private final JdbcTemplate jdbc;
     private final AccountStore accounts;
     private final CostModel costs;
     private final FollowerRisk risk;
-    private final double simulatedBrokerFunds;
+    private final FollowerVenue venue;
     private final QuoteSource quotes;            // null: capital-refused adds are not retried
+    private final KillSwitches kills;
 
     public FollowerSimulator(DataSource dataSource, CostModel costs, FollowerRisk risk, double simulatedBrokerFunds) {
         this(dataSource, costs, risk, simulatedBrokerFunds, null);
@@ -81,12 +83,19 @@ public final class FollowerSimulator {
     /** With {@code quotes}, a capital-refused add is retried when the account's capital frees (see {@link #retry}). */
     public FollowerSimulator(DataSource dataSource, CostModel costs, FollowerRisk risk, double simulatedBrokerFunds,
                              QuoteSource quotes) {
+        this(dataSource, costs, risk, new SimulatedVenue(dataSource, simulatedBrokerFunds), quotes);
+    }
+
+    /** Orders through {@code venue} (a {@link BrokerVenue} for a broker-routed account). */
+    public FollowerSimulator(DataSource dataSource, CostModel costs, FollowerRisk risk, FollowerVenue venue,
+                             QuoteSource quotes) {
         this.jdbc = new JdbcTemplate(dataSource);
         this.accounts = new AccountStore(dataSource);
         this.costs = costs;
         this.risk = risk;
-        this.simulatedBrokerFunds = simulatedBrokerFunds;
+        this.venue = venue;
         this.quotes = quotes;
+        this.kills = new KillSwitches(dataSource);
     }
 
     private String workerId;                     // set by an execution worker: claim intents before running them
@@ -135,6 +144,22 @@ public final class FollowerSimulator {
         Day day = days.computeIfAbsent(account.id() + ":" + date, k -> restore(new Day(account, date), copyGroupId));
         int executed = 0, skipped = 0, rejected = 0, closed = 0;
         Map<String, Integer> reasons = new LinkedHashMap<>();
+        boolean sessionLost = venue.broker() && sessionLost(account);
+        if (venue.broker() && !sessionLost) {
+            try {
+                for (FollowerVenue.StopFill stop : venue.stopFills(account)) {   // stops that sold while held
+                    book(day, stop.positionId(), stop.quantity(), stop.price(), stop.at(), "BROKER_STOP");
+                    closed++;
+                }
+            } catch (BrokerException e) {
+                if (e.kind() == BrokerException.Kind.SESSION) {
+                    sessionLost = true;
+                    loseSession(account, e.getMessage());
+                } else {
+                    reasons.merge("STOP_READ_" + e.kind(), 1, Integer::sum);     // read again next turn
+                }
+            }
+        }
         List<Pending> pending = pending(account.id(), copyGroupId, date);
         Set<Long> handled = new HashSet<>();
         for (Pending p : pending) {
@@ -142,21 +167,43 @@ public final class FollowerSimulator {
                 continue;                                          // the second leg of a straddle already handled
             }
             List<String> outcomes = new ArrayList<>();
-            if (p.legGroup() != null && p.action().equals("ENTER")) {
-                Pending other = pending.stream().filter(q -> q.intentId() != p.intentId() && p.legGroup().equals(q.legGroup())
-                        && q.action().equals("ENTER")).findFirst().orElse(null);
-                if (other != null) {
-                    handled.add(other.intentId());
+            if (sessionLost) {
+                if (!p.action().equals("EXIT")) {                   // entries refused; exits wait for the next login
+                    outcomes.add(reject(p, "BROKER_SESSION", "the broker session is not valid: log in again"));
+                } else {
+                    outcomes.add("PENDING_BROKER_SESSION");
                 }
-                outcomes.addAll(enterStraddle(day, p, other));
             } else {
-                outcomes.add(switch (p.action()) {
-                    case "ENTER" -> enter(day, p);
-                    case "ADD" -> add(day, p);
-                    default -> exit(day, p);
-                });
+                try {
+                    if (p.legGroup() != null && p.action().equals("ENTER")) {
+                        Pending other = pending.stream().filter(q -> q.intentId() != p.intentId()
+                                && p.legGroup().equals(q.legGroup()) && q.action().equals("ENTER")).findFirst().orElse(null);
+                        if (other != null) {
+                            handled.add(other.intentId());
+                        }
+                        outcomes.addAll(enterStraddle(day, p, other));
+                    } else {
+                        outcomes.add(switch (p.action()) {
+                            case "ENTER" -> enter(day, p);
+                            case "ADD" -> add(day, p);
+                            default -> exit(day, p);
+                        });
+                    }
+                } catch (BrokerException e) {
+                    if (e.kind() != BrokerException.Kind.SESSION) {
+                        throw e;
+                    }
+                    sessionLost = true;
+                    loseSession(account, e.getMessage());
+                    outcomes.add(p.action().equals("EXIT") ? "PENDING_BROKER_SESSION"
+                            : reject(p, "BROKER_SESSION", e.getMessage()));
+                }
             }
             for (String outcome : outcomes) {
+                if (outcome.startsWith("PENDING")) {
+                    reasons.merge(outcome, 1, Integer::sum);           // left for the next turn, nothing changed
+                    continue;
+                }
                 reasons.merge(outcome, 1, Integer::sum);
                 if (outcome.equals("EXECUTED")) {
                     executed++;
@@ -241,9 +288,14 @@ public final class FollowerSimulator {
         if (refused != null) {
             return refused;
         }
-        order(day.account, p, "ENTRY", "BUY", quantity, price);
-        insertPosition(day, p, p.side(), quantity, price, step == 0 ? Double.NaN : scale);
-        return done(p, quantity);
+        FollowerVenue.Fill fill = order(day.account, p, "ENTRY", "BUY", quantity, price, 1);
+        if (fill.quantity() == 0) {
+            return notFilled(day, p, fill);
+        }
+        long positionId = insertPosition(day, p, p.side(), fill, step == 0 ? Double.NaN : scale);
+        protect(day, p, positionId);
+        reconcileIfUnknown(day, p, fill);
+        return done(p, fill.quantity());
     }
 
     private String add(Day day, Pending p) {
@@ -276,13 +328,15 @@ public final class FollowerSimulator {
             }
             return refused;
         }
-        double average = ((Number) position.get("average_entry")).doubleValue();
-        long total = held + quantity;
-        double charges = charge(day.date, p.underlying(), Side.BUY, price, quantity);
-        order(day.account, p, "ENTRY", "BUY", quantity, price);
-        jdbc.update("update exec.position set quantity_open = ?, average_entry = ?, charges = charges + ? where id = ?",
-                total, (average * held + price * quantity) / total, charges, ((Number) position.get("id")).longValue());
-        return done(p, quantity);
+        FollowerVenue.Fill fill = order(day.account, p, "ENTRY", "BUY", quantity, price, 1);
+        if (fill.quantity() == 0) {
+            return notFilled(day, p, fill);
+        }
+        long positionId = ((Number) position.get("id")).longValue();
+        addToPosition(day, p, positionId, held, ((Number) position.get("average_entry")).doubleValue(), fill);
+        protect(day, p, positionId);                                   // the stop re-sized to the new quantity
+        reconcileIfUnknown(day, p, fill);
+        return done(p, fill.quantity());
     }
 
     private List<String> enterStraddle(Day day, Pending first, Pending second) {
@@ -321,20 +375,32 @@ public final class FollowerSimulator {
             return List.of(refused, refused);
         }
         long quantity = lots * ce.lotSize();
-        order(day.account, ce, "ENTRY", "BUY", quantity, ceAsk);
-        order(day.account, pe, "ENTRY", "BUY", quantity, peAsk);
-        insertPosition(day, ce, "CE", quantity, ceAsk, Double.NaN);
-        insertPosition(day, pe, "PE", quantity, peAsk, Double.NaN);
-        return List.of(done(ce, quantity), done(pe, quantity));
+        List<String> outcomes = new ArrayList<>();
+        for (Pending leg : List.of(ce, pe)) {                            // a leg that does not fill leaves the other held
+            FollowerVenue.Fill fill = order(day.account, leg, "ENTRY", "BUY", quantity, leg == ce ? ceAsk : peAsk, 1);
+            if (fill.quantity() == 0) {
+                outcomes.add(notFilled(day, leg, fill));
+                continue;
+            }
+            long positionId = insertPosition(day, leg, leg.side(), fill, Double.NaN);
+            protect(day, leg, positionId);
+            reconcileIfUnknown(day, leg, fill);
+            outcomes.add(done(leg, fill.quantity()));
+        }
+        return outcomes;
     }
 
     /** The risk engine's checks in its order; null = approved, else the REJECTED_ outcome (intent updated). */
     private String check(Day day, Pending p, boolean add, int newPositions, long lots, double premium) {
+        String killed = kills.engaged(day.account, p.strategyId(), p.instrumentKey());
+        if (killed != null) {
+            return reject(p, "KILL_SWITCH", killed);
+        }
         if (day.dailyLossLatched) {
             return reject(p, "DAILY_LOSS", "the daily loss limit was reached earlier today");
         }
         EntryDecision capital = day.policy.checkEntry(TradeMode.valueOf(p.mode()), day.equity, premium,
-                openPremium(day.account.id()), day.todayNet(), funds(p.mode()));
+                openPremium(day.account.id()), day.todayNet(), funds(day.account, p.mode()));
         if (!capital.approved() && capital.code().equals("DAILY_LOSS")) {
             day.dailyLossLatched = true;
             return reject(p, capital.code(), capital.reason());
@@ -366,19 +432,37 @@ public final class FollowerSimulator {
         if (position == null) {
             return skip(p, "NOT_HELD", "the account holds no position to exit");
         }
-        if (!(p.price() > 0)) {
+        if (!(p.price() > 0) && !venue.broker()) {
             return reject(p, "NO_EXIT_PRICE", "the signal's exit price is unknown");
         }
-        long quantity = ((Number) position.get("quantity_open")).longValue();
-        double price = sellPrice(p.price());
-        double average = ((Number) position.get("average_entry")).doubleValue();
-        double charges = charge(day.date, p.underlying(), Side.SELL, price, quantity);
-        order(day.account, p, "EXIT", "SELL", quantity, price);
         long positionId = ((Number) position.get("id")).longValue();
-        jdbc.update("update exec.position set quantity_open = 0, closed_at = ?, exit_reason = ?, realised_gross = ?, "
-                        + "charges = charges + ?, status = 'CLOSED' where id = ?", Timestamp.from(p.at()), p.reason(),
-                (price - average) * quantity, charges, positionId);
-        String outcome = done(p, quantity);
+        long quantity = ((Number) position.get("quantity_open")).longValue();
+        // plan section 3, exit sequencing: the broker stop comes off first; if it already sold, nothing more is sent
+        FollowerVenue.Release release = venue.release(day.account, positionId);
+        if (release.retryLater()) {
+            return "PENDING_STOP_RELEASE";
+        }
+        if (release.soldQuantity() > 0) {
+            book(day, positionId, release.sold(), release.at(), "BROKER_STOP");
+            quantity -= release.soldQuantity();
+        }
+        String outcome;
+        if (quantity <= 0) {
+            outcome = skip(p, "STOPPED_AT_BROKER", "the broker stop sold the position before this exit");
+        } else {
+            FollowerVenue.Fill fill = order(day.account, p, "EXIT", "SELL", quantity, sellPrice(p.price()), 1);
+            if (fill.quantity() > 0) {
+                book(day, positionId, fill.parts(), fill.at(), p.reason());
+            }
+            if (fill.quantity() < quantity) {
+                // the chase ran out: the rest keeps a broker stop, the account takes no new entries, an alert goes out
+                protect(day, p, positionId);
+                kills.engageAccount(day.account, "EXIT_NOT_FILLED: " + (quantity - fill.quantity()) + " of " + p.symbol()
+                        + " still held after the exit chase (" + fill.reason() + ")", "execution");
+                return fail(p, fill.unknown() ? "ORDER_UNKNOWN" : "EXIT_NOT_FILLED", fill.reason());
+            }
+            outcome = done(p, quantity);
+        }
         day.retries.removeIf(r -> r.positionId() == positionId);       // its pending adds die with the position
         retry(day, p.at());                                            // this exit freed capital
         return outcome;
@@ -424,15 +508,16 @@ public final class FollowerSimulator {
                 }
                 continue;
             }
-            double average = ((Number) position.get("average_entry")).doubleValue();
-            long total = held + quantity;
-            order(day.account, p, "ENTRY", "BUY", quantity, price, 2);
-            jdbc.update("update exec.position set quantity_open = ?, average_entry = ?, charges = charges + ? where id = ?",
-                    total, (average * held + price * quantity) / total,
-                    charge(day.date, p.underlying(), Side.BUY, price, quantity), r.positionId());
+            FollowerVenue.Fill fill = order(day.account, p, "ENTRY", "BUY", quantity, price, 2);
+            if (fill.quantity() == 0) {
+                day.retries.remove(r);
+                continue;
+            }
+            addToPosition(day, p, r.positionId(), held, ((Number) position.get("average_entry")).doubleValue(), fill);
+            protect(day, p, r.positionId());
             jdbc.update("update exec.trade_intent set state = 'EXECUTED', quantity = ?, attempts = attempts + 1, "
-                    + "reject_code = 'CAPITAL_RETRIED', reject_reason = ?, updated_at = now() where id = ?", quantity,
-                    "filled on retry at " + at + " for " + price, p.intentId());
+                    + "reject_code = 'CAPITAL_RETRIED', reject_reason = ?, updated_at = now() where id = ?", fill.quantity(),
+                    "filled on retry at " + at + " for " + fill.price(), p.intentId());
             day.retries.remove(r);
             day.retried.merge("EXECUTED_RETRY", 1, Integer::sum);
         }
@@ -440,28 +525,217 @@ public final class FollowerSimulator {
 
     // ---------------------------------------------------------------- records
 
-    private void insertPosition(Day day, Pending p, String side, long quantity, double price, double scale) {
-        jdbc.update("insert into exec.position (tenant_id, broker_account_id, entry_trade_intent_id, strategy_id, underlying, "
-                        + "option_side, instrument_token, symbol, quantity_open, average_entry, opened_at, charges, status, "
-                        + "sizing_scale) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'OPEN', ?)", day.account.tenantId(),
-                day.account.id(), p.intentId(), p.strategyId(), p.underlying(), side, p.token(), p.symbol(), quantity,
-                price, Timestamp.from(p.at()), charge(day.date, p.underlying(), Side.BUY, price, quantity),
-                Double.isNaN(scale) ? null : scale);
+    /** The new position (its stop_pct: the signal's, else none); returns its id. */
+    private long insertPosition(Day day, Pending p, String side, FollowerVenue.Fill fill, double scale) {
+        return jdbc.queryForObject("insert into exec.position (tenant_id, broker_account_id, entry_trade_intent_id, "
+                        + "strategy_id, underlying, option_side, instrument_token, instrument_key, symbol, quantity_open, "
+                        + "average_entry, opened_at, charges, status, sizing_scale, stop_pct) values (?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                        + "?, ?, ?, ?, 'OPEN', ?, ?) returning id", Long.class, day.account.tenantId(), day.account.id(),
+                p.intentId(), p.strategyId(), p.underlying(), side, p.token(), p.instrumentKey(), p.symbol(), fill.quantity(),
+                fill.price(), Timestamp.from(fill.at()), buyCharges(day, p, fill), Double.isNaN(scale) ? null : scale,
+                Double.isNaN(p.stopPct()) ? null : p.stopPct());
     }
 
-    private void order(BrokerAccount account, Pending p, String role, String side, long quantity, double price) {
-        order(account, p, role, side, quantity, price, 1);
+    private void addToPosition(Day day, Pending p, long positionId, long held, double average, FollowerVenue.Fill fill) {
+        long total = held + fill.quantity();
+        jdbc.update("update exec.position set quantity_open = ?, average_entry = ?, charges = charges + ? where id = ?",
+                total, (average * held + fill.price() * fill.quantity()) / total, buyCharges(day, p, fill), positionId);
     }
 
-    /** The broker tag (the idempotency key) is deterministic: F + intent id + role initial + attempt, <= 20 chars. */
-    private void order(BrokerAccount account, Pending p, String role, String side, long quantity, double price,
-                       int attempt) {
-        jdbc.update("insert into exec.order_execution (tenant_id, trade_intent_id, broker_account_id, broker_type, role, "
-                        + "client_tag, attempt_no, order_side, order_type, quantity_requested, quantity_filled, limit_price, "
-                        + "average_fill_price, status, raw_status, lease_epoch) values (?, ?, ?, ?, ?, ?, ?, ?, 'LIMIT', ?, ?, "
-                        + "?, ?, 'FILLED', ?, ?)", account.tenantId(), p.intentId(), account.id(), account.brokerType().name(),
-                role, "F" + p.intentId() + role.charAt(0) + attempt, attempt, side, quantity, quantity, price,
-                price, p.mode().equals("DRY_RUN") ? "DRY_RUN_SIMULATED" : "PAPER_SIMULATED", leaseEpoch);
+    /**
+     * Books a sale (its executed orders, each charged on its own): realised gross and charges added; the position closes
+     * when nothing is left.
+     */
+    private void book(Day day, long positionId, List<FollowerVenue.Part> parts, Instant at, String reason) {
+        Map<String, Object> pos = jdbc.queryForMap("select underlying, quantity_open, average_entry from exec.position "
+                + "where id = ?", positionId);
+        long open = ((Number) pos.get("quantity_open")).longValue();
+        double average = ((Number) pos.get("average_entry")).doubleValue();
+        String underlying = (String) pos.get("underlying");
+        long sold = 0;
+        double gross = 0, charges = 0;
+        for (FollowerVenue.Part part : parts) {
+            long q = Math.min(part.quantity(), open - sold);
+            if (q <= 0) {
+                break;
+            }
+            sold += q;
+            gross += (part.price() - average) * q;
+            charges += charge(day.date, underlying, Side.SELL, part.price(), q);
+        }
+        if (sold <= 0) {
+            return;
+        }
+        boolean closes = sold == open;
+        jdbc.update("update exec.position set quantity_open = quantity_open - ?, realised_gross = coalesce(realised_gross, 0) "
+                        + "+ ?, charges = charges + ?, closed_at = case when ? then ? else closed_at end, exit_reason = case "
+                        + "when ? then ? else exit_reason end, status = case when ? then 'CLOSED' else status end where id = ?",
+                sold, gross, charges, closes, Timestamp.from(at), closes, reason, closes, positionId);
+    }
+
+    private void book(Day day, long positionId, long quantity, double price, Instant at, String reason) {
+        book(day, positionId, List.of(new FollowerVenue.Part(quantity, price)), at, reason);
+    }
+
+    /** Charges of the buy orders of a fill, each child order on its own. */
+    private double buyCharges(Day day, Pending p, FollowerVenue.Fill fill) {
+        double total = 0;
+        for (FollowerVenue.Part part : fill.parts()) {
+            total += charge(day.date, p.underlying(), Side.BUY, part.price(), part.quantity());
+        }
+        return total;
+    }
+
+    /**
+     * Arms (or re-sizes) the position's broker stop. A stop that sold in the meantime is booked first and the rest
+     * re-protected. A stop that cannot be placed means an emergency exit (the long-option rule): every stop of the
+     * position comes off first (so nothing is sold twice), then what is left is sold, and the account's entries stop.
+     */
+    private void protect(Day day, Pending p, long positionId) {
+        protect(day, p, positionId, p.symbol());
+    }
+
+    /** {@code p} null (flatten): a stop that cannot be placed is reported, not followed by another exit. */
+    private void protect(Day day, Pending p, long positionId, String symbol) {
+        if (p == null) {
+            FollowerVenue.Protection r = venue.protect(day.account, positionId, leaseEpoch);
+            if (r.soldQuantity() > 0) {
+                book(day, positionId, r.sold(), r.at(), "BROKER_STOP");
+            }
+            if (r.failure() != null) {
+                kills.engageAccount(day.account, "flatten left " + symbol + " without a broker stop: " + r.failure(),
+                        "flatten");
+            }
+            return;
+        }
+        for (int round = 0; round < 3; round++) {
+            FollowerVenue.Protection r = venue.protect(day.account, positionId, leaseEpoch);
+            if (r.soldQuantity() > 0) {
+                book(day, positionId, r.sold(), r.at(), "BROKER_STOP");
+                continue;
+            }
+            if (r.failure() == null) {
+                return;
+            }
+            FollowerVenue.Release release = venue.release(day.account, positionId);
+            if (release.retryLater()) {
+                kills.engageAccount(day.account, "STOP_PLACEMENT_FAILED on " + p.symbol() + " (" + r.failure()
+                        + ") and the stop's state is not confirmed: " + release.reason(), "execution");
+                return;
+            }
+            if (release.soldQuantity() > 0) {
+                book(day, positionId, release.sold(), release.at(), "BROKER_STOP");
+            }
+            long open = jdbc.queryForObject("select quantity_open from exec.position where id = ?", Long.class, positionId);
+            FollowerVenue.Fill fill = open <= 0 ? null
+                    : order(day.account, p, "EMERGENCY_EXIT", "SELL", open, sellPrice(p.price()), 1 + round);
+            if (fill != null && fill.quantity() > 0) {
+                book(day, positionId, fill.parts(), fill.at(), "STOP_PLACEMENT_FAILED");
+            }
+            long left = open - (fill == null ? 0 : fill.quantity());
+            kills.engageAccount(day.account, "STOP_PLACEMENT_FAILED on " + p.symbol() + ": " + r.failure()
+                    + (left > 0 ? "; " + left + " still held" : "; exited"), "execution");
+            return;
+        }
+        kills.engageAccount(day.account, "the stop of " + p.symbol() + " kept selling while being re-armed", "execution");
+    }
+
+    private FollowerVenue.Fill order(BrokerAccount account, Pending p, String role, String side, long quantity, double price,
+                                     int attempt) {
+        return venue.execute(new FollowerVenue.OrderSpec(account, p.intentId(), p.mode(), role, side, p.underlying(),
+                p.token(), p.instrumentKey(), p.symbol(), p.lotSize(), quantity, price, p.at(), attempt, leaseEpoch));
+    }
+
+    /** An order that filled nothing: refused (its code), or unknown at the broker (the account must be reconciled). */
+    private String notFilled(Day day, Pending p, FollowerVenue.Fill fill) {
+        if (fill.unknown()) {
+            kills.engageAccount(day.account, "ORDER_UNKNOWN for intent " + p.intentId() + ": " + fill.reason(), "execution");
+            jdbc.update("update exec.trade_intent set state = 'RECONCILIATION_REQUIRED', reject_code = ?, reject_reason = ?, "
+                    + "updated_at = now() where id = ?", fill.code(), fill.reason(), p.intentId());
+            return "RECONCILIATION_" + fill.code();
+        }
+        return reject(p, fill.code(), fill.reason());
+    }
+
+    /**
+     * Flatten (live plan section 4, "Flatten all live"): every open position of the account is exited now, its broker
+     * stop taken off first (what the stop already sold is booked, never sold twice). {@code price} gives the simulated
+     * exit price of a position (a broker venue prices from the broker). The caller engages the kill switch first.
+     * Returns one line per position.
+     */
+    public List<String> flatten(BrokerAccount account, LocalDate date, java.util.function.ToDoubleFunction<Map<String, Object>> price,
+                                String reason) {
+        Day day = new Day(account, date);
+        List<String> lines = new ArrayList<>();
+        for (Map<String, Object> pos : jdbc.queryForList("select p.id, p.entry_trade_intent_id, p.strategy_id, p.underlying, "
+                + "p.option_side, p.instrument_token, p.instrument_key, p.symbol, p.quantity_open, p.average_entry, "
+                + "d.lot_size, i.execution_mode from exec.position p join exec.trade_intent i on i.id = p.entry_trade_intent_id "
+                + "join exec.trade_batch b on b.id = i.trade_batch_id join exec.signal_decision d on d.id = b.signal_decision_id "
+                + "where p.broker_account_id = ? and p.status = 'OPEN' order by p.id", account.id())) {
+            long positionId = ((Number) pos.get("id")).longValue();
+            String symbol = (String) pos.get("symbol");
+            FollowerVenue.Release release = venue.release(account, positionId);
+            if (release.retryLater()) {
+                lines.add(symbol + ": NOT flattened, " + release.reason());
+                continue;
+            }
+            if (release.soldQuantity() > 0) {
+                book(day, positionId, release.sold(), release.at(), "BROKER_STOP");
+            }
+            long open = jdbc.queryForObject("select quantity_open from exec.position where id = ?", Long.class, positionId);
+            if (open <= 0) {
+                lines.add(symbol + ": the broker stop had sold it");
+                continue;
+            }
+            long intent = ((Number) pos.get("entry_trade_intent_id")).longValue();
+            int attempt = jdbc.queryForObject("select coalesce(max(attempt_no), 0) + 1 from exec.order_execution "
+                    + "where trade_intent_id = ? and role = 'EMERGENCY_EXIT'", Integer.class, intent);
+            long token = ((Number) pos.get("instrument_token")).longValue();
+            FollowerVenue.Fill fill = venue.execute(new FollowerVenue.OrderSpec(account, intent,
+                    (String) pos.get("execution_mode"), "EMERGENCY_EXIT", "SELL", (String) pos.get("underlying"), token,
+                    InstrumentKeys.normalize((String) pos.get("instrument_key"), token), symbol,
+                    ((Number) pos.get("lot_size")).intValue(), open, price.applyAsDouble(pos), java.time.Instant.now(),
+                    attempt, leaseEpoch));
+            if (fill.quantity() > 0) {
+                book(day, positionId, fill.parts(), fill.at(), reason);
+            }
+            if (fill.quantity() < open) {
+                protect(day, null, positionId, symbol);
+                lines.add(symbol + ": " + fill.quantity() + " of " + open + " sold (" + fill.code() + " " + fill.reason()
+                        + "); the rest keeps its broker stop");
+            } else {
+                lines.add(symbol + ": " + open + " sold at " + String.format(java.util.Locale.ROOT, "%.2f", fill.price()));
+            }
+        }
+        kills.audit(account, "flatten", "FLATTEN", Map.of("reason", reason, "positions", lines));
+        return lines;
+    }
+
+    /** A child order whose end is not known (a cancel not confirmed): what filled is booked, the account reconciled. */
+    private void reconcileIfUnknown(Day day, Pending p, FollowerVenue.Fill fill) {
+        if (fill.unknown()) {
+            kills.engageAccount(day.account, "ORDER_UNKNOWN for intent " + p.intentId() + " (" + fill.quantity()
+                    + " booked): " + fill.reason(), "execution");
+        }
+    }
+
+    private String fail(Pending p, String code, String reason) {
+        jdbc.update("update exec.trade_intent set state = 'FAILED', reject_code = ?, reject_reason = ?, updated_at = now() "
+                + "where id = ?", code, reason, p.intentId());
+        return "FAILED_" + code;
+    }
+
+    /** True when the account's broker session is known to be invalid (set by {@link #loseSession}, cleared at login). */
+    private boolean sessionLost(BrokerAccount account) {
+        String status = jdbc.queryForObject("select connection_status from acct.broker_account where id = ?", String.class,
+                account.id());
+        return "TOKEN_EXPIRED".equals(status) || "TOKEN_REJECTED".equals(status);
+    }
+
+    private void loseSession(BrokerAccount account, String message) {
+        jdbc.update("update acct.broker_account set connection_status = 'TOKEN_EXPIRED', updated_at = now() where id = ?",
+                account.id());
+        kills.audit(account, "execution", "BROKER_SESSION_LOST", Map.of("message", String.valueOf(message)));
     }
 
     private String done(Pending p, long quantity) {
@@ -482,8 +756,8 @@ public final class FollowerSimulator {
         return "REJECTED_" + code;
     }
 
-    private double funds(String mode) {
-        return TradeMode.valueOf(mode).needsBrokerFunds() ? simulatedBrokerFunds : Double.NaN;
+    private double funds(BrokerAccount account, String mode) {
+        return TradeMode.valueOf(mode).needsBrokerFunds() ? venue.funds(account) : Double.NaN;
     }
 
     private double buyPrice(double price) {
@@ -540,11 +814,12 @@ public final class FollowerSimulator {
     }
 
     private static final String PENDING = "select i.id, i.execution_mode, d.action, d.strategy_id, d.underlying, "
-            + "d.option_side, d.instrument_token, d.symbol, d.lot_size, d.reference_price, d.premium_budget, "
+            + "d.option_side, d.instrument_token, d.instrument_key, d.symbol, d.lot_size, d.reference_price, d.premium_budget, "
             + "d.reference_capital, d.lots, d.leg_group, d.decided_at, d.reason, coalesce(s.size_multiplier, 1) as size_multiplier, "
             + "(d.context->>'strategy_lots')::float8 as strategy_lots, (d.context->>'intended_lots')::float8 as intended_lots, "
             + "(d.context->>'liquidity_lots')::float8 as liquidity_lots, (d.context->>'rvol_tod')::float8 as rvol_tod, "
             + "(d.context->>'call_ask')::float8 as call_ask, (d.context->>'put_ask')::float8 as put_ask, "
+            + "(d.context->>'stop_pct')::float8 as stop_pct, "
             // replay depth ceiling: what the signal account's own position got filled through the same book
             + "(select tp.quantity from trade.position tp where tp.session_id = d.signal_session_id "
             + "and tp.strategy_id = d.strategy_id and tp.underlying = d.underlying and tp.symbol = d.symbol "
@@ -591,11 +866,12 @@ public final class FollowerSimulator {
     private static Pending pendingRow(ResultSet rs, int i) throws SQLException {
         return new Pending(rs.getLong("id"), rs.getString("execution_mode"), rs.getString("action"),
                 rs.getString("strategy_id"), rs.getString("underlying"), rs.getString("option_side"),
-                rs.getLong("instrument_token"), rs.getString("symbol"), rs.getInt("lot_size"),
+                rs.getLong("instrument_token"), InstrumentKeys.normalize(rs.getString("instrument_key"),
+                        rs.getLong("instrument_token")), rs.getString("symbol"), rs.getInt("lot_size"),
                 orNaN(rs, "reference_price"), orNaN(rs, "premium_budget"), orNaN(rs, "reference_capital"),
                 rs.getInt("lots"), rs.getString("leg_group"), rs.getTimestamp("decided_at").toInstant(),
                 rs.getString("reason"), rs.getDouble("size_multiplier"), orNaN(rs, "strategy_lots"),
                 orNaN(rs, "intended_lots"), orNaN(rs, "liquidity_lots"), orNaN(rs, "rvol_tod"), orNaN(rs, "call_ask"),
-                orNaN(rs, "put_ask"), bookQuantity(rs));
+                orNaN(rs, "put_ask"), bookQuantity(rs), orNaN(rs, "stop_pct"));
     }
 }

@@ -7,10 +7,11 @@ import com.autotrade.config.ThresholdConfig;
 
 /**
  * A follower's risk file (config/risk/follower-risk.vN.yaml): capital limits, position and lot limits, the RVOL boost
- * (v2) and the simulated fill model. Limits a file does not set are off (v1: no position, lot or boost rules).
+ * (v2), the simulated fill model and, from v3, the broker order rules ({@code orders}: null before v3, when only
+ * simulated fills are possible). Limits a file does not set are off (v1: no position, lot or boost rules).
  */
 public record FollowerRisk(String version, CapitalLimits limits, int maxOpenPositions, int maxLotsPerUnderlying,
-                           double rvolBoostThreshold, double rvolBoostFactor, double adverseBps) {
+                           double rvolBoostThreshold, double rvolBoostFactor, double adverseBps, OrderRules orders) {
 
     public static FollowerRisk load(Path file) {
         ThresholdConfig c = ThresholdConfig.load(file);
@@ -21,7 +22,7 @@ public record FollowerRisk(String version, CapitalLimits limits, int maxOpenPosi
                 c.has("positions.max_lots_per_underlying") ? c.getInt("positions.max_lots_per_underlying") : Integer.MAX_VALUE,
                 c.has("sizing.rvol_boost_threshold") ? c.getDouble("sizing.rvol_boost_threshold") : Double.NaN,
                 c.has("sizing.rvol_boost_factor") ? c.getDouble("sizing.rvol_boost_factor") : 1.0,
-                c.has("simulation.adverse_bps") ? c.getDouble("simulation.adverse_bps") : 0);
+                c.has("simulation.adverse_bps") ? c.getDouble("simulation.adverse_bps") : 0, OrderRules.from(c));
     }
 
     /** The budget multiplier for an entry at this RVOL (risk v17: the factor at or above the threshold, else 1). */

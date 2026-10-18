@@ -113,6 +113,17 @@ public final class AccountStore {
                 tenantId, name);
     }
 
+    public Optional<BrokerAccount> byId(long id) {
+        return jdbc.query("select " + ACCOUNT_COLUMNS + " from acct.broker_account a where a.id = ?", AccountStore::account,
+                id).stream().findFirst();
+    }
+
+    /** A tenant's accounts (the API's per-tenant view). */
+    public List<BrokerAccount> ofTenant(long tenantId) {
+        return jdbc.query("select " + ACCOUNT_COLUMNS + " from acct.broker_account a where a.tenant_id = ? order by a.id",
+                AccountStore::account, tenantId);
+    }
+
     public Optional<BrokerAccount> byLegacyLabel(String legacyLabel) {
         return jdbc.query("select " + ACCOUNT_COLUMNS + " from acct.broker_account a where a.legacy_account_label = ?",
                 AccountStore::account, legacyLabel).stream().findFirst();

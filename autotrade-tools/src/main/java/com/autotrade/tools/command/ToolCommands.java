@@ -491,16 +491,29 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
             System.err.println("no zt source for retry quotes (" + e.getMessage() + "): own capture only");
         }
         com.autotrade.execution.StoredQuotes quotes = new com.autotrade.execution.StoredQuotes(target, archive);
-        for (LocalDate day : args.dates("session")) {
-            int intents = fanOut.fanOut(group, day);
-            System.out.printf("%s: %d intents%n", day, intents);
-            for (com.autotrade.account.BrokerAccount account : accounts.followers(group)) {
-                com.autotrade.execution.FollowerRisk risk = com.autotrade.execution.FollowerRisk.load(Path.of(account.riskFile()));
-                var result = new com.autotrade.execution.FollowerSimulator(target, costs, risk, funds, quotes)
-                        .run(account, group, day);
-                System.out.printf("  %-10s %-7s executed %d, skipped %d, rejected %d, closed %d, net %.0f  %s%n",
-                        result.account(), account.tradeMode(), result.executed(), result.skipped(), result.rejected(),
-                        result.closed(), result.net(), result.reasons());
+        // each account's venue from the broker registry: simulated fills, or (a ZERODHA DRY_RUN account on a v3 risk
+        // file) the Kite adapter against its own local simulator; LIVE is refused there
+        try (com.autotrade.execution.BrokerConnections connections =
+                     new com.autotrade.execution.BrokerConnections(target, funds)) {
+            Map<Long, com.autotrade.execution.FollowerSimulator> followers = new java.util.HashMap<>();
+            for (LocalDate day : args.dates("session")) {
+                int intents = fanOut.fanOut(group, day);
+                System.out.printf("%s: %d intents%n", day, intents);
+                for (com.autotrade.account.BrokerAccount account : accounts.followers(group)) {
+                    com.autotrade.execution.FollowerRisk risk =
+                            com.autotrade.execution.FollowerRisk.load(Path.of(account.riskFile()));
+                    var route = connections.route(account, risk);
+                    if (route.venue() == null) {
+                        System.out.printf("  %-10s %-7s not run: %s%n", account.displayName(), account.tradeMode(),
+                                route.description());
+                        continue;
+                    }
+                    var result = followers.computeIfAbsent(account.id(), id -> new com.autotrade.execution.FollowerSimulator(
+                            target, costs, risk, route.venue(), quotes)).run(account, group, day);
+                    System.out.printf("  %-10s %-7s executed %d, skipped %d, rejected %d, closed %d, net %.0f  %s%n",
+                            result.account(), account.tradeMode(), result.executed(), result.skipped(), result.rejected(),
+                            result.closed(), result.net(), result.reasons());
+                }
             }
         }
         return 0;

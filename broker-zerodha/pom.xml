@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.autotrade</groupId>
+        <artifactId>autotrade-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+    <artifactId>broker-zerodha</artifactId>
+    <description>Zerodha Kite Connect v3 adapter (live plan L2): daily request-token login, orders with tags, quotes, funds,
+        order and trade books, rate limit; and a local Kite simulator with fault injection for DRY_RUN and tests. No
+        SDK: plain HTTP (java.net.http) and Jackson. LIVE use needs the user's explicit go-ahead.</description>
+    <dependencies>
+        <dependency><groupId>com.autotrade</groupId><artifactId>broker-api</artifactId></dependency>
+        <dependency><groupId>tools.jackson.core</groupId><artifactId>jackson-databind</artifactId></dependency>
+        <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId></dependency>
+    </dependencies>
+</project>
