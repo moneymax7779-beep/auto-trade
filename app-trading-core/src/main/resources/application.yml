@@ -64,10 +64,9 @@ autotrade:
       # Its file and code stay; it returns only through a new registered test.
       - config/strategy/ma-cross.v1.yaml                   # mac-v1 forward test in PAPER (A-067, user 2026-10-09 20:40: "run it in paper"); A-066 test PASS, held-out FAIL on one trade; never the expiring index; Rs 2.5L budget; last, so the others take the capital first
       - config/strategy/opening-drive-momentum.v4.yaml     # odm-v4 live from 14 Oct (A-093) = odm-v3 (A-089) + peak trail (arm +50 %, exit 15 % off the peak; A-091 PASS, thin): never worse than v3 on 23 tick days (+Rs 1.55L), 13 Oct +Rs 35K; last, so the others take the capital first
-      # 2026-10-19 (A-148, user 18 Oct ~23:55: "add zbf-v10 in PAPER mode", chose live PAPER-1 shared over shadow after A-145):
-      # zone-break-flow v10 = zbf-v5 rules on NIFTY only (A-144 bar-day PASS alone; A-145 inside the set: -Rs 7.53L on the test days).
-      # Last in the list, so on a common trigger the six above take the capital first.
-      - config/strategy/zone-break-flow.v10.yaml
+      # zbf-v10 removed 2026-10-19 after one live session (A-149, user 19 Oct ~16:50: "remove zbf-v10 from the live set"):
+      # live 19 Oct only (A-148), 3 trades, 3 losses, -Rs 1,49,446 (the set's day -Rs 1,16,673; without it +Rs 32,774).
+      # Its file and code stay; it returns only through a new registered test.
     features-file: config/features/features.v12.yaml   # v12 from 14 Oct (A-090 PASS, A-093): v11 + bar backfill of spot history, weekly/monthly levels, OI-change z-scores; no trade changed on 23 tick days. v11 (A-030) live 2-13 Oct
     exchange-file: config/exchange/nse-bse-sessions.v3.yaml
     costs-file: config/costs/india-index-options-costs.v2.yaml   # v2: Upstox Plus brokerage Rs 30/order from 2026-09-01 (A-044, user 2026-10-06)
