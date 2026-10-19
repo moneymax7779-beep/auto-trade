@@ -1,4 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
+import { OiTapePanel } from "../components/OiTapePanel";
 import { useMemo, useState } from "react";
 import { LEVEL_COLORS, LevelTogglesBar, levelColor, mergeLevels, useLevels, useLevelToggles, visibleLevels, visibleZones } from "../components/levels";
 import { Link, useParams, useSearchParams } from "react-router";
@@ -387,6 +388,13 @@ export function SessionDetailPage() {
             </>
           )}
       </Panel>
+
+      {session && (
+        <OiTapePanel underlying={underlying} date={session.session_date}
+          title={`${underlying} · OI tape · ${session.session_date} · this session's trades`}
+          trades={(positions.data ?? []).filter((p) => p.underlying === underlying)
+            .map((p) => ({ label: `${p.strategy_id ?? ""} ${p.option_side}`, opened: p.opened_at, closed: p.closed_at, net: p.net }))} />
+      )}
 
       <Panel title="Trades">
         <TradesTable rows={positions.data ?? []} showStrategy={strategyIds.length > 1} empty="No trades." numbered

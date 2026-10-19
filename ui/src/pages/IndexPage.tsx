@@ -8,6 +8,7 @@ import { splitDecisionKey, storedScores, StrategyMatrix } from "../components/st
 import { SurgePanel, type DayNav } from "../components/SurgePanel";
 import { TradesTable } from "../components/TradesTable";
 import { PcrPanel } from "../components/PcrPanel";
+import { OiTapePanel, type TapeTrade } from "../components/OiTapePanel";
 import { ErrorNote, Loading, Panel, Pnl } from "../components/ui";
 
 export const INDICES = ["NIFTY", "SENSEX", "BANKNIFTY"] as const;
@@ -95,6 +96,8 @@ function LiveDay({ underlying, s, nav }: { underlying: string; s: Status; nav: D
           volatility={market.volatility} cas={market.cas} />
       )}
       <SurgePanel live date={s.date} underlying={underlying} nav={nav} />
+      {s.date && <OiTapePanel underlying={underlying} date={s.date} live
+        trades={[...open, ...closed].filter((p) => p.opened).map((p): TapeTrade => ({ label: `${p.strategy ?? ""} ${p.side}`, opened: p.opened!, closed: p.closed, net: p.net }))} />}
       <PcrPanel underlying={underlying} live />
       {entries.length > 0 && (
         <Panel title={`Strategies on ${underlying}`}>
@@ -131,6 +134,8 @@ function PastDay({ underlying, day, sessionId, nav }: { underlying: string; day:
             <Link to={`/sessions/${sessionId}`} className="hover:underline">session #{sessionId}</Link></span></>} />
       )}
       <SurgePanel date={day} underlying={underlying} nav={nav} />
+      <OiTapePanel underlying={underlying} date={day}
+        trades={trades.map((p): TapeTrade => ({ label: `${p.strategy_id ?? ""} ${p.option_side}`, opened: p.opened_at, closed: p.closed_at, net: p.net }))} />
       <PcrPanel underlying={underlying} date={day} />
       {rows.length > 0 && (
         <Panel title={`How each strategy ended on ${underlying}`}>
