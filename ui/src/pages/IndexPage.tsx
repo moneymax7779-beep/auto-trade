@@ -26,13 +26,15 @@ export function IndexPage() {
   const picked = params.get("date");
   const status = useQuery({ queryKey: ["status"], queryFn: () => get<Status>("/api/status"), refetchInterval: 2000 });
   const sessions = useQuery({ queryKey: ["sessions"], queryFn: () => get<SessionRow[]>("/api/sessions") });
+  // the days the own capture holds: a day can be shown (charts, OI tape, PCR) without a live session record of it
+  const captured = useQuery({ queryKey: ["oi-tape-days"], queryFn: () => get<string[]>("/api/oi-tape/days") });
   if (status.isLoading) return <Loading what="live status" />;
   if (status.error) return <ErrorNote error={status.error} />;
   const s = status.data!;
   const running = s.status !== "NO_SESSION" && s.session != null;
-  // every day with a live session, newest first (the dates the charts can show)
+  // every day with a live session or the own capture, newest first (the dates the charts can show)
   const liveSessions = (sessions.data ?? []).filter((r) => r.mode === "PAPER_LIVE");
-  const days = [...new Set(liveSessions.map((r) => r.session_date))].sort().reverse();
+  const days = [...new Set([...liveSessions.map((r) => r.session_date), ...(captured.data ?? [])])].sort().reverse();
   const showLive = running && (!picked || picked === s.date);
   const day = showLive ? s.date! : picked ?? days[0];
   const go = (d: string | null) => setParams(d && !(running && d === s.date) ? { date: d } : {});
@@ -144,7 +146,8 @@ function PastDay({ underlying, day, sessionId, nav }: { underlying: string; day:
         </Panel>
       )}
       <Panel title={`Trades on ${underlying} · ${day}`}>
-        <TradesTable rows={trades} showStrategy empty={positions.isLoading ? "Loading…" : "No trades on this index that day."} />
+        <TradesTable rows={trades} showStrategy empty={sessionId == null ? "No live session of this day is recorded on this server (its market data is)."
+          : positions.isLoading ? "Loading…" : "No trades on this index that day."} />
       </Panel>
     </>
   );

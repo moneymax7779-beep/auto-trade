@@ -174,6 +174,12 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
         return out;
     }
 
+    /** Every day the own capture holds (md.load_manifest, newest first): the days the tape can show. */
+    @GetMapping("/days")
+    List<String> days() {
+        return jdbc.queryForList("select distinct session_date::text from md.load_manifest order by 1 desc", String.class);
+    }
+
     @GetMapping("/strikes")
     Map<String, Object> strikes(@RequestParam(required = false) String date, @RequestParam String underlying,
                                 @RequestParam String at, @RequestParam(defaultValue = "300") int back) {
