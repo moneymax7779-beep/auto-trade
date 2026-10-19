@@ -100,6 +100,9 @@ autotrade:
       # 2026-10-15 ~23:55 (A-114, user: "yes register A-114 and put odb-v9 in shadow"): odb-v3 + the 10:00 exit extended
       # to 15:15 only with futures RVOL >= 1 and the future on the trade's side of VWAP; own session, judged forward.
       - config/strategy/opening-drive.v9.yaml
+      # 2026-10-19 ~19:00 (A-150, user: "add zbf-v10 as a shadow"): zbf-v10 after it left the live set (A-149); own session,
+      # no capital shared with the live set, judged forward.
+      - config/strategy/zone-break-flow.v10.yaml
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"
