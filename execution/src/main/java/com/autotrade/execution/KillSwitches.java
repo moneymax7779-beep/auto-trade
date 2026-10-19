@@ -70,12 +70,13 @@ public final class KillSwitches {
 
     /** Releases a switch; false when it was not engaged (or belongs to another tenant). */
     public boolean release(long id, Long tenantId, String actor) {
-        int released = jdbc.update("update exec.kill_switch set released_at = now(), released_by = ? where id = ? "
-                + "and released_at is null and (?::bigint is null or tenant_id = ?)", actor, id, tenantId, tenantId);
-        if (released > 0) {
-            audit(tenantId, null, actor, "KILL_RELEASED", Map.of("switch", id));
+        List<Long> account = jdbc.queryForList("update exec.kill_switch set released_at = now(), released_by = ? where id = ? "
+                + "and released_at is null and (?::bigint is null or tenant_id = ?) returning coalesce(broker_account_id, -1)",
+                Long.class, actor, id, tenantId, tenantId);
+        if (!account.isEmpty()) {                                    // audited on the switch's account, when it has one
+            audit(tenantId, account.getFirst() < 0 ? null : account.getFirst(), actor, "KILL_RELEASED", Map.of("switch", id));
         }
-        return released > 0;
+        return !account.isEmpty();
     }
 
     /** Engaged switches: a tenant's, or every one ({@code tenantId} null, ADMIN). */

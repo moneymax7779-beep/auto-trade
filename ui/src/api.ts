@@ -303,3 +303,85 @@ export interface PerformanceRow {
   average_cost: number | null;
   average_exit: number | null;
 }
+
+// ---------------------------------------------------------------- execution workers (Accounts page)
+// Same origin: trading-core forwards /api/execution/** to app-execution (ExecutionProxyController).
+
+/** POST a JSON body; a refusal's reason (the API's "message" or "error") becomes the thrown error. */
+export async function postJson<T>(path: string, body: unknown): Promise<T> {
+  const response = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body ?? {}),
+  });
+  const text = await response.text();
+  let parsed: Json | null = null;
+  try {
+    parsed = text ? (JSON.parse(text) as Json) : null;
+  } catch {
+    parsed = null;
+  }
+  if (!response.ok) {
+    const reason = (parsed?.message as string) || (parsed?.error as string) || response.statusText;
+    throw new Error(`${response.status}: ${reason}`);
+  }
+  return parsed as T;
+}
+
+export interface AccountTurn {
+  accountId: number;
+  tenantId: number;
+  account: string;
+  mode: string;
+  broker: string;
+  route: string | null;
+  leaseEpoch: number | null;
+  state: string;
+  lastRun: string;
+  lastResult: string;
+}
+
+export interface WorkerStatus {
+  worker: string;
+  copyGroup: string;
+  day: string;
+  lastTick: string | null;
+  stale: boolean;
+  accounts: AccountTurn[];
+}
+
+export interface ExecutionAccount {
+  id: number;
+  tenantId: number;
+  name: string;
+  broker: string;
+  mode: string;
+  role: string;
+  enabled: boolean;
+  allocatedCapital: number;
+  riskFile: string;
+  connection: string | null;
+  lastTurn: AccountTurn | null;
+}
+
+export interface KillSwitch {
+  id: number;
+  tenantId: number | null;
+  scope: "GLOBAL_LIVE" | "ACCOUNT" | "STRATEGY" | "INSTRUMENT";
+  accountId: number | null;
+  strategyId: string | null;
+  instrumentKey: string | null;
+  reason: string;
+  engagedBy: string;
+  engagedAt: string;
+}
+
+export interface AuditRow {
+  id: number;
+  tenant_id: number | null;
+  broker_account_id: number | null;
+  actor: string;
+  action: string;
+  detail: string;
+  at: string;
+}

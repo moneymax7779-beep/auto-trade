@@ -112,3 +112,26 @@ section 13, "Chaos drill").
   and `/sim/state`. The faults are `NONE`, `HTTP_429`, `HTTP_500`, `HTTP_500_PROCESSED`, `TIMEOUT`,
   `TIMEOUT_PROCESSED`, `TOKEN_EXPIRED`, `INPUT_ERROR` and `REJECT_FUNDS`.
 - **Afterwards:** recreate the worker without `AUTOTRADE_EXECUTION_DAY`.
+
+## The Accounts page (UI)
+
+A branch-built UI runs next to the main one, at **http://127.0.0.1:8097/accounts**. It is trading-core in serve mode
+(display only: no session, alerts or cues), with no tokens and no zt mount, and it forwards `/api/execution/**` to the
+worker. The main UI on 8095 (the GCP code) is unchanged.
+
+The page shows:
+
+- the worker's heartbeat;
+- each follower account: broker, mode, session, allocation, route, last turn and result;
+- Kill, "Logged in" (marks the session ACTIVE) and Flatten (type FLATTEN) per account;
+- kill switches: list, release, engage by account, strategy, contract, or every LIVE account (admin);
+- Flatten all (type FLATTEN ALL);
+- the audit log, filterable by account.
+
+```bash
+AUTOTRADE_CODE_VERSION=<tag> docker compose -p autotrade --profile preview up -d --no-deps ui-preview   # start
+docker stop autotrade-ui-preview                                                                       # stop
+```
+
+The page acts as `autotrade.ui.execution-user` (default `local-owner`). This is not a login: both ports are loopback
+only until Keycloak.

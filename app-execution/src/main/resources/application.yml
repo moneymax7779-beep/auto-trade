@@ -4,6 +4,9 @@
 spring:
   application:
     name: autotrade-execution
+  web:
+    error:
+      include-message: always         # a refusal's reason ("read-only role for this account") reaches the UI
   datasource:
     url: ${AUTOTRADE_DB_URL:jdbc:postgresql://127.0.0.1:5500/autotrade}
     username: ${AUTOTRADE_DB_USER:autotrade}

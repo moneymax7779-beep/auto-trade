@@ -1,4 +1,5 @@
 import { NavLink, Route, Routes } from "react-router";
+import { AccountsPage } from "./pages/AccountsPage";
 import { ConfigPage } from "./pages/ConfigPage";
 import { IndexPage } from "./pages/IndexPage";
 import { LivePage } from "./pages/LivePage";
@@ -17,6 +18,7 @@ const NAV = [
   ["/performance", "Performance"],
   ["/research", "Research"],
   ["/replay", "Replay"],
+  ["/accounts", "Accounts"],          // live execution: accounts, kill switches, flatten (feature/live-execution)
   ["/config", "Config"],
 ] as const;
 
@@ -51,6 +53,7 @@ export function App() {
           <Route path="/research/:id" element={<RunDetailPage />} />
           <Route path="/replay" element={<ReplayPage />} />
           <Route path="/config" element={<ConfigPage />} />
+          <Route path="/accounts" element={<AccountsPage />} />
         </Routes>
       </main>
     </div>

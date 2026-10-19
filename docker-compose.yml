@@ -104,6 +104,35 @@ services:
     mem_limit: 768m
     restart: unless-stopped
 
+  # A branch-built UI next to the main one (user, 19 Oct: "build it on 8097"): trading-core in serve mode (display only,
+  # no session, no alerts, no cues), the UI with the Accounts page, /api/execution forwarded to the execution worker.
+  # No tokens and no zt mount: replays and history only read the auto-trade database. Opt-in:
+  #   AUTOTRADE_CODE_VERSION=<tag> docker compose -p autotrade --profile preview up -d --no-deps ui-preview
+  ui-preview:
+    profiles: ["preview"]
+    image: autotrade-trading-core:${AUTOTRADE_CODE_VERSION:-latest}
+    container_name: autotrade-ui-preview
+    command: ["--mode=serve"]
+    environment:
+      AUTOTRADE_DB_URL: jdbc:postgresql://postgres:5432/autotrade
+      AUTOTRADE_DB_PASSWORD: ${AUTOTRADE_DB_PASSWORD:-autotrade}
+      AUTOTRADE_UI_EXECUTION_URL: http://execution:8096
+      ZT_SOURCE_URL: jdbc:postgresql://postgres:5432/zt_archive
+      ZT_SOURCE_USER: autotrade
+      ZT_SOURCE_PASSWORD: autotrade
+      ZT_SOURCE_PASSWORD_FILE: /nonexistent
+      JAVA_TOOL_OPTIONS: "-Xmx768m -XX:+ExitOnOutOfMemoryError"
+      SERVER_ADDRESS: 0.0.0.0
+    ports:
+      - "127.0.0.1:8097:8095"
+    volumes:
+      - ./config:/app/config:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 1g
+    restart: unless-stopped
+
   valkey:
     image: valkey/valkey:8-alpine
     container_name: autotrade-valkey
