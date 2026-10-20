@@ -58,4 +58,16 @@ class OiTapeSeriesTest {
         assertThat(OiTapeController.time(39)).isEqualTo("09:34:30");
         assertThat(OiTapeController.STEPS).isEqualTo(750);
     }
+
+    /** Today is read to whole steps the capture has written (15 s back), never past the close. */
+    @org.junit.jupiter.api.Test
+    void readsTodayOnlyToStepsTheCaptureHasWritten() {
+        java.time.Instant close = java.time.Instant.parse("2026-10-19T10:00:00Z");
+        org.assertj.core.api.Assertions.assertThat(OiTapeController.readableUntil(java.time.Instant.parse("2026-10-19T04:00:40Z"), close))
+                .isEqualTo(java.time.Instant.parse("2026-10-19T04:00:00Z"));      // 04:00:25 written -> the 04:00:00 step boundary
+        org.assertj.core.api.Assertions.assertThat(OiTapeController.readableUntil(java.time.Instant.parse("2026-10-19T04:00:46Z"), close))
+                .isEqualTo(java.time.Instant.parse("2026-10-19T04:00:30Z"));
+        org.assertj.core.api.Assertions.assertThat(OiTapeController.readableUntil(java.time.Instant.parse("2026-10-19T10:00:20Z"), close))
+                .isEqualTo(close);
+    }
 }

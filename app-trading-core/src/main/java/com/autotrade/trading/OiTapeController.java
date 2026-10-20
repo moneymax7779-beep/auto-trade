@@ -60,6 +60,11 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
     static final int STEP = 30;
     static final int STEPS = (int) (java.time.Duration.between(OPEN, CLOSE).toSeconds() / STEP);   // 750
     static final int BAND = 5, STRIKES = 15;
+    /**
+     * Today is read only up to this long ago: the live capture writes its ticks every 5 s ({@code LiveCapture.flush}),
+     * and a step is read once, so a step read before its last ticks were written would keep them out for good.
+     */
+    static final java.time.Duration WRITE_LAG = java.time.Duration.ofSeconds(15);
     private static final int KEPT_DAYS = 16;
 
     /** One index and day: per step the index, the future and every option contract's last OI in that step (NaN = none). */
@@ -104,12 +109,15 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
     });
     private final List<String> underlyings;
     private final org.springframework.boot.ApplicationArguments args;
+    private final MarketHours market;
     private java.util.concurrent.ScheduledExecutorService warmer;
 
-    OiTapeController(DataSource target, TradingProperties properties, org.springframework.boot.ApplicationArguments args) {
+    OiTapeController(DataSource target, TradingProperties properties, org.springframework.boot.ApplicationArguments args,
+                     MarketHours market) {
         this.jdbc = new JdbcTemplate(target);
         this.underlyings = List.copyOf(properties.trading().underlyings());
         this.args = args;
+        this.market = market;
     }
 
     @org.springframework.context.event.EventListener(org.springframework.boot.context.event.ApplicationReadyEvent.class)
@@ -123,7 +131,7 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
                 Thread.ofPlatform().name("oi-tape-warmer").daemon(true).factory());
         warmer.scheduleAtFixedRate(() -> {
             ZonedDateTime now = ZonedDateTime.now(MarketTime.IST);
-            if (now.getDayOfWeek().getValue() > 5 || now.toLocalTime().isBefore(OPEN.plusSeconds(STEP))
+            if (!market.tradingDay(now.toLocalDate()) || now.toLocalTime().isBefore(OPEN.plusSeconds(STEP))
                     || now.toLocalTime().isAfter(CLOSE.plusMinutes(2))) {
                 return;
             }
@@ -174,10 +182,14 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
         return out;
     }
 
-    /** Every day the own capture holds (md.load_manifest, newest first): the days the tape can show. */
+    /**
+     * Every day the own capture holds (an ACTIVE md.load_manifest entry, newest first): the days the tape can show. A
+     * failed or superseded load holds no ticks.
+     */
     @GetMapping("/days")
     List<String> days() {
-        return jdbc.queryForList("select distinct session_date::text from md.load_manifest order by 1 desc", String.class);
+        return jdbc.queryForList("select distinct session_date::text from md.load_manifest where status = 'ACTIVE' "
+                + "order by 1 desc", String.class);
     }
 
     @GetMapping("/strikes")
@@ -235,12 +247,13 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
         return out;
     }
 
-    /** An earlier day not yet in memory is read after the close only, so it never competes with the live session. */
+    /**
+     * An earlier day not yet in memory is read only outside market hours (holidays included), so it never competes with
+     * the live session.
+     */
     private boolean deferred(LocalDate day, String u) {
         ZonedDateTime now = ZonedDateTime.now(MarketTime.IST);
-        boolean marketHours = now.getDayOfWeek().getValue() <= 5 && !now.toLocalTime().isBefore(PREOPEN)
-                && now.toLocalTime().isBefore(LocalTime.of(15, 50));
-        return marketHours && !day.equals(now.toLocalDate()) && !days.containsKey(day + "|" + u);
+        return market.busy(now) && !day.equals(now.toLocalDate()) && !days.containsKey(day + "|" + u);
     }
 
     /** The day, read up to now (today) or to the close; null when the capture has no options for it. */
@@ -259,13 +272,24 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
         synchronized (d) {
             if (!d.complete) {
                 Instant end = ts(day, CLOSE).toInstant();
-                Instant now = Instant.now();
-                Instant until = now.isBefore(end) ? Instant.ofEpochSecond(now.getEpochSecond() / STEP * STEP) : end;
+                Instant until = readableUntil(Instant.now(), end);
                 read(d, u, until);
                 d.complete = !until.isBefore(end);
             }
         }
         return d;
+    }
+
+    /** How far a day can be read at {@code now}: whole steps written by the capture ({@link #WRITE_LAG}), or the close. */
+    static Instant readableUntil(Instant now, Instant end) {
+        Instant written = now.minus(WRITE_LAG);
+        return written.isBefore(end) ? Instant.ofEpochSecond(Math.floorDiv(written.getEpochSecond(), STEP) * STEP) : end;
+    }
+
+    /** A malformed {@code date} or {@code at} is the caller's error (400), not the server's. */
+    @org.springframework.web.bind.annotation.ExceptionHandler(java.time.format.DateTimeParseException.class)
+    org.springframework.http.ResponseEntity<Map<String, Object>> badTime(java.time.format.DateTimeParseException e) {
+        return org.springframework.http.ResponseEntity.badRequest().body(Map.of("error", "bad date or time: " + e.getParsedString()));
     }
 
     /** Reads the ticks from where the day was left up to {@code until} (whole 30 s steps). */

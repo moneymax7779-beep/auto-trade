@@ -89,7 +89,7 @@ function Tape({ d, view, setView, trades, pinned, setPinned, bucket, setBucket }
     return d.series.map((r) => { cc += r[7]; cp += r[8]; return { t: secs(r[0]) / 60, time: r[0], spot: r[1], fpx: r[2], foi: r[3], atm: r[4],
       ce: r[5], pe: r[6], dce: r[7], dpe: r[8], pcr: r[9], cumCe: cc, cumPe: cp }; });
   }, [d.series]);
-  const vis = rows.filter((r) => r.t >= view.a && r.t <= view.b);
+  const vis = useMemo(() => rows.filter((r) => r.t >= view.a && r.t <= view.b), [rows, view.a, view.b]);
   const span = view.b - view.a;
   const step = bucket === "auto" ? (span > 150 ? 300 : span > 40 ? 60 : 30) : bucket;
   const bars = useMemo(() => {
@@ -249,10 +249,10 @@ function Tape({ d, view, setView, trades, pinned, setPinned, bucket, setBucket }
 
 function Strikes({ underlying, date, at, pinned, live }: { underlying: string; date: string; at: string; pinned: boolean; live?: boolean }) {
   const [back, setBack] = useState(300);
+  // live and unpinned, "at" follows the tape's latest step, so a new step is a new query: no timer of its own
   const q = useQuery({
     queryKey: ["oi-strikes", underlying, date, at, back],
     queryFn: () => get<StrikesData>(`/api/oi-tape/strikes?underlying=${underlying}&date=${date}&at=${at}&back=${back}`),
-    refetchInterval: live && !pinned ? 30_000 : false,
   });
   const [ref, W] = useWidth<HTMLDivElement>();
   const d = q.data;

@@ -60,12 +60,15 @@ class PcrController implements org.springframework.beans.factory.DisposableBean 
     private final Map<String, Day> days = new ConcurrentHashMap<>();
     private final List<String> underlyings;
     private final org.springframework.boot.ApplicationArguments args;
+    private final MarketHours market;
     private java.util.concurrent.ScheduledExecutorService warmer;
 
-    PcrController(DataSource target, TradingProperties properties, org.springframework.boot.ApplicationArguments args) {
+    PcrController(DataSource target, TradingProperties properties, org.springframework.boot.ApplicationArguments args,
+                  MarketHours market) {
         this.jdbc = new JdbcTemplate(target);
         this.underlyings = List.copyOf(properties.trading().underlyings());
         this.args = args;
+        this.market = market;
     }
 
     @org.springframework.context.event.EventListener(org.springframework.boot.context.event.ApplicationReadyEvent.class)
@@ -79,7 +82,7 @@ class PcrController implements org.springframework.beans.factory.DisposableBean 
                 Thread.ofPlatform().name("pcr-warmer").daemon(true).factory());
         warmer.scheduleAtFixedRate(() -> {
             ZonedDateTime now = ZonedDateTime.now(MarketTime.IST);
-            if (now.getDayOfWeek().getValue() > 5 || now.toLocalTime().isBefore(LocalTime.of(9, 16))
+            if (!market.tradingDay(now.toLocalDate()) || now.toLocalTime().isBefore(LocalTime.of(9, 16))
                     || now.toLocalTime().isAfter(LocalTime.of(15, 32))) {
                 return;
             }
@@ -111,9 +114,7 @@ class PcrController implements org.springframework.beans.factory.DisposableBean 
         out.put("underlying", u);
         String key = day + "|" + u;
         Day d = days.get(key);
-        boolean marketHours = now.getDayOfWeek().getValue() <= 5 && !now.toLocalTime().isBefore(LocalTime.of(9, 0))
-                && now.toLocalTime().isBefore(LocalTime.of(15, 50));
-        if (d == null && !day.equals(today) && marketHours) {
+        if (d == null && !day.equals(today) && market.busy(now)) {
             out.put("deferred", true);                      // an earlier day is computed after the close
             out.put("series", List.of());
             return out;
@@ -132,8 +133,10 @@ class PcrController implements org.springframework.beans.factory.DisposableBean 
         synchronized (d) {
             if (!d.complete) {
                 Instant end = day.atTime(CLOSE).atZone(MarketTime.IST).toInstant();
-                Instant until = day.equals(today) && Instant.now().isBefore(end)
-                        ? Instant.now().truncatedTo(java.time.temporal.ChronoUnit.MINUTES) : end;
+                // today only up to whole minutes the live capture has written (it writes every 5 s; see OiTapeController)
+                Instant written = Instant.now().minus(OiTapeController.WRITE_LAG);
+                Instant until = day.equals(today) && written.isBefore(end)
+                        ? written.truncatedTo(java.time.temporal.ChronoUnit.MINUTES) : end;
                 read(d, day, u, until);
                 d.complete = !until.isBefore(end);
             }
@@ -142,6 +145,12 @@ class PcrController implements org.springframework.beans.factory.DisposableBean 
             out.put("series", List.copyOf(d.series));
         }
         return out;
+    }
+
+    /** A malformed {@code date} is the caller's error (400), not the server's. */
+    @org.springframework.web.bind.annotation.ExceptionHandler(java.time.format.DateTimeParseException.class)
+    org.springframework.http.ResponseEntity<Map<String, Object>> badDate(java.time.format.DateTimeParseException e) {
+        return org.springframework.http.ResponseEntity.badRequest().body(Map.of("error", "bad date: " + e.getParsedString()));
     }
 
     /** Reads the ticks from where the day was left to {@code until} (whole minutes only) and extends the series. */
