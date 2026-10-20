@@ -46,3 +46,34 @@ export function useLinkedTime(): [boolean, (on: boolean) => void] {
   };
   return [on, set];
 }
+
+/*
+ * The moment under the mouse ("cursor") and the moment clicked ("pin") on one index's day, shared by the charts drawn
+ * for it (the price chart and the OI panels under it), in minutes since midnight IST; null = none. Kept apart from the
+ * window's listeners: the cursor changes on every mouse move.
+ */
+const moments = new Map<string, number | null>();
+const momentListeners = new Set<() => void>();
+const momentKey = (kind: "cursor" | "pin", date: string, underlying: string) => `${kind}|${date}|${underlying}`;
+
+export function subscribeMoments(l: () => void) {
+  momentListeners.add(l);
+  return () => { momentListeners.delete(l); };
+}
+
+export function getMoment(kind: "cursor" | "pin", date: string, underlying: string): number | null {
+  return moments.get(momentKey(kind, date, underlying)) ?? null;
+}
+
+export function setMoment(kind: "cursor" | "pin", date: string, underlying: string, m: number | null) {
+  const key = momentKey(kind, date, underlying);
+  if ((moments.get(key) ?? null) === m) return;
+  moments.set(key, m);
+  momentListeners.forEach((l) => l());
+}
+
+/** A component's view of the shared cursor or pin (re-renders when it changes). */
+export function useMoment(kind: "cursor" | "pin", date: string, underlying: string): [number | null, (m: number | null) => void] {
+  const m = useSyncExternalStore(subscribeMoments, () => getMoment(kind, date, underlying));
+  return [m, (v: number | null) => setMoment(kind, date, underlying, v)];
+}

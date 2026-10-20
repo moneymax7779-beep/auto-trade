@@ -6,7 +6,7 @@ import {
   LEVEL_COLORS, LevelTogglesBar, levelColor, mergeLevels, tagName, useLevels, useLevelToggles, visibleLevels, visibleZones,
   type LevelToggles, type LevelsData,
 } from "./levels";
-import { presetView, useChartView, useLinkedTime, type View } from "./chartView";
+import { presetView, useChartView, useLinkedTime, type View, useMoment } from "./chartView";
 
 /** One option side's flow around a surge: ATM ± 2 total OI change and the ATM mid before / after. */
 interface SideFlow { oi: number; pct: number; mid0: number; mid1: number; bid: number; ask: number; label: string; score: number }
@@ -214,7 +214,7 @@ function HitRate({ surges }: { surges: Surge[] }) {
 const T = 10, GAP = 10, AXIS = 24;
 const FULL_W = 1000;                                  // the viewBox width on a wide screen (scaled to fit)
 /** Layout for a width: below FULL_W the chart is drawn 1:1 in pixels so text stays readable on a phone. */
-function layout(boxWidth: number | null) {
+export function layout(boxWidth: number | null) {
   const W = boxWidth && boxWidth < FULL_W ? Math.max(280, Math.round(boxWidth)) : FULL_W;
   const narrow = W < 600;
   const L = narrow ? 48 : 60, R = narrow ? 84 : 104;   // the right gutter holds the price tags
@@ -262,6 +262,10 @@ function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, 
   const clipId = `plot-${useId().replace(/:/g, "")}`;
   const [hover, setHover] = useState<{ m: number; y: number } | null>(null);
   const [view, setView] = useChartView(date, data.underlying, FULL);
+  // the moment under the mouse, shared with the OI panels below: hover there and a line marks it here
+  const [cursor, setCursor] = useMoment("cursor", date, data.underlying);
+  const hoverMinute = hover?.m ?? null;
+  useEffect(() => { setCursor(hoverMinute); }, [hoverMinute]);   // eslint-disable-line react-hooks/exhaustive-deps
   const [linked, setLinked] = useLinkedTime();
   const [showPremium, setShowPremium] = useState(() => { try { return localStorage.getItem(PREMIUM_KEY) !== "false"; } catch { return true; } });
   const [pickedStrike, setPickedStrike] = useState<number | null>(null);
@@ -727,6 +731,10 @@ function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, 
 
           {hover != null && (
             <line x1={X(hover.m)} x2={X(hover.m)} y1={T} y2={VY0 + VOL_H} stroke="var(--color-text)" strokeOpacity={0.35} pointerEvents="none" />
+          )}
+          {hover == null && cursor != null && cursor >= a && cursor <= b && (
+            <line x1={X(cursor)} x2={X(cursor)} y1={T} y2={VY0 + VOL_H} stroke="var(--color-accent)" strokeOpacity={0.6}
+              strokeDasharray="4 3" pointerEvents="none" />
           )}
           {crossY != null && (
             <g pointerEvents="none">

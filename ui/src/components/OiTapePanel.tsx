@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent, type RefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type PointerEvent, type ReactNode, type RefObject } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { get } from "../api";
-import { useChartView, type View } from "./chartView";
+import { useChartView, useMoment, type View } from "./chartView";
+import { layout as surgeLayout } from "./SurgePanel";
 import { ErrorNote, Panel } from "./ui";
 
 /** /api/oi-tape: [time, spot, futures price, futures OI, ATM, band call OI, band put OI, call flow, put flow, band PCR]. */
@@ -15,12 +16,21 @@ interface StrikesData {
   date: string; underlying: string; at?: string; from?: string; spot?: number | null; atm?: number | null; strikeStep?: number;
   deferred?: boolean; rows: [number, number | null, number | null, number | null, number | null][];
 }
+/** /api/surges: per index the futures volume of each minute and its normal ([IST "HH:mm", volume, normal or null]). */
+interface SurgeVolume { underlyings: { underlying: string; volume?: [string, number, number | null][] }[] }
 /** A trade drawn on the tape: entry and exit in IST, "HH:MM[:SS]" or "YYYY-MM-DD HH:MM:SS" (as the API gives them). */
 export interface TapeTrade { label: string; opened: string; closed: string | null; net: number }
+/** The tape's plot margins for a width, so its time axis lines up with the price chart above it. */
+export type TapeInsets = (width: number) => { L: number; R: number };
 
 const DAY0 = 9 * 60 + 15, DAY1 = 15 * 60 + 30;
 const FULL: View = { a: DAY0, b: DAY1 };
-const CALL = "var(--color-accent)", PUT = "var(--color-warn)";
+const CALL = "var(--color-accent)", PUT = "var(--color-warn)", SURGE = "rgba(245,158,11,0.9)", VOL = "rgba(148,163,184,0.55)";
+/** The surge chart's margins in pixels at a width (its drawing is W units wide, scaled to the panel). */
+export const surgeInsets: TapeInsets = (w) => {
+  const { W, L, R } = surgeLayout(w);
+  return { L: (L * w) / W, R: (R * w) / W };
+};
 const secs = (t: string) => { const [h, m, s] = t.split(":").map(Number); return h * 3600 + m * 60 + (s || 0); };
 const istMin = (t: string) => { const m = t.match(/(\d{2}):(\d{2})(?::(\d{2}))?(?!.*\d{2}:\d{2})/); return m ? Number(m[1]) * 60 + Number(m[2]) + Number(m[3] ?? 0) / 60 : NaN; };
 const hm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(Math.floor(m % 60)).padStart(2, "0")}`;
@@ -43,45 +53,68 @@ function useWidth<T extends HTMLElement>(): [RefObject<T | null>, number] {
 }
 
 /**
- * The OI tape of one index and day (display only): the index with the day's trades, the call and put OI added or
- * removed near the money since 09:15, the flow per step, the band's PCR and the futures OI, every 30 seconds from the
- * own capture; and, under it, every strike's OI at any moment you click. Live, it refreshes every 30 seconds. The time
- * window is shared with the surge chart (drag across either to zoom).
+ * The OI tape of one index and day (display only), drawn under the page's price chart and sharing its time window
+ * (zoom either one and the other follows): the call and put OI added or removed near the money since 09:15, the flow
+ * per step, the PCR of the opening chain, the futures OI and the futures volume per minute (surges ≥ 5 × normal in
+ * amber), every 30 seconds from the own capture, with the day's trades as bands; and, under it, every strike's OI at
+ * any moment you click. Live, it refreshes every 30 seconds. The index itself is the chart above.
  */
-export function OiTapePanel({ underlying, date, live, trades = [], title }:
-  { underlying: string; date: string; live?: boolean; trades?: TapeTrade[]; title?: string }) {
+export function OiTapePanel({ underlying, date, live, trades = [], title, insets = surgeInsets, bare }:
+  { underlying: string; date: string; live?: boolean; trades?: TapeTrade[]; title?: string; insets?: TapeInsets;
+    /** drawn inside the price chart's card (no card of its own), right under the chart */
+    bare?: boolean }) {
   const q = useQuery({
     queryKey: ["oi-tape", underlying, date],
     queryFn: () => get<TapeData>(`/api/oi-tape?underlying=${underlying}&date=${date}`),
     refetchInterval: live ? 30_000 : false,
   });
+  // the same per-minute futures volume the price charts draw (shared cache with the surge chart and the session chart)
+  const surges = useQuery({
+    queryKey: ["surges", date],
+    queryFn: () => get<SurgeVolume>(`/api/surges?date=${date}`),
+    refetchInterval: live ? 30_000 : false,
+  });
   const [view, setView] = useChartView(date, underlying, FULL);
-  const [pinned, setPinned] = useState<string | null>(null);
+  // the moment clicked here or on the price chart above (shared): the strike ladder shows it
   const [bucket, setBucket] = useState<"auto" | 30 | 60 | 300>("auto");
-  useEffect(() => setPinned(null), [underlying, date]);
+  const [pinM, setPinM] = useMoment("pin", date, underlying);
+  const volume = useMemo(() => surges.data?.underlyings.find((u) => u.underlying === underlying)?.volume ?? [], [surges.data, underlying]);
   const head = title ?? `${underlying} · OI tape · ${date}`;
-  if (q.error) return <ErrorNote error={q.error} />;
   const d = q.data;
+  const right = d?.expiry ? <span className="text-xs text-muted">expiry {d.expiry} · ATM ± {d.band} strikes · every {d.stepSeconds} s{d.complete ? "" : " · live"}</span> : null;
+  const frame = (body: ReactNode) => bare ? (
+    <div className="mt-4 border-t border-line pt-3">
+      <div className="mb-2 flex flex-wrap items-baseline justify-between gap-2"><span className="text-sm font-semibold">{head}</span>{right}</div>
+      {body}
+    </div>
+  ) : <Panel title={head} right={right}>{body}</Panel>;
+  if (q.error) return frame(<ErrorNote error={q.error} />);
   if (!d || d.series.length === 0) {
-    return <Panel title={head}><p className="text-sm text-muted">{q.isLoading ? "Loading…"
+    return frame(<p className="text-sm text-muted">{q.isLoading ? "Loading…"
       : d?.deferred ? "An earlier day's OI tape is built after the close (15:50 IST), so it never slows the live session."
-      : "No option OI in the own capture for this day (the capture starts on 28 Sep 2026; earlier days were recorded by zt-tiger-v2 only)."}</p></Panel>;
+      : "No option OI in the own capture for this day (the capture starts on 28 Sep 2026; earlier days were recorded by zt-tiger-v2 only). The price chart above still shows the day."}</p>);
   }
-  const at = pinned ?? d.series[d.series.length - 1][0];
-  return (
-    <Panel title={head} right={<span className="text-xs text-muted">expiry {d.expiry} · ATM ± {d.band} strikes · every {d.stepSeconds} s{d.complete ? "" : " · live"}</span>}>
-      <Tape d={d} view={view} setView={setView} trades={trades} pinned={pinned} setPinned={setPinned} bucket={bucket} setBucket={setBucket} />
-      <Strikes underlying={underlying} date={date} at={at} pinned={pinned != null} live={live} />
-    </Panel>
+  // the step holding the pinned moment (the last one that started at or before it), else the latest step
+  const pinRow = pinM == null ? null : [...d.series].reverse().find((r) => secs(r[0]) / 60 <= pinM + 1e-9) ?? d.series[0];
+  const at = pinRow ? pinRow[0] : d.series[d.series.length - 1][0];
+  return frame(
+    <>
+      <Tape d={d} date={date} underlying={underlying} volume={volume} view={view} setView={setView} trades={trades}
+        pinned={pinRow ? pinRow[0] : null} setPinned={(t) => setPinM(t == null ? null : secs(t) / 60)}
+        bucket={bucket} setBucket={setBucket} insets={insets} />
+      <Strikes underlying={underlying} date={date} at={at} pinned={pinRow != null} live={live} />
+    </>
   );
 }
 
-function Tape({ d, view, setView, trades, pinned, setPinned, bucket, setBucket }: {
-  d: TapeData; view: View; setView: (v: View) => void; trades: TapeTrade[]; pinned: string | null; setPinned: (t: string | null) => void;
-  bucket: "auto" | 30 | 60 | 300; setBucket: (b: "auto" | 30 | 60 | 300) => void;
+function Tape({ d, date, underlying, volume, view, setView, trades, pinned, setPinned, bucket, setBucket, insets }: {
+  d: TapeData; date: string; underlying: string; volume: [string, number, number | null][]; view: View; setView: (v: View) => void; trades: TapeTrade[];
+  pinned: string | null; setPinned: (t: string | null) => void;
+  bucket: "auto" | 30 | 60 | 300; setBucket: (b: "auto" | 30 | 60 | 300) => void; insets: TapeInsets;
 }) {
   const [ref, W] = useWidth<HTMLDivElement>();
-  const [hover, setHover] = useState<number | null>(null);
+  // the moment under the mouse, here or on the price chart above (shared)
+  const [hover, setHover] = useMoment("cursor", date, underlying);
   const [drag, setDrag] = useState<{ a: number; b: number } | null>(null);
   // the day's cumulative flow, computed once over every step (so a zoomed window still starts from the day's total)
   const rows = useMemo(() => {
@@ -89,7 +122,9 @@ function Tape({ d, view, setView, trades, pinned, setPinned, bucket, setBucket }
     return d.series.map((r) => { cc += r[7]; cp += r[8]; return { t: secs(r[0]) / 60, time: r[0], spot: r[1], fpx: r[2], foi: r[3], atm: r[4],
       ce: r[5], pe: r[6], dce: r[7], dpe: r[8], pcr: r[9], cumCe: cc, cumPe: cp }; });
   }, [d.series]);
+  const vols = useMemo(() => volume.map(([t, v, normal]) => ({ t: secs(t) / 60, v, surge: normal != null && v >= 5 * normal, normal })), [volume]);
   const vis = useMemo(() => rows.filter((r) => r.t >= view.a && r.t <= view.b), [rows, view.a, view.b]);
+  const visVol = vols.filter((r) => r.t >= view.a && r.t <= view.b);
   const span = view.b - view.a;
   const step = bucket === "auto" ? (span > 150 ? 300 : span > 40 ? 60 : 30) : bucket;
   const bars = useMemo(() => {
@@ -98,17 +133,19 @@ function Tape({ d, view, setView, trades, pinned, setPinned, bucket, setBucket }
     return [...m.values()];
   }, [vis, step]);
 
-  const L = 64, R = 12, gap = 22;
+  const { L, R } = insets(W);
+  const gap = 22;
   const panels = [
-    { key: "spot", label: `${d.underlying} · trades shaded (green won, red lost)`, h: 160 },
     { key: "cum", label: "OI added since 09:15, ATM ± band (calls · puts)", h: 120 },
     { key: "flow", label: `OI change per ${step >= 60 ? `${step / 60} min` : `${step} s`} (calls left, puts right)`, h: 104 },
     { key: "pcr", label: "PCR of the 09:15 chain, a fixed set of strikes (dashed = 1)", h: 64 },
     { key: "fut", label: `Futures OI${d.futuresExpiry ? ` (${d.futuresExpiry})` : ""}`, h: 64 },
+    { key: "vol", label: "Futures volume per minute (amber: a surge, ≥ 5 × the minute's normal)", h: 64 },
   ];
   let yy = 18; const top: Record<string, number> = {};
   panels.forEach((p) => { top[p.key] = yy; yy += p.h + gap; });
   const H = yy - gap + 22;
+  const yEnd = top.vol + panels[panels.length - 1].h;
   const x = (m: number) => L + ((m - view.a) / Math.max(1, span)) * (W - L - R);
   const inv = (px_: number) => view.a + ((px_ - L) / Math.max(1, W - L - R)) * span;
   const scale = (key: string, lo: number, hi: number) => {
@@ -122,13 +159,13 @@ function Tape({ d, view, setView, trades, pinned, setPinned, bucket, setBucket }
     if (incl != null) v.push(incl);
     return v.length ? [Math.min(...v), Math.max(...v)] : [0, 1];
   };
-  const sSpot = scale("spot", ...(ext(vis.map((r) => r.spot)) as [number, number]));
-  const whole = (v: number) => Math.round(v).toLocaleString("en-IN");
   const sCum = scale("cum", ...(ext([...vis.map((r) => r.cumCe), ...vis.map((r) => r.cumPe)], 0) as [number, number]));
   const mxFlow = Math.max(1, ...bars.map((b) => Math.max(Math.abs(b.ce), Math.abs(b.pe))));
   const sFlow = scale("flow", -mxFlow, mxFlow);
   const sPcr = scale("pcr", ...(ext(vis.map((r) => r.pcr), 1) as [number, number]));
   const sFut = scale("fut", ...(ext(vis.map((r) => r.foi)) as [number, number]));
+  const mxVol = Math.max(1, ...visVol.map((r) => r.v));
+  const volY = (v: number) => top.vol + panels[4].h - (v / mxVol) * panels[4].h;
   const path = (f: (r: (typeof rows)[number]) => number | null, s: { y: (v: number) => number }) =>
     vis.reduce((acc, r) => { const v = f(r); if (v == null || !Number.isFinite(v)) return acc; return acc + `${acc ? "L" : "M"}${x(r.t).toFixed(1)},${s.y(v).toFixed(1)}`; }, "");
   const ticks = (() => { const st = span > 240 ? 60 : span > 120 ? 30 : span > 45 ? 15 : span > 15 ? 5 : 1; const out: number[] = [];
@@ -136,7 +173,8 @@ function Tape({ d, view, setView, trades, pinned, setPinned, bucket, setBucket }
   const shown = trades.map((t) => ({ ...t, a: istMin(t.opened), b: t.closed ? istMin(t.closed) : rows[rows.length - 1]?.t ?? DAY1 }))
     .filter((t) => Number.isFinite(t.a) && t.b >= view.a && t.a <= view.b);
   const nearest = (m: number) => vis.reduce((best, r) => (Math.abs(r.t - m) < Math.abs(best.t - m) ? r : best), vis[0]);
-  const hv = hover != null && vis.length ? nearest(hover) : null;
+  const hv = hover != null && hover >= view.a && hover <= view.b && vis.length ? nearest(hover) : null;
+  const hvVol = hv ? vols.find((r) => r.t === Math.floor(hv.t)) : null;
   const pin = pinned ? rows.find((r) => r.time === pinned) : null;
 
   const pos = (e: PointerEvent<SVGRectElement>) => { const b = (e.currentTarget.ownerSVGElement as SVGSVGElement).getBoundingClientRect();
@@ -168,36 +206,37 @@ function Tape({ d, view, setView, trades, pinned, setPinned, bucket, setBucket }
       <div ref={ref} className="relative mt-2">
         <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" className="select-none"
           aria-label={`${d.underlying} OI tape ${hm(view.a)}-${hm(view.b)}`}>
+          {/* the day's trades as bands across every panel (the price chart above draws their entries and exits) */}
+          {shown.map((t, i) => {
+            const col = t.net >= 0 ? "var(--color-up)" : "var(--color-down)";
+            const a = x(Math.max(view.a, t.a)), b = x(Math.min(view.b, t.b));
+            return (
+              <g key={i}>
+                <rect x={a} y={top.cum} width={Math.max(2, b - a)} height={yEnd - top.cum} fill={col} opacity={0.07} />
+                <line x1={x(t.a)} x2={x(t.a)} y1={top.cum} y2={yEnd} stroke={col} strokeDasharray="3 3" opacity={0.5} />
+                <text x={a + 3} y={top.cum + 11 + (i % 3) * 12} className="fill-current text-[10px] opacity-80">{t.label}</text>
+              </g>
+            );
+          })}
           {panels.map((p) => (
             <g key={p.key}>
               <text x={L} y={top[p.key] - 6} className="fill-current text-[11px] font-semibold">{p.label}</text>
               <line x1={L} x2={W - R} y1={top[p.key] + p.h} y2={top[p.key] + p.h} stroke="var(--color-line)" />
             </g>
           ))}
-          {shown.map((t, i) => {
-            const col = t.net >= 0 ? "var(--color-up)" : "var(--color-down)";
-            const a = x(Math.max(view.a, t.a)), b = x(Math.min(view.b, t.b));
-            return (
-              <g key={i}>
-                <rect x={a} y={top.spot} width={Math.max(2, b - a)} height={panels[0].h} fill={col} opacity={0.13} />
-                <line x1={x(t.a)} x2={x(t.a)} y1={top.spot} y2={top.fut + 64} stroke={col} strokeDasharray="3 3" opacity={0.6} />
-                <text x={a + 3} y={top.spot + 11 + (i % 3) * 12} className="fill-current text-[10px] opacity-80">{t.label}</text>
-              </g>
-            );
-          })}
-          {/* axis labels: min and max of each panel */}
-          {[["spot", sSpot, whole], ["cum", sCum, (v: number) => big(v, true)], ["flow", sFlow, (v: number) => big(v, true)],
+          {/* each panel's top and bottom values, in the right gutter like the price axis above */}
+          {[["cum", sCum, (v: number) => big(v, true)], ["flow", sFlow, (v: number) => big(v, true)],
             ["pcr", sPcr, (v: number) => v.toFixed(2)], ["fut", sFut, (v: number) => big(v)]].map(([k, s, f]) => {
             const sc = s as ReturnType<typeof scale>, fmt = f as (v: number) => string;
             const hi = sc.b - (sc.b - sc.a) * 0.08, lo = sc.a + (sc.b - sc.a) * 0.08;
             return (
               <g key={k as string} className="fill-current text-[10px] opacity-60">
-                <text x={L - 6} y={sc.y(hi) + 4} textAnchor="end">{fmt(hi)}</text>
-                <text x={L - 6} y={sc.y(lo) + 4} textAnchor="end">{fmt(lo)}</text>
+                <text x={W - R + 6} y={sc.y(hi) + 4}>{fmt(hi)}</text>
+                <text x={W - R + 6} y={sc.y(lo) + 4}>{fmt(lo)}</text>
               </g>
             );
           })}
-          <path d={path((r) => r.spot, sSpot)} fill="none" stroke="var(--color-text)" strokeWidth={1.5} />
+          <text x={W - R + 6} y={top.vol + 10} className="fill-current text-[10px] opacity-60">{big(mxVol)}</text>
           <line x1={L} x2={W - R} y1={sCum.y(0)} y2={sCum.y(0)} stroke="var(--color-line)" />
           <path d={path((r) => r.cumCe, sCum)} fill="none" stroke={CALL} strokeWidth={2} />
           <path d={path((r) => r.cumPe, sCum)} fill="none" stroke={PUT} strokeWidth={2} />
@@ -214,34 +253,41 @@ function Tape({ d, view, setView, trades, pinned, setPinned, bucket, setBucket }
           {sPcr.a <= 1 && sPcr.b >= 1 && <line x1={L} x2={W - R} y1={sPcr.y(1)} y2={sPcr.y(1)} stroke="currentColor" strokeOpacity={0.3} strokeDasharray="4 4" />}
           <path d={path((r) => r.pcr, sPcr)} fill="none" stroke="#6366f1" strokeWidth={1.6} />
           <path d={path((r) => r.foi, sFut)} fill="none" stroke="var(--color-muted)" strokeWidth={1.6} />
+          {visVol.map((r) => {
+            const w = Math.max(0.6, x(r.t + 1) - x(r.t) - 0.6);
+            return <rect key={r.t} x={x(r.t)} width={w} y={volY(r.v)} height={top.vol + panels[4].h - volY(r.v)} fill={r.surge ? SURGE : VOL} />;
+          })}
+          {visVol.length === 0 && <text x={L + 4} y={top.vol + panels[4].h / 2} className="fill-current text-[10px] opacity-60">no futures volume for this day</text>}
           {ticks.map((m) => (
             <text key={m} x={x(m)} y={H - 6} textAnchor="middle" className="fill-current text-[10px] opacity-60">{hm(m)}</text>
           ))}
-          {pin && <line x1={x(pin.t)} x2={x(pin.t)} y1={top.spot} y2={top.fut + 64} stroke="var(--color-accent)" strokeWidth={1.5} />}
-          {hv && <line x1={x(hv.t)} x2={x(hv.t)} y1={top.spot} y2={top.fut + 64} stroke="currentColor" strokeOpacity={0.35} />}
+          {pin && <line x1={x(pin.t)} x2={x(pin.t)} y1={top.cum} y2={yEnd} stroke="var(--color-accent)" strokeWidth={1.5} />}
+          {hv && <line x1={x(hv.t)} x2={x(hv.t)} y1={top.cum} y2={yEnd} stroke="currentColor" strokeOpacity={0.35} />}
           {drag && Math.abs(drag.b - drag.a) > 0.5 && (
-            <rect x={x(Math.min(drag.a, drag.b))} width={Math.abs(x(drag.b) - x(drag.a))} y={top.spot} height={top.fut + 64 - top.spot}
+            <rect x={x(Math.min(drag.a, drag.b))} width={Math.abs(x(drag.b) - x(drag.a))} y={top.cum} height={yEnd - top.cum}
               fill="var(--color-accent)" opacity={0.12} />
           )}
-          <rect x={L} y={top.spot} width={W - L - R} height={top.fut + 64 - top.spot} fill="transparent" style={{ cursor: "crosshair" }}
+          <rect x={L} y={top.cum} width={Math.max(0, W - L - R)} height={yEnd - top.cum} fill="transparent" style={{ cursor: "crosshair" }}
             onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerLeave={() => { setHover(null); }}
             onDoubleClick={() => setView(FULL)} />
         </svg>
         {hv && (
           <div className="pointer-events-none absolute z-10 rounded border border-line bg-panel px-2 py-1 text-xs shadow num"
-            style={{ left: `${tipLeft}%`, top: top.cum }}>
+            style={{ left: `${tipLeft}%`, top: top.flow }}>
             <div className="text-muted">{hv.time} IST</div>
             <div>spot {px(hv.spot)} · ATM {px(hv.atm)}</div>
             <div><span style={{ color: CALL }}>calls</span> {big(hv.ce)} ({big(hv.dce, true)}) · since 09:15 {big(hv.cumCe, true)}</div>
             <div><span style={{ color: PUT }}>puts</span> {big(hv.pe)} ({big(hv.dpe, true)}) · since 09:15 {big(hv.cumPe, true)}</div>
             <div>PCR {hv.pcr?.toFixed(3) ?? "–"} · futures OI {big(hv.foi)} @ {px(hv.fpx)}</div>
+            {hvVol && <div>futures volume {big(hvVol.v)} in {hm(hvVol.t)}{hvVol.normal ? ` (${(hvVol.v / hvVol.normal).toFixed(1)} × normal)` : ""}</div>}
           </div>
         )}
       </div>
       <p className="mt-1 text-xs text-muted">
-        Drag across the chart to zoom (the surge chart follows), double-click for the whole day; click a moment to see its strikes below.
-        Flow counts only strikes within ATM ± {d.band} that had OI in both steps, so a strike the capture starts recording mid-day adds no
-        false jump. OI is what the exchange had published by the end of each step (NIFTY about once a minute, BSE every 2½–3 minutes).
+        Drag across the panels to zoom (the price chart above follows, and the other way round), double-click for the whole day; click a
+        moment to see its strikes below. Flow counts only strikes within ATM ± {d.band} that had OI in both steps, so a strike the capture
+        starts recording mid-day adds no false jump. OI is what the exchange had published by the end of each step (NIFTY about once a
+        minute, BSE every 2½–3 minutes).
       </p>
     </div>
   );
