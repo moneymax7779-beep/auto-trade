@@ -322,14 +322,21 @@ function Strikes({ underlying, date, at, pinned, live }: { underlying: string; d
         <span className="font-semibold">Strikes at {d?.at ?? at}{pinned ? "" : live ? " (latest)" : " (close)"}</span>
         <span className="text-muted">· change since {d?.from ?? "…"}</span>
         <span className="ml-2 text-muted">over</span>
-        {[60, 300, 900, 1800].map((b) => (
+        {[30, 60, 300, 900, 1800].map((b) => (
           <button key={b} type="button" onClick={() => setBack(b)}
-            className={`rounded border px-2 py-0.5 ${back === b ? "border-accent bg-accent/10" : "border-line text-muted hover:text-text"}`}>{b / 60} min</button>
+            className={`rounded border px-2 py-0.5 ${back === b ? "border-accent bg-accent/10" : "border-line text-muted hover:text-text"}`}>{b < 60 ? `${b} s` : `${b / 60} min`}</button>
         ))}
         {d?.spot != null && <span className="ml-auto num text-muted">spot {px(d.spot)} · ATM {px(d.atm)}</span>}
       </div>
       {q.error ? <ErrorNote error={q.error} /> : d?.deferred ? <p className="mt-2 text-sm text-muted">Built after the close.</p> : (
         <>
+        {/* a short window often holds no OI print at all: the exchange publishes NIFTY option OI once a minute, BSE every ~2.7 min */}
+        {/* judged near the money (ATM ± 5): deep in-the-money strikes also tick off the exchange's clock */}
+        {d && rows.length > 0 && rows.filter((r) => d.atm == null || !d.strikeStep || Math.abs(r.k - d.atm) <= 5 * d.strikeStep + 1e-6)
+          .every((r) => (r.dc ?? 0) === 0 && (r.dp ?? 0) === 0) && (
+          <p className="mt-2 text-xs text-warn">No OI print between {d.from} and {d.at}: the exchange publishes {underlying === "NIFTY" || underlying === "BANKNIFTY"
+            ? "NSE option OI about once a minute" : "BSE option OI every 2½–3 minutes"}, so a {back < 60 ? `${back}-second` : `${back / 60}-minute`} window can fall between two prints. Try a longer window or another moment.</p>
+        )}
           <div className="mt-2 grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2 num">
             <span><span style={{ color: CALL }}>Calls built</span> {mv("dc", 1)}</span>
             <span><span style={{ color: PUT }}>Puts built</span> {mv("dp", 1)}</span>
