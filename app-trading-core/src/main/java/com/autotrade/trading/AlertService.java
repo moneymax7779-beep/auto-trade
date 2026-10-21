@@ -90,6 +90,10 @@ class AlertService {
         return telegram.groupConfigured();
     }
 
+    synchronized boolean isActive(String key) {
+        return active.containsKey(key);
+    }
+
     synchronized List<Alert> active() {
         return List.copyOf(active.values());
     }
