@@ -55,7 +55,11 @@ final class ShadowRunner {
      * one strategy can be compared, and none takes another's capital); returns the summaries, or null when none.
      */
     String run(LocalDate session) throws Exception {
-        List<String> files = properties.trading().shadowStrategyFiles();
+        return run(session, properties.trading().shadowStrategyFiles());
+    }
+
+    /** The same for the given strategy files only. */
+    String run(LocalDate session, List<String> files) throws Exception {
         if (files == null || files.isEmpty()) {
             return null;
         }
@@ -64,6 +68,20 @@ final class ShadowRunner {
             summaries.add(runOne(session, List.of(file)));
         }
         return String.join("\n\n", summaries);
+    }
+
+    /**
+     * The shadow strategy files with no session on {@code session} yet, or only one a restart cut short (STOPPED):
+     * the ones the after-close run still has to do. A run interrupted part-way resumes with these.
+     */
+    List<String> pending(LocalDate session) {
+        List<String> files = properties.trading().shadowStrategyFiles();
+        if (files == null || files.isEmpty()) {
+            return List.of();
+        }
+        TradeStore store = new TradeStore(target);
+        return files.stream().filter(file -> !store.ranWith(ACCOUNT, session, Path.of(file).getFileName().toString()))
+                .toList();
     }
 
     private String runOne(LocalDate session, List<String> files) throws Exception {

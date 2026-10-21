@@ -62,10 +62,32 @@ final class TradeStore {
      * Replay sessions run in their own processes and are left alone.
      */
     int closeOrphanedLiveSessions(String account) {
+        return closeOrphaned(account, "PAPER_LIVE");
+    }
+
+    /**
+     * The same for the shadow account's replays, which only the always-on service runs (in-process, after the
+     * close): one left RUNNING at its start was cut short by a restart or crash.
+     */
+    int closeOrphanedShadowSessions(String account) {
+        return closeOrphaned(account, "PAPER_REPLAY");
+    }
+
+    private int closeOrphaned(String account, String mode) {
         return jdbc.update("update trade.session s set status = 'STOPPED', ended_at = coalesce((select max(d.snap_time) "
                 + "from trade.decision d where d.session_id = s.id), s.started_at), error = coalesce(s.error, "
                 + "'not closed by its process (service restarted or crashed); closed at the next service start') "
-                + "where s.mode = 'PAPER_LIVE' and s.status = 'RUNNING' and s.account = ?", account);
+                + "where s.mode = ? and s.status = 'RUNNING' and s.account = ?", mode, account);
+    }
+
+    /**
+     * Whether the account has a session on the day that ran with the config file {@code configName} (a key of
+     * {@code configs}) and was not cut short (STOPPED): DONE, FAILED or still RUNNING.
+     */
+    boolean ranWith(String account, LocalDate session, String configName) {
+        Boolean ran = jdbc.queryForObject("select exists (select 1 from trade.session where account = ? and session_date = ? "
+                + "and status <> 'STOPPED' and jsonb_exists(configs, ?))", Boolean.class, account, session, configName);
+        return Boolean.TRUE.equals(ran);
     }
 
     void order(long session, ManagedPosition position, String role, OrderRequest request, Instant at) {

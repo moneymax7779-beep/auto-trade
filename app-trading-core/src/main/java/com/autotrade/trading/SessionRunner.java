@@ -93,6 +93,7 @@ class SessionRunner implements ApplicationRunner {
 
     private final AlertService alerts;
     private volatile Thread shadowThread;
+    private volatile LocalDate shadowTriedOn;          // the day this process last started (or found nothing left of) a shadow run
 
     SessionRunner(TradingProperties properties, DataSource target, ConfigurableApplicationContext context,
                   AlertService alerts) {
@@ -130,6 +131,7 @@ class SessionRunner implements ApplicationRunner {
                     context.getEnvironment().getProperty("server.port", "8095"));
             case "auto" -> {
                 closeOrphanedLiveSessions();
+                closeOrphanedShadowSessions();
                 startScheduler();
             }
             case "surge-preview" -> {
@@ -245,6 +247,20 @@ class SessionRunner implements ApplicationRunner {
     }
 
     /**
+     * Only this always-on process runs the after-close shadow replays (a by-hand --mode=shadow run is a separate
+     * process: don't run one across a restart of this service), so a shadow session still RUNNING at its start was
+     * cut short. Marked STOPPED, its strategy file is pending again and the scheduler resumes it (21 Oct: the 15:52
+     * deploy killed shadow replay 937, which stayed RUNNING and blocked that day's shadow run).
+     */
+    private void closeOrphanedShadowSessions() {
+        int closed = new TradeStore(target).closeOrphanedShadowSessions(ShadowRunner.ACCOUNT);
+        if (closed > 0) {
+            log.warn("marked {} shadow session(s) left RUNNING by an earlier crash or restart as STOPPED; "
+                    + "the after-close shadow run resumes them", closed);
+        }
+    }
+
+    /**
      * Always-on mode: serves the UI and starts the live session itself at {@code start-at} IST on every
      * trading day (exchange holiday file), stops it at {@code stop-after}, and after a restart during
      * market hours starts it again at once (the live engine never trades on stale catch-up data).
@@ -293,26 +309,34 @@ class SessionRunner implements ApplicationRunner {
 
     /**
      * Shadow mode: once today's live session is DONE (5 minutes after stop-after), the shadow strategies replay
-     * the day from own capture on account SHADOW-1, once per day (also after a restart), and the result is sent
-     * with the alerts. Runs on its own thread; never touches the live session.
+     * the day from own capture on account SHADOW-1, and the result is sent with the alerts. Each strategy file runs
+     * once per day: after a restart only the files without a finished session run (one tried per process per day,
+     * so a file that cannot start is not retried every minute). Runs on its own thread; never touches the live session.
      */
     private void shadowAfterClose(LocalDate today, LocalTime time, LocalTime stopAfter) {
         List<String> files = properties.trading().shadowStrategyFiles();
         if (files == null || files.isEmpty() || !calendar.isTradingDay(today) || time.isBefore(stopAfter.plusMinutes(5))
-                || (shadowThread != null && shadowThread.isAlive())) {
+                || today.equals(shadowTriedOn) || (shadowThread != null && shadowThread.isAlive())) {
             return;
         }
         org.springframework.jdbc.core.JdbcTemplate jdbc = new org.springframework.jdbc.core.JdbcTemplate(target);
         Integer liveDone = jdbc.queryForObject("select count(*) from trade.session where mode = 'PAPER_LIVE' "
                 + "and session_date = ? and status = 'DONE'", Integer.class, today);
-        Integer shadowed = jdbc.queryForObject("select count(*) from trade.session where account = ? "
-                + "and session_date = ? and status in ('RUNNING', 'DONE')", Integer.class, ShadowRunner.ACCOUNT, today);
-        if (liveDone == null || liveDone == 0 || (shadowed != null && shadowed > 0)) {
+        if (liveDone == null || liveDone == 0) {
             return;
+        }
+        ShadowRunner shadow = new ShadowRunner(properties, target);
+        List<String> pending = shadow.pending(today);
+        shadowTriedOn = today;
+        if (pending.isEmpty()) {
+            return;
+        }
+        if (pending.size() < files.size()) {
+            log.info("shadow run for {} resumes {} of {} strategy files: {}", today, pending.size(), files.size(), pending);
         }
         shadowThread = Thread.ofPlatform().name("shadow-" + today).start(() -> {
             try {
-                String summary = new ShadowRunner(properties, target).run(today);
+                String summary = shadow.run(today, pending);
                 if (summary != null) {
                     alerts.info(summary);
                 }
