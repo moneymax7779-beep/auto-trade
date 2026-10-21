@@ -44,7 +44,8 @@ def load(u, d):
         f"and recv_ts >= '{d} 09:15+05:30' and recv_ts < '{d} 15:30+05:30' group by 1")}
     if not idx:
         return None
-    exp = q(f"select min(expiry)::text from md.option_tick where session_date = '{d}' and underlying = '{u}' and expiry >= '{d}'")
+    exp = q(f"select min(expiry)::text from md.option_tick where session_date = '{d}' and underlying = '{u}' and expiry >= '{d}' "
+            f"and recv_ts >= '{d} 09:15+05:30' and recv_ts < '{d} 09:20+05:30'")
     if not exp or not exp[0][0]:
         return None
     lo = min(v[1] for v in idx.values()); hi = max(v[0] for v in idx.values())
@@ -59,7 +60,8 @@ def load(u, d):
             opt[(ty, float(k))][hm(t)] = float(oi)
         if ltp:
             px[(ty, float(k))][hm(t)] = float(ltp)
-    fexp = q(f"select min(expiry)::text from md.future_tick where session_date = '{d}' and underlying = '{u}' and expiry >= '{d}'")
+    fexp = q(f"select min(expiry)::text from md.future_tick where session_date = '{d}' and underlying = '{u}' and expiry >= '{d}' "
+             f"and recv_ts >= '{d} 09:15+05:30' and recv_ts < '{d} 09:20+05:30'")
     fut = {}
     if fexp and fexp[0][0]:
         last = None
@@ -82,9 +84,13 @@ def day(u, d):
     return data
 
 
+OWN_DAYS = ["2026-09-28", "2026-09-29", "2026-09-30", "2026-10-01", "2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08",
+            "2026-10-09", "2026-10-12", "2026-10-13", "2026-10-14", "2026-10-15", "2026-10-16", "2026-10-19", "2026-10-21"]
+
+
 def previous_day(d):
-    r = q(f"select max(session_date)::text from md.index_tick where session_date < '{d}'")
-    return r[0][0] if r and r[0][0] else None
+    i = OWN_DAYS.index(d)
+    return OWN_DAYS[i - 1] if i > 0 else None
 
 
 def carried(series, minutes):
