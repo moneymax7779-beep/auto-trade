@@ -256,6 +256,36 @@ class SetupFamiliesTest {
     }
 
     /**
+     * A-161 aob-v4: a call from 09:41; puts written at 4x the day's mean at a new high exit it (OI_CLIMAX) only once it is
+     * 10 minutes old, in profit and at a new extreme: not at 09:45 (too young), not at 09:52 (no new high), yes at 09:53.
+     */
+    @Test
+    void atmOiBurstV4ExitsOnTheDrivingOiClimaxAtANewExtreme() {
+        Day d = new Day("atm-oi-burst.v4.yaml", Map.of());
+        for (int m = 16; m <= 40; m++) {
+            double x = m % 2 == 0 ? 0.001 : -0.001;
+            d.at(String.format("09:%02d", m), 22600, PositionView.FLAT, "options.atmBandShare3m", x,
+                    "options.atmBandCallShare3m", -x / 2, "options.atmBandPutShare3m", x / 2,
+                    "futures.volumeLastMinute", m >= 39 ? 2000L : 1000L);
+        }
+        assertThat(d.at("09:41", 22610, PositionView.FLAT, "options.atmBandShare3m", 0.004, "options.atmBandCallShare3m", -0.001,
+                "options.atmBandPutShare3m", 0.003, "futures.volumeLastMinute", 2000L).orders())
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("OI_BURST_UP");
+        java.time.Instant opened = Snapshots.SESSION.atTime(9, 41).atZone(com.autotrade.core.time.MarketTime.IST).toInstant();
+        PositionView held = new PositionView(true, OptionSide.CE, 1, 50, opened, 55);
+        Object[] climax = {"options.atmBandShare3m", 0.0015, "options.atmBandCallShare3m", 0.0005, "options.atmBandPutShare3m", 0.002,
+                "futures.volumeLastMinute", 1000L};
+        Object[] calm = {"options.atmBandShare3m", 0.0, "options.atmBandCallShare3m", 0.0, "options.atmBandPutShare3m", 0.0,
+                "futures.volumeLastMinute", 1000L};
+        assertThat(d.at("09:42", 22615, held, calm).orders()).isEmpty();
+        assertThat(d.at("09:45", 22630, held, climax).orders()).as("4 minutes old").isEmpty();
+        assertThat(d.at("09:50", 22640, held, calm).orders()).isEmpty();
+        assertThat(d.at("09:52", 22635, held, climax).orders()).as("no new high").isEmpty();
+        assertThat(d.at("09:53", 22650, held, climax).orders()).singleElement().extracting(OrderIntent::reason)
+                .isEqualTo("OI_CLIMAX");
+    }
+
+    /**
      * A-078: an ORL break at 09:51, before EMA20 exists (as on 12 Oct). orc-v1 has no trend then and stays out; orc-v2
      * takes the VWAP side and the close below EMA9 as the trend and buys the put, stop 1 ATR back above the ORL.
      */

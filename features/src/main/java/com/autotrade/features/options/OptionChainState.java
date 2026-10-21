@@ -234,7 +234,8 @@ public final class OptionChainState {
                 ceQuote.spreadPct, peQuote.spreadPct,
                 wallOiChangePct(callBarrier, time), wallOiChangePct(putSupport, time),
                 oiZ("CE", ce, windows, nearOi, time), oiZ("PE", pe, windows, nearOi, time),
-                bandShare(time, atm, step, 0), bandShare(time, atm, step, 1), bandShare(time, atm, step, 2));
+                bandShare(time, atm, step, 0), bandShare(time, atm, step, 1), bandShare(time, atm, step, 2),
+                bandSide(time, atm, step, true), bandSide(time, atm, step, false));
     }
 
     /**
@@ -242,7 +243,17 @@ public final class OptionChainState {
      * contracts' OI at the window start; NaN when any of them lacks an OI at either end.
      */
     private double bandShare(Instant time, double atm, double step, int window) {
-        Instant from = time.minus(Duration.ofMinutes(BAND_WINDOWS_MIN[window]));
+        return bandChange(time, atm, step, BAND_WINDOWS_MIN[window], 0);
+    }
+
+    /** A-161: one side of the 3-minute band change (calls or puts) over the band's OI at the window start. */
+    private double bandSide(Instant time, double atm, double step, boolean calls) {
+        return bandChange(time, atm, step, 3, calls ? 1 : 2);
+    }
+
+    /** side 0: Δ puts − Δ calls; 1: Δ calls; 2: Δ puts; each over the band's OI at the window start (NaN if incomplete). */
+    private double bandChange(Instant time, double atm, double step, int minutes, int side) {
+        Instant from = time.minus(Duration.ofMinutes(minutes));
         double net = 0, base = 0;
         for (int k = -ATM_BAND; k <= ATM_BAND; k++) {
             for (boolean call : new boolean[] {true, false}) {
@@ -255,7 +266,11 @@ public final class OptionChainState {
                     return Double.NaN;
                 }
                 base += start;
-                net += call ? start - now : now - start;
+                if (side == 0) {
+                    net += call ? start - now : now - start;
+                } else if (call == (side == 1)) {
+                    net += now - start;
+                }
             }
         }
         return base > 0 ? net / base : Double.NaN;
@@ -596,7 +611,7 @@ public final class OptionChainState {
         double n = Double.NaN;
         return new OptionsFeatures(expiry == null ? null : expiry.toString(), n, n, contracts.size(), n, n, n, n, n, n, n,
                 n, "UNKNOWN", "UNKNOWN", n, n, n, n, false, false, n, n, n, n, n, n, n, n, n, "NONE", n, n, n, n, n, n,
-                n, n, n, n, n, n, n, n, n, n);
+                n, n, n, n, n, n, n, n, n, n, n, n);
     }
 
     static double midPrice(OptionTick tick) {

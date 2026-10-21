@@ -158,7 +158,7 @@ abstract class SetupStrategy implements Strategy {
         if (position.open()) {
             String exit = exitReason(position.side(), spot, now, time, s.structure().vwapSpotProxy());
             if (exit == null) {
-                exit = customExit(s, position.side(), time);       // a family's own exit (A-122); none by default
+                exit = customExit(s, position, time);              // a family's own exit (A-122); none by default
             }
             if (exit == null && !Double.isNaN(profitLockArmPct) && position.averagePremium() > 0 && position.bid() > 0) {
                 double gainPct = (position.bid() / position.averagePremium() - 1) * 100.0;   // A-124 profit lock
@@ -212,6 +212,11 @@ abstract class SetupStrategy implements Strategy {
     /** A family's own exit signal for an open position, checked after the frame's exits; null = none (default). */
     protected String customExit(FeatureSnapshot s, OptionSide side, LocalTime time) {
         return null;
+    }
+
+    /** The same with the position (A-161: its premium and bid); by default the side-only form. */
+    protected String customExit(FeatureSnapshot s, PositionView position, LocalTime time) {
+        return customExit(s, position.side(), time);
     }
 
     private String exitReason(OptionSide side, double spot, Instant now, LocalTime time, double vwap) {

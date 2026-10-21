@@ -10,6 +10,7 @@ import java.util.Map;
 import com.autotrade.config.ThresholdConfig;
 import com.autotrade.features.snapshot.FeatureSnapshot;
 import com.autotrade.strategy.OptionSide;
+import com.autotrade.strategy.PositionView;
 
 /**
  * ATM OI burst (A-157 / A-158): when the 3-minute net OI change over the ATM ± 2 strikes (puts written minus calls written,
@@ -17,7 +18,10 @@ import com.autotrade.strategy.OptionSide;
  * the last 3 minutes is at least {@code entry.volume_ratio_min} times the median of the day's earlier 3-minute windows, buy
  * the ATM option in the flow's direction (puts written faster = call). No index stop or target. aob-v1 holds until a burst
  * of the same strength the other way ({@code exits.opposite_burst_k}), the premium stop or {@code flat_by}; aob-v2 (A-159,
- * no {@code opposite_burst_k}) exits on the frame's premium trail, the premium stop or {@code flat_by}.
+ * no {@code opposite_burst_k}) exits on the frame's premium trail, the premium stop or {@code flat_by}. aob-v4 (A-161,
+ * {@code exits.climax_k}) adds the climax exit: the trade's own driving OI (calls written for a put, puts written for a
+ * call) at least {@code climax_k} times the day's mean of that side while the index makes a new extreme since entry, once
+ * the trade is {@code exits.climax_min_minutes} old and the option's bid is above its premium.
  * <p>
  * The day's mean and the volume median use only earlier snapshots (from 09:16), one per minute. No new entry in the same
  * direction within {@code entry.same_direction_gap_min} minutes of the last.
@@ -31,6 +35,15 @@ final class AtmOiBurst extends SetupStrategy {
     private final double volumeRatioMin;
     private final int gapMin;
     private final double oppositeK;
+    private final double climaxK;
+    private final int climaxMinMinutes;
+    private double callSum, putSum;
+    private int sideCount;
+    private double callMean = Double.NaN, putMean = Double.NaN;
+    private double callShare = Double.NaN, putShare = Double.NaN;
+    /** A-161: the index extreme (minute closes) in the open trade's direction since its entry, and that entry's time. */
+    private java.time.Instant extremeFor;
+    private double extreme = Double.NaN;
 
     private double absShareSum;
     private int absShareCount;
@@ -48,11 +61,22 @@ final class AtmOiBurst extends SetupStrategy {
         volumeRatioMin = c.getDouble("entry.volume_ratio_min");
         gapMin = c.getInt("entry.same_direction_gap_min");
         oppositeK = c.has("exits.opposite_burst_k") ? c.getDouble("exits.opposite_burst_k") : Double.NaN;   // absent: off
+        climaxK = c.has("exits.climax_k") ? c.getDouble("exits.climax_k") : Double.NaN;                    // A-161: absent = off
+        climaxMinMinutes = c.has("exits.climax_min_minutes") ? c.getInt("exits.climax_min_minutes") : 10;
     }
 
     @Override
     protected Entry evaluate(FeatureSnapshot s, LocalTime time, boolean canEnter, Map<String, Boolean> c) {
         share = s.options() == null ? Double.NaN : s.options().atmBandShare3m();
+        callShare = s.options() == null ? Double.NaN : s.options().atmBandCallShare3m();
+        putShare = s.options() == null ? Double.NaN : s.options().atmBandPutShare3m();
+        callMean = sideCount >= minHistory ? callSum / sideCount : Double.NaN;
+        putMean = sideCount >= minHistory ? putSum / sideCount : Double.NaN;
+        if (!time.isBefore(HISTORY_FROM) && Double.isFinite(callShare) && Double.isFinite(putShare)) {
+            callSum += Math.abs(callShare);
+            putSum += Math.abs(putShare);
+            sideCount++;
+        }
         double mean = absShareCount >= minHistory ? absShareSum / absShareCount : Double.NaN;
         relative = Double.isFinite(share) && mean > 0 ? Math.abs(share) / mean : Double.NaN;
         double volumeRatio = Double.NaN;
@@ -87,9 +111,30 @@ final class AtmOiBurst extends SetupStrategy {
     }
 
     @Override
-    protected String customExit(FeatureSnapshot s, OptionSide side, LocalTime time) {
+    protected String customExit(FeatureSnapshot s, PositionView position, LocalTime time) {
+        OptionSide side = position.side();
         double sign = side == OptionSide.CE ? 1 : -1;
-        return sign * share < 0 && relative >= oppositeK ? "OPPOSITE_BURST" : null;     // NaN: never
+        if (sign * share < 0 && relative >= oppositeK) {                               // NaN: never
+            return "OPPOSITE_BURST";
+        }
+        // A-161: a new extreme since entry, judged on the minute closes (the study used minute lows / highs)
+        double spot = s.spot();
+        boolean newExtreme = false;
+        if (position.openedAt() != null && !position.openedAt().equals(extremeFor)) {
+            extremeFor = position.openedAt();
+            extreme = spot;
+        } else if (Double.isFinite(spot) && Double.isFinite(extreme)) {
+            newExtreme = side == OptionSide.PE ? spot < extreme : spot > extreme;
+            extreme = side == OptionSide.PE ? Math.min(extreme, spot) : Math.max(extreme, spot);
+        }
+        if (!(climaxK > 0) || position.openedAt() == null
+                || Duration.between(position.openedAt(), s.time()).toMinutes() < climaxMinMinutes
+                || !(position.bid() > position.averagePremium())) {
+            return null;
+        }
+        double own = side == OptionSide.PE ? callShare : putShare;
+        double mean = side == OptionSide.PE ? callMean : putMean;
+        return newExtreme && mean > 0 && own >= climaxK * mean ? "OI_CLIMAX" : null;
     }
 
     private static double median(List<Long> values) {

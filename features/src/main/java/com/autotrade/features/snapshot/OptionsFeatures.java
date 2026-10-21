@@ -64,5 +64,8 @@ public record OptionsFeatures(
          */
         double atmBandShare1m,
         double atmBandShare3m,
-        double atmBandShare5m) {
+        double atmBandShare5m,
+        /** A-161: the two sides of atmBandShare3m: Δ call OI and Δ put OI over 3 minutes, each / the band's OI then. */
+        double atmBandCallShare3m,
+        double atmBandPutShare3m) {
 }
