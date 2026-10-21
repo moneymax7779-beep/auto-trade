@@ -234,6 +234,28 @@ class SetupFamiliesTest {
     }
 
     /**
+     * A-159 aob-v2: the same entry as v1; an opposite burst no longer exits; the premium trail does: armed at +20 % (bid 60
+     * on a 50 premium), out once the bid is 15 % below its peak (70 -> 59.5).
+     */
+    @Test
+    void atmOiBurstV2HoldsThroughTheOppositeBurstAndExitsOnThePremiumTrail() {
+        Day d = new Day("atm-oi-burst.v2.yaml", Map.of());
+        for (int m = 16; m <= 40; m++) {
+            d.at(String.format("09:%02d", m), 22600, PositionView.FLAT, "options.atmBandShare3m", m % 2 == 0 ? 0.001 : -0.001,
+                    "futures.volumeLastMinute", m >= 39 ? 2000L : 1000L);
+        }
+        assertThat(d.at("09:41", 22610, PositionView.FLAT, "options.atmBandShare3m", 0.004, "futures.volumeLastMinute", 2000L)
+                .orders()).singleElement().extracting(OrderIntent::reason).isEqualTo("OI_BURST_UP");
+        Object[] quiet = {"options.atmBandShare3m", 0.001, "futures.volumeLastMinute", 1000L};
+        assertThat(d.at("09:45", 22600, new PositionView(true, OptionSide.CE, 1, 50, null, 48),
+                "options.atmBandShare3m", -0.005, "futures.volumeLastMinute", 1000L).orders()).as("opposite burst: v2 holds").isEmpty();
+        assertThat(d.at("09:50", 22640, new PositionView(true, OptionSide.CE, 1, 50, null, 60), quiet).orders()).isEmpty();
+        assertThat(d.at("09:55", 22660, new PositionView(true, OptionSide.CE, 1, 50, null, 70), quiet).orders()).isEmpty();
+        assertThat(d.at("10:00", 22645, new PositionView(true, OptionSide.CE, 1, 50, null, 59.5), quiet).orders())
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("TRAIL_15");
+    }
+
+    /**
      * A-078: an ORL break at 09:51, before EMA20 exists (as on 12 Oct). orc-v1 has no trend then and stays out; orc-v2
      * takes the VWAP side and the close below EMA9 as the trend and buys the put, stop 1 ATR back above the ORL.
      */

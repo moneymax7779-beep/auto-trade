@@ -103,9 +103,10 @@ autotrade:
       # 2026-10-19 ~19:00 (A-150, user: "add zbf-v10 as a shadow"): zbf-v10 after it left the live set (A-149); own session,
       # no capital shared with the live set, judged forward.
       - config/strategy/zone-break-flow.v10.yaml
-      # 2026-10-21 ~22:45 (A-158, user: "yes register and build it and run in shadow"): aob-v1, the ATM OI burst (A-157's
-      # 3-minute near-ATM OI burst with futures volume; exit on the opposite burst, chosen by data); own session.
-      - config/strategy/atm-oi-burst.v1.yaml
+      # 2026-10-21 ~22:45 (A-158, user: "yes register and build it and run in shadow"): the ATM OI burst (A-157's 3-minute
+      # near-ATM OI burst with futures volume); ~23:00 (A-159, user: "Choose - Premium trail"): aob-v2, premium-trail exit,
+      # replaces aob-v1 (opposite-burst exit) before v1 ever ran; own session.
+      - config/strategy/atm-oi-burst.v2.yaml
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"

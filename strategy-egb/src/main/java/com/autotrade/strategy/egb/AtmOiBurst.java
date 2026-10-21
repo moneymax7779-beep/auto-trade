@@ -15,8 +15,9 @@ import com.autotrade.strategy.OptionSide;
  * ATM OI burst (A-157 / A-158): when the 3-minute net OI change over the ATM ± 2 strikes (puts written minus calls written,
  * as a share of those strikes' OI) is at least {@code entry.burst_k} times the day's mean so far, and the futures volume of
  * the last 3 minutes is at least {@code entry.volume_ratio_min} times the median of the day's earlier 3-minute windows, buy
- * the ATM option in the flow's direction (puts written faster = call). No index stop or target: the position is held until
- * a burst of the same strength the other way ({@code exits.opposite_burst_k}), the premium stop or {@code flat_by}.
+ * the ATM option in the flow's direction (puts written faster = call). No index stop or target. aob-v1 holds until a burst
+ * of the same strength the other way ({@code exits.opposite_burst_k}), the premium stop or {@code flat_by}; aob-v2 (A-159,
+ * no {@code opposite_burst_k}) exits on the frame's premium trail, the premium stop or {@code flat_by}.
  * <p>
  * The day's mean and the volume median use only earlier snapshots (from 09:16), one per minute. No new entry in the same
  * direction within {@code entry.same_direction_gap_min} minutes of the last.
@@ -46,7 +47,7 @@ final class AtmOiBurst extends SetupStrategy {
         minHistory = c.getInt("entry.min_history");
         volumeRatioMin = c.getDouble("entry.volume_ratio_min");
         gapMin = c.getInt("entry.same_direction_gap_min");
-        oppositeK = c.getDouble("exits.opposite_burst_k");
+        oppositeK = c.has("exits.opposite_burst_k") ? c.getDouble("exits.opposite_burst_k") : Double.NaN;   // absent: off
     }
 
     @Override
@@ -88,7 +89,7 @@ final class AtmOiBurst extends SetupStrategy {
     @Override
     protected String customExit(FeatureSnapshot s, OptionSide side, LocalTime time) {
         double sign = side == OptionSide.CE ? 1 : -1;
-        return sign * share < 0 && relative >= oppositeK ? "OPPOSITE_BURST" : null;
+        return sign * share < 0 && relative >= oppositeK ? "OPPOSITE_BURST" : null;     // NaN: never
     }
 
     private static double median(List<Long> values) {
