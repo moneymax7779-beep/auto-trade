@@ -107,6 +107,9 @@ autotrade:
       # near-ATM OI burst with futures volume); ~23:00 (A-159, user: "Choose - Premium trail"): aob-v2, premium-trail exit,
       # replaces aob-v1 (opposite-burst exit) before v1 ever ran; own session.
       - config/strategy/atm-oi-burst.v2.yaml
+      # 2026-10-22 ~00:55 (A-161, user: "yes add v4 to shadow alongside v2"): aob-v4 = aob-v2 + the OI climax exit; own
+      # session, same entries as v2, so the two compare the exit alone on new days.
+      - config/strategy/atm-oi-burst.v4.yaml
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"
