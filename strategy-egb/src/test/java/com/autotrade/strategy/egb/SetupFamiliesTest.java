@@ -202,6 +202,38 @@ class SetupFamiliesTest {
     }
 
     /**
+     * A-158 aob-v1: a quiet morning (3-minute share 0.001, 1,000 futures a minute), then at 09:41 a 4x share with the last
+     * three minutes at 2,000 a minute (2x the day's median window): buy the call. Held through ordinary flow against it, out
+     * on a 3x burst the other way. The same burst without the volume does not enter.
+     */
+    @Test
+    void atmOiBurstBuysTheFlowsDirectionWithVolumeAndExitsOnTheOppositeBurst() {
+        Day d = new Day("atm-oi-burst.v1.yaml", Map.of());
+        Day quiet = new Day("atm-oi-burst.v1.yaml", Map.of());
+        for (int m = 16; m <= 40; m++) {
+            String t = String.format("09:%02d", m);
+            double share = m % 2 == 0 ? 0.001 : -0.001;
+            long volume = m >= 39 ? 2000L : 1000L;
+            assertThat(d.at(t, 22600, PositionView.FLAT, "options.atmBandShare3m", share, "futures.volumeLastMinute", volume)
+                    .orders()).isEmpty();
+            quiet.at(t, 22600, PositionView.FLAT, "options.atmBandShare3m", share, "futures.volumeLastMinute", 1000L);
+        }
+        assertThat(d.at("09:41", 22610, PositionView.FLAT, "options.atmBandShare3m", 0.004, "futures.volumeLastMinute", 2000L)
+                .orders()).singleElement().satisfies(o -> {
+                    assertThat(o.side()).isEqualTo(OptionSide.CE);
+                    assertThat(o.reason()).isEqualTo("OI_BURST_UP");
+                });
+        assertThat(quiet.at("09:41", 22610, PositionView.FLAT, "options.atmBandShare3m", 0.004, "futures.volumeLastMinute", 1000L)
+                .orders()).as("no volume, no entry").isEmpty();
+
+        PositionView holding = new PositionView(true, OptionSide.CE, 1, 50, null, 52);
+        assertThat(d.at("09:45", 22620, holding, "options.atmBandShare3m", -0.0015, "futures.volumeLastMinute", 1000L).orders())
+                .as("ordinary flow against: hold").isEmpty();
+        assertThat(d.at("09:50", 22600, holding, "options.atmBandShare3m", -0.005, "futures.volumeLastMinute", 1000L).orders())
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("OPPOSITE_BURST");
+    }
+
+    /**
      * A-078: an ORL break at 09:51, before EMA20 exists (as on 12 Oct). orc-v1 has no trend then and stays out; orc-v2
      * takes the VWAP side and the close below EMA9 as the trend and buys the put, stop 1 ATR back above the ORL.
      */

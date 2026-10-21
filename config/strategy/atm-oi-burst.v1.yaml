@@ -1,0 +1,33 @@
+# ATM OI burst, v1 (A-158; user 2026-10-21: "yes register and build it and run in shadow ... it should be based on data").
+# Entry = A-157's rule, chosen on 1, 5-9 Oct and checked on 12-19 Oct (own-capture tick days): the 3-minute net OI change
+# over the ATM +- 2 strikes (puts written minus calls written, share of those strikes' OI) at least 3x the day's mean so
+# far, with the last 3 minutes' futures volume at least 1.5x the day's earlier 3-minute median. Exit E2 chosen by the
+# A-158 exit study on 1, 5-9 Oct: hold until a burst of the same strength the other way, else 15:15; 30 % premium stop.
+# Shadow only (SHADOW-1, its own session). Every value is fixed by the ledger, not tuned.
+version: aob-v1
+strategy: atm-oi-burst
+status: UNCALIBRATED
+source: "A-157 / A-158 (user 2026-10-21; rules fixed in the ledger before each computation)"
+
+scope:
+  entry_from: "09:31"                  # the first snapshot carrying the 09:30 minute
+  last_new_entry: "14:46"              # exclusive: signals to the 14:45 minute
+  flat_by: "15:15"
+  time_stop_min: 0                     # no time stop: the exit is the opposite burst, the premium stop or 15:15
+  skip_expiring_index: false           # A-157 counted the expiring index too
+
+entry:
+  burst_k: 3.0                         # |3-min share| >= 3 x the day's mean |3-min share| so far
+  min_history: 10                      # earlier snapshots (from 09:16) needed for that mean
+  volume_ratio_min: 1.5                # last 3 minutes' futures volume vs the median of the day's earlier 3-minute windows
+  same_direction_gap_min: 15           # A-157's one event per 15 minutes per direction
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 30                 # emergency stop on the option (A-158)
+  opposite_burst_k: 3.0                # exit E2: a burst of the same strength against the position
+  use_target: false

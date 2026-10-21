@@ -107,4 +107,11 @@ public final class SetupProviders {
             return "auction-pressure";
         }
     }
+
+    public static final class AtmOiBurstProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "atm-oi-burst";
+        }
+    }
 }
