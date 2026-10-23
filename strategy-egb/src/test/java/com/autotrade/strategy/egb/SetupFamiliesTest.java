@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.nio.file.Path;
 import java.time.LocalTime;
+import java.util.List;
 import java.util.Map;
 
 import org.junit.jupiter.api.Test;
@@ -314,6 +315,33 @@ class SetupFamiliesTest {
                 assertThat(v5.at("09:41", 22610, PositionView.FLAT, burst).orders()).as("writing burst: v5 skips").isEmpty();
             }
         }
+    }
+
+    /**
+     * A-180 aob-v6, the 23 Oct morning shape: a loud open (3-minute shares of +-0.01 to 09:29), a quiet half hour (+-0.001),
+     * then from 09:50 a steady -0.0025 a minute: 2.5x the 09:30 mean, never a 3x spike, on ordinary volume. v6's
+     * sustained-flow trigger buys the put (OI_FLOW_DOWN) once four of the five 3-minute shares are on the put side; v2
+     * never enters.
+     */
+    @Test
+    void atmOiBurstV6BuysASustainedFlowThatNeverSpikes() {
+        Day v6 = new Day("atm-oi-burst.v6.yaml", Map.of());
+        Day v2 = new Day("atm-oi-burst.v2.yaml", Map.of());
+        String entered = null, reason = null;
+        for (int m = 16; m <= 70; m++) {
+            String t = String.format("%02d:%02d", 9 + m / 60, m % 60);
+            double share = m < 30 ? (m % 2 == 0 ? 0.01 : -0.01) : m < 50 ? (m % 2 == 0 ? 0.001 : -0.001) : -0.0025;
+            Object[] f = {"options.atmBandShare3m", share, "futures.volumeLastMinute", 1000L};
+            assertThat(v2.at(t, 22600 - Math.max(0, m - 50) * 5, PositionView.FLAT, f).orders()).as("v2 at " + t).isEmpty();
+            List<OrderIntent> o = v6.at(t, 22600 - Math.max(0, m - 50) * 5, PositionView.FLAT, f).orders();
+            if (entered == null && !o.isEmpty()) {
+                entered = t;
+                reason = o.get(0).reason();
+                assertThat(o.get(0).side()).isEqualTo(OptionSide.PE);
+            }
+        }
+        assertThat(entered).as("v6 enters during the run").isNotNull().isBetween("09:55", "10:05");
+        assertThat(reason).isEqualTo("OI_FLOW_DOWN");
     }
 
     /**

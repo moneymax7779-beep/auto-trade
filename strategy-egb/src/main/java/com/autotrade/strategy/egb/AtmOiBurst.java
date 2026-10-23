@@ -23,7 +23,10 @@ import com.autotrade.strategy.PositionView;
  * call) at least {@code climax_k} times the day's mean of that side while the index makes a new extreme since entry, once
  * the trade is {@code exits.climax_min_minutes} old and the option's bid is above its premium. aob-v5 (A-179,
  * {@code entry.burst_kind: covering}) enters only on a covering burst: an up burst whose call OI fall outweighs its put
- * OI rise, a down burst whose put OI fall outweighs its call OI rise (writers closing, A-178's split).
+ * OI rise, a down burst whose put OI fall outweighs its call OI rise (writers closing, A-178's split). aob-v6 (A-180):
+ * the day's mean counts minutes from {@code entry.mean_from} only, and a second trigger, sustained flow: the sum of the
+ * 3-minute shares at m, m − 3, m − 6, m − 9, m − 12 (about the 15-minute change) at least {@code entry.sustained_k} times
+ * the day's mean of that sum, with at least {@code entry.sustained_agree} of the five on its side; no volume condition.
  * <p>
  * The day's mean and the volume median use only earlier snapshots (from 09:16), one per minute. No new entry in the same
  * direction within {@code entry.same_direction_gap_min} minutes of the last.
@@ -41,6 +44,13 @@ final class AtmOiBurst extends SetupStrategy {
     private final int climaxMinMinutes;
     /** A-179: only bursts driven by writers closing ("covering"); absent = any burst. */
     private final boolean coveringOnly;
+    /** A-180: the first minute the day's means count (absent: 09:16), and the sustained-flow trigger (absent: off). */
+    private final LocalTime meanFrom;
+    private final double sustainedK;
+    private final int sustainedAgree;
+    private final Map<Integer, Double> shareByMinute = new java.util.HashMap<>();
+    private double s15Sum;
+    private int s15Count;
     private double callSum, putSum;
     private int sideCount;
     private double callMean = Double.NaN, putMean = Double.NaN;
@@ -72,6 +82,9 @@ final class AtmOiBurst extends SetupStrategy {
             throw new IllegalArgumentException("entry.burst_kind must be any or covering: " + kind);
         }
         coveringOnly = kind.equals("covering");
+        meanFrom = c.has("entry.mean_from") ? c.getTime("entry.mean_from") : HISTORY_FROM;
+        sustainedK = c.has("entry.sustained_k") ? c.getDouble("entry.sustained_k") : Double.NaN;
+        sustainedAgree = c.has("entry.sustained_agree") ? c.getInt("entry.sustained_agree") : 4;
     }
 
     @Override
@@ -89,11 +102,40 @@ final class AtmOiBurst extends SetupStrategy {
         double mean = absShareCount >= minHistory ? absShareSum / absShareCount : Double.NaN;
         relative = Double.isFinite(share) && mean > 0 ? Math.abs(share) / mean : Double.NaN;
         double volumeRatio = Double.NaN;
-        if (!time.isBefore(HISTORY_FROM)) {
-            if (Double.isFinite(share)) {
-                absShareSum += Math.abs(share);
-                absShareCount++;
+        if (!time.isBefore(meanFrom) && Double.isFinite(share)) {
+            absShareSum += Math.abs(share);
+            absShareCount++;
+        }
+        // A-180: sustained flow from the five 3-minute shares ending at m, m - 3, ..., m - 12
+        int minute = time.getHour() * 60 + time.getMinute();
+        if (Double.isFinite(share)) {
+            shareByMinute.put(minute, share);
+        }
+        double s15 = 0;
+        int agree = 0;
+        boolean full = true;
+        for (int back = 0; back <= 12; back += 3) {
+            Double v = shareByMinute.get(minute - back);
+            if (v == null) {
+                full = false;
+                break;
             }
+            s15 += v;
+        }
+        if (full) {
+            for (int back = 0; back <= 12; back += 3) {
+                if (Math.signum(shareByMinute.get(minute - back)) == Math.signum(s15) && s15 != 0) {
+                    agree++;
+                }
+            }
+        }
+        double mean15 = s15Count >= minHistory ? s15Sum / s15Count : Double.NaN;
+        boolean sustained = sustainedK > 0 && full && mean15 > 0 && Math.abs(s15) >= sustainedK * mean15 && agree >= sustainedAgree;
+        if (full && !time.isBefore(meanFrom)) {
+            s15Sum += Math.abs(s15);
+            s15Count++;
+        }
+        if (!time.isBefore(HISTORY_FROM)) {
             minuteVolumes.add(s.futures() == null ? 0L : s.futures().volumeLastMinute());
             int n = minuteVolumes.size();
             if (n >= 3) {
@@ -105,23 +147,30 @@ final class AtmOiBurst extends SetupStrategy {
         }
         boolean burst = relative >= burstK;                              // NaN compares false
         boolean volume = volumeRatio >= volumeRatioMin;
-        OptionSide side = share > 0 ? OptionSide.CE : OptionSide.PE;
+        // A-179: covering = the falling side drives the burst (up: -dCall > dPut; down: -dPut > dCall)
+        boolean covering = share > 0 ? -callShare > putShare : -putShare > callShare;     // NaN compares false
+        boolean spike = burst && volume && (!coveringOnly || covering);
+        OptionSide side = spike ? (share > 0 ? OptionSide.CE : OptionSide.PE)
+                : sustained ? (s15 > 0 ? OptionSide.CE : OptionSide.PE)
+                : share > 0 ? OptionSide.CE : OptionSide.PE;
         LocalTime last = lastEntry.get(side);
         boolean gap = last == null || Duration.between(last, time).toMinutes() >= gapMin;
         c.put("burst", burst);
         c.put("burst_up", burst && share > 0);
         c.put("futures_volume", volume);
         c.put("same_direction_gap", gap);
-        // A-179: covering = the falling side drives the burst (up: -dCall > dPut; down: -dPut > dCall)
-        boolean covering = share > 0 ? -callShare > putShare : -putShare > callShare;     // NaN compares false
         if (coveringOnly) {
             c.put("covering", covering);
         }
-        if (!canEnter || !burst || !volume || !gap || coveringOnly && !covering) {
+        if (sustainedK > 0) {
+            c.put("sustained_flow", sustained);
+        }
+        if (!canEnter || !(spike || sustained) || !gap) {
             return null;
         }
         lastEntry.put(side, time);
-        return new Entry(side, Double.NaN, Double.NaN, side == OptionSide.CE ? "OI_BURST_UP" : "OI_BURST_DOWN");
+        String up = spike ? "OI_BURST_UP" : "OI_FLOW_UP", down = spike ? "OI_BURST_DOWN" : "OI_FLOW_DOWN";
+        return new Entry(side, Double.NaN, Double.NaN, side == OptionSide.CE ? up : down);
     }
 
     @Override
