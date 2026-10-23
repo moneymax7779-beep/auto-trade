@@ -28,7 +28,8 @@ import com.autotrade.strategy.PositionView;
  * 3-minute shares at m, m − 3, m − 6, m − 9, m − 12 (about the 15-minute change) at least {@code entry.sustained_k} times
  * the day's mean of that sum, with at least {@code entry.sustained_agree} of the five on its side; no volume condition.
  * aob-v7 (A-181) also needs the newest of the five on the sum's side ({@code entry.sustained_newest_same_side}) and no one
- * of them above {@code entry.sustained_max_share} of the sum, so one old spike cannot carry it.
+ * of them above {@code entry.sustained_max_share} of the sum, so one old spike cannot carry it. aob-v9 (A-186,
+ * {@code entry.with_day_direction}) buys a call only with the index above the day's open and a put only below it.
  * <p>
  * The day's mean and the volume median use only earlier snapshots (from 09:16), one per minute. No new entry in the same
  * direction within {@code entry.same_direction_gap_min} minutes of the last.
@@ -52,6 +53,7 @@ final class AtmOiBurst extends SetupStrategy {
     private final int sustainedAgree;
     private final boolean sustainedNewestSameSide;
     private final double sustainedMaxShare;
+    private final boolean withDayDirection;
     private final Map<Integer, Double> shareByMinute = new java.util.HashMap<>();
     private double s15Sum;
     private int s15Count;
@@ -91,6 +93,7 @@ final class AtmOiBurst extends SetupStrategy {
         sustainedAgree = c.has("entry.sustained_agree") ? c.getInt("entry.sustained_agree") : 4;
         sustainedNewestSameSide = c.has("entry.sustained_newest_same_side") && c.getBoolean("entry.sustained_newest_same_side");
         sustainedMaxShare = c.has("entry.sustained_max_share") ? c.getDouble("entry.sustained_max_share") : Double.NaN;
+        withDayDirection = c.has("entry.with_day_direction") && c.getBoolean("entry.with_day_direction");
     }
 
     @Override
@@ -173,6 +176,14 @@ final class AtmOiBurst extends SetupStrategy {
         }
         if (sustainedK > 0) {
             c.put("sustained_flow", sustained);
+        }
+        if (withDayDirection) {                                                  // A-186: with the day, not against it
+            double open = s.structure() == null ? Double.NaN : s.structure().dayOpen();
+            boolean with = side == OptionSide.CE ? s.spot() > open : s.spot() < open;   // NaN compares false: no entry
+            c.put("with_day_direction", with);
+            if (!with) {
+                return null;
+            }
         }
         if (!canEnter || !(spike || sustained) || !gap) {
             return null;
