@@ -345,6 +345,47 @@ class SetupFamiliesTest {
     }
 
     /**
+     * A-181 aob-v7, the 23 Oct 13:56 shape: no flow, one big window (+0.03 at 10:00), small ones on its side (+0.002) and
+     * then the newest the other way (-0.003 at 10:12). v6's 15-minute sum rides the spike (OI_FLOW_UP at 10:09: the spike
+     * is 83 % of it); v7 skips that and enters only at 10:10, when four +0.002 windows without the spike make the sum. On a
+     * steady run (the A-180 morning shape) v7 still buys the put like v6.
+     */
+    @Test
+    void atmOiBurstV7NeedsTheSustainedFlowToBeSpreadAndCurrent() {
+        Day v6 = new Day("atm-oi-burst.v6.yaml", Map.of());
+        Day v7 = new Day("atm-oi-burst.v7.yaml", Map.of());
+        String v6At = null, v7At = null;
+        for (int m = 16; m <= 90; m++) {
+            String t = String.format("%02d:%02d", 9 + m / 60, m % 60);
+            double share = m == 60 ? 0.03 : m > 60 && m < 72 ? 0.002 : m == 72 ? -0.003 : 0.0;
+            Object[] f = {"options.atmBandShare3m", share, "futures.volumeLastMinute", 1000L};
+            List<OrderIntent> o6 = v6.at(t, 22600, PositionView.FLAT, f).orders();
+            if (v6At == null && !o6.isEmpty()) {
+                v6At = t;
+                assertThat(o6.get(0).reason()).isEqualTo("OI_FLOW_UP");
+            }
+            if (v7At == null && !v7.at(t, 22600, PositionView.FLAT, f).orders().isEmpty()) {
+                v7At = t;
+            }
+        }
+        assertThat(v6At).as("v6 rides the spike").isEqualTo("10:09");
+        assertThat(v7At).as("v7 waits for windows without the spike").isEqualTo("10:10");
+
+        Day steady = new Day("atm-oi-burst.v7.yaml", Map.of());
+        String entered = null;
+        for (int m = 16; m <= 70; m++) {
+            String t = String.format("%02d:%02d", 9 + m / 60, m % 60);
+            double share = m < 30 ? (m % 2 == 0 ? 0.01 : -0.01) : m < 50 ? (m % 2 == 0 ? 0.001 : -0.001) : -0.0025;
+            List<OrderIntent> o = steady.at(t, 22600, PositionView.FLAT, "options.atmBandShare3m", share, "futures.volumeLastMinute", 1000L).orders();
+            if (entered == null && !o.isEmpty()) {
+                entered = t;
+                assertThat(o.get(0).reason()).isEqualTo("OI_FLOW_DOWN");
+            }
+        }
+        assertThat(entered).as("v7 still takes a steady run").isNotNull();
+    }
+
+    /**
      * A-172 odm-v9, the 22 Oct shape: open 22,690, a flush to 22,560 by 09:18, then a flat base. At 09:24 the drive holds
      * (−0.47 %, near the low) and v4 buys the put; v9 sees no new low since 09:21 and waits; a new low at 09:26 makes the
      * 09:27 check fresh and v9 enters then.

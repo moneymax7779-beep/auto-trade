@@ -27,6 +27,8 @@ import com.autotrade.strategy.PositionView;
  * the day's mean counts minutes from {@code entry.mean_from} only, and a second trigger, sustained flow: the sum of the
  * 3-minute shares at m, m − 3, m − 6, m − 9, m − 12 (about the 15-minute change) at least {@code entry.sustained_k} times
  * the day's mean of that sum, with at least {@code entry.sustained_agree} of the five on its side; no volume condition.
+ * aob-v7 (A-181) also needs the newest of the five on the sum's side ({@code entry.sustained_newest_same_side}) and no one
+ * of them above {@code entry.sustained_max_share} of the sum, so one old spike cannot carry it.
  * <p>
  * The day's mean and the volume median use only earlier snapshots (from 09:16), one per minute. No new entry in the same
  * direction within {@code entry.same_direction_gap_min} minutes of the last.
@@ -48,6 +50,8 @@ final class AtmOiBurst extends SetupStrategy {
     private final LocalTime meanFrom;
     private final double sustainedK;
     private final int sustainedAgree;
+    private final boolean sustainedNewestSameSide;
+    private final double sustainedMaxShare;
     private final Map<Integer, Double> shareByMinute = new java.util.HashMap<>();
     private double s15Sum;
     private int s15Count;
@@ -85,6 +89,8 @@ final class AtmOiBurst extends SetupStrategy {
         meanFrom = c.has("entry.mean_from") ? c.getTime("entry.mean_from") : HISTORY_FROM;
         sustainedK = c.has("entry.sustained_k") ? c.getDouble("entry.sustained_k") : Double.NaN;
         sustainedAgree = c.has("entry.sustained_agree") ? c.getInt("entry.sustained_agree") : 4;
+        sustainedNewestSameSide = c.has("entry.sustained_newest_same_side") && c.getBoolean("entry.sustained_newest_same_side");
+        sustainedMaxShare = c.has("entry.sustained_max_share") ? c.getDouble("entry.sustained_max_share") : Double.NaN;
     }
 
     @Override
@@ -111,7 +117,7 @@ final class AtmOiBurst extends SetupStrategy {
         if (Double.isFinite(share)) {
             shareByMinute.put(minute, share);
         }
-        double s15 = 0;
+        double s15 = 0, largest = 0;
         int agree = 0;
         boolean full = true;
         for (int back = 0; back <= 12; back += 3) {
@@ -121,6 +127,7 @@ final class AtmOiBurst extends SetupStrategy {
                 break;
             }
             s15 += v;
+            largest = Math.max(largest, Math.abs(v));
         }
         if (full) {
             for (int back = 0; back <= 12; back += 3) {
@@ -130,7 +137,9 @@ final class AtmOiBurst extends SetupStrategy {
             }
         }
         double mean15 = s15Count >= minHistory ? s15Sum / s15Count : Double.NaN;
-        boolean sustained = sustainedK > 0 && full && mean15 > 0 && Math.abs(s15) >= sustainedK * mean15 && agree >= sustainedAgree;
+        boolean sustained = sustainedK > 0 && full && mean15 > 0 && Math.abs(s15) >= sustainedK * mean15 && agree >= sustainedAgree
+                && (!sustainedNewestSameSide || Math.signum(share) == Math.signum(s15))                 // A-181
+                && !(largest > sustainedMaxShare * Math.abs(s15));                                       // NaN: no cap
         if (full && !time.isBefore(meanFrom)) {
             s15Sum += Math.abs(s15);
             s15Count++;
