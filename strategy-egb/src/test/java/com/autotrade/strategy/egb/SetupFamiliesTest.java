@@ -386,6 +386,38 @@ class SetupFamiliesTest {
     }
 
     /**
+     * A-186 aob-v9: a 4x burst with 2x volume at 09:41 (before 09:45: v9 waits), then another at 09:51 with the index above
+     * or below the day's open. v2 (shown only the 09:51 burst) takes the call either way; v9 only above the open.
+     */
+    @Test
+    void atmOiBurstV9WaitsFor0945AndTradesWithTheDay() {
+        for (boolean aboveOpen : new boolean[] {true, false}) {
+            Day v2 = new Day("atm-oi-burst.v2.yaml", Map.of());
+            Day v9 = new Day("atm-oi-burst.v9.yaml", Map.of());
+            double open = aboveOpen ? 22590 : 22630;
+            for (int m = 16; m <= 50; m++) {
+                String t = String.format("09:%02d", m);
+                boolean early = m == 41;
+                Object[] f = {"options.atmBandShare3m", early ? 0.004 : m % 2 == 0 ? 0.001 : -0.001,
+                        "futures.volumeLastMinute", m >= 39 && m <= 41 || m >= 49 ? 2000L : 1000L, "structure.dayOpen", open};
+                List<OrderIntent> o9 = v9.at(t, 22610, PositionView.FLAT, f).orders();
+                assertThat(o9).as("v9 before 09:51 at " + t).isEmpty();
+                v2.at(t, 22610, PositionView.FLAT, early ? new Object[] {"options.atmBandShare3m", 0.001, "futures.volumeLastMinute", 2000L,
+                        "structure.dayOpen", open} : f);                    // v2 sees no 09:41 burst, so its 15-minute gap is free
+            }
+            Object[] burst = {"options.atmBandShare3m", 0.004, "futures.volumeLastMinute", 2000L, "structure.dayOpen", open};
+            assertThat(v2.at("09:51", 22610, PositionView.FLAT, burst).orders()).singleElement()
+                    .extracting(OrderIntent::reason).isEqualTo("OI_BURST_UP");
+            List<OrderIntent> o9 = v9.at("09:51", 22610, PositionView.FLAT, burst).orders();
+            if (aboveOpen) {
+                assertThat(o9).singleElement().extracting(OrderIntent::reason).isEqualTo("OI_BURST_UP");
+            } else {
+                assertThat(o9).as("call below the day's open: v9 skips").isEmpty();
+            }
+        }
+    }
+
+    /**
      * A-172 odm-v9, the 22 Oct shape: open 22,690, a flush to 22,560 by 09:18, then a flat base. At 09:24 the drive holds
      * (−0.47 %, near the low) and v4 buys the put; v9 sees no new low since 09:21 and waits; a new low at 09:26 makes the
      * 09:27 check fresh and v9 enters then.
