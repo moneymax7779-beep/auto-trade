@@ -50,7 +50,8 @@ autotrade:
     # egb-v3 removed 2026-09-27 (user: run the strategies behind the replay results; egb-v3 was refused for
     # capital both times it triggered on the 7 expiry days and made no trade).
     strategy-files:
-      - config/strategy/expiry-breakout-straddle.v2.yaml   # ebs-v2 = v1 with no limit on straddles a day (user, 2026-10-01)
+      # ebs-v2 removed 2026-10-23 (A-171, user: "remove ebs from live"): out of sample on Oct 2024-Dec 2025 (A-168) 42 trades
+      # -Rs 4,16,679, PF 0.80 (+Rs 3.52L / -Rs 7.69L by half). Its file and code stay; it returns only through a new registered test.
       - config/strategy/early-confirm-runner.v11.yaml      # ecr-v11 = v8 (expiry days only) with no limit on campaigns per side (user, 2026-10-01)
       - config/strategy/opening-drive.v3.yaml              # odb-v3 = v2 with no limit on trades; a re-entry needs a fresh break (user, 2026-10-01)
       # egb-v4 removed 2026-10-15 (A-095 PASS, A-105; user 14 Oct: "choose the best and make the changes"): 0 trades on
