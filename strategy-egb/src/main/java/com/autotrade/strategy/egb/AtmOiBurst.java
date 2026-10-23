@@ -21,7 +21,9 @@ import com.autotrade.strategy.PositionView;
  * no {@code opposite_burst_k}) exits on the frame's premium trail, the premium stop or {@code flat_by}. aob-v4 (A-161,
  * {@code exits.climax_k}) adds the climax exit: the trade's own driving OI (calls written for a put, puts written for a
  * call) at least {@code climax_k} times the day's mean of that side while the index makes a new extreme since entry, once
- * the trade is {@code exits.climax_min_minutes} old and the option's bid is above its premium.
+ * the trade is {@code exits.climax_min_minutes} old and the option's bid is above its premium. aob-v5 (A-179,
+ * {@code entry.burst_kind: covering}) enters only on a covering burst: an up burst whose call OI fall outweighs its put
+ * OI rise, a down burst whose put OI fall outweighs its call OI rise (writers closing, A-178's split).
  * <p>
  * The day's mean and the volume median use only earlier snapshots (from 09:16), one per minute. No new entry in the same
  * direction within {@code entry.same_direction_gap_min} minutes of the last.
@@ -37,6 +39,8 @@ final class AtmOiBurst extends SetupStrategy {
     private final double oppositeK;
     private final double climaxK;
     private final int climaxMinMinutes;
+    /** A-179: only bursts driven by writers closing ("covering"); absent = any burst. */
+    private final boolean coveringOnly;
     private double callSum, putSum;
     private int sideCount;
     private double callMean = Double.NaN, putMean = Double.NaN;
@@ -63,6 +67,11 @@ final class AtmOiBurst extends SetupStrategy {
         oppositeK = c.has("exits.opposite_burst_k") ? c.getDouble("exits.opposite_burst_k") : Double.NaN;   // absent: off
         climaxK = c.has("exits.climax_k") ? c.getDouble("exits.climax_k") : Double.NaN;                    // A-161: absent = off
         climaxMinMinutes = c.has("exits.climax_min_minutes") ? c.getInt("exits.climax_min_minutes") : 10;
+        String kind = c.has("entry.burst_kind") ? c.getString("entry.burst_kind") : "any";
+        if (!kind.equals("any") && !kind.equals("covering")) {
+            throw new IllegalArgumentException("entry.burst_kind must be any or covering: " + kind);
+        }
+        coveringOnly = kind.equals("covering");
     }
 
     @Override
@@ -103,7 +112,12 @@ final class AtmOiBurst extends SetupStrategy {
         c.put("burst_up", burst && share > 0);
         c.put("futures_volume", volume);
         c.put("same_direction_gap", gap);
-        if (!canEnter || !burst || !volume || !gap) {
+        // A-179: covering = the falling side drives the burst (up: -dCall > dPut; down: -dPut > dCall)
+        boolean covering = share > 0 ? -callShare > putShare : -putShare > callShare;     // NaN compares false
+        if (coveringOnly) {
+            c.put("covering", covering);
+        }
+        if (!canEnter || !burst || !volume || !gap || coveringOnly && !covering) {
             return null;
         }
         lastEntry.put(side, time);

@@ -286,6 +286,37 @@ class SetupFamiliesTest {
     }
 
     /**
+     * A-179 aob-v5: the same 4x up burst at 09:41 with volume. Driven by calls closing (call share -0.003 against a put
+     * share +0.001) it enters; driven by puts written (put share +0.003, calls -0.001) it is a writing burst and v5 skips it,
+     * while v2 takes both.
+     */
+    @Test
+    void atmOiBurstV5EntersOnlyOnACoveringBurst() {
+        for (boolean coveringBurst : new boolean[] {true, false}) {
+            Day v5 = new Day("atm-oi-burst.v5.yaml", Map.of());
+            Day v2 = new Day("atm-oi-burst.v2.yaml", Map.of());
+            for (int m = 16; m <= 40; m++) {
+                double x = m % 2 == 0 ? 0.001 : -0.001;
+                Object[] f = {"options.atmBandShare3m", x, "options.atmBandCallShare3m", -x / 2, "options.atmBandPutShare3m", x / 2,
+                        "futures.volumeLastMinute", m >= 39 ? 2000L : 1000L};
+                v5.at(String.format("09:%02d", m), 22600, PositionView.FLAT, f);
+                v2.at(String.format("09:%02d", m), 22600, PositionView.FLAT, f);
+            }
+            Object[] burst = {"options.atmBandShare3m", 0.004,
+                    "options.atmBandCallShare3m", coveringBurst ? -0.003 : -0.001, "options.atmBandPutShare3m", coveringBurst ? 0.001 : 0.003,
+                    "futures.volumeLastMinute", 2000L};
+            assertThat(v2.at("09:41", 22610, PositionView.FLAT, burst).orders()).singleElement()
+                    .extracting(OrderIntent::reason).isEqualTo("OI_BURST_UP");
+            if (coveringBurst) {
+                assertThat(v5.at("09:41", 22610, PositionView.FLAT, burst).orders()).singleElement()
+                        .extracting(OrderIntent::reason).isEqualTo("OI_BURST_UP");
+            } else {
+                assertThat(v5.at("09:41", 22610, PositionView.FLAT, burst).orders()).as("writing burst: v5 skips").isEmpty();
+            }
+        }
+    }
+
+    /**
      * A-172 odm-v9, the 22 Oct shape: open 22,690, a flush to 22,560 by 09:18, then a flat base. At 09:24 the drive holds
      * (−0.47 %, near the low) and v4 buys the put; v9 sees no new low since 09:21 and waits; a new low at 09:26 makes the
      * 09:27 check fresh and v9 enters then.

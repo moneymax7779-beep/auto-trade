@@ -114,6 +114,9 @@ autotrade:
       # 2026-10-23 (A-172 PASS, user: "yes build odm-v9"): odm-v4 + the fresh-drive rule; own session, judged against
       # odm-v4 (live) on the same days before any live change.
       - config/strategy/opening-drive-momentum.v9.yaml
+      # 2026-10-23 (A-179, user: "put covering-only aob variant and run replay"): aob-v5 = aob-v2 entering only on covering
+      # bursts (A-178: covering +6.2 bp vs writing +1.5 bp on 17 tick days, CI includes zero); own session, judged forward.
+      - config/strategy/atm-oi-burst.v5.yaml
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"
