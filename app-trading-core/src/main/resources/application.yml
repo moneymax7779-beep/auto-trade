@@ -111,6 +111,9 @@ autotrade:
       # 2026-10-22 ~00:55 (A-161, user: "yes add v4 to shadow alongside v2"): aob-v4 = aob-v2 + the OI climax exit; own
       # session, same entries as v2, so the two compare the exit alone on new days.
       - config/strategy/atm-oi-burst.v4.yaml
+      # 2026-10-23 (A-172 PASS, user: "yes build odm-v9"): odm-v4 + the fresh-drive rule; own session, judged against
+      # odm-v4 (live) on the same days before any live change.
+      - config/strategy/opening-drive-momentum.v9.yaml
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"
