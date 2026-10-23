@@ -286,6 +286,31 @@ class SetupFamiliesTest {
     }
 
     /**
+     * A-172 odm-v9, the 22 Oct shape: open 22,690, a flush to 22,560 by 09:18, then a flat base. At 09:24 the drive holds
+     * (−0.47 %, near the low) and v4 buys the put; v9 sees no new low since 09:21 and waits; a new low at 09:26 makes the
+     * 09:27 check fresh and v9 enters then.
+     */
+    @Test
+    void odmV9NeedsAFreshExtremeAndWaitsOutAStaleDrive() {
+        Map<String, Object> open = Map.of("structure.dayOpen", 22690.0, "breadth.moverBreadth", -77.0);
+        Day v4 = new Day("opening-drive-momentum.v4.yaml", open), v9 = new Day("opening-drive-momentum.v9.yaml", open);
+        double[] path = {22690, 22600, 22570, 22560, 22590, 22605, 22615, 22590, 22579};   // 09:15 .. 09:23 (a bounce at 09:21, as on 22 Oct)
+        for (int i = 0; i < path.length; i++) {
+            for (Day d : new Day[] {v4, v9}) {
+                d.at(String.format("09:%02d", 15 + i), path[i]);
+            }
+        }
+        assertThat(v4.at("09:24", 22584).orders()).singleElement().extracting(OrderIntent::side).isEqualTo(OptionSide.PE);
+        assertThat(v9.at("09:24", 22584).orders()).as("stale: no new low since 09:21").isEmpty();
+        v9.at("09:25", 22570);
+        v9.at("09:26", 22550);                                                    // a new session low
+        assertThat(v9.at("09:27", 22552).orders()).singleElement().satisfies(o -> {
+            assertThat(o.side()).isEqualTo(OptionSide.PE);
+            assertThat(o.reason()).isEqualTo("OPENING_DRIVE_DOWN");
+        });
+    }
+
+    /**
      * A-078: an ORL break at 09:51, before EMA20 exists (as on 12 Oct). orc-v1 has no trend then and stays out; orc-v2
      * takes the VWAP side and the close below EMA9 as the trend and buys the put, stop 1 ATR back above the ORL.
      */
