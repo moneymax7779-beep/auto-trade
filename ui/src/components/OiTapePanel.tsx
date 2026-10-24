@@ -63,9 +63,12 @@ export function OiTapePanel({ underlying, date, live, trades = [], title, insets
   { underlying: string; date: string; live?: boolean; trades?: TapeTrade[]; title?: string; insets?: TapeInsets;
     /** drawn inside the price chart's card (no card of its own), right under the chart */
     bare?: boolean }) {
+  // the strikes around the money the OI lines and flow bars count (an experiment, 23 Oct: ATM ± 3 against the usual ± 5)
+  const [band, setBand] = useState<3 | 5>(5);
   const q = useQuery({
-    queryKey: ["oi-tape", underlying, date],
-    queryFn: () => get<TapeData>(`/api/oi-tape?underlying=${underlying}&date=${date}`),
+    queryKey: ["oi-tape", underlying, date, band],
+    queryFn: () => get<TapeData>(`/api/oi-tape?underlying=${underlying}&date=${date}&band=${band}`),
+    placeholderData: (prev) => prev,
     refetchInterval: live ? 30_000 : false,
   });
   // the same per-minute futures volume the price charts draw (shared cache with the surge chart and the session chart)
@@ -101,16 +104,16 @@ export function OiTapePanel({ underlying, date, live, trades = [], title, insets
     <>
       <Tape d={d} date={date} underlying={underlying} volume={volume} view={view} setView={setView} trades={trades}
         pinned={pinRow ? pinRow[0] : null} setPinned={(t) => setPinM(t == null ? null : secs(t) / 60)}
-        bucket={bucket} setBucket={setBucket} insets={insets} />
+        bucket={bucket} setBucket={setBucket} band={band} setBand={setBand} insets={insets} />
       <Strikes underlying={underlying} date={date} at={at} pinned={pinRow != null} live={live} />
     </>
   );
 }
 
-function Tape({ d, date, underlying, volume, view, setView, trades, pinned, setPinned, bucket, setBucket, insets }: {
+function Tape({ d, date, underlying, volume, view, setView, trades, pinned, setPinned, bucket, setBucket, band, setBand, insets }: {
   d: TapeData; date: string; underlying: string; volume: [string, number, number | null][]; view: View; setView: (v: View) => void; trades: TapeTrade[];
   pinned: string | null; setPinned: (t: string | null) => void;
-  bucket: "auto" | 30 | 60 | 300; setBucket: (b: "auto" | 30 | 60 | 300) => void; insets: TapeInsets;
+  bucket: "auto" | 30 | 60 | 300; setBucket: (b: "auto" | 30 | 60 | 300) => void; band: 3 | 5; setBand: (b: 3 | 5) => void; insets: TapeInsets;
 }) {
   const [ref, W] = useWidth<HTMLDivElement>();
   const clipId = `oi-clip-${useId().replace(/:/g, "")}`;
@@ -199,6 +202,13 @@ function Tape({ d, date, underlying, volume, view, setView, trades, pinned, setP
           <button key={String(b)} type="button" onClick={() => setBucket(b)}
             className={`rounded border px-2 py-0.5 ${bucket === b ? "border-accent bg-accent/10" : "border-line text-muted hover:text-text"}`}>
             {b === "auto" ? `auto (${step >= 60 ? `${step / 60} min` : `${step} s`})` : b >= 60 ? `${b / 60} min` : `${b} s`}
+          </button>
+        ))}
+        <span className="ml-3 text-muted">Strikes</span>
+        {([3, 5] as const).map((b) => (
+          <button key={b} type="button" onClick={() => setBand(b)}
+            className={`rounded border px-2 py-0.5 ${band === b ? "border-accent bg-accent/10" : "border-line text-muted hover:text-text"}`}>
+            ATM ± {b}
           </button>
         ))}
         <button type="button" onClick={() => setView(FULL)} disabled={view.a === DAY0 && view.b === DAY1}

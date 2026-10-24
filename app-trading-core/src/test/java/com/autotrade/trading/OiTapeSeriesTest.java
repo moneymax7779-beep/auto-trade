@@ -51,6 +51,15 @@ class OiTapeSeriesTest {
     }
 
     @Test
+    void theBandParameterSetsHowManyStrikesAroundTheMoneyCount() {
+        OiTapeController.Day d = day();
+        d.calls.put(23_150.0, steps(300, 400, 400, 400));                     // 3 strikes above the 23,000 ATM
+        // band 3 counts it (OI 300 at step 0, +100 flow at step 1); band 2 leaves it out
+        assertThat(row(OiTapeController.series(d, 50, 3), 1).subList(5, 8)).containsExactly(1_500L, 1_900L, 100L);
+        assertThat(row(OiTapeController.series(d, 50, 2), 1).subList(5, 8)).containsExactly(1_100L, 1_900L, 0L);
+    }
+
+    @Test
     void stepIndexAndLabel() {
         assertThat(OiTapeController.index(LocalTime.of(9, 15))).isZero();
         assertThat(OiTapeController.index(LocalTime.of(9, 34, 29))).isEqualTo(38);

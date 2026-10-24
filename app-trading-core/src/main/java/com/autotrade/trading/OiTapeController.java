@@ -30,7 +30,7 @@ import com.autotrade.core.time.MarketTime;
  * expiry in 30-second steps from 09:15 to 15:30 IST, from the own capture (md.*), for any day it holds.
  * <ul>
  *   <li>{@code /api/oi-tape}: per step the index, the future's price and OI, the ATM strike, the call and put OI of
- *       the band ATM ± {@value #BAND} strikes, the <b>flow</b> (the band's OI change from the step before, summed
+ *       the band ATM ± {@value #BAND} strikes (the {@code band} parameter, 1 to {@value #MAX_BAND}), the <b>flow</b> (the band's OI change from the step before, summed
  *       over strikes that had OI in both steps, so a strike the capture starts recording mid-day adds no false jump)
  *       and the PCR of the opening chain: put OI over call OI of the strikes recorded on both sides in the first step,
  *       a fixed set for the day, so the ratio moves only when OI does (a band that follows the money also moves with
@@ -60,6 +60,8 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
     static final int STEP = 30;
     static final int STEPS = (int) (java.time.Duration.between(OPEN, CLOSE).toSeconds() / STEP);   // 750
     static final int BAND = 5, STRIKES = 15;
+    /** The widest band a caller may ask for (the capture records about ATM ± 16, re-centred as the market moves). */
+    static final int MAX_BAND = 10;
     /**
      * Today is read only up to this long ago: the live capture writes its ticks every 5 s ({@code LiveCapture.flush}),
      * and a step is read once, so a step read before its last ticks were written would keep them out for good.
@@ -157,7 +159,9 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
     // ------------------------------------------------------------------ API
 
     @GetMapping
-    Map<String, Object> tape(@RequestParam(required = false) String date, @RequestParam String underlying) {
+    Map<String, Object> tape(@RequestParam(required = false) String date, @RequestParam String underlying,
+                             @RequestParam(defaultValue = "" + BAND) int band) {
+        int b = Math.max(1, Math.min(MAX_BAND, band));
         LocalDate day = date == null ? LocalDate.now(MarketTime.IST) : LocalDate.parse(date);
         String u = known(underlying);
         Map<String, Object> out = header(day, u);
@@ -176,10 +180,10 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
             out.put("expiry", d.expiry.toString());
             out.put("futuresExpiry", d.futExpiry);
             out.put("strikeStep", step);
-            out.put("band", BAND);
+            out.put("band", b);
             out.put("stepSeconds", STEP);
             out.put("complete", d.complete);
-            out.put("series", series(d, step));
+            out.put("series", series(d, step, b));
         }
         return out;
     }
@@ -375,6 +379,11 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
 
     /** Per step: [time, spot, fut price, fut OI, ATM, band call OI, band put OI, call flow, put flow, band PCR]. */
     static List<Object> series(Day d, double step) {
+        return series(d, step, BAND);
+    }
+
+    /** As {@link #series(Day, double)} with the flow / OI band ATM ± {@code band} strikes (the opening-chain PCR does not depend on it). */
+    static List<Object> series(Day d, double step, int band) {
         List<Object> rows = new ArrayList<>(d.steps);
         Map<Double, double[]> callsCarried = carriedAll(d.calls, d.seedCalls, d.steps);
         Map<Double, double[]> putsCarried = carriedAll(d.puts, d.seedPuts, d.steps);
@@ -395,7 +404,7 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
             double atm = Math.round(spot[i] / step) * step;
             double ce = 0, pe = 0, dce = 0, dpe = 0, chainCe = 0, chainPe = 0;
             for (Map.Entry<Double, double[]> e : callsCarried.entrySet()) {
-                if (Math.abs(e.getKey() - atm) <= BAND * step + 1e-6) {
+                if (Math.abs(e.getKey() - atm) <= band * step + 1e-6) {
                     double[] v = e.getValue();
                     ce += nz(v[i + 1]);
                     if (!Double.isNaN(v[i + 1]) && !Double.isNaN(v[i])) {
@@ -404,7 +413,7 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
                 }
             }
             for (Map.Entry<Double, double[]> e : putsCarried.entrySet()) {
-                if (Math.abs(e.getKey() - atm) <= BAND * step + 1e-6) {
+                if (Math.abs(e.getKey() - atm) <= band * step + 1e-6) {
                     double[] v = e.getValue();
                     pe += nz(v[i + 1]);
                     if (!Double.isNaN(v[i + 1]) && !Double.isNaN(v[i])) {
