@@ -34,3 +34,13 @@ autotrade:
     poll-ms: 1000
     costs-file: config/costs/india-index-options-costs.v2.yaml
     broker-funds: 1000000000         # DRY_RUN in L1: simulated broker funds (L2 reads the broker)
+    # The daily Kite login (live L3, user go-ahead 24 Oct 2026): the app's key and secret as files in secrets-dir (read
+    # only; the credential profile names them file:<name>), the day's access token per account in sessions-dir (owner
+    # only), the 08:30 IST login link by Telegram to public-base-url/api/execution/accounts/{id}/kite/login.
+    kite:
+      secrets-dir: ${AUTOTRADE_KITE_SECRETS_DIR:/app/secrets}
+      sessions-dir: ${AUTOTRADE_KITE_SESSIONS_DIR:/app/broker-sessions}
+      public-base-url: ${AUTOTRADE_PUBLIC_BASE_URL:}
+      api-base: ${AUTOTRADE_KITE_API_BASE:https://api.kite.trade}
+      login-base: ${AUTOTRADE_KITE_LOGIN_BASE:https://kite.zerodha.com}
+      telegram-file: ${AUTOTRADE_TELEGRAM_FILE:/app/telegram/bot.env}

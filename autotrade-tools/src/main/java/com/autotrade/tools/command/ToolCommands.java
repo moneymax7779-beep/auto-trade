@@ -119,6 +119,7 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                 case "follower-add" -> followerAdd(parsed);
                 case "follow" -> follow(parsed);
                 case "account-session" -> accountSession(parsed);
+                case "kite-profile" -> kiteProfile(parsed);
                 case "divergence-report" -> divergenceReport(parsed);
                 default -> usage("unknown command: " + parsed.command());
             };
@@ -177,6 +178,11 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                                                              fan out the signal source's decisions and run PAPER/DRY_RUN followers
                   account-session --label L --status ACTIVE|DISCONNECTED [--tenant owner]
                                                              mark a broker account's session after the day's login (audited)
+                  kite-profile --name N --redirect-uri URL [--api-key-ref file:kite-api-key]
+                          [--api-secret-ref file:kite-api-secret] [--ips 34.14.137.170] [--tenant owner]
+                          [--account LABEL [--client-id AB1234]]
+                                                             a Zerodha app's credential profile (secret references only, never
+                                                             values) and, with --account, attach it to a ZERODHA account
                   divergence-report --session D[,D] [--copy-group LIVE-SET] [--tenant owner] [--paper-session ID] [--out DIR]
                                                              L1 daily report: each follower vs the signal source, PAPER followers
                                                              vs PAPER-1 (gate: every divergence explained); Markdown
@@ -490,6 +496,54 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
         accounts.setConnectionStatus(account.id(), status);
         new com.autotrade.execution.KillSwitches(target).audit(account, "cli", "SESSION_" + status, Map.of());
         System.out.printf("account %d %s: connection %s%n", account.id(), account.displayName(), status);
+        return 0;
+    }
+
+    /**
+     * Live L3 (user go-ahead 24 Oct 2026, "C1"): a Zerodha (Kite Connect) app's credential profile. Only references are
+     * stored ({@code file:<name>} in the execution container's secrets folder), never the key or secret themselves. With
+     * {@code --account}, the ZERODHA account uses it for its daily login; {@code --client-id} pins the Zerodha client id
+     * the login must come from (else the first login sets it).
+     */
+    private int kiteProfile(ToolArgs args) {
+        args.allowOnly(Set.of("name", "redirect-uri", "api-key-ref", "api-secret-ref", "ips", "tenant", "account",
+                "client-id"));
+        if (!args.has("name") || !args.has("redirect-uri")) {
+            return usage("kite-profile needs --name and --redirect-uri");
+        }
+        String keyRef = args.get("api-key-ref", "file:kite-api-key"), secretRef = args.get("api-secret-ref", "file:kite-api-secret");
+        for (String ref : List.of(keyRef, secretRef)) {
+            if (!ref.matches("file:[A-Za-z0-9._-]{1,64}")) {
+                return usage("secret references are file:<name>, got " + ref + " (never the key or secret itself)");
+            }
+        }
+        com.autotrade.account.AccountStore accounts = new com.autotrade.account.AccountStore(target);
+        long tenant = accounts.ensureTenant(args.get("tenant", "owner"));
+        org.springframework.jdbc.core.JdbcTemplate jdbc = new org.springframework.jdbc.core.JdbcTemplate(target);
+        String[] ips = args.get("ips", "34.14.137.170").split(",");
+        long profile = jdbc.queryForObject("insert into acct.broker_credential_profile (tenant_id, broker_type, scope, name, "
+                + "api_key_ref, api_secret_ref, redirect_uri, registered_ips) values (?, 'ZERODHA', 'TENANT_SHARED', ?, ?, ?, ?, ?) "
+                + "on conflict (tenant_id, name) do update set api_key_ref = excluded.api_key_ref, "
+                + "api_secret_ref = excluded.api_secret_ref, redirect_uri = excluded.redirect_uri, "
+                + "registered_ips = excluded.registered_ips, updated_at = now() returning id", Long.class, tenant,
+                args.get("name", ""), keyRef, secretRef, args.get("redirect-uri", ""), ips);
+        System.out.printf("credential profile %d %s: key %s, secret %s, redirect %s, ips %s%n", profile, args.get("name", ""),
+                keyRef, secretRef, args.get("redirect-uri", ""), String.join(",", ips));
+        if (args.has("account")) {
+            com.autotrade.account.BrokerAccount account = accounts.ofTenant(tenant).stream()
+                    .filter(a -> a.displayName().equals(args.get("account", ""))).findFirst()
+                    .orElseThrow(() -> new IllegalArgumentException("no account " + args.get("account", "") + " in this tenant"));
+            if (account.brokerType() != com.autotrade.account.BrokerType.ZERODHA) {
+                return usage(account.displayName() + " is not a ZERODHA account");
+            }
+            jdbc.update("update acct.broker_account set credential_profile_id = ?, external_broker_user_id = coalesce(?, "
+                    + "external_broker_user_id), updated_at = now() where id = ?", profile,
+                    args.has("client-id") ? args.get("client-id", "").toUpperCase(java.util.Locale.ROOT) : null, account.id());
+            new com.autotrade.execution.KillSwitches(target).audit(account, "cli", "CREDENTIAL_PROFILE_SET",
+                    Map.of("profile", args.get("name", "")));
+            System.out.printf("account %d %s: credential profile %s%s%n", account.id(), account.displayName(),
+                    args.get("name", ""), args.has("client-id") ? ", Zerodha client " + args.get("client-id", "").toUpperCase(java.util.Locale.ROOT) : "");
+        }
         return 0;
     }
 
