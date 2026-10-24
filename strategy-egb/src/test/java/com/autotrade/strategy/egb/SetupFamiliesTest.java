@@ -418,6 +418,71 @@ class SetupFamiliesTest {
     }
 
     /**
+     * A-181 aob-v7's newest-same-side rule on its own: +0.004 at 10:00, 10:03, 10:06, 10:09 and -0.001 at 10:12 (no flow
+     * otherwise, ordinary volume). At 10:12 the five windows sum to +0.015 with four on its side and none above 40 % of it,
+     * so only the newest window (-0.001) is against: v6 signals a call, v7 does not.
+     */
+    @Test
+    void atmOiBurstV7SkipsWhenTheNewestWindowIsAgainstTheSum() {
+        Day v6 = new Day("atm-oi-burst.v6.yaml", Map.of());
+        Day v7 = new Day("atm-oi-burst.v7.yaml", Map.of());
+        List<OrderIntent> at6 = List.of(), at7 = List.of();
+        for (int m = 16; m <= 72; m++) {
+            String t = String.format("%02d:%02d", 9 + m / 60, m % 60);
+            double share = m == 72 ? -0.001 : m >= 60 && m % 3 == 0 ? 0.004 : 0.0;
+            Object[] f = {"options.atmBandShare3m", share, "futures.volumeLastMinute", 1000L};
+            List<OrderIntent> o6 = v6.at(t, 22600, PositionView.FLAT, f).orders();
+            List<OrderIntent> o7 = v7.at(t, 22600, PositionView.FLAT, f).orders();
+            if (m == 72) {
+                at6 = o6;
+                at7 = o7;
+            }
+        }
+        assertThat(at6).as("v6 at 10:12").singleElement().extracting(OrderIntent::reason).isEqualTo("OI_FLOW_UP");
+        assertThat(at7).as("v7 at 10:12: the newest window is against the sum").isEmpty();
+    }
+
+    /** The aob-v2 quiet morning, 09:16-09:40, with the 2x volume from 09:39 (as in the v1 / v2 tests). */
+    private static Day aobMorning() {
+        Day d = new Day("atm-oi-burst.v2.yaml", Map.of());
+        for (int m = 16; m <= 40; m++) {
+            d.at(String.format("09:%02d", m), 22600, PositionView.FLAT, "options.atmBandShare3m", m % 2 == 0 ? 0.001 : -0.001,
+                    "futures.volumeLastMinute", m >= 39 ? 2000L : 1000L);
+        }
+        return d;
+    }
+
+    private static final Object[] AOB_BURST = {"options.atmBandShare3m", 0.004, "futures.volumeLastMinute", 2000L};
+    private static final Object[] AOB_QUIET = {"options.atmBandShare3m", 0.001, "futures.volumeLastMinute", 2000L};
+
+    /**
+     * Review fix (24 Oct): the same-direction gap counts entries that filled. A 09:41 call signal the session refused
+     * (the position stays flat) does not block the 09:43 call signal.
+     */
+    @Test
+    void atmOiBurstARefusedSignalDoesNotStartTheGap() {
+        Day d = aobMorning();
+        assertThat(d.at("09:41", 22610, PositionView.FLAT, AOB_BURST).orders()).singleElement()
+                .extracting(OrderIntent::reason).isEqualTo("OI_BURST_UP");
+        d.at("09:42", 22610, PositionView.FLAT, AOB_QUIET);                          // refused: still flat
+        assertThat(d.at("09:43", 22615, PositionView.FLAT, AOB_BURST).orders()).as("not blocked by a refused signal")
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("OI_BURST_UP");
+    }
+
+    /** ... while a call that filled at 09:41 still blocks calls until 09:56 (15 minutes from the signal's minute). */
+    @Test
+    void atmOiBurstAFilledEntryStartsTheGapAtItsSignalMinute() {
+        Day d = aobMorning();
+        assertThat(d.at("09:41", 22610, PositionView.FLAT, AOB_BURST).orders()).hasSize(1);
+        java.time.Instant opened = Snapshots.SESSION.atTime(9, 41).atZone(com.autotrade.core.time.MarketTime.IST).toInstant();
+        d.at("09:42", 22612, new PositionView(true, OptionSide.CE, 1, 50, opened, 51), AOB_QUIET);   // filled
+        d.at("09:45", 22605, PositionView.FLAT, AOB_QUIET);                                          // closed
+        assertThat(d.at("09:50", 22615, PositionView.FLAT, AOB_BURST).orders()).as("inside the gap").isEmpty();
+        assertThat(d.at("09:56", 22620, PositionView.FLAT, AOB_BURST).orders()).as("15 minutes after 09:41")
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("OI_BURST_UP");
+    }
+
+    /**
      * A-172 odm-v9, the 22 Oct shape: open 22,690, a flush to 22,560 by 09:18, then a flat base. At 09:24 the drive holds
      * (−0.47 %, near the low) and v4 buys the put; v9 sees no new low since 09:21 and waits; a new low at 09:26 makes the
      * 09:27 check fresh and v9 enters then.

@@ -91,6 +91,8 @@ class StrategiesController {
                 + "count(t.opened_at) trades, count(*) filter (where t.net > 0) wins, coalesce(sum(t.net), 0)::bigint net "
                 + "from trade.session s left join t on t.session_id = s.id "
                 + "where s.account = ? and s.mode = ? and '+' || s.strategy_id || '+' like ? "
+                // a shadow replay a restart cut short (STOPPED) is re-run whole; its partial trades would count twice
+                + "and not (s.account = '" + ShadowRunner.ACCOUNT + "' and s.status = 'STOPPED') "
                 + "group by s.id order by s.session_date desc, s.id desc limit 60",
                 strategy, strategy + ".v%", account, mode, "%+" + strategy + "+%");
     }

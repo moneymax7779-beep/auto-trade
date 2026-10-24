@@ -11,7 +11,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
-import java.util.concurrent.ConcurrentHashMap;
 
 import javax.sql.DataSource;
 
@@ -57,11 +56,18 @@ class PcrController implements org.springframework.beans.factory.DisposableBean 
     }
 
     private final JdbcTemplate jdbc;
-    private final Map<String, Day> days = new ConcurrentHashMap<>();
+    // bounded like the OI tape's cache (every day ever viewed used to stay in memory)
+    private final Map<String, Day> days = java.util.Collections.synchronizedMap(new LinkedHashMap<>(16, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Day> eldest) {
+            return size() > 16;
+        }
+    });
     private final List<String> underlyings;
     private final org.springframework.boot.ApplicationArguments args;
     private final MarketHours market;
     private java.util.concurrent.ScheduledExecutorService warmer;
+    private volatile Instant lastWarn = Instant.EPOCH;
 
     PcrController(DataSource target, TradingProperties properties, org.springframework.boot.ApplicationArguments args,
                   MarketHours market) {
@@ -89,8 +95,14 @@ class PcrController implements org.springframework.beans.factory.DisposableBean 
             for (String u : underlyings) {
                 try {
                     pcr(null, u);
-                } catch (RuntimeException e) {
-                    log.debug("pcr warmer {}: {}", u, e.getMessage());
+                } catch (Throwable e) {                               // never let one failure cancel the schedule
+                    Instant at = Instant.now();
+                    if (at.isAfter(lastWarn.plus(java.time.Duration.ofMinutes(10)))) {      // WARN at most every 10 min
+                        lastWarn = at;
+                        log.warn("pcr warmer {}: {}", u, e.toString());
+                    } else {
+                        log.debug("pcr warmer {}: {}", u, e.toString());
+                    }
                 }
             }
         }, 30, 60, java.util.concurrent.TimeUnit.SECONDS);
@@ -127,8 +139,9 @@ class PcrController implements org.springframework.beans.factory.DisposableBean 
                 out.put("series", List.of());
                 return out;
             }
-            d = new Day(expiries.getFirst(), day.atTime(OPEN).atZone(MarketTime.IST).toInstant());
-            days.put(key, d);
+            LocalDate expiry = expiries.getFirst();
+            // one Day per key even when the warmer and a request miss at once (both used to read the whole day)
+            d = days.computeIfAbsent(key, k -> new Day(expiry, day.atTime(OPEN).atZone(MarketTime.IST).toInstant()));
         }
         synchronized (d) {
             if (!d.complete) {

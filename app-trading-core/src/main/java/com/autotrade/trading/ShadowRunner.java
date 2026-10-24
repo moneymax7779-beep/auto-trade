@@ -50,24 +50,37 @@ final class ShadowRunner {
         this.target = target;
     }
 
+    /** The summaries of the files that ran ({@code null} when none did) and the files that failed, with the reason. */
+    record Outcome(String summary, List<String> failed) {
+    }
+
     /**
      * Runs the shadow strategies on {@code session}, each in its own session on the shadow account (so two versions of
-     * one strategy can be compared, and none takes another's capital); returns the summaries, or null when none.
+     * one strategy can be compared, and none takes another's capital).
      */
-    String run(LocalDate session) throws Exception {
+    Outcome run(LocalDate session) {
         return run(session, properties.trading().shadowStrategyFiles());
     }
 
-    /** The same for the given strategy files only. */
-    String run(LocalDate session, List<String> files) throws Exception {
+    /**
+     * The same for the given strategy files only. A file that fails is reported and the rest still run (one bad file
+     * must not cost the other strategies their day); a failed file has no finished session, so {@link #pending} keeps it.
+     */
+    Outcome run(LocalDate session, List<String> files) {
         if (files == null || files.isEmpty()) {
-            return null;
+            return new Outcome(null, List.of());
         }
         List<String> summaries = new ArrayList<>();
+        List<String> failed = new ArrayList<>();
         for (String file : files) {
-            summaries.add(runOne(session, List.of(file)));
+            try {
+                summaries.add(runOne(session, List.of(file)));
+            } catch (Exception e) {
+                log.warn("shadow {} on {} failed: {}", file, session, e.getMessage(), e);
+                failed.add(Path.of(file).getFileName() + ": " + e.getMessage());
+            }
         }
-        return String.join("\n\n", summaries);
+        return new Outcome(summaries.isEmpty() ? null : String.join("\n\n", summaries), List.copyOf(failed));
     }
 
     /**

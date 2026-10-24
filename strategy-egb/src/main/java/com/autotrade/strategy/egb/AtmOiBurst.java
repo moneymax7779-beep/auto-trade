@@ -70,6 +70,10 @@ final class AtmOiBurst extends SetupStrategy {
     private final List<Long> minuteVolumes = new ArrayList<>();
     private final List<Long> windowVolumes = new ArrayList<>();
     private final Map<OptionSide, LocalTime> lastEntry = new EnumMap<>(OptionSide.class);
+    /** The minute of the latest entry signal per side; it becomes lastEntry only once a position opens on it. */
+    private final Map<OptionSide, LocalTime> signalAt = new EnumMap<>(OptionSide.class);
+    private java.time.Instant gapFor;
+    private int lastMinute = -1;
     /** This snapshot's share and its size against the day's earlier mean (set in evaluate, read by the exit). */
     private double share = Double.NaN;
     private double relative = Double.NaN;
@@ -103,7 +107,11 @@ final class AtmOiBurst extends SetupStrategy {
         putShare = s.options() == null ? Double.NaN : s.options().atmBandPutShare3m();
         callMean = sideCount >= minHistory ? callSum / sideCount : Double.NaN;
         putMean = sideCount >= minHistory ? putSum / sideCount : Double.NaN;
-        if (!time.isBefore(HISTORY_FROM) && Double.isFinite(callShare) && Double.isFinite(putShare)) {
+        // every mean and window counts one value per minute: a second snapshot in the same minute adds nothing
+        int minute = time.getHour() * 60 + time.getMinute();
+        boolean newMinute = minute != lastMinute;
+        lastMinute = minute;
+        if (newMinute && !time.isBefore(meanFrom) && Double.isFinite(callShare) && Double.isFinite(putShare)) {
             callSum += Math.abs(callShare);
             putSum += Math.abs(putShare);
             sideCount++;
@@ -111,12 +119,11 @@ final class AtmOiBurst extends SetupStrategy {
         double mean = absShareCount >= minHistory ? absShareSum / absShareCount : Double.NaN;
         relative = Double.isFinite(share) && mean > 0 ? Math.abs(share) / mean : Double.NaN;
         double volumeRatio = Double.NaN;
-        if (!time.isBefore(meanFrom) && Double.isFinite(share)) {
+        if (newMinute && !time.isBefore(meanFrom) && Double.isFinite(share)) {
             absShareSum += Math.abs(share);
             absShareCount++;
         }
         // A-180: sustained flow from the five 3-minute shares ending at m, m - 3, ..., m - 12
-        int minute = time.getHour() * 60 + time.getMinute();
         if (Double.isFinite(share)) {
             shareByMinute.put(minute, share);
         }
@@ -143,11 +150,11 @@ final class AtmOiBurst extends SetupStrategy {
         boolean sustained = sustainedK > 0 && full && mean15 > 0 && Math.abs(s15) >= sustainedK * mean15 && agree >= sustainedAgree
                 && (!sustainedNewestSameSide || Math.signum(share) == Math.signum(s15))                 // A-181
                 && !(largest > sustainedMaxShare * Math.abs(s15));                                       // NaN: no cap
-        if (full && !time.isBefore(meanFrom)) {
+        if (newMinute && full && !time.isBefore(meanFrom)) {
             s15Sum += Math.abs(s15);
             s15Count++;
         }
-        if (!time.isBefore(HISTORY_FROM)) {
+        if (newMinute && !time.isBefore(HISTORY_FROM)) {
             minuteVolumes.add(s.futures() == null ? 0L : s.futures().volumeLastMinute());
             int n = minuteVolumes.size();
             if (n >= 3) {
@@ -188,9 +195,25 @@ final class AtmOiBurst extends SetupStrategy {
         if (!canEnter || !(spike || sustained) || !gap) {
             return null;
         }
-        lastEntry.put(side, time);
+        signalAt.put(side, time);                                     // the gap starts once a position opens (decide)
         String up = spike ? "OI_BURST_UP" : "OI_FLOW_UP", down = spike ? "OI_BURST_DOWN" : "OI_FLOW_DOWN";
         return new Entry(side, Double.NaN, Double.NaN, side == OptionSide.CE ? up : down);
+    }
+
+    /**
+     * The same-direction gap is counted from an entry that filled: a signal the session refused (risk, capital, stale
+     * quotes) does not block that direction for {@code entry.same_direction_gap_min} (the A-157 / A-158 studies counted
+     * entries). The gap starts at the signal's minute, as before, once a position on that side is seen open.
+     */
+    @Override
+    public com.autotrade.strategy.Decision decide(FeatureSnapshot s, PositionView position) {
+        if (position.open() && position.openedAt() != null && !position.openedAt().equals(gapFor)) {
+            gapFor = position.openedAt();
+            LocalTime at = signalAt.get(position.side());
+            lastEntry.put(position.side(), at != null ? at
+                    : position.openedAt().atZone(com.autotrade.core.time.MarketTime.IST).toLocalTime());
+        }
+        return super.decide(s, position);
     }
 
     @Override
@@ -204,8 +227,10 @@ final class AtmOiBurst extends SetupStrategy {
         double spot = s.spot();
         boolean newExtreme = false;
         if (position.openedAt() != null && !position.openedAt().equals(extremeFor)) {
-            extremeFor = position.openedAt();
-            extreme = spot;
+            if (Double.isFinite(spot)) {                                  // a missing spot must not leave the extreme NaN
+                extremeFor = position.openedAt();
+                extreme = spot;
+            }
         } else if (Double.isFinite(spot) && Double.isFinite(extreme)) {
             newExtreme = side == OptionSide.PE ? spot < extreme : spot > extreme;
             extreme = side == OptionSide.PE ? Math.min(extreme, spot) : Math.max(extreme, spot);

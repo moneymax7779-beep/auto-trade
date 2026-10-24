@@ -65,6 +65,8 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
      * and a step is read once, so a step read before its last ticks were written would keep them out for good.
      */
     static final java.time.Duration WRITE_LAG = java.time.Duration.ofSeconds(15);
+    /** How much of today already read is read again (late-committed ticks). */
+    static final java.time.Duration REREAD = java.time.Duration.ofSeconds(60);
     private static final int KEPT_DAYS = 16;
 
     /** One index and day: per step the index, the future and every option contract's last OI in that step (NaN = none). */
@@ -138,8 +140,8 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
             for (String u : underlyings) {
                 try {
                     day(now.toLocalDate(), u);
-                } catch (RuntimeException e) {
-                    log.debug("oi tape warmer {}: {}", u, e.getMessage());
+                } catch (Throwable e) {                               // never let one failure cancel the schedule
+                    warn(u, e);
                 }
             }
         }, 20, STEP, java.util.concurrent.TimeUnit.SECONDS);
@@ -157,7 +159,7 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
     @GetMapping
     Map<String, Object> tape(@RequestParam(required = false) String date, @RequestParam String underlying) {
         LocalDate day = date == null ? LocalDate.now(MarketTime.IST) : LocalDate.parse(date);
-        String u = underlying.toUpperCase(Locale.ROOT);
+        String u = known(underlying);
         Map<String, Object> out = header(day, u);
         if (deferred(day, u)) {
             out.put("deferred", true);
@@ -196,7 +198,7 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
     Map<String, Object> strikes(@RequestParam(required = false) String date, @RequestParam String underlying,
                                 @RequestParam String at, @RequestParam(defaultValue = "300") int back) {
         LocalDate day = date == null ? LocalDate.now(MarketTime.IST) : LocalDate.parse(date);
-        String u = underlying.toUpperCase(Locale.ROOT);
+        String u = known(underlying);
         Map<String, Object> out = header(day, u);
         if (deferred(day, u)) {
             out.put("deferred", true);
@@ -286,6 +288,29 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
         return written.isBefore(end) ? Instant.ofEpochSecond(Math.floorDiv(written.getEpochSecond(), STEP) * STEP) : end;
     }
 
+    /** An underlying this service does not capture is the caller's error (400); it never reaches the database. */
+    private String known(String underlying) {
+        String u = underlying.toUpperCase(Locale.ROOT);
+        if (!underlyings.contains(u)) {
+            throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.BAD_REQUEST,
+                    "unknown underlying " + underlying);
+        }
+        return u;
+    }
+
+    private volatile Instant lastWarn = Instant.EPOCH;
+
+    /** Warmer failures at WARN, at most one every 10 minutes (a persistent failure shows, without flooding the log). */
+    private void warn(String u, Throwable e) {
+        Instant now = Instant.now();
+        if (now.isAfter(lastWarn.plus(java.time.Duration.ofMinutes(10)))) {
+            lastWarn = now;
+            log.warn("oi tape warmer {}: {}", u, e.toString());
+        } else {
+            log.debug("oi tape warmer {}: {}", u, e.toString());
+        }
+    }
+
     /** A malformed {@code date} or {@code at} is the caller's error (400), not the server's. */
     @org.springframework.web.bind.annotation.ExceptionHandler(java.time.format.DateTimeParseException.class)
     org.springframework.http.ResponseEntity<Map<String, Object>> badTime(java.time.format.DateTimeParseException e) {
@@ -297,11 +322,14 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
         if (!until.isAfter(d.readUntil)) {
             return;
         }
-        Timestamp from = Timestamp.from(d.readUntil), to = Timestamp.from(until);
         Instant open = ts(d.date, OPEN).toInstant();
+        // re-read the last minute already read: ticks the capture committed late (a slow flush) still land; the steps are
+        // written by index, so reading them twice is harmless
+        Instant overlap = d.readUntil.minus(REREAD);
+        Timestamp from = Timestamp.from(overlap.isAfter(open) ? overlap : d.readUntil), to = Timestamp.from(until);
         jdbc.query("select time_bucket('30 seconds', recv_ts) b, strike, option_type, last(oi, recv_ts) from md.option_tick "
                         + "where session_date = ? and underlying = ? and expiry = ? and recv_ts >= ? and recv_ts < ? and oi > 0 "
-                        + "group by 1, 2, 3",
+                        + "group by 1, 2, 3 order by 1",                // in time order: the last pre-open bucket seeds
                 rs -> {
                     Instant b = rs.getTimestamp(1).toInstant();
                     double k = rs.getDouble(2), oi = rs.getDouble(4);
