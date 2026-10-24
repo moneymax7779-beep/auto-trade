@@ -24,7 +24,8 @@ public final class SetupFactory implements StrategyFactory {
             Map.entry("trend-state", TrendState::new),   // A-081
             Map.entry("opening-range-breakout", OpeningRangeBreakout::new),   // A-082
             Map.entry("opening-drive-momentum", OpeningDriveMomentum::new),   // A-085
-            Map.entry("zone-break-flow", ZoneBreakFlow::new));   // A-131 (zbf-v10 live PAPER from 19 Oct, A-148)
+            Map.entry("zone-break-flow", ZoneBreakFlow::new),   // A-131 (zbf-v10 live PAPER from 19 Oct, A-148)
+            Map.entry("atm-oi-burst", AtmOiBurst::new));   // A-158
 
     private final ThresholdConfig config;
     private final Function<ThresholdConfig, Strategy> family;

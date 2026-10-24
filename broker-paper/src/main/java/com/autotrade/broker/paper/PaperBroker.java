@@ -28,7 +28,9 @@ import com.autotrade.core.event.OptionTick;
  * {@code latency} after they are sent (by the market clock), limit orders fill against the visible
  * depth at their limit or better (partially if the depth is thin), stop-limits trigger on the last
  * traded price as NSE/BSE stop orders do, and fills are moved {@code adverseBps} against the
- * trader without crossing the limit. Feed it every market event, in order.
+ * trader without crossing the limit. Orders matched on the same tick share its displayed depth, the
+ * earliest-placed first, so what one takes is gone for the next and the rest waits for a later tick.
+ * Feed it every market event, in order.
  */
 public final class PaperBroker implements BrokerGateway, Consumer<MarketEvent> {
 
@@ -81,6 +83,10 @@ public final class PaperBroker implements BrokerGateway, Consumer<MarketEvent> {
     private final Map<Long, Holding> holdings = new HashMap<>();
     private final List<Consumer<OrderUpdate>> listeners = new ArrayList<>();
     private final AtomicLong sequence = new AtomicLong();
+    // Quantity already taken from depthTick's book, per level; the next option tick starts afresh.
+    private OptionTick depthTick;
+    private long[] askTaken = new long[0];
+    private long[] bidTaken = new long[0];
 
     /**
      * @param clock the market clock: the latest event time in replay, wall-clock time live
@@ -194,10 +200,19 @@ public final class PaperBroker implements BrokerGateway, Consumer<MarketEvent> {
         }
     }
 
-    /** Fills against the side of the book the order takes from, at the limit or better. */
+    /**
+     * Fills against the side of the book the order takes from, at the limit or better, from what
+     * earlier orders on this tick left.
+     */
     private void match(Order order, OptionTick tick) {
+        if (tick != depthTick) {
+            depthTick = tick;
+            askTaken = new long[tick.asks().size()];
+            bidTaken = new long[tick.bids().size()];
+        }
         boolean buy = order.request.side() == OrderSide.BUY;
         DepthLevels book = buy ? tick.asks() : tick.bids();
+        long[] taken = buy ? askTaken : bidTaken;
         long fillQuantity = 0;
         double fillNotional = 0;
         for (int i = 0; i < book.size() && fillQuantity < order.remaining(); i++) {
@@ -205,7 +220,12 @@ public final class PaperBroker implements BrokerGateway, Consumer<MarketEvent> {
             if (price <= 0 || book.quantity(i) <= 0 || (buy ? price > order.limit : price < order.limit)) {
                 break;
             }
-            long take = Math.min(order.remaining() - fillQuantity, book.quantity(i));
+            long available = book.quantity(i) - taken[i];
+            if (available <= 0) {
+                continue; // an earlier order on this tick took the level
+            }
+            long take = Math.min(order.remaining() - fillQuantity, available);
+            taken[i] += take;
             fillQuantity += take;
             fillNotional += take * price;
         }

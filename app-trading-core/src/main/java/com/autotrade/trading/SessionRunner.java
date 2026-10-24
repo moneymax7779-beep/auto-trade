@@ -93,6 +93,13 @@ class SessionRunner implements ApplicationRunner {
 
     private final AlertService alerts;
     private volatile Thread shadowThread;
+    private volatile LocalDate shadowTriedOn;          // the day this process finished (or found nothing left of) a shadow run
+    // a shadow run that failed (a file, or the run) is retried: at most SHADOW_ATTEMPTS a day, SHADOW_RETRY apart
+    static final int SHADOW_ATTEMPTS = 3;
+    static final java.time.Duration SHADOW_RETRY = java.time.Duration.ofMinutes(10);
+    private volatile LocalDate shadowFailedOn;
+    private volatile int shadowFailures;
+    private volatile Instant shadowRetryAt;
 
     private volatile Thread signalWorker;                 // live execution L1: the signal source alongside, if any
 
@@ -132,6 +139,7 @@ class SessionRunner implements ApplicationRunner {
                     context.getEnvironment().getProperty("server.port", "8095"));
             case "auto" -> {
                 closeOrphanedLiveSessions();
+                closeOrphanedShadowSessions();
                 startScheduler();
             }
             case "surge-preview" -> {
@@ -216,9 +224,10 @@ class SessionRunner implements ApplicationRunner {
             case "shadow" -> {
                 // the shadow strategies on a captured day, by hand (the scheduler does this after each live session)
                 LocalDate session = LocalDate.parse(first(args, "session", LocalDate.now(MarketTime.IST).toString()));
-                String summary = new ShadowRunner(properties, target).run(session);
-                log.info("{}", summary == null ? "no shadow-strategy-files configured" : summary);
-                exit(0);
+                ShadowRunner.Outcome outcome = new ShadowRunner(properties, target).run(session);
+                log.info("{}", outcome.summary() == null ? "no shadow session finished" : outcome.summary());
+                outcome.failed().forEach(f -> log.error("shadow failed: {}", f));
+                exit(outcome.failed().isEmpty() ? 0 : 2);
             }
             case "replay" -> {
                 LocalDate session = LocalDate.parse(first(args, "session", LocalDate.now(MarketTime.IST).toString()));
@@ -247,6 +256,20 @@ class SessionRunner implements ApplicationRunner {
         int closed = new TradeStore(target).closeOrphanedLiveSessions(properties.trading().account());
         if (closed > 0) {
             log.warn("marked {} live session(s) left RUNNING by an earlier crash or restart as STOPPED", closed);
+        }
+    }
+
+    /**
+     * Only this always-on process runs the after-close shadow replays (a by-hand --mode=shadow run is a separate
+     * process: don't run one across a restart of this service), so a shadow session still RUNNING at its start was
+     * cut short. Marked STOPPED, its strategy file is pending again and the scheduler resumes it (21 Oct: the 15:52
+     * deploy killed shadow replay 937, which stayed RUNNING and blocked that day's shadow run).
+     */
+    private void closeOrphanedShadowSessions() {
+        int closed = new TradeStore(target).closeOrphanedShadowSessions(ShadowRunner.ACCOUNT);
+        if (closed > 0) {
+            log.warn("marked {} shadow session(s) left RUNNING by an earlier crash or restart as STOPPED; "
+                    + "the after-close shadow run resumes them", closed);
         }
     }
 
@@ -299,33 +322,59 @@ class SessionRunner implements ApplicationRunner {
 
     /**
      * Shadow mode: once today's live session is DONE (5 minutes after stop-after), the shadow strategies replay
-     * the day from own capture on account SHADOW-1, once per day (also after a restart), and the result is sent
-     * with the alerts. Runs on its own thread; never touches the live session.
+     * the day from own capture on account SHADOW-1, and the result is sent with the alerts. Each strategy file runs
+     * once per day: after a restart only the files without a finished session run. A run with failed files (or one that
+     * failed outright) is retried for the files still pending, at most {@link #SHADOW_ATTEMPTS} times a day and
+     * {@link #SHADOW_RETRY} apart, so a file that cannot start is neither lost for the day nor retried every minute.
+     * Runs on its own thread; never touches the live session.
      */
     private void shadowAfterClose(LocalDate today, LocalTime time, LocalTime stopAfter) {
         List<String> files = properties.trading().shadowStrategyFiles();
         if (files == null || files.isEmpty() || !calendar.isTradingDay(today) || time.isBefore(stopAfter.plusMinutes(5))
-                || (shadowThread != null && shadowThread.isAlive())) {
+                || today.equals(shadowTriedOn) || (shadowThread != null && shadowThread.isAlive())) {
+            return;
+        }
+        if (today.equals(shadowFailedOn) && (shadowFailures >= SHADOW_ATTEMPTS || Instant.now().isBefore(shadowRetryAt))) {
             return;
         }
         org.springframework.jdbc.core.JdbcTemplate jdbc = new org.springframework.jdbc.core.JdbcTemplate(target);
         Integer liveDone = jdbc.queryForObject("select count(*) from trade.session where mode = 'PAPER_LIVE' "
                 + "and session_date = ? and status = 'DONE'", Integer.class, today);
-        Integer shadowed = jdbc.queryForObject("select count(*) from trade.session where account = ? "
-                + "and session_date = ? and status in ('RUNNING', 'DONE')", Integer.class, ShadowRunner.ACCOUNT, today);
-        if (liveDone == null || liveDone == 0 || (shadowed != null && shadowed > 0)) {
+        if (liveDone == null || liveDone == 0) {
             return;
         }
+        ShadowRunner shadow = new ShadowRunner(properties, target);
+        List<String> pending = shadow.pending(today);
+        if (pending.isEmpty()) {
+            shadowTriedOn = today;
+            return;
+        }
+        if (pending.size() < files.size()) {
+            log.info("shadow run for {} resumes {} of {} strategy files: {}", today, pending.size(), files.size(), pending);
+        }
         shadowThread = Thread.ofPlatform().name("shadow-" + today).start(() -> {
+            List<String> failed;
             try {
-                String summary = new ShadowRunner(properties, target).run(today);
-                if (summary != null) {
-                    alerts.info(summary);
+                ShadowRunner.Outcome outcome = shadow.run(today, pending);
+                if (outcome.summary() != null) {
+                    alerts.info(outcome.summary());
                 }
+                failed = outcome.failed();
             } catch (Exception e) {
                 log.warn("shadow run for {} failed: {}", today, e.getMessage(), e);
-                alerts.raise("shadow", AlertService.Level.WARN, "Shadow run for " + today + " failed: " + e.getMessage());
+                failed = List.of(String.valueOf(e.getMessage()));
             }
+            if (failed.isEmpty()) {
+                shadowTriedOn = today;
+                return;
+            }
+            int attempt = today.equals(shadowFailedOn) ? shadowFailures + 1 : 1;
+            shadowFailedOn = today;
+            shadowFailures = attempt;
+            shadowRetryAt = Instant.now().plus(SHADOW_RETRY);
+            alerts.raise("shadow", AlertService.Level.WARN, "Shadow run for " + today + ", attempt " + attempt + " of "
+                    + SHADOW_ATTEMPTS + ": " + failed.size() + " failed (" + String.join("; ", failed) + ")"
+                    + (attempt < SHADOW_ATTEMPTS ? "; retrying the pending files in " + SHADOW_RETRY.toMinutes() + " min" : "; no more retries today"));
         });
     }
 

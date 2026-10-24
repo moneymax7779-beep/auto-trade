@@ -15,6 +15,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
 
+import com.autotrade.core.history.DailyBar;
 import com.autotrade.core.history.GiftQuote;
 import com.autotrade.core.history.ParticipantOi;
 import com.autotrade.core.time.MarketTime;
@@ -84,5 +85,25 @@ class ReferenceStoreCuesIT {
         List<GiftQuote> quotes = store.giftNiftyQuotes(LocalDate.of(2026, 10, 19));
         assertThat(quotes).extracting(GiftQuote::last).containsExactly(22000.0, 22100.0);         // not Wednesday's (before Thursday 09:00)
         assertThat(quotes.getLast().changePct()).isEqualTo(0.45);
+    }
+
+    @Test
+    void dailyBarsFallBackToTheOneMinuteBarsOfSessionsWithoutADailyRow() {
+        LocalDate d22 = LocalDate.of(2026, 10, 22), d23 = LocalDate.of(2026, 10, 23), d26 = LocalDate.of(2026, 10, 26);
+        store.upsert("VIX_T", ReferenceStore.DAY, "BACKFILL",
+                List.of(new ReferenceStore.Candle(ist("2026-10-22T00:00:00"), d22, 15.0, 15.5, 14.5, 15.2)));
+        store.upsert("VIX_T", ReferenceStore.MINUTE, "CAPTURE", List.of(
+                new ReferenceStore.Candle(ist("2026-10-22T09:15:00"), d22, 99, 99, 99, 99),              // has a daily row: ignored
+                new ReferenceStore.Candle(ist("2026-10-23T09:15:00"), d23, 15.8, 16.1, 15.3, 16.0),
+                new ReferenceStore.Candle(ist("2026-10-23T15:29:00"), d23, 16.9, 17.2, 16.7, 16.81),
+                new ReferenceStore.Candle(ist("2026-10-26T09:15:00"), d26, 17.0, 17.0, 17.0, 17.0)));     // the session itself: never read
+        List<DailyBar> bars = store.dailyBars("VIX_T", d26, 5);
+        assertThat(bars).extracting(DailyBar::session).containsExactly(d23, d22);
+        assertThat(bars.getFirst().close()).isEqualTo(16.81);
+        assertThat(bars.getFirst().open()).isEqualTo(15.8);
+        assertThat(bars.getFirst().high()).isEqualTo(17.2);
+        assertThat(bars.getFirst().low()).isEqualTo(15.3);
+        assertThat(bars.get(1).close()).isEqualTo(15.2);
+        assertThat(store.dailyBars("VIX_T", d26, 1)).hasSize(1);
     }
 }

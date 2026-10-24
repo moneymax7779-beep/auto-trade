@@ -79,7 +79,7 @@ export function LivePage() {
           <Stat label="Day P&L (net of costs)" value={<Pnl value={s.dayPnl} />} />
           <Stat label="Feed" value={s.feed} />
           <Stat label="Last event (IST)" value={s.lastEvent?.slice(0, 8) ?? "–"} />
-          <Stat label="Feed lag" value={lag == null ? "replay" : `${lag.toFixed(1)} s`} tone={lag != null && lag > 5 ? "down" : undefined} />
+          <Stat label="Feed lag" value={lag != null ? `${lag.toFixed(1)} s` : s.status === "RUNNING" ? "replay" : "closed"} tone={lag != null && lag > 5 ? "down" : undefined} />
           <Stat label="Kill switches" value={killed ? s.killSwitches!.join(", ") : "none"} tone={killed ? "down" : "muted"} />
         </div>
         {killed && (

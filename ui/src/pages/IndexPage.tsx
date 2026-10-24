@@ -1,13 +1,14 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, NavLink, useParams, useSearchParams } from "react-router";
-import { get, parseSide, type LastDecisionRow, type SessionRow, type Status, type TradePositionRow } from "../api";
+import { get, parseSide, type LastDecisionRow, type PositionRow, type SessionRow, type Status, type TradePositionRow } from "../api";
 import { AlertBanner } from "../components/AlertBanner";
 import { LivePositions } from "../components/LivePositions";
 import { MarketCard } from "../components/MarketCard";
-import { splitDecisionKey, storedScores, StrategyMatrix } from "../components/strategies";
+import { splitDecisionKey, storedScores, StrategyMatrix, strategyShort } from "../components/strategies";
 import { SurgePanel, type DayNav } from "../components/SurgePanel";
-import { TradesTable } from "../components/TradesTable";
+import { chartTrades, TradesTable } from "../components/TradesTable";
 import { PcrPanel } from "../components/PcrPanel";
+import { OiTapePanel, type TapeTrade } from "../components/OiTapePanel";
 import { ErrorNote, Loading, Panel, Pnl } from "../components/ui";
 
 export const INDICES = ["NIFTY", "SENSEX", "BANKNIFTY"] as const;
@@ -25,13 +26,15 @@ export function IndexPage() {
   const picked = params.get("date");
   const status = useQuery({ queryKey: ["status"], queryFn: () => get<Status>("/api/status"), refetchInterval: 2000 });
   const sessions = useQuery({ queryKey: ["sessions"], queryFn: () => get<SessionRow[]>("/api/sessions") });
+  // the days the own capture holds: a day can be shown (charts, OI tape, PCR) without a live session record of it
+  const captured = useQuery({ queryKey: ["oi-tape-days"], queryFn: () => get<string[]>("/api/oi-tape/days") });
   if (status.isLoading) return <Loading what="live status" />;
   if (status.error) return <ErrorNote error={status.error} />;
   const s = status.data!;
   const running = s.status !== "NO_SESSION" && s.session != null;
-  // every day with a live session, newest first (the dates the charts can show)
+  // every day with a live session or the own capture, newest first (the dates the charts can show)
   const liveSessions = (sessions.data ?? []).filter((r) => r.mode === "PAPER_LIVE");
-  const days = [...new Set(liveSessions.map((r) => r.session_date))].sort().reverse();
+  const days = [...new Set([...liveSessions.map((r) => r.session_date), ...(captured.data ?? [])])].sort().reverse();
   const showLive = running && (!picked || picked === s.date);
   const day = showLive ? s.date! : picked ?? days[0];
   const go = (d: string | null) => setParams(d && !(running && d === s.date) ? { date: d } : {});
@@ -94,7 +97,10 @@ function LiveDay({ underlying, s, nav }: { underlying: string; s: Status; nav: D
         <MarketCard title={underlying} spot={market.spot} time={market.time} state={market.state}
           volatility={market.volatility} cas={market.cas} />
       )}
-      <SurgePanel live date={s.date} underlying={underlying} nav={nav} />
+      <SurgePanel live date={s.date} underlying={underlying} nav={nav}
+        trades={chartTrades([...open, ...closed].filter((p) => p.opened).map((p) => liveAsStored(p, s.date!)), underlying, null, strategyShort, noSpot)} />
+      {s.date && <OiTapePanel underlying={underlying} date={s.date} live
+        trades={[...open, ...closed].filter((p) => p.opened).map((p): TapeTrade => ({ label: `${p.strategy ?? ""} ${p.side}`, opened: p.opened!, closed: p.closed, net: p.net }))} />}
       <PcrPanel underlying={underlying} live />
       {entries.length > 0 && (
         <Panel title={`Strategies on ${underlying}`}>
@@ -130,7 +136,9 @@ function PastDay({ underlying, day, sessionId, nav }: { underlying: string; day:
           title={<>{underlying} <span className="ml-1 text-xs font-normal text-muted">{day} at close ·{" "}
             <Link to={`/sessions/${sessionId}`} className="hover:underline">session #{sessionId}</Link></span></>} />
       )}
-      <SurgePanel date={day} underlying={underlying} nav={nav} />
+      <SurgePanel date={day} underlying={underlying} nav={nav} trades={chartTrades(trades, underlying, null, strategyShort, noSpot)} />
+      <OiTapePanel underlying={underlying} date={day}
+        trades={trades.map((p): TapeTrade => ({ label: `${p.strategy_id ?? ""} ${p.option_side}`, opened: p.opened_at, closed: p.closed_at, net: p.net }))} />
       <PcrPanel underlying={underlying} date={day} />
       {rows.length > 0 && (
         <Panel title={`How each strategy ended on ${underlying}`}>
@@ -139,8 +147,22 @@ function PastDay({ underlying, day, sessionId, nav }: { underlying: string; day:
         </Panel>
       )}
       <Panel title={`Trades on ${underlying} · ${day}`}>
-        <TradesTable rows={trades} showStrategy empty={positions.isLoading ? "Loading…" : "No trades on this index that day."} />
+        <TradesTable rows={trades} showStrategy empty={sessionId == null ? "No live session of this day is recorded on this server (its market data is)."
+          : positions.isLoading ? "Loading…" : "No trades on this index that day."} />
       </Panel>
     </>
   );
+}
+
+const noSpot = () => null;                                // the surge chart places a trade on its own index line
+
+/** A live position as a stored one, for the chart's trade list (live times are "HH:MM:SS": the day is added). */
+function liveAsStored(p: PositionRow, date: string): TradePositionRow {
+  const stamp = (t: string | null) => (t == null ? null : t.length <= 8 ? `${date} ${t}` : t);
+  return {
+    strategy_id: p.strategy ?? null, underlying: p.underlying, option_side: p.leg ? p.leg : p.side, symbol: p.symbol,
+    opened_at: stamp(p.opened)!, closed_at: stamp(p.closed), stages: p.stages, exit_reason: p.exitReason,
+    realised: p.realised ?? 0, costs: p.costs ?? 0, net: p.net, quantity: p.quantity, lot_size: p.lotSize ?? null,
+    average_cost: p.averageCost, average_exit: p.exitPrice ?? null,
+  };
 }

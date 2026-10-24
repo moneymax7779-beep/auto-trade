@@ -1,0 +1,39 @@
+# orb-v4 (A-173, 23 Oct 2026, research): orb-v1 + a premium trail (+20 % arm, 15 % giveback); otherwise identical.
+# 15-minute opening-range breakout with volume and OI confirmation, v1 (user 2026-10-12 ~16:15: pasted an ORB guide
+# — "review this and see if we can have this ... implement and run in local docker and to replay"; ledger A-082,
+# docs/studies/2026-10-12-orb-from-guide.md). The guide's rules, mapped onto auto-trade's features:
+# - range: the 09:15-09:30 candle's high / low (features ORH / ORL);
+# - trigger: a 15-minute candle closing beyond the range, in the guide's window 10:15-14:30;
+# - volume spike: futures volume >= 1.5x normal for the time of day at the close (guide gives no number);
+# - OI: on an upside break put OI building, on a downside break call OI building (writers on the other side);
+# - option: ATM; stop at the breakout candle's low (high) = its lowest (highest) minute close; target 2R (guide 1.5-2);
+# - at most one trade per direction per index per day (guide: 2-3 trades a day); flat by 15:15 (guide: before 15:20).
+# Deviations, stated: size is the usual premium budget (not 1-2 % risk of capital per trade); the expiring index is
+# left to the expiry strategies, like every non-expiry strategy here; 15-minute candle extremes are minute closes.
+# Priors: A-076 / A-078 (ORH/ORL continuation, trend + volume filters) FAIL, 1 win in 21 breaks after 09:30.
+version: orb-v4
+strategy: opening-range-breakout
+status: UNCALIBRATED
+source: "user-request-2026-10-12 (A-082; values from the guide or round numbers, fixed at registration)"
+
+scope:
+  entry_from: "10:15"                  # the guide's window
+  last_new_entry: "14:31"              # exclusive: the 14:30 candle close is the last
+  flat_by: "15:15"
+  time_stop_min: 0                     # the guide has none: stop, target or square-off
+  skip_expiring_index: true            # the expiring index belongs to the expiry strategies
+
+setup:
+  min_futures_rvol: 1.5                # "a spike in volume": futures volume >= 1.5x normal for the time of day
+  reward_to_risk: 2.0                  # "at least 1:1.5 or 1:2"
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM ("ATM or slightly ITM")
+
+exits:
+  premium_stop_pct: 30                 # emergency only; the candle stop comes first
+  use_target: true                     # 2R target
+  trail_activation_pct: 20             # A-173: premium trail armed at +20 % ...
+  trail_giveback_pct: 15               # ... out 15 % below the peak (keeps a trend gain through a squeeze)

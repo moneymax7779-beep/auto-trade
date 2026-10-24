@@ -1,5 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
+import { OiTapePanel, type TapeInsets } from "../components/OiTapePanel";
+import { useChartView } from "../components/chartView";
 import { LEVEL_COLORS, LevelTogglesBar, levelColor, mergeLevels, useLevels, useLevelToggles, visibleLevels, visibleZones } from "../components/levels";
 import { Link, useParams, useSearchParams } from "react-router";
 import { fixed, get, type DecisionRow, type OrderRow, type SessionRow, type SessionRunRow, type TradePositionRow } from "../api";
@@ -212,6 +214,8 @@ export function SessionsPage() {
   );
 }
 
+const WHOLE_DAY = { a: 9 * 60 + 15, b: 15 * 60 + 30 };
+
 export function SessionDetailPage() {
   const { id } = useParams();
   const [underlying, setUnderlying] = useState("NIFTY");
@@ -299,6 +303,11 @@ export function SessionDetailPage() {
   }, [surgeData.data, underlying]);
   const [markerScope, setMarkerScope] = useState<"all" | "selected">("all");
   const [focus, setFocus] = useState<{ from: string; to: string } | null>(null);
+  // one time window for the price chart and the OI panels under it (zoom either; the other follows)
+  const [view, setView] = useChartView(session?.session_date ?? "", underlying, WHOLE_DAY);
+  const [axisWidth, setAxisWidth] = useState(64);
+  const tapeInsets = useMemo<TapeInsets>(() => () => ({ L: 0, R: axisWidth }), [axisWidth]);
+  const wholeDay = () => { setFocus(null); setView(WHOLE_DAY); };
   const spotAt = useMemo(() => {
     const byMinute = new Map(rows.map((r) => [r.t, r.spot ?? null]));
     return (t: string) => byMinute.get(t) ?? null;
@@ -306,7 +315,7 @@ export function SessionDetailPage() {
   const trades = useMemo(() => chartTrades(positions.data ?? [], underlying,
     markerScope === "all" || strategyIds.length <= 1 ? null : strategy, strategyShort, spotAt),
   [positions.data, underlying, strategy, markerScope, strategyIds.length, spotAt]);
-  const pickIndex = (u: string) => { setUnderlying(u); setFocus(null); };
+  const pickIndex = (u: string) => { setUnderlying(u); wholeDay(); };
   const changes = useMemo(() => rows.filter((r, i) => i === 0 || r.ce_stage !== rows[i - 1].ce_stage || r.pe_stage !== rows[i - 1].pe_stage), [rows]);
 
   return (
@@ -348,7 +357,7 @@ export function SessionDetailPage() {
               </div>
               <div id="session-chart">
                 <TimelineChart date={session?.session_date ?? "2026-01-01"} lines={price} trades={trades} volume={volume}
-                  focus={focus} height={420} />
+                  focus={focus} height={420} view={view} onView={setView} onLayout={setAxisWidth} momentsOf={underlying} />
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
                 <span className="text-muted">
@@ -373,13 +382,19 @@ export function SessionDetailPage() {
                   );
                 })}
                 {focus && (
-                  <button type="button" onClick={() => setFocus(null)} className="rounded border border-accent px-2 py-0.5 text-accent">whole day</button>
+                  <button type="button" onClick={wholeDay} className="rounded border border-accent px-2 py-0.5 text-accent">whole day</button>
                 )}
               </div>
+              {session && (
+                <OiTapePanel bare underlying={underlying} date={session.session_date} insets={tapeInsets}
+                  title={`${underlying} · OI under the chart · this session's trades`}
+                  trades={(positions.data ?? []).filter((p) => p.underlying === underlying)
+                    .map((p) => ({ label: `${p.strategy_id ?? ""} ${p.option_side}`, opened: p.opened_at, closed: p.closed_at, net: p.net }))} />
+              )}
               {hasScores ? (
                 <>
                   <div className="mt-3 text-xs text-muted">Confirm and runner scores (0–100) over the day</div>
-                  <TimelineChart date={session?.session_date ?? "2026-01-01"} lines={scores} height={180} />
+                  <TimelineChart date={session?.session_date ?? "2026-01-01"} lines={scores} height={180} view={view} />
                 </>
               ) : (
                 <p className="mt-3 text-xs text-muted">{strategy} has no confirm or runner scores; its conditions are in the stage changes below.</p>

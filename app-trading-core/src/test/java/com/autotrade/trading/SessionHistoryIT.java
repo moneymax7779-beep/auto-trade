@@ -95,6 +95,41 @@ class SessionHistoryIT {
     }
 
     @Test
+    void shadowSessionsLeftRunningAreStoppedAndTheirStrategyFileIsPendingAgain() {
+        TradeStore store = new TradeStore(dataSource);
+        LocalDate day = LocalDate.parse("2026-10-21");
+        long finished = store.startSession("SHADOW-1", "PAPER_REPLAY", day, "own", "orc", "sha256:x",
+                Map.of("orc-v1.yaml", "sha256:a", "features.v12.yaml", "sha256:f"), "test");
+        store.endSession(finished, "DONE", Map.of("net", 0), null);
+        long cut = store.startSession("SHADOW-1", "PAPER_REPLAY", day, "own", "zbf", "sha256:x",
+                Map.of("zbf-v10.yaml", "sha256:b", "features.v12.yaml", "sha256:f"), "test");
+        long failed = store.startSession("SHADOW-1", "PAPER_REPLAY", day, "own", "qpb", "sha256:x",
+                Map.of("qpb-v4.yaml", "sha256:c"), "test");
+        store.endSession(failed, "FAILED", Map.of(), "boom");
+        long replay = session(store, "PAPER-1", "PAPER_REPLAY");
+        long live = session(store, "SHADOW-1", "PAPER_LIVE");
+        assertThat(store.ranWith("SHADOW-1", day, "zbf-v10.yaml")).as("running counts as ran").isTrue();
+
+        assertThat(store.closeOrphanedShadowSessions("SHADOW-1")).isEqualTo(1);
+
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        Map<String, Object> closed = jdbc.queryForMap("select status, error from trade.session where id = ?", cut);
+        assertThat(closed.get("status")).isEqualTo("STOPPED");
+        assertThat((String) closed.get("error")).contains("restarted or crashed");
+        assertThat(jdbc.queryForObject("select status from trade.session where id = ?", String.class, replay))
+                .as("other accounts' replays run in their own processes").isEqualTo("RUNNING");
+        assertThat(jdbc.queryForObject("select status from trade.session where id = ?", String.class, live))
+                .as("live sessions are closeOrphanedLiveSessions' business").isEqualTo("RUNNING");
+        assertThat(store.ranWith("SHADOW-1", day, "orc-v1.yaml")).as("done").isTrue();
+        assertThat(store.ranWith("SHADOW-1", day, "qpb-v4.yaml")).as("failed: not retried").isTrue();
+        assertThat(store.ranWith("SHADOW-1", day, "zbf-v10.yaml")).as("cut short: pending again").isFalse();
+        assertThat(store.ranWith("SHADOW-1", day, "odb-v9.yaml")).as("never ran").isFalse();
+        assertThat(store.ranWith("SHADOW-1", day.minusDays(1), "orc-v1.yaml")).as("other day").isFalse();
+        assertThat(store.ranWith("PAPER-1", day, "orc-v1.yaml")).as("other account").isFalse();
+        assertThat(store.closeOrphanedShadowSessions("SHADOW-1")).as("idempotent").isZero();
+    }
+
+    @Test
     void lastDecisionsGiveEachUnderlyingAndStrategyItsFinalState() {
         TradeStore store = new TradeStore(dataSource);
         long id = session(store, "PAPER-3", "PAPER_REPLAY");

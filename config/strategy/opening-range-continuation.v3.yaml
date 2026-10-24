@@ -1,0 +1,46 @@
+# orc-v3 (A-173, 23 Oct 2026, research): orc-v2 + a premium trail (+20 % arm, 15 % giveback); otherwise identical.
+# Opening-range continuation, v2 (user 2026-10-12 11:50: "make orc-v2 that can enter before 10:15"; ledger A-078).
+# v1 (A-076) checks the trend with EMA9 vs EMA20 of 3-minute bars; EMA20 needs 20 bars and exists only from about
+# 10:15, so v1 could not take a break between 09:33 and 10:15 (12 Oct: NIFTY broke its ORL at about 10:03 and fell
+# ~130 points; the live cross saw no crossing either, because EMA9 was already below EMA20 when EMA20 first existed).
+# v2 = v1 + trend_before_ema20: until EMA20 exists, the trend is the VWAP side plus the close on EMA9's side (EMA9
+# from about 09:42), the VWAP side alone before that. From 10:15 v2 is v1. Every other value is v1's, not tuned.
+# Design day: 12 Oct (not in the 22 tick days). v1 notes follow.
+#
+# Opening-range continuation, v1 (user 2026-10-12 morning: "how could we miss the best move .. now do something";
+# ledger A-076). The live set has no rule for a non-expiry day whose index breaks its opening range after 09:30 and
+# trends without a pullback (9 Oct NIFTY, 12 Oct): opening drive stops at 09:26, the cross needs a fresh crossing, the
+# expiry strategies need an expiry day. This buys the first 3-minute close beyond the opening range when the trend and
+# the futures volume agree, waits for no retest, and rides it with a noise-proof stop and a VWAP trail.
+# A pre-check on index points (A-069, no trend/volume filter) found the first cross of today's ORH won 1 of 8 and ORL
+# 2 of 8 on the 16 non-design days: this test, with real fills and the trend + volume filters, decides it.
+# Designed from 9 Oct NIFTY (and 12 Oct, not in the test data): 9 Oct is a design day. Values fixed at registration.
+version: orc-v3
+strategy: opening-range-continuation
+status: UNCALIBRATED
+source: "user-request-2026-10-12 (A-078; v1 values unchanged; only trend_before_ema20 added)"
+
+scope:
+  entry_from: "09:33"                  # the first 3-minute close after the opening range (09:15-09:30)
+  last_new_entry: "13:00"              # a morning trend; afternoon breaks are other strategies' ground
+  flat_by: "15:15"
+  time_stop_min: 0                     # no time stop: a trend is ridden until the VWAP trail
+  skip_expiring_index: true            # the expiring index belongs to the expiry strategies
+
+setup:
+  break_buffer_atr: 0.1                # the 3-minute close at least 0.1 ATR beyond ORH / ORL
+  min_futures_rvol: 1.5                # futures volume at least 1.5x normal for the time of day
+  stop_atr_beyond_edge: 1.0            # stop 1 ATR back inside the broken edge (outside one minute's noise)
+  trend_before_ema20: true             # v2: before EMA20 exists, VWAP side + close vs EMA9 (VWAP alone before EMA9)
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 30                 # emergency only; the index stop and the VWAP trail come first
+  vwap_trail_3m: true                  # exit on a 3-minute close back through the session VWAP
+  use_target: false                    # no target: ride the trend
+  trail_activation_pct: 20             # A-173: premium trail armed at +20 % ...
+  trail_giveback_pct: 15               # ... out 15 % below the peak (keeps a trend gain through a squeeze)

@@ -6,7 +6,8 @@ import {
   LEVEL_COLORS, LevelTogglesBar, levelColor, mergeLevels, tagName, useLevels, useLevelToggles, visibleLevels, visibleZones,
   type LevelToggles, type LevelsData,
 } from "./levels";
-import { presetView, useChartView, useLinkedTime, type View } from "./chartView";
+import { presetView, useChartView, useLinkedTime, type View, useMoment } from "./chartView";
+import { compactRupees, type ChartTrade } from "./TimelineChart";
 
 /** One option side's flow around a surge: ATM ± 2 total OI change and the ATM mid before / after. */
 interface SideFlow { oi: number; pct: number; mid0: number; mid1: number; bid: number; ask: number; label: string; score: number }
@@ -100,7 +101,9 @@ const dominant = (b: Burst): Flow =>
 export interface DayNav { prev?: string; next?: string; go: (day: string) => void }
 const shortDay = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString("en-IN", { day: "numeric", month: "short", timeZone: "UTC" });
 
-export function SurgePanel({ live, date, underlying, nav }: { live?: boolean; date?: string; underlying?: string; nav?: DayNav }) {
+export function SurgePanel({ live, date, underlying, nav, trades = NO_TRADES }: { live?: boolean; date?: string; underlying?: string; nav?: DayNav;
+  /** the day's trades on this index, drawn on the price chart (entry arrow, exit square, the index from entry to exit) */
+  trades?: ChartTrade[] }) {
   const q = useQuery({
     queryKey: ["surges", date ?? "latest"],
     queryFn: () => get<SurgeReport>(`/api/surges${date ? `?date=${date}` : ""}`),
@@ -118,20 +121,27 @@ export function SurgePanel({ live, date, underlying, nav }: { live?: boolean; da
   return (
     <div className="space-y-4">
       {r.underlyings.filter((u) => !underlying || u.underlying === underlying).map((u) => (
-        <UnderlyingSurgesPanel key={u.underlying} date={r.date!} data={u} live={live} filters={filters} onFilters={update} nav={nav} />
+        <UnderlyingSurgesPanel key={u.underlying} date={r.date!} data={u} live={live} filters={filters} onFilters={update} nav={nav}
+          trades={u.underlying === underlying ? trades : NO_TRADES} />
       ))}
     </div>
   );
 }
 
-function UnderlyingSurgesPanel({ date, data, live, filters, onFilters, nav }:
-  { date: string; data: UnderlyingSurges; live?: boolean; filters: Filters; onFilters: (f: Filters) => void; nav?: DayNav }) {
+function UnderlyingSurgesPanel({ date, data, live, filters, onFilters, nav, trades }:
+  { date: string; data: UnderlyingSurges; live?: boolean; filters: Filters; onFilters: (f: Filters) => void; nav?: DayNav; trades: ChartTrade[] }) {
   const shown = useMemo(
     () => data.surges.filter((s) => filters.flows.includes(s.flow) && s.x >= filters.minX),
     [data.surges, filters],
   );
   const groups = useMemo(() => bursts(shown), [shown]);
   const [selected, setSelected] = useState<string | null>(null);
+  const [tableOpen, setTableOpenState] = useState(() => { try { return localStorage.getItem(TABLE_KEY) === "open"; } catch { return false; } });
+  const setTableOpen = (open: boolean) => {
+    setTableOpenState(open);
+    if (!open) setSelected(null);                         // a selected surge keeps the table open
+    try { localStorage.setItem(TABLE_KEY, open ? "open" : "closed"); } catch { /* not kept */ }
+  };
   const levels = useLevels(date, data.underlying, live);
   const [toggles, setToggles] = useLevelToggles();
   const count = (f: Flow) => data.surges.filter((s) => s.flow === f).length;
@@ -149,15 +159,24 @@ function UnderlyingSurgesPanel({ date, data, live, filters, onFilters, nav }:
         <p className="mb-2 text-xs text-warn">SENSEX futures trade thinly (hundreds to a few thousand contracts a minute), so its surges rest on small volumes.</p>
       )}
       <SurgeChart date={date} live={live} nav={nav} data={data} shown={shown} groups={groups} selected={selected} onSelect={setSelected}
-        levels={levels.data} toggles={toggles} />
-      <BurstTable groups={groups} index={data.index} live={live} selected={selected} onSelect={setSelected} />
-      <p className="mt-2 text-xs text-muted">
-        Surge: futures volume ≥ 5 × the median of the same minute over the previous 10 sessions. Flow compares the last
-        quote of minute t−1 with minute t+1: futures OI ≥ 0.2 %; calls / puts: the ATM ± 2 strikes' OI ≥ 1 %, read with
-        the ATM option's mid. Index moves are measured from the close of t+1, when the flow is first known. OI shows
-        positions opening or closing, not who bought or sold. Trading this signal lost
-        money over 18 sessions (docs/studies/2026-09-29-surge-oi-flow.md); today's hit rate is a description, not evidence.
-      </p>
+        levels={levels.data} toggles={toggles} trades={trades} />
+      <button type="button" aria-expanded={tableOpen || selected != null} onClick={() => setTableOpen(!(tableOpen || selected != null))}
+        className="mt-3 flex items-center gap-1.5 text-sm font-semibold hover:text-accent">
+        <span className="inline-block w-3 text-xs">{tableOpen || selected != null ? "▾" : "▸"}</span>
+        Surge minutes <span className="text-xs font-normal text-muted">({groups.length})</span>
+      </button>
+      {(tableOpen || selected != null) && (
+        <>
+          <BurstTable groups={groups} index={data.index} live={live} selected={selected} onSelect={setSelected} />
+          <p className="mt-2 text-xs text-muted">
+            Surge: futures volume ≥ 5 × the median of the same minute over the previous 10 sessions. Flow compares the last
+            quote of minute t−1 with minute t+1: futures OI ≥ 0.2 %; calls / puts: the ATM ± 2 strikes' OI ≥ 1 %, read with
+            the ATM option's mid. Index moves are measured from the close of t+1, when the flow is first known. OI shows
+            positions opening or closing, not who bought or sold. Trading this signal lost
+            money over 18 sessions (docs/studies/2026-09-29-surge-oi-flow.md); today's hit rate is a description, not evidence.
+          </p>
+        </>
+      )}
     </Panel>
   );
 }
@@ -214,7 +233,7 @@ function HitRate({ surges }: { surges: Surge[] }) {
 const T = 10, GAP = 10, AXIS = 24;
 const FULL_W = 1000;                                  // the viewBox width on a wide screen (scaled to fit)
 /** Layout for a width: below FULL_W the chart is drawn 1:1 in pixels so text stays readable on a phone. */
-function layout(boxWidth: number | null) {
+export function layout(boxWidth: number | null) {
   const W = boxWidth && boxWidth < FULL_W ? Math.max(280, Math.round(boxWidth)) : FULL_W;
   const narrow = W < 600;
   const L = narrow ? 48 : 60, R = narrow ? 84 : 104;   // the right gutter holds the price tags
@@ -234,6 +253,11 @@ interface Drag { kind: "pan" | "yscale" | "xscale"; x: number; y: number; view: 
 interface Pinch { dist: number; mid: number; view: View }
 interface Premium { strike: number; expiry: string; CE: [string, number, number][]; PE: [string, number, number][] }
 const PREMIUM_KEY = "surge-chart-premium";
+const TRADE_UP = "#16a34a", TRADE_DOWN = "#dc2626", TRADE_STRADDLE = "#2563eb";   // as on the session chart
+const NO_TRADES: ChartTrade[] = [];
+/** a halo in the panel's colour, so a label stays readable over the price line and the surge dots */
+const HALO = { stroke: "var(--color-panel)", strokeWidth: 3, paintOrder: "stroke" } as const;
+const TABLE_KEY = "surge-table";                     // the surge-minute table: "open" / "closed" (default closed)
 const PREMIUM_COLORS = { CE: "#22c55e", PE: "#ef4444" } as const;
 const strikeStep = (u: string) => (u === "SENSEX" ? 100 : u === "BANKNIFTY" ? 100 : 50);
 
@@ -255,13 +279,19 @@ function loadSize(): Size {
   return "S";
 }
 
-function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, levels, toggles }:
+function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, levels, toggles, trades }:
   { date: string; live?: boolean; nav?: DayNav; data: UnderlyingSurges; shown: Surge[]; groups: Burst[]; selected: string | null;
-    onSelect: (t: string | null) => void; levels?: LevelsData; toggles: LevelToggles }) {
+    onSelect: (t: string | null) => void; levels?: LevelsData; toggles: LevelToggles; trades: ChartTrade[] }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const clipId = `plot-${useId().replace(/:/g, "")}`;
   const [hover, setHover] = useState<{ m: number; y: number } | null>(null);
   const [view, setView] = useChartView(date, data.underlying, FULL);
+  // the moment under the mouse, shared with the OI panels below: hover there and a line marks it here
+  const [cursor, setCursor] = useMoment("cursor", date, data.underlying);
+  // the moment pinned here or on the OI panels below (shared): a solid line; a plain click on the plot pins or unpins
+  const [pin, setPin] = useMoment("pin", date, data.underlying);
+  const hoverMinute = hover?.m ?? null;
+  useEffect(() => { setCursor(hoverMinute); }, [hoverMinute]);   // eslint-disable-line react-hooks/exhaustive-deps
   const [linked, setLinked] = useLinkedTime();
   const [showPremium, setShowPremium] = useState(() => { try { return localStorage.getItem(PREMIUM_KEY) !== "false"; } catch { return true; } });
   const [pickedStrike, setPickedStrike] = useState<number | null>(null);
@@ -468,7 +498,14 @@ function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, 
   const onPointerUp = (e: PointerEvent<SVGSVGElement>) => {
     pointers.current.delete(e.pointerId);
     if (pointers.current.size < 2) pinch.current = null;
+    const d = drag.current;
     drag.current = null;
+    // a click (no drag) on the plot, not on a surge marker (they select their surge): pin that minute, or unpin it
+    if (d && !d.moved && d.kind === "pan" && !(e.target instanceof SVGCircleElement)) {
+      const p = toSvg(e);
+      const m = Math.round(a + ((p.x - L) / PW) * span);
+      if (p.x >= L && p.x <= W - R && m >= X0 && m <= X1) setPin(pin === m ? null : m);
+    }
   };
 
   const tip = hover == null ? null : (() => {
@@ -636,6 +673,30 @@ function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, 
                   className="cursor-pointer" onClick={() => onSelect(on ? null : s.t)} />
               );
             })}
+            {/* drawn over the surge dots (no pointer events, so the dots stay clickable). The day's trades: entry arrow (a call below the price, a put above, a straddle as a dot), the index from entry to
+                exit (dashed while open, to the latest price), an exit square coloured by the result; display only (no clicks) */}
+            {trades.map((tr) => {
+              const m0 = minutes(tr.from), m1 = tr.to ? minutes(tr.to) : lastMinute;
+              const p0 = at(m0), p1 = at(m1);
+              if (p0 == null || m1 < a || m0 > b) return null;
+              const won = tr.net >= 0, col = won ? TRADE_UP : TRADE_DOWN;
+              const x0 = X(m0), y0 = Y(p0), x1 = X(m1), y1p = p1 == null ? y0 : Y(p1);
+              const put = tr.side === "PE", entryCol = tr.side === "CE" ? TRADE_UP : put ? TRADE_DOWN : TRADE_STRADDLE;
+              const ay = put ? y0 - 9 : y0 + 9, dir = put ? 1 : -1;      // a put's arrow points down from above, a call's up from below
+              return (
+                <g key={`${tr.n}-${tr.from}`} pointerEvents="none">
+                  <line x1={x0} y1={y0} x2={x1} y2={y1p} stroke={col} strokeWidth={3.5} strokeLinecap="round" opacity={0.85}
+                    strokeDasharray={tr.to ? undefined : "6 4"} />
+                  {tr.side === "STRADDLE"
+                    ? <circle cx={x0} cy={y0} r={4.5} fill={entryCol} stroke="var(--color-panel)" />
+                    : <path d={`M${x0 - 5},${ay - 4 * dir} L${x0 + 5},${ay - 4 * dir} L${x0},${ay + 5 * dir} Z`} fill={entryCol} />}
+                  <text x={x0 + 6} y={put ? ay - 6 : ay + 13} fontSize="10" fill={entryCol} className="num" {...HALO}>#{tr.n} {tr.who}</text>
+                  {tr.to && <rect x={x1 - 4} y={y1p + (put ? 6 : -14)} width={8} height={8} fill={col} />}
+                  <text x={x1 + 6} y={y1p + (put ? 15 : -8)} fontSize="10" fill={col} className="num font-semibold" {...HALO}>
+                    #{tr.n} {tr.to ? "" : "open "}{compactRupees(tr.net)}</text>
+                </g>
+              );
+            })}
           </g>
 
           {/* price-axis tags in the right gutter, nudged apart: levels, VWAP / EMA20 and the last visible price */}
@@ -727,6 +788,15 @@ function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, 
 
           {hover != null && (
             <line x1={X(hover.m)} x2={X(hover.m)} y1={T} y2={VY0 + VOL_H} stroke="var(--color-text)" strokeOpacity={0.35} pointerEvents="none" />
+          )}
+          {pin != null && pin >= a && pin <= b && (
+            <line x1={X(pin)} x2={X(pin)} y1={T} y2={VY0 + VOL_H} stroke="var(--color-accent)" strokeWidth={1.5} pointerEvents="none">
+              <title>{`pinned ${hhmm(Math.floor(pin))}${pin % 1 >= 0.5 ? ":30" : ""} (the strike ladder below shows it); click again to unpin`}</title>
+            </line>
+          )}
+          {hover == null && cursor != null && cursor >= a && cursor <= b && (
+            <line x1={X(cursor)} x2={X(cursor)} y1={T} y2={VY0 + VOL_H} stroke="var(--color-accent)" strokeOpacity={0.6}
+              strokeDasharray="4 3" pointerEvents="none" />
           )}
           {crossY != null && (
             <g pointerEvents="none">

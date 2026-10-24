@@ -50,9 +50,14 @@ autotrade:
     # egb-v3 removed 2026-09-27 (user: run the strategies behind the replay results; egb-v3 was refused for
     # capital both times it triggered on the 7 expiry days and made no trade).
     strategy-files:
-      - config/strategy/expiry-breakout-straddle.v2.yaml   # ebs-v2 = v1 with no limit on straddles a day (user, 2026-10-01)
+      # ebs-v2 removed 2026-10-23 (A-171, user: "remove ebs from live"): out of sample on Oct 2024-Dec 2025 (A-168) 42 trades
+      # -Rs 4,16,679, PF 0.80 (+Rs 3.52L / -Rs 7.69L by half). Its file and code stay; it returns only through a new registered test.
       - config/strategy/early-confirm-runner.v11.yaml      # ecr-v11 = v8 (expiry days only) with no limit on campaigns per side (user, 2026-10-01)
-      - config/strategy/opening-drive.v3.yaml              # odb-v3 = v2 with no limit on trades; a re-entry needs a fresh break (user, 2026-10-01)
+      # odb-v3 removed 2026-10-24 (A-184 PASS, user: "yes remove odb from live and keep it in shadow"): on the 27 tick days the
+      # live set without it made +Rs 39.02L vs +Rs 36.16L, win 58 % vs 53 %, better in both halves; odb-v3 alone -Rs 32K (PF 0.91,
+      # 10 of 16 trades failed within 3 minutes) and its 14 Oct losses tripped the kill switch that refused mac's 12:54 puts.
+      # Bars favour it (+Rs 4.41L on 2024-25) but overstate it (12 days both ways: +Rs 1.97L bars vs +Rs 24K ticks). It now
+      # runs as a shadow (below) to keep its forward record.
       # egb-v4 removed 2026-10-15 (A-095 PASS, A-105; user 14 Oct: "choose the best and make the changes"): 0 trades on
       # the 24 tick days, 6 on 169 bar days (1 win, PF 0.17); without it +Rs 75,795 on bar days, tick days unchanged,
       # every other strategy's trades unchanged. Its file and code stay; it returns only through a new registered test.
@@ -64,10 +69,9 @@ autotrade:
       # Its file and code stay; it returns only through a new registered test.
       - config/strategy/ma-cross.v1.yaml                   # mac-v1 forward test in PAPER (A-067, user 2026-10-09 20:40: "run it in paper"); A-066 test PASS, held-out FAIL on one trade; never the expiring index; Rs 2.5L budget; last, so the others take the capital first
       - config/strategy/opening-drive-momentum.v4.yaml     # odm-v4 live from 14 Oct (A-093) = odm-v3 (A-089) + peak trail (arm +50 %, exit 15 % off the peak; A-091 PASS, thin): never worse than v3 on 23 tick days (+Rs 1.55L), 13 Oct +Rs 35K; last, so the others take the capital first
-      # 2026-10-19 (A-148, user 18 Oct ~23:55: "add zbf-v10 in PAPER mode", chose live PAPER-1 shared over shadow after A-145):
-      # zone-break-flow v10 = zbf-v5 rules on NIFTY only (A-144 bar-day PASS alone; A-145 inside the set: -Rs 7.53L on the test days).
-      # Last in the list, so on a common trigger the six above take the capital first.
-      - config/strategy/zone-break-flow.v10.yaml
+      # zbf-v10 removed 2026-10-19 after one live session (A-149, user 19 Oct ~16:50: "remove zbf-v10 from the live set"):
+      # live 19 Oct only (A-148), 3 trades, 3 losses, -Rs 1,49,446 (the set's day -Rs 1,16,673; without it +Rs 32,774).
+      # Its file and code stay; it returns only through a new registered test.
     features-file: config/features/features.v12.yaml   # v12 from 14 Oct (A-090 PASS, A-093): v11 + bar backfill of spot history, weekly/monthly levels, OI-change z-scores; no trade changed on 23 tick days. v11 (A-030) live 2-13 Oct
     exchange-file: config/exchange/nse-bse-sessions.v3.yaml
     costs-file: config/costs/india-index-options-costs.v2.yaml   # v2: Upstox Plus brokerage Rs 30/order from 2026-09-01 (A-044, user 2026-10-06)
@@ -101,6 +105,24 @@ autotrade:
       # 2026-10-15 ~23:55 (A-114, user: "yes register A-114 and put odb-v9 in shadow"): odb-v3 + the 10:00 exit extended
       # to 15:15 only with futures RVOL >= 1 and the future on the trade's side of VWAP; own session, judged forward.
       - config/strategy/opening-drive.v9.yaml
+      # 2026-10-24 (A-184, user: "keep it in shadow"): odb-v3 after it left the live set; own session, judged forward.
+      - config/strategy/opening-drive.v3.yaml
+      # 2026-10-19 ~19:00 (A-150, user: "add zbf-v10 as a shadow"): zbf-v10 after it left the live set (A-149); own session,
+      # no capital shared with the live set, judged forward.
+      - config/strategy/zone-break-flow.v10.yaml
+      # 2026-10-21 ~22:45 (A-158, user: "yes register and build it and run in shadow"): the ATM OI burst (A-157's 3-minute
+      # near-ATM OI burst with futures volume); ~23:00 (A-159, user: "Choose - Premium trail"): aob-v2, premium-trail exit,
+      # replaces aob-v1 (opposite-burst exit) before v1 ever ran; own session.
+      - config/strategy/atm-oi-burst.v2.yaml
+      # 2026-10-22 ~00:55 (A-161, user: "yes add v4 to shadow alongside v2"): aob-v4 = aob-v2 + the OI climax exit; own
+      # session, same entries as v2, so the two compare the exit alone on new days.
+      - config/strategy/atm-oi-burst.v4.yaml
+      # 2026-10-23 (A-172 PASS, user: "yes build odm-v9"): odm-v4 + the fresh-drive rule; own session, judged against
+      # odm-v4 (live) on the same days before any live change.
+      - config/strategy/opening-drive-momentum.v9.yaml
+      # 2026-10-23 (A-179, user: "put covering-only aob variant and run replay"): aob-v5 = aob-v2 entering only on covering
+      # bursts (A-178: covering +6.2 bp vs writing +1.5 bp on 17 tick days, CI includes zero); own session, judged forward.
+      - config/strategy/atm-oi-burst.v5.yaml
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"
@@ -109,7 +131,9 @@ autotrade:
     token-source: zt                     # zt: read zt-tiger-v2's Upstox token (read-only); file: own token file only
     token-file: ${UPSTOX_TOKEN_FILE:.local/upstox/token.json}
     instrument-dir: .local/instruments   # NSE-*.json.gz / BSE-*.json.gz contract files (newest used)
-    strikes-each-side: 12
+    # 20 from 2026-10-24 (A-197, user: "widen strikes to 20"): the weekly short strangle's ~Rs 30 picks sit up to ~1,000 NIFTY
+    # points from ATM; at 12 (+-600 points) one of three checked entries was on the range edge. ~+64 % option ticks.
+    strikes-each-side: 20
     recenter-strikes: 8
   alerts:                                # --mode=auto only (replays never alert)
     telegram-file: .local/telegram/bot.env   # TELEGRAM_BOT_TOKEN=... and TELEGRAM_CHAT_ID=... (never logged); absent = log and UI only

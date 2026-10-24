@@ -56,5 +56,16 @@ public record OptionsFeatures(
          * the stored bars' baseline for the same days-to-expiry and 15-minute bucket; NaN when off or without baseline.
          */
         double ceOiChange5mZ,
-        double peOiChange5mZ) {
+        double peOiChange5mZ,
+        /**
+         * A-157 / A-158: (put OI change − call OI change) over the ATM ± 2 strikes in the last 1 / 3 / 5 minutes, as a share
+         * of those strikes' OI at the window start (unweighted); positive = puts written faster (up). NaN when a contract
+         * lacks either value.
+         */
+        double atmBandShare1m,
+        double atmBandShare3m,
+        double atmBandShare5m,
+        /** A-161: the two sides of atmBandShare3m: Δ call OI and Δ put OI over 3 minutes, each / the band's OI then. */
+        double atmBandCallShare3m,
+        double atmBandPutShare3m) {
 }

@@ -654,7 +654,8 @@ public final class TradingSession {
             status.put("events", events.get());
             Instant last = feed.lastEventTime();
             status.put("lastEvent", last == null ? null : last.atZone(MarketTime.IST).toLocalTime().toString());
-            status.put("feedLagSeconds", last == null || settings.mode() == Mode.PAPER_REPLAY ? null
+            // the lag of a running live session only: after its stop the feed is closed on purpose (no lag to show)
+            status.put("feedLagSeconds", last == null || settings.mode() == Mode.PAPER_REPLAY || !"RUNNING".equals(this.status) ? null
                     : Duration.between(last, Instant.now()).toMillis() / 1000.0);
             status.put("dayPnl", Math.round(oms.dayPnl()));
             status.put("capital", Math.round(settings.risk().capital()));

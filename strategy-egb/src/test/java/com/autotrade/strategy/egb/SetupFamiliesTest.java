@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.nio.file.Path;
 import java.time.LocalTime;
+import java.util.List;
 import java.util.Map;
 
 import org.junit.jupiter.api.Test;
@@ -199,6 +200,311 @@ class SetupFamiliesTest {
         down.at("11:00", 22600, PositionView.FLAT, "structure.ema9", 22603.0, "structure.ema20", 22601.0);
         assertThat(down.at("11:01", 22590, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22601.0).orders())
                 .singleElement().extracting(OrderIntent::side).isEqualTo(OptionSide.PE);
+    }
+
+    /**
+     * A-158 aob-v1: a quiet morning (3-minute share 0.001, 1,000 futures a minute), then at 09:41 a 4x share with the last
+     * three minutes at 2,000 a minute (2x the day's median window): buy the call. Held through ordinary flow against it, out
+     * on a 3x burst the other way. The same burst without the volume does not enter.
+     */
+    @Test
+    void atmOiBurstBuysTheFlowsDirectionWithVolumeAndExitsOnTheOppositeBurst() {
+        Day d = new Day("atm-oi-burst.v1.yaml", Map.of());
+        Day quiet = new Day("atm-oi-burst.v1.yaml", Map.of());
+        for (int m = 16; m <= 40; m++) {
+            String t = String.format("09:%02d", m);
+            double share = m % 2 == 0 ? 0.001 : -0.001;
+            long volume = m >= 39 ? 2000L : 1000L;
+            assertThat(d.at(t, 22600, PositionView.FLAT, "options.atmBandShare3m", share, "futures.volumeLastMinute", volume)
+                    .orders()).isEmpty();
+            quiet.at(t, 22600, PositionView.FLAT, "options.atmBandShare3m", share, "futures.volumeLastMinute", 1000L);
+        }
+        assertThat(d.at("09:41", 22610, PositionView.FLAT, "options.atmBandShare3m", 0.004, "futures.volumeLastMinute", 2000L)
+                .orders()).singleElement().satisfies(o -> {
+                    assertThat(o.side()).isEqualTo(OptionSide.CE);
+                    assertThat(o.reason()).isEqualTo("OI_BURST_UP");
+                });
+        assertThat(quiet.at("09:41", 22610, PositionView.FLAT, "options.atmBandShare3m", 0.004, "futures.volumeLastMinute", 1000L)
+                .orders()).as("no volume, no entry").isEmpty();
+
+        PositionView holding = new PositionView(true, OptionSide.CE, 1, 50, null, 52);
+        assertThat(d.at("09:45", 22620, holding, "options.atmBandShare3m", -0.0015, "futures.volumeLastMinute", 1000L).orders())
+                .as("ordinary flow against: hold").isEmpty();
+        assertThat(d.at("09:50", 22600, holding, "options.atmBandShare3m", -0.005, "futures.volumeLastMinute", 1000L).orders())
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("OPPOSITE_BURST");
+    }
+
+    /**
+     * A-159 aob-v2: the same entry as v1; an opposite burst no longer exits; the premium trail does: armed at +20 % (bid 60
+     * on a 50 premium), out once the bid is 15 % below its peak (70 -> 59.5).
+     */
+    @Test
+    void atmOiBurstV2HoldsThroughTheOppositeBurstAndExitsOnThePremiumTrail() {
+        Day d = new Day("atm-oi-burst.v2.yaml", Map.of());
+        for (int m = 16; m <= 40; m++) {
+            d.at(String.format("09:%02d", m), 22600, PositionView.FLAT, "options.atmBandShare3m", m % 2 == 0 ? 0.001 : -0.001,
+                    "futures.volumeLastMinute", m >= 39 ? 2000L : 1000L);
+        }
+        assertThat(d.at("09:41", 22610, PositionView.FLAT, "options.atmBandShare3m", 0.004, "futures.volumeLastMinute", 2000L)
+                .orders()).singleElement().extracting(OrderIntent::reason).isEqualTo("OI_BURST_UP");
+        Object[] quiet = {"options.atmBandShare3m", 0.001, "futures.volumeLastMinute", 1000L};
+        assertThat(d.at("09:45", 22600, new PositionView(true, OptionSide.CE, 1, 50, null, 48),
+                "options.atmBandShare3m", -0.005, "futures.volumeLastMinute", 1000L).orders()).as("opposite burst: v2 holds").isEmpty();
+        assertThat(d.at("09:50", 22640, new PositionView(true, OptionSide.CE, 1, 50, null, 60), quiet).orders()).isEmpty();
+        assertThat(d.at("09:55", 22660, new PositionView(true, OptionSide.CE, 1, 50, null, 70), quiet).orders()).isEmpty();
+        assertThat(d.at("10:00", 22645, new PositionView(true, OptionSide.CE, 1, 50, null, 59.5), quiet).orders())
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("TRAIL_15");
+    }
+
+    /**
+     * A-161 aob-v4: a call from 09:41; puts written at 4x the day's mean at a new high exit it (OI_CLIMAX) only once it is
+     * 10 minutes old, in profit and at a new extreme: not at 09:45 (too young), not at 09:52 (no new high), yes at 09:53.
+     */
+    @Test
+    void atmOiBurstV4ExitsOnTheDrivingOiClimaxAtANewExtreme() {
+        Day d = new Day("atm-oi-burst.v4.yaml", Map.of());
+        for (int m = 16; m <= 40; m++) {
+            double x = m % 2 == 0 ? 0.001 : -0.001;
+            d.at(String.format("09:%02d", m), 22600, PositionView.FLAT, "options.atmBandShare3m", x,
+                    "options.atmBandCallShare3m", -x / 2, "options.atmBandPutShare3m", x / 2,
+                    "futures.volumeLastMinute", m >= 39 ? 2000L : 1000L);
+        }
+        assertThat(d.at("09:41", 22610, PositionView.FLAT, "options.atmBandShare3m", 0.004, "options.atmBandCallShare3m", -0.001,
+                "options.atmBandPutShare3m", 0.003, "futures.volumeLastMinute", 2000L).orders())
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("OI_BURST_UP");
+        java.time.Instant opened = Snapshots.SESSION.atTime(9, 41).atZone(com.autotrade.core.time.MarketTime.IST).toInstant();
+        PositionView held = new PositionView(true, OptionSide.CE, 1, 50, opened, 55);
+        Object[] climax = {"options.atmBandShare3m", 0.0015, "options.atmBandCallShare3m", 0.0005, "options.atmBandPutShare3m", 0.002,
+                "futures.volumeLastMinute", 1000L};
+        Object[] calm = {"options.atmBandShare3m", 0.0, "options.atmBandCallShare3m", 0.0, "options.atmBandPutShare3m", 0.0,
+                "futures.volumeLastMinute", 1000L};
+        assertThat(d.at("09:42", 22615, held, calm).orders()).isEmpty();
+        assertThat(d.at("09:45", 22630, held, climax).orders()).as("4 minutes old").isEmpty();
+        assertThat(d.at("09:50", 22640, held, calm).orders()).isEmpty();
+        assertThat(d.at("09:52", 22635, held, climax).orders()).as("no new high").isEmpty();
+        assertThat(d.at("09:53", 22650, held, climax).orders()).singleElement().extracting(OrderIntent::reason)
+                .isEqualTo("OI_CLIMAX");
+    }
+
+    /**
+     * A-179 aob-v5: the same 4x up burst at 09:41 with volume. Driven by calls closing (call share -0.003 against a put
+     * share +0.001) it enters; driven by puts written (put share +0.003, calls -0.001) it is a writing burst and v5 skips it,
+     * while v2 takes both.
+     */
+    @Test
+    void atmOiBurstV5EntersOnlyOnACoveringBurst() {
+        for (boolean coveringBurst : new boolean[] {true, false}) {
+            Day v5 = new Day("atm-oi-burst.v5.yaml", Map.of());
+            Day v2 = new Day("atm-oi-burst.v2.yaml", Map.of());
+            for (int m = 16; m <= 40; m++) {
+                double x = m % 2 == 0 ? 0.001 : -0.001;
+                Object[] f = {"options.atmBandShare3m", x, "options.atmBandCallShare3m", -x / 2, "options.atmBandPutShare3m", x / 2,
+                        "futures.volumeLastMinute", m >= 39 ? 2000L : 1000L};
+                v5.at(String.format("09:%02d", m), 22600, PositionView.FLAT, f);
+                v2.at(String.format("09:%02d", m), 22600, PositionView.FLAT, f);
+            }
+            Object[] burst = {"options.atmBandShare3m", 0.004,
+                    "options.atmBandCallShare3m", coveringBurst ? -0.003 : -0.001, "options.atmBandPutShare3m", coveringBurst ? 0.001 : 0.003,
+                    "futures.volumeLastMinute", 2000L};
+            assertThat(v2.at("09:41", 22610, PositionView.FLAT, burst).orders()).singleElement()
+                    .extracting(OrderIntent::reason).isEqualTo("OI_BURST_UP");
+            if (coveringBurst) {
+                assertThat(v5.at("09:41", 22610, PositionView.FLAT, burst).orders()).singleElement()
+                        .extracting(OrderIntent::reason).isEqualTo("OI_BURST_UP");
+            } else {
+                assertThat(v5.at("09:41", 22610, PositionView.FLAT, burst).orders()).as("writing burst: v5 skips").isEmpty();
+            }
+        }
+    }
+
+    /**
+     * A-180 aob-v6, the 23 Oct morning shape: a loud open (3-minute shares of +-0.01 to 09:29), a quiet half hour (+-0.001),
+     * then from 09:50 a steady -0.0025 a minute: 2.5x the 09:30 mean, never a 3x spike, on ordinary volume. v6's
+     * sustained-flow trigger buys the put (OI_FLOW_DOWN) once four of the five 3-minute shares are on the put side; v2
+     * never enters.
+     */
+    @Test
+    void atmOiBurstV6BuysASustainedFlowThatNeverSpikes() {
+        Day v6 = new Day("atm-oi-burst.v6.yaml", Map.of());
+        Day v2 = new Day("atm-oi-burst.v2.yaml", Map.of());
+        String entered = null, reason = null;
+        for (int m = 16; m <= 70; m++) {
+            String t = String.format("%02d:%02d", 9 + m / 60, m % 60);
+            double share = m < 30 ? (m % 2 == 0 ? 0.01 : -0.01) : m < 50 ? (m % 2 == 0 ? 0.001 : -0.001) : -0.0025;
+            Object[] f = {"options.atmBandShare3m", share, "futures.volumeLastMinute", 1000L};
+            assertThat(v2.at(t, 22600 - Math.max(0, m - 50) * 5, PositionView.FLAT, f).orders()).as("v2 at " + t).isEmpty();
+            List<OrderIntent> o = v6.at(t, 22600 - Math.max(0, m - 50) * 5, PositionView.FLAT, f).orders();
+            if (entered == null && !o.isEmpty()) {
+                entered = t;
+                reason = o.get(0).reason();
+                assertThat(o.get(0).side()).isEqualTo(OptionSide.PE);
+            }
+        }
+        assertThat(entered).as("v6 enters during the run").isNotNull().isBetween("09:55", "10:05");
+        assertThat(reason).isEqualTo("OI_FLOW_DOWN");
+    }
+
+    /**
+     * A-181 aob-v7, the 23 Oct 13:56 shape: no flow, one big window (+0.03 at 10:00), small ones on its side (+0.002) and
+     * then the newest the other way (-0.003 at 10:12). v6's 15-minute sum rides the spike (OI_FLOW_UP at 10:09: the spike
+     * is 83 % of it); v7 skips that and enters only at 10:10, when four +0.002 windows without the spike make the sum. On a
+     * steady run (the A-180 morning shape) v7 still buys the put like v6.
+     */
+    @Test
+    void atmOiBurstV7NeedsTheSustainedFlowToBeSpreadAndCurrent() {
+        Day v6 = new Day("atm-oi-burst.v6.yaml", Map.of());
+        Day v7 = new Day("atm-oi-burst.v7.yaml", Map.of());
+        String v6At = null, v7At = null;
+        for (int m = 16; m <= 90; m++) {
+            String t = String.format("%02d:%02d", 9 + m / 60, m % 60);
+            double share = m == 60 ? 0.03 : m > 60 && m < 72 ? 0.002 : m == 72 ? -0.003 : 0.0;
+            Object[] f = {"options.atmBandShare3m", share, "futures.volumeLastMinute", 1000L};
+            List<OrderIntent> o6 = v6.at(t, 22600, PositionView.FLAT, f).orders();
+            if (v6At == null && !o6.isEmpty()) {
+                v6At = t;
+                assertThat(o6.get(0).reason()).isEqualTo("OI_FLOW_UP");
+            }
+            if (v7At == null && !v7.at(t, 22600, PositionView.FLAT, f).orders().isEmpty()) {
+                v7At = t;
+            }
+        }
+        assertThat(v6At).as("v6 rides the spike").isEqualTo("10:09");
+        assertThat(v7At).as("v7 waits for windows without the spike").isEqualTo("10:10");
+
+        Day steady = new Day("atm-oi-burst.v7.yaml", Map.of());
+        String entered = null;
+        for (int m = 16; m <= 70; m++) {
+            String t = String.format("%02d:%02d", 9 + m / 60, m % 60);
+            double share = m < 30 ? (m % 2 == 0 ? 0.01 : -0.01) : m < 50 ? (m % 2 == 0 ? 0.001 : -0.001) : -0.0025;
+            List<OrderIntent> o = steady.at(t, 22600, PositionView.FLAT, "options.atmBandShare3m", share, "futures.volumeLastMinute", 1000L).orders();
+            if (entered == null && !o.isEmpty()) {
+                entered = t;
+                assertThat(o.get(0).reason()).isEqualTo("OI_FLOW_DOWN");
+            }
+        }
+        assertThat(entered).as("v7 still takes a steady run").isNotNull();
+    }
+
+    /**
+     * A-186 aob-v9: a 4x burst with 2x volume at 09:41 (before 09:45: v9 waits), then another at 09:51 with the index above
+     * or below the day's open. v2 (shown only the 09:51 burst) takes the call either way; v9 only above the open.
+     */
+    @Test
+    void atmOiBurstV9WaitsFor0945AndTradesWithTheDay() {
+        for (boolean aboveOpen : new boolean[] {true, false}) {
+            Day v2 = new Day("atm-oi-burst.v2.yaml", Map.of());
+            Day v9 = new Day("atm-oi-burst.v9.yaml", Map.of());
+            double open = aboveOpen ? 22590 : 22630;
+            for (int m = 16; m <= 50; m++) {
+                String t = String.format("09:%02d", m);
+                boolean early = m == 41;
+                Object[] f = {"options.atmBandShare3m", early ? 0.004 : m % 2 == 0 ? 0.001 : -0.001,
+                        "futures.volumeLastMinute", m >= 39 && m <= 41 || m >= 49 ? 2000L : 1000L, "structure.dayOpen", open};
+                List<OrderIntent> o9 = v9.at(t, 22610, PositionView.FLAT, f).orders();
+                assertThat(o9).as("v9 before 09:51 at " + t).isEmpty();
+                v2.at(t, 22610, PositionView.FLAT, early ? new Object[] {"options.atmBandShare3m", 0.001, "futures.volumeLastMinute", 2000L,
+                        "structure.dayOpen", open} : f);                    // v2 sees no 09:41 burst, so its 15-minute gap is free
+            }
+            Object[] burst = {"options.atmBandShare3m", 0.004, "futures.volumeLastMinute", 2000L, "structure.dayOpen", open};
+            assertThat(v2.at("09:51", 22610, PositionView.FLAT, burst).orders()).singleElement()
+                    .extracting(OrderIntent::reason).isEqualTo("OI_BURST_UP");
+            List<OrderIntent> o9 = v9.at("09:51", 22610, PositionView.FLAT, burst).orders();
+            if (aboveOpen) {
+                assertThat(o9).singleElement().extracting(OrderIntent::reason).isEqualTo("OI_BURST_UP");
+            } else {
+                assertThat(o9).as("call below the day's open: v9 skips").isEmpty();
+            }
+        }
+    }
+
+    /**
+     * A-181 aob-v7's newest-same-side rule on its own: +0.004 at 10:00, 10:03, 10:06, 10:09 and -0.001 at 10:12 (no flow
+     * otherwise, ordinary volume). At 10:12 the five windows sum to +0.015 with four on its side and none above 40 % of it,
+     * so only the newest window (-0.001) is against: v6 signals a call, v7 does not.
+     */
+    @Test
+    void atmOiBurstV7SkipsWhenTheNewestWindowIsAgainstTheSum() {
+        Day v6 = new Day("atm-oi-burst.v6.yaml", Map.of());
+        Day v7 = new Day("atm-oi-burst.v7.yaml", Map.of());
+        List<OrderIntent> at6 = List.of(), at7 = List.of();
+        for (int m = 16; m <= 72; m++) {
+            String t = String.format("%02d:%02d", 9 + m / 60, m % 60);
+            double share = m == 72 ? -0.001 : m >= 60 && m % 3 == 0 ? 0.004 : 0.0;
+            Object[] f = {"options.atmBandShare3m", share, "futures.volumeLastMinute", 1000L};
+            List<OrderIntent> o6 = v6.at(t, 22600, PositionView.FLAT, f).orders();
+            List<OrderIntent> o7 = v7.at(t, 22600, PositionView.FLAT, f).orders();
+            if (m == 72) {
+                at6 = o6;
+                at7 = o7;
+            }
+        }
+        assertThat(at6).as("v6 at 10:12").singleElement().extracting(OrderIntent::reason).isEqualTo("OI_FLOW_UP");
+        assertThat(at7).as("v7 at 10:12: the newest window is against the sum").isEmpty();
+    }
+
+    /** The aob-v2 quiet morning, 09:16-09:40, with the 2x volume from 09:39 (as in the v1 / v2 tests). */
+    private static Day aobMorning() {
+        Day d = new Day("atm-oi-burst.v2.yaml", Map.of());
+        for (int m = 16; m <= 40; m++) {
+            d.at(String.format("09:%02d", m), 22600, PositionView.FLAT, "options.atmBandShare3m", m % 2 == 0 ? 0.001 : -0.001,
+                    "futures.volumeLastMinute", m >= 39 ? 2000L : 1000L);
+        }
+        return d;
+    }
+
+    private static final Object[] AOB_BURST = {"options.atmBandShare3m", 0.004, "futures.volumeLastMinute", 2000L};
+    private static final Object[] AOB_QUIET = {"options.atmBandShare3m", 0.001, "futures.volumeLastMinute", 2000L};
+
+    /**
+     * Review fix (24 Oct): the same-direction gap counts entries that filled. A 09:41 call signal the session refused
+     * (the position stays flat) does not block the 09:43 call signal.
+     */
+    @Test
+    void atmOiBurstARefusedSignalDoesNotStartTheGap() {
+        Day d = aobMorning();
+        assertThat(d.at("09:41", 22610, PositionView.FLAT, AOB_BURST).orders()).singleElement()
+                .extracting(OrderIntent::reason).isEqualTo("OI_BURST_UP");
+        d.at("09:42", 22610, PositionView.FLAT, AOB_QUIET);                          // refused: still flat
+        assertThat(d.at("09:43", 22615, PositionView.FLAT, AOB_BURST).orders()).as("not blocked by a refused signal")
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("OI_BURST_UP");
+    }
+
+    /** ... while a call that filled at 09:41 still blocks calls until 09:56 (15 minutes from the signal's minute). */
+    @Test
+    void atmOiBurstAFilledEntryStartsTheGapAtItsSignalMinute() {
+        Day d = aobMorning();
+        assertThat(d.at("09:41", 22610, PositionView.FLAT, AOB_BURST).orders()).hasSize(1);
+        java.time.Instant opened = Snapshots.SESSION.atTime(9, 41).atZone(com.autotrade.core.time.MarketTime.IST).toInstant();
+        d.at("09:42", 22612, new PositionView(true, OptionSide.CE, 1, 50, opened, 51), AOB_QUIET);   // filled
+        d.at("09:45", 22605, PositionView.FLAT, AOB_QUIET);                                          // closed
+        assertThat(d.at("09:50", 22615, PositionView.FLAT, AOB_BURST).orders()).as("inside the gap").isEmpty();
+        assertThat(d.at("09:56", 22620, PositionView.FLAT, AOB_BURST).orders()).as("15 minutes after 09:41")
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("OI_BURST_UP");
+    }
+
+    /**
+     * A-172 odm-v9, the 22 Oct shape: open 22,690, a flush to 22,560 by 09:18, then a flat base. At 09:24 the drive holds
+     * (−0.47 %, near the low) and v4 buys the put; v9 sees no new low since 09:21 and waits; a new low at 09:26 makes the
+     * 09:27 check fresh and v9 enters then.
+     */
+    @Test
+    void odmV9NeedsAFreshExtremeAndWaitsOutAStaleDrive() {
+        Map<String, Object> open = Map.of("structure.dayOpen", 22690.0, "breadth.moverBreadth", -77.0);
+        Day v4 = new Day("opening-drive-momentum.v4.yaml", open), v9 = new Day("opening-drive-momentum.v9.yaml", open);
+        double[] path = {22690, 22600, 22570, 22560, 22590, 22605, 22615, 22590, 22579};   // 09:15 .. 09:23 (a bounce at 09:21, as on 22 Oct)
+        for (int i = 0; i < path.length; i++) {
+            for (Day d : new Day[] {v4, v9}) {
+                d.at(String.format("09:%02d", 15 + i), path[i]);
+            }
+        }
+        assertThat(v4.at("09:24", 22584).orders()).singleElement().extracting(OrderIntent::side).isEqualTo(OptionSide.PE);
+        assertThat(v9.at("09:24", 22584).orders()).as("stale: no new low since 09:21").isEmpty();
+        v9.at("09:25", 22570);
+        v9.at("09:26", 22550);                                                    // a new session low
+        assertThat(v9.at("09:27", 22552).orders()).singleElement().satisfies(o -> {
+            assertThat(o.side()).isEqualTo(OptionSide.PE);
+            assertThat(o.reason()).isEqualTo("OPENING_DRIVE_DOWN");
+        });
     }
 
     /**

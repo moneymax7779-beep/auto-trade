@@ -51,6 +51,7 @@ class AlertMonitor implements ApplicationRunner {
     private HikariDataSource zt;
     private int ztFailures;
     private long lastTokenCheckMinute = -1;
+    private LocalDate lastTokenCheckDay;
     private Long sessionId;
     private String lastStatus;
     private final Set<String> seenOpened = new HashSet<>();
@@ -82,7 +83,7 @@ class AlertMonitor implements ApplicationRunner {
         LocalDate today = now.toLocalDate();
         LocalTime time = now.toLocalTime();
         boolean tradingDay = runner.tradingDay(today);
-        for (Runnable check : List.<Runnable>of(this::disk, () -> zt(tradingDay, time), () -> token(tradingDay, time),
+        for (Runnable check : List.<Runnable>of(this::disk, () -> zt(tradingDay, time), () -> token(tradingDay, today, time),
                 () -> session(tradingDay, today, time))) {
             try {
                 check.run();
@@ -146,28 +147,48 @@ class AlertMonitor implements ApplicationRunner {
 
     // ---------------------------------------------------------------- Upstox token before the open
 
-    private void token(boolean tradingDay, LocalTime time) {
-        if (!tradingDay || time.isBefore(LocalTime.of(8, 0)) || !time.isBefore(LocalTime.of(9, 0))) {
+    private void token(boolean tradingDay, LocalDate today, LocalTime time) {
+        if (!tradingDay || !tokenCheckDue(time, alerts.isActive("token"), today, lastTokenCheckDay, lastTokenCheckMinute)) {
             return;
         }
-        long minute = time.toSecondOfDay() / 60;
-        if (lastTokenCheckMinute >= 0 && minute - lastTokenCheckMinute < 10) {
-            return;
-        }
-        lastTokenCheckMinute = minute;
+        lastTokenCheckDay = today;
+        lastTokenCheckMinute = time.toSecondOfDay() / 60;
         if (zt == null && !ztReachable()) {
             return;                                   // the zt alert covers it
         }
         try {
             if (runner.upstoxToken(zt).isPresent()) {
-                alerts.clear("token", "Upstox token valid: today's live session can start at 09:00.");
-            } else {
+                alerts.clear("token", time.isBefore(OPEN) ? "Upstox token valid: today's live session can start at 09:00."
+                        : "Upstox token valid now (signed in after the last check before 09:00).");
+            } else if (time.isBefore(OPEN)) {
                 alerts.raise("token", AlertService.Level.CRITICAL,
                         "No valid Upstox token. Sign in to Upstox in zt-tiger-v2 before 09:00, or the live feed won't start.");
             }
         } catch (java.io.IOException e) {
             log.warn("token check failed: {}", e.getMessage());
         }
+    }
+
+    static final LocalTime TOKEN_FROM = LocalTime.of(8, 0), OPEN = LocalTime.of(9, 0), TOKEN_UNTIL = LocalTime.of(15, 40);
+
+    /**
+     * Whether the Upstox token check runs now: every 10 minutes from 08:00 to 09:00 (it raises and clears the alert);
+     * after 09:00 only while that alert is still active, every minute until 15:40 (it can only clear it: a sign-in in the
+     * last minutes before 09:00 would otherwise leave the alert up all day). A new day always checks at once (the
+     * minutes of yesterday's last check say nothing about today).
+     */
+    static boolean tokenCheckDue(LocalTime time, boolean alertActive, LocalDate today, LocalDate lastDay, long lastMinute) {
+        if (time.isBefore(TOKEN_FROM)) {
+            return false;
+        }
+        boolean beforeOpen = time.isBefore(OPEN);
+        if (!beforeOpen && (!alertActive || !time.isBefore(TOKEN_UNTIL))) {
+            return false;
+        }
+        if (!today.equals(lastDay) || lastMinute < 0) {
+            return true;
+        }
+        return time.toSecondOfDay() / 60 - lastMinute >= (beforeOpen ? 10 : 1);
     }
 
     // ---------------------------------------------------------------- the live session

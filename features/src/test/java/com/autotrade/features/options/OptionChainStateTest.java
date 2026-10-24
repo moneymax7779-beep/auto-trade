@@ -106,6 +106,38 @@ class OptionChainStateTest {
         assertThat(OiBaseline.dteBucket(SESSION, LocalDate.of(2026, 10, 6))).isEqualTo(4);
     }
 
+    /**
+     * A-157 / A-158: over the ATM ± 2 strikes (ATM 23200: 23100-23300), puts +60,000 and calls +20,000 in the last 3
+     * minutes on 10 x 100,000 OI at the window start: share (60,000 − 20,000) / 1,000,000 = 0.04. A strike outside the band
+     * does not count; a missing band contract gives NaN.
+     */
+    @Test
+    void atmBandShareIsPutMinusCallOiChangeOverTheBandsStartingOi() {
+        FeatureConfig config = TestConfig.load();
+        OptionChainState chain = new OptionChainState(config, new SessionClock(config), SESSION);
+        long token = 1;
+        for (double strike = 23100; strike <= 23300; strike += 50) {
+            for (OptionTick.OptionType type : OptionTick.OptionType.values()) {
+                boolean put = type == OptionTick.OptionType.PE;
+                chain.onOption(tick(token, strike, type, 100_000, T0.minus(Duration.ofMinutes(4))));
+                chain.onOption(tick(token, strike, type, 100_000 + (put ? 12_000 : 4_000), T0.minusSeconds(30)));
+                token++;
+            }
+        }
+        chain.onOption(tick(token, 23400, OptionTick.OptionType.PE, 5_000_000, T0.minusSeconds(30)));   // outside the band
+        TimedSeries spot = new TimedSeries(Duration.ofMinutes(15));
+        spot.add(T0.minusSeconds(1), 23205);
+
+        OptionsFeatures features = chain.snapshot(T0, 23205, 10, spot);
+        assertThat(features.atmBandShare3m()).isCloseTo(0.04, org.assertj.core.api.Assertions.within(1e-12));
+        assertThat(features.atmBandShare5m()).as("no OI 5 minutes back").isNaN();
+        assertThat(features.atmBandCallShare3m()).isCloseTo(0.02, org.assertj.core.api.Assertions.within(1e-12));   // A-161
+        assertThat(features.atmBandPutShare3m()).isCloseTo(0.06, org.assertj.core.api.Assertions.within(1e-12));
+
+        OptionsFeatures shifted = chain.snapshot(T0, 23305, 10, spot);   // ATM 23300: 23350 / 23400 missing on one side
+        assertThat(shifted.atmBandShare3m()).isNaN();
+    }
+
     private static OptionTick tick(long token, double strike, OptionTick.OptionType type, double oi, Instant time) {
         return new OptionTick(time, time, "NIFTY", 1, token, "NIFTY " + (int) strike + " " + type,
                 LocalDate.of(2026, 9, 29), strike, type, 65, 100, 1000L, oi, 0.0, 0.0,

@@ -70,14 +70,24 @@ public final class ReferenceStore implements ReferenceData {
 
     @Override
     public List<DailyBar> dailyBars(String symbol, LocalDate session, int sessions) {
-        String sql = "select session_date, open, high, low, close from ref.index_candle where symbol = ? "
-                + "and timeframe = '1day' and session_date < ? order by session_date desc limit ?";
+        // Daily rows come from a one-off backfill; later sessions have only the captured one-minute bars, so a session
+        // without a 1day row is summarised from its 1minute rows (first open, high, low, last close).
+        String sql = "with d as (select session_date, open, high, low, close from ref.index_candle where symbol = ? "
+                + "and timeframe = '1day' and session_date < ?), "
+                + "m as (select session_date, (array_agg(open order by bar_start))[1] open, max(high) high, min(low) low, "
+                + "(array_agg(close order by bar_start desc))[1] close from ref.index_candle where symbol = ? "
+                + "and timeframe = '1minute' and session_date < ? and session_date not in (select session_date from d) "
+                + "group by session_date) "
+                + "select session_date, open, high, low, close from (select * from d union all select * from m) x "
+                + "order by session_date desc limit ?";
         List<DailyBar> bars = new ArrayList<>();
         try (Connection connection = dataSource.getConnection();
              PreparedStatement statement = connection.prepareStatement(sql)) {
             statement.setString(1, symbol);
             statement.setObject(2, session);
-            statement.setInt(3, sessions);
+            statement.setString(3, symbol);
+            statement.setObject(4, session);
+            statement.setInt(5, sessions);
             try (ResultSet rs = statement.executeQuery()) {
                 while (rs.next()) {
                     bars.add(new DailyBar(rs.getObject(1, LocalDate.class), rs.getDouble(2), rs.getDouble(3),
