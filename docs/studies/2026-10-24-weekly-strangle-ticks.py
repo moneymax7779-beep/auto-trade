@@ -13,7 +13,7 @@ from collections import defaultdict
 IST = "at time zone 'Asia/Kolkata'"
 QTY, ENTRY_PX, ADJ, CHARGES = 650, 30.0, 0.875, 0.0015
 CAPITAL, DD_STOP = 2_000_000, 540_000
-OUT = "/Users/satyasiripuram/Desktop/Dev/Code/auto-trade-deploy/.local/a197"
+OUT = os.environ.get("A197_OUT", "/Users/satyasiripuram/Desktop/Dev/Code/auto-trade-deploy/.local/a197")   # the daily sync sets ~/.autotrade-sync/a197
 
 
 def q(sql):

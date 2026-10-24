@@ -100,6 +100,23 @@ case ",$PARTS," in *,own,*)
   $AT -c "select setval(pg_get_serial_sequence('ref.instrument_snapshot','id'), greatest((select max(id) from ref.instrument_snapshot), 1))" >/dev/null 2>&1
 esac
 
+# 3b. A-197 (S0 of the buy/sell plan, user 2026-10-24): the weekly NIFTY short-strangle forward record on the own capture
+# just loaded (frozen rules; equity on a Rs 20 L paper account). 3c. A-209 (user 2026-10-24): live mac trades of the day,
+# read from GCP (read-only), split by the previous session's India VIX close. Trackers are copied into $HOME_DIR/trackers
+# by install.sh (launchd jobs cannot read ~/Desktop). Neither ever counts as a sync problem.
+case ",$PARTS," in *,own,*)
+  TR="$HOME_DIR/trackers"; PY="env PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin A197_OUT=$HOME_DIR/a197 A209_OUT=$HOME_DIR/a209 /usr/bin/python3"
+  if [ -f "$TR/2026-10-24-weekly-strangle-ticks.py" ]; then
+    $PY "$TR/2026-10-24-weekly-strangle-ticks.py" forward > "$OUT/a197-forward.txt" 2>&1 \
+      && log "A-197 forward: $(tail -1 "$OUT/a197-forward.txt")" || log "A-197 forward tracker failed (see $OUT/a197-forward.txt)"
+  fi
+  if [ -f "$TR/2026-10-24-mac-vix-forward.py" ]; then
+    gcloud compute ssh zt-autotrade $G --command="sudo docker exec autotrade-postgres psql -U autotrade -d autotrade -X -At -F, -c \"select s.session_date, s.id, p.underlying, p.option_side, to_char(p.opened_at at time zone 'Asia/Kolkata','HH24:MI'), p.net, p.average_cost * p.quantity from trade.position p join trade.session s on s.id = p.session_id where s.session_date = '$DAY' and s.mode = 'PAPER_LIVE' and p.strategy_id = 'ma-cross' and p.quantity > 0\"" 2>/dev/null > "$OUT/a209-mac.csv"
+    $PY "$TR/2026-10-24-mac-vix-forward.py" "$DAY" < "$OUT/a209-mac.csv" > "$OUT/a209-forward.txt" 2>&1 \
+      && log "$(tail -1 "$OUT/a209-forward.txt")" || log "A-209 mac/VIX tracker failed (see $OUT/a209-forward.txt)"
+  fi
+esac
+
 # 4. zt-tiger-v2's capture -> zt_archive
 case ",$PARTS," in *,zt,*)
   load "$ZA" zt.market_candles market_candles "bar_start >= '$DAY' and bar_start < '$NEXT'"
