@@ -120,6 +120,7 @@ public final class FollowerSimulator {
         final LocalDate date;
         final CapitalPolicy policy = new CapitalPolicy(risk.limits());
         final double equity;
+        final double dailyLossLimit;                 // the account's own rupee limit (V25), NaN = the risk file's %
         boolean dailyLossLatched;
         final List<Retry> retries = new ArrayList<>();
         final Map<String, Integer> retried = new LinkedHashMap<>();
@@ -129,6 +130,7 @@ public final class FollowerSimulator {
             this.date = date;
             this.equity = CapitalPolicy.equity(account, accounts.capitalMovements(account.id(), date),
                     realisedNet(account.id(), account.equityFrom(), date));
+            this.dailyLossLimit = dailyLossLimit(account.id());
         }
 
         double todayNet() {
@@ -142,7 +144,15 @@ public final class FollowerSimulator {
      * first time (after a restart).
      */
     public DayResult run(BrokerAccount account, long copyGroupId, LocalDate date) {
-        Day day = days.computeIfAbsent(account.id() + ":" + date, k -> restore(new Day(account, date), copyGroupId));
+        // the day's state is rebuilt (latch and retries restored from the database) when the account's sizing settings
+        // change, so an edit on the Accounts page applies from the next turn, not the next day
+        String prefix = account.id() + ":" + date + ":";
+        String key = prefix + account.allocatedCapital() + "/" + account.equityMode() + "/" + account.sizeStepPct() + "/"
+                + dailyLossLimit(account.id());
+        if (!days.containsKey(key)) {
+            days.keySet().removeIf(k -> k.startsWith(prefix));
+        }
+        Day day = days.computeIfAbsent(key, k -> restore(new Day(account, date), copyGroupId));
         int executed = 0, skipped = 0, rejected = 0, closed = 0;
         Map<String, Integer> reasons = new LinkedHashMap<>();
         boolean sessionLost = venue.broker() && sessionLost(account);
@@ -429,7 +439,7 @@ public final class FollowerSimulator {
             return reject(p, combined.substring(0, combined.indexOf(':')), combined.substring(combined.indexOf(':') + 2));
         }
         EntryDecision capital = day.policy.checkEntry(TradeMode.valueOf(p.mode()), day.equity, premium,
-                openPremium(day.account.id()), day.todayNet(), funds(day.account, p.mode()));
+                openPremium(day.account.id()), day.todayNet(), funds(day.account, p.mode()), day.dailyLossLimit);
         if (!capital.approved() && capital.code().equals("DAILY_LOSS")) {
             day.dailyLossLatched = true;
             return reject(p, capital.code(), capital.reason());
@@ -916,6 +926,13 @@ public final class FollowerSimulator {
                 + "and status = 'OPEN' and (?::text is null or option_side = ?) order by id limit 1", accountId, strategyId,
                 underlying, side, side);
         return rows.isEmpty() ? null : rows.getFirst();
+    }
+
+    /** The account's own daily loss limit in rupees (acct.broker_account.daily_loss_limit, V25); NaN when not set. */
+    private double dailyLossLimit(long accountId) {
+        java.math.BigDecimal v = jdbc.queryForObject("select daily_loss_limit from acct.broker_account where id = ?",
+                java.math.BigDecimal.class, accountId);
+        return v == null ? Double.NaN : v.doubleValue();
     }
 
     private double openPremium(long accountId) {

@@ -91,6 +91,10 @@ class AccountsController {
         BrokerAccount a = own(user, id);
         String status = body.status() == null ? "" : body.status();
         Access.require(status.equals("ACTIVE") || status.equals("DISCONNECTED"), "status: ACTIVE or DISCONNECTED");
+        Integer linked = jdbc.queryForObject("select count(*) from acct.broker_account where id = ? and credential_profile_id "
+                + "is not null", Integer.class, a.id());
+        Access.require(!"ACTIVE".equals(status) || linked == null || linked == 0,
+                a.displayName() + " is linked to a Kite app: log in with Kite (its session is set by the login, not by hand)");
         accounts.setConnectionStatus(a.id(), status);
         kills.audit(a, user.subject(), "SESSION_" + status, Map.of());
         return Map.of("account", a.displayName(), "connection", status);

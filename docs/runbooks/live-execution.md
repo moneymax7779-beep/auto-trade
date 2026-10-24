@@ -149,3 +149,17 @@ only until Keycloak.
   client id is refused. Before the login (connection TOKEN_EXPIRED) entries are refused with `BROKER_SESSION`.
 - **Cross-site guard:** state-changing `/api` calls from another site are refused (`SameOriginFilter`); the UI and
   scripts on the host are unaffected.
+
+## Managing accounts (Accounts page, 24 Oct 2026)
+
+- **Add account:** name, broker (Zerodha in DRY_RUN, or Paper), Zerodha client id and Kite app, allocation, fixed or
+  compounding equity, a daily loss limit in rupees (blank = the risk file's %), strategies, enabled. New accounts use
+  follower-risk v3; no account is ever created LIVE.
+- **Manage** (per account): change the allocation, equity mode, daily loss limit, mode (PAPER / DRY_RUN), client id,
+  enabled and strategies; the account's Kite session and a "Log in to Kite" button; positions of any day; daily P&L for
+  30 days. Changes apply from the account's next turn (about a second) and are audited (`ACCOUNT_CREATED`,
+  `ACCOUNT_SETTINGS` with the values before).
+- Only an OWNER or ADMIN of the tenant may create or change accounts; a TRADER may kill and flatten; a VIEWER only reads.
+- The daily loss limit in rupees is `acct.broker_account.daily_loss_limit` (V25); when set it replaces the risk file's
+  `daily_loss_pct` for that account.
+

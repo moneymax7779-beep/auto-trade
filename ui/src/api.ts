@@ -393,3 +393,62 @@ export interface AuditRow {
   detail: string;
   at: string;
 }
+
+// ---------------------------------------------------------------- account management (Accounts page)
+
+/** GET /api/execution/accounts/{id}/details */
+export interface AccountDetails {
+  id: number;
+  name: string;
+  broker: string;
+  mode: string;
+  enabled: boolean;
+  allocatedCapital: number;
+  equityMode: string;
+  equityFrom: string;
+  riskFile: string;
+  sizeStepPct: number;
+  clientId: string | null;
+  credentialProfile: string | null;
+  /** rupees; null = the risk file's percentage */
+  dailyLossLimit: number | null;
+  connection: string | null;
+  session: { status: string; expires: string } | null;
+  strategies: { strategy_id: string; enabled: boolean; size_multiplier: number; copy_group: string }[];
+  today: { open: number; closed: number; net: number };
+}
+
+/** GET /api/execution/accounts/{id}/positions?day= */
+export interface ExecPosition {
+  id: number;
+  strategy_id: string;
+  underlying: string;
+  option_side: string;
+  symbol: string;
+  quantity_open: number;
+  average_entry: number;
+  opened: string;
+  closed: string | null;
+  exit_reason: string | null;
+  realised_gross: number | null;
+  charges: number | null;
+  status: string;
+}
+
+/** GET /api/execution/accounts/{id}/pnl?days= */
+export interface PnlDay {
+  day: string;
+  trades: number;
+  wins: number;
+  net: number;
+}
+
+/** GET /api/execution/credential-profiles: a broker app's settings, never its secrets */
+export interface CredentialProfile {
+  id: number;
+  name: string;
+  broker_type: string;
+  redirect_uri: string | null;
+  ips: string;
+  status: string;
+}

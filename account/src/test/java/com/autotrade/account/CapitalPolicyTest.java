@@ -58,4 +58,15 @@ class CapitalPolicyTest {
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> new CapitalLimits(0, 50, 100, 10)).isInstanceOf(IllegalArgumentException.class);
     }
+
+    @Test
+    void theAccountsOwnRupeeLossLimitReplacesThePercentage() {
+        // 20 % of 2 L = 40,000 by the risk file; the account's own limit of 20,000 replaces it (V25)
+        assertThat(POLICY.checkEntry(TradeMode.DRY_RUN, 200_000, 10_000, 0, -25_000, 5_000_000).approved()).isTrue();
+        assertThat(POLICY.checkEntry(TradeMode.DRY_RUN, 200_000, 10_000, 0, -25_000, 5_000_000, 20_000).code())
+                .isEqualTo("DAILY_LOSS");
+        assertThat(POLICY.checkEntry(TradeMode.DRY_RUN, 200_000, 10_000, 0, -19_999, 5_000_000, 20_000).approved()).isTrue();
+        assertThat(POLICY.checkEntry(TradeMode.DRY_RUN, 200_000, 10_000, 0, -45_000, 5_000_000, Double.NaN).code())
+                .as("not set: the percentage").isEqualTo("DAILY_LOSS");
+    }
 }

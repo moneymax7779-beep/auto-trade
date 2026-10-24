@@ -34,6 +34,12 @@ class Access {
             return "OWNER".equals(role) || "ADMIN".equals(role) || "TRADER".equals(role);
         }
 
+        /** OWNER or ADMIN: may create accounts and change their capital, limits and strategies (TRADER may not). */
+        boolean manages(long tenantId) {
+            String role = roles.get(tenantId);
+            return "OWNER".equals(role) || "ADMIN".equals(role);
+        }
+
         boolean admin() {
             return roles.containsValue("ADMIN");
         }

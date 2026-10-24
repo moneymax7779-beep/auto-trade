@@ -4,6 +4,7 @@ import {
   get, postJson, type AuditRow, type ExecutionAccount, type KillSwitch, type WorkerStatus,
 } from "../api";
 import { ErrorNote, Loading, Panel, Table } from "../components/ui";
+import { AccountDetailPanel, AddAccountPanel } from "./AccountManagement";
 
 // Live execution: the caller's broker accounts across copy groups, kill switches, flatten and the audit log. Every call
 // goes to the execution workers (app-execution) through trading-core; the workers scope it to the user's tenants.
@@ -64,6 +65,7 @@ export function AccountsPage() {
     refetchInterval: 10000,
   });
   const [flattenFor, setFlattenFor] = useState<number | null>(null);
+  const [managed, setManaged] = useState<number | null>(null);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
   const act = useMutation({
@@ -91,7 +93,8 @@ export function AccountsPage() {
             <span><span className="text-muted">Copy groups </span><span className="num">{s.copyGroup === "*" ? "all" : s.copyGroup}</span></span>
             <span><span className="text-muted">Session date </span><span className="num">{s.day}</span></span>
             <span><span className="text-muted">Last tick </span><span className="num">{time(s.lastTick)}</span></span>
-            <span className="text-muted">PAPER and DRY_RUN only: LIVE is refused; DRY_RUN orders go to a local broker simulator.</span>
+            <span className="text-muted">PAPER and DRY_RUN only: LIVE is refused; DRY_RUN orders go to a local broker simulator.
+              Open positions are squared off at 15:20 if the signal source sent no exit.</span>
           </div>
         )}
       </Panel>
@@ -119,10 +122,11 @@ export function AccountsPage() {
           { key: "res", label: "Last result", render: (a) => <span className="text-xs text-muted">{a.lastTurn?.lastResult ?? ""}</span> },
           { key: "a", label: "", render: (a) => (
             <div className="flex flex-wrap gap-1.5">
-              {a.broker !== "PAPER" && a.connection !== "ACTIVE" && (
-                <button className="rounded border border-line px-2 py-0.5 text-xs hover:bg-panel-2" disabled={act.isPending}
-                  onClick={() => act.mutate({ path: `/api/execution/accounts/${a.id}/session`, body: { status: "ACTIVE" },
-                    done: `${a.name} marked logged in` })}>Logged in</button>
+              <button className="rounded border border-accent/60 px-2 py-0.5 text-xs text-accent hover:bg-accent/10"
+                onClick={() => setManaged(managed === a.id ? null : a.id)}>{managed === a.id ? "Close" : "Manage"}</button>
+              {a.broker === "ZERODHA" && a.connection !== "ACTIVE" && (
+                <a className="rounded border border-line px-2 py-0.5 text-xs hover:bg-panel-2" target="_blank" rel="noreferrer"
+                  href={`/api/execution/accounts/${a.id}/kite/login`}>Log in to Kite</a>
               )}
               <button className="rounded border border-warn/60 px-2 py-0.5 text-xs text-warn hover:bg-warn/10" disabled={act.isPending}
                 onClick={() => {
@@ -147,6 +151,13 @@ export function AccountsPage() {
           </div>
         )}
       </Panel>
+
+      {managed != null && (
+        <AccountDetailPanel key={managed} accountId={managed} onClose={() => setManaged(null)}
+          onDone={(text, ok) => setMessage({ ok, text })} />
+      )}
+
+      <AddAccountPanel onDone={(text, ok) => setMessage({ ok, text })} />
 
       <KillSwitchPanel switches={switches} accounts={rows} names={names} busy={act.isPending}
         onEngage={(body) => act.mutate({ path: "/api/execution/kill-switches", body, done: "kill switch engaged" })}

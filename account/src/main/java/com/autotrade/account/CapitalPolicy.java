@@ -34,13 +34,22 @@ public final class CapitalPolicy {
      */
     public EntryDecision checkEntry(TradeMode mode, double equity, double premium, double openPremium, double todayNet,
                                     double brokerAvailableFunds) {
+        return checkEntry(mode, equity, premium, openPremium, todayNet, brokerAvailableFunds, Double.NaN);
+    }
+
+    /**
+     * The same with the account's own daily loss limit in rupees ({@code acct.broker_account.daily_loss_limit}, V25):
+     * when finite and positive it replaces {@code daily_loss_pct} of equity; NaN keeps the percentage.
+     */
+    public EntryDecision checkEntry(TradeMode mode, double equity, double premium, double openPremium, double todayNet,
+                                    double brokerAvailableFunds, double dailyLossLimit) {
         if (!(premium > 0)) {
             return EntryDecision.refuse("NO_PREMIUM", "entry premium unknown or zero");
         }
         if (!(equity > 0)) {
             return EntryDecision.refuse("NO_EQUITY", "account equity is zero");
         }
-        double lossLimit = equity * limits.dailyLossPct() / 100;
+        double lossLimit = dailyLossLimit > 0 ? dailyLossLimit : equity * limits.dailyLossPct() / 100;
         if (todayNet <= -lossLimit) {
             return EntryDecision.refuse("DAILY_LOSS", "day net " + rupees(todayNet) + " at or beyond the loss limit -"
                     + rupees(lossLimit));
