@@ -61,6 +61,11 @@ services:
       ZT_SOURCE_PASSWORD_FILE: /run/zt/runtime.env
       UPSTOX_TOKEN_FILE: /app/.local/upstox/token.json
       SERVER_ADDRESS: 0.0.0.0        # inside the container; the published port below is loopback-only
+      # Per-user logins: none (default, as before) or oidc with Keycloak (bin/keycloak/bootstrap.sh)
+      AUTOTRADE_AUTH_MODE: ${AUTOTRADE_AUTH_MODE:-none}
+      AUTOTRADE_AUTH_PUBLIC_BASE: ${AUTOTRADE_AUTH_PUBLIC_BASE:-}
+      AUTOTRADE_AUTH_INTERNAL_BASE: ${AUTOTRADE_AUTH_INTERNAL_BASE:-http://keycloak:8180/auth}
+      AUTOTRADE_AUTH_CLIENT_SECRET: ${AUTOTRADE_AUTH_CLIENT_SECRET:-}
     ports:
       - "127.0.0.1:8095:8095"
     volumes:
@@ -123,6 +128,10 @@ services:
       ZT_SOURCE_PASSWORD_FILE: /nonexistent
       JAVA_TOOL_OPTIONS: "-Xmx768m -XX:+ExitOnOutOfMemoryError"
       SERVER_ADDRESS: 0.0.0.0
+      AUTOTRADE_AUTH_MODE: ${AUTOTRADE_AUTH_MODE:-none}
+      AUTOTRADE_AUTH_PUBLIC_BASE: ${AUTOTRADE_AUTH_PUBLIC_BASE:-}
+      AUTOTRADE_AUTH_INTERNAL_BASE: ${AUTOTRADE_AUTH_INTERNAL_BASE:-http://keycloak:8180/auth}
+      AUTOTRADE_AUTH_CLIENT_SECRET: ${AUTOTRADE_AUTH_CLIENT_SECRET:-}
     ports:
       - "127.0.0.1:8097:8095"
     volumes:
@@ -141,18 +150,31 @@ services:
       - "127.0.0.1:6390:6379"
     restart: unless-stopped
 
+  # Per-user logins (L3, autotrade.auth.mode=oidc): Keycloak under /auth. KC_HOSTNAME is the address browsers use, so the
+  # token issuer is always that address, while trading-core fetches tokens and keys over the compose network
+  # (backchannel dynamic). Realm, client and roles: bin/keycloak/bootstrap.sh. Dev mode (H2 in the keycloak-data volume)
+  # on the Mac; a server deployment uses start with its own database (docker-compose.gcp.yml).
   keycloak:
     image: quay.io/keycloak/keycloak:26.3
     container_name: autotrade-keycloak
     profiles: [platform]
-    command: ["start-dev", "--http-port=8180"]
+    command: ["start-dev"]
     environment:
       KC_BOOTSTRAP_ADMIN_USERNAME: admin
       KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
+      KC_HTTP_PORT: "8180"
+      KC_HTTP_RELATIVE_PATH: /auth
+      KC_HOSTNAME: ${KEYCLOAK_HOSTNAME:-http://localhost:8180/auth}
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HEALTH_ENABLED: "true"
     ports:
       - "127.0.0.1:8180:8180"
+    volumes:
+      - keycloak-data:/opt/keycloak/data
     restart: unless-stopped
 
 volumes:
+  keycloak-data:
+    name: autotrade-keycloak-data
   pgdata:
     name: autotrade-pgdata
