@@ -13,10 +13,11 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
  * @param clientId      this app's client in the realm (autotrade-web)
  * @param clientSecret  its secret (from the environment, never logged)
  * @param operatorRole  the realm role allowed to use the PAPER system controls (kill, stop, exit-all)
+ * @param maxSession    how long a sign-in lasts however busy the page is (default 12 h, the realm's maximum)
  */
 @ConfigurationProperties(prefix = "autotrade.auth")
 public record AuthProperties(String mode, String publicBase, String internalBase, String realm, String clientId,
-                             String clientSecret, String operatorRole) {
+                             String clientSecret, String operatorRole, java.time.Duration maxSession) {
 
     public AuthProperties {
         mode = mode == null || mode.isBlank() ? "none" : mode.trim().toLowerCase(java.util.Locale.ROOT);
@@ -25,6 +26,8 @@ public record AuthProperties(String mode, String publicBase, String internalBase
         operatorRole = blank(operatorRole) ? "operator" : operatorRole;
         publicBase = blank(publicBase) ? null : publicBase.replaceAll("/+$", "");
         internalBase = blank(internalBase) ? publicBase : internalBase.replaceAll("/+$", "");
+        maxSession = maxSession == null || maxSession.isNegative() || maxSession.isZero()
+                ? java.time.Duration.ofHours(12) : maxSession;
         if (!mode.equals("none") && !mode.equals("oidc")) {
             throw new IllegalArgumentException("autotrade.auth.mode must be none or oidc, not " + mode);
         }
@@ -32,6 +35,16 @@ public record AuthProperties(String mode, String publicBase, String internalBase
 
     public boolean oidc() {
         return "oidc".equals(mode);
+    }
+
+    /** The Spring authority of the operator role, as {@link SecurityConfig} checks it and {@link MeController} shows it. */
+    String operatorAuthority() {
+        return authority(operatorRole);
+    }
+
+    /** A Keycloak realm role as a Spring authority: ROLE_ and upper case. */
+    static String authority(String role) {
+        return "ROLE_" + role.trim().toUpperCase(java.util.Locale.ROOT);
     }
 
     String publicRealm() {

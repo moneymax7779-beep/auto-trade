@@ -192,6 +192,7 @@ autotrade:
     client-id: autotrade-web
     client-secret: ${AUTOTRADE_AUTH_CLIENT_SECRET:}     # from the environment only, never in a file in the repo
     operator-role: operator
+    max-session: 12h                                    # a sign-in ends after this however busy the page is (Keycloak's maximum)
   source:
     url: ${ZT_SOURCE_URL:jdbc:postgresql://127.0.0.1:5490/trading}
     username: ${ZT_SOURCE_USER:zerotrade}

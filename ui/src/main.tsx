@@ -5,16 +5,24 @@ import { BrowserRouter } from "react-router";
 import { App } from "./App";
 import "./index.css";
 
-// Per-user logins (autotrade.auth.mode=oidc): an API call after the session ended gets 401; start the Keycloak sign-in
-// again (once) instead of showing errors. With mode none the API never answers 401, so this does nothing.
+// Per-user logins (autotrade.auth.mode=oidc): when the sign-in has ended, trading-core answers an API call with 401 and
+// X-Autotrade-Sign-In. Reload the page: the page request goes to the Keycloak sign-in and comes back to this page.
+// Only that 401 (not one from behind the sign-in), and at most once a minute, so a refusal can never loop. With mode
+// none the API never sends it, so this does nothing.
 const nativeFetch = window.fetch.bind(window);
 let signingIn = false;
 window.fetch = async (input, init) => {
   const response = await nativeFetch(input, init);
-  const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-  if (response.status === 401 && !signingIn && new URL(url, window.location.href).pathname.startsWith("/api/")) {
+  if (response.status === 401 && response.headers.get("X-Autotrade-Sign-In") && !signingIn) {
     signingIn = true;
-    window.location.assign("/oauth2/authorization/keycloak");
+    let last = 0;
+    try {
+      last = Number(sessionStorage.getItem("autotrade.signInReload") ?? 0);
+      sessionStorage.setItem("autotrade.signInReload", String(Date.now()));
+    } catch {
+      last = 0;
+    }
+    if (Date.now() - last > 60_000) window.location.reload();
   }
   return response;
 };

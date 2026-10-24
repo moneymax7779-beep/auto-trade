@@ -886,6 +886,16 @@ Keycloak".
   - A non-operator gets 403 on kill and exit-all; sign out works.
   - `SecurityConfigTest` covers 7 cases; `mvn install` passes.
   - The preview on :8097 is back on mode none.
+- **Code review fixes (same evening):**
+  - An API link opened in a browser (the daily Kite login link, Zerodha's redirect back) now goes to the sign-in and
+    returns to the link; only scripts' calls get 401, marked `X-Autotrade-Sign-In`.
+  - The UI reloads the page on that 401 (at most once a minute), so after signing in again it returns to the same
+    page, never to a raw API answer.
+  - One chain chosen by `AuthProperties`: an empty or oddly cased mode can no longer leave Spring's default
+    password page in place.
+  - A sign-in ends after `autotrade.auth.max-session` (12 h, Keycloak's maximum) even while the page polls, so a
+    disabled user or a removed role takes effect.
+  - `ExecutionProxyControllerTest` checks that the worker hears the signed-in user and never the caller's header.
 - **Not done:**
   - Keycloak on GCP: a Postgres database for it, `start` mode, an nginx `/auth/` route, `KC_HOSTNAME` = the public
     https address.

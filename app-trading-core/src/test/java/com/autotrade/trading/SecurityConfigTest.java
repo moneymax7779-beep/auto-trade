@@ -63,8 +63,12 @@ class SecurityConfigTest {
     }
 
     static RequestPostProcessor user(String name, String... roles) {
-        var token = new OidcIdToken("t", Instant.now(), Instant.now().plusSeconds(60),
-                Map.of("sub", "id-" + name, "preferred_username", name));
+        return user(Instant.now(), name, roles);
+    }
+
+    static RequestPostProcessor user(Instant signedInAt, String name, String... roles) {
+        var token = new OidcIdToken("t", signedInAt, signedInAt.plusSeconds(300),
+                Map.of("sub", "id-" + name, "preferred_username", name, "auth_time", signedInAt));
         var authorities = java.util.Arrays.stream(roles).map(SimpleGrantedAuthority::new).toList();
         return oidcLogin().oidcUser(new DefaultOidcUser(authorities, token, "preferred_username"));
     }
@@ -81,6 +85,19 @@ class SecurityConfigTest {
         }
     }
 
+    /** Set but empty (docker run -e AUTOTRADE_AUTH_MODE=): AuthProperties reads none, and so does the chain. */
+    @Nested
+    @SpringJUnitWebConfig(App.class)
+    @TestPropertySource(properties = "autotrade.auth.mode=")
+    class ModeEmpty {
+        @Test
+        void isModeNoneEverywhere(WebApplicationContext context) throws Exception {
+            MockMvc mvc = mvc(context);
+            mvc.perform(get("/api/me")).andExpect(status().isOk()).andExpect(jsonPath("$.mode").value("none"));
+            mvc.perform(post("/api/kill")).andExpect(status().isOk());
+        }
+    }
+
     @Nested
     @SpringJUnitWebConfig(App.class)
     @TestPropertySource(properties = {"autotrade.auth.mode=oidc", "autotrade.auth.public-base=http://localhost:8180/auth/",
@@ -89,13 +106,45 @@ class SecurityConfigTest {
         @Test
         void withoutASessionApiCallsGet401AndPagesGoToKeycloak(WebApplicationContext context) throws Exception {
             MockMvc mvc = mvc(context);
-            mvc.perform(get("/api/me")).andExpect(status().isUnauthorized());
+            mvc.perform(get("/api/me")).andExpect(status().isUnauthorized())
+                    .andExpect(header().string(SecurityConfig.SIGN_IN_HEADER, "required"));
             mvc.perform(post("/api/kill")).andExpect(status().isUnauthorized());
             mvc.perform(get("/live").accept("text/html")).andExpect(status().isFound())
                     .andExpect(header().string("Location", "/oauth2/authorization/keycloak"));
             mvc.perform(get("/oauth2/authorization/keycloak")).andExpect(status().isFound())
                     .andExpect(header().string("Location",
                             org.hamcrest.Matchers.startsWith("http://localhost:8180/auth/realms/autotrade/protocol/openid-connect/auth?")));
+        }
+
+        @Test
+        void aLinkOpenedInABrowserSignsInAndComesBack(WebApplicationContext context) throws Exception {
+            MockMvc mvc = mvc(context);
+            String link = "/api/execution/accounts/1/kite/login";
+            var opened = mvc.perform(get(link).accept("text/html,application/xhtml+xml"))
+                    .andExpect(status().isFound())
+                    .andExpect(header().string("Location", "/oauth2/authorization/keycloak")).andReturn();
+            var saved = (org.springframework.security.web.savedrequest.SavedRequest) opened.getRequest().getSession()
+                    .getAttribute("SPRING_SECURITY_SAVED_REQUEST");
+            assertThat(saved.getRedirectUrl()).as("the Kite login link is where sign-in returns to").contains(link);
+        }
+
+        @Test
+        void aScriptCallIsNeverWhereSignInReturnsTo(WebApplicationContext context) throws Exception {
+            var call = mvc(context).perform(get("/api/status")).andExpect(status().isUnauthorized()).andReturn();
+            var session = call.getRequest().getSession(false);
+            assertThat(session == null ? null : session.getAttribute("SPRING_SECURITY_SAVED_REQUEST")).isNull();
+        }
+
+        @Test
+        void aSignInEndsAfterTheMaximumHoweverBusy(WebApplicationContext context) throws Exception {
+            MockMvc mvc = mvc(context);
+            mvc.perform(get("/api/me").with(user(Instant.now().minus(java.time.Duration.ofHours(11)), "satya")))
+                    .andExpect(status().isOk());
+            mvc.perform(get("/api/me").with(user(Instant.now().minus(java.time.Duration.ofHours(13)), "satya")))
+                    .andExpect(status().isUnauthorized())
+                    .andExpect(header().string(SecurityConfig.SIGN_IN_HEADER, "required"));
+            mvc.perform(post("/api/kill").with(user(Instant.now().minus(java.time.Duration.ofHours(13)), "satya",
+                    "ROLE_OPERATOR"))).andExpect(status().isUnauthorized());
         }
 
         @Test
@@ -132,14 +181,16 @@ class SecurityConfigTest {
 
     @Test
     void settingsAreChecked() {
-        AuthProperties auth = new AuthProperties(null, null, null, null, null, "s3cret", null);
+        AuthProperties auth = new AuthProperties(" ", null, null, null, null, "s3cret", null, null);
         assertThat(auth.oidc()).isFalse();
         assertThat(auth.toString()).doesNotContain("s3cret");
-        assertThat(new AuthProperties("OIDC", "http://h/auth/", null, null, null, null, null).internalRealm())
+        assertThat(auth.maxSession()).hasHours(12);
+        assertThat(auth.operatorAuthority()).isEqualTo("ROLE_OPERATOR");
+        assertThat(new AuthProperties(" OIDC ", "http://h/auth/", null, null, null, null, null, null).internalRealm())
                 .isEqualTo("http://h/auth/realms/autotrade");
-        assertThatThrownBy(() -> new AuthProperties("basic", null, null, null, null, null, null))
+        assertThatThrownBy(() -> new AuthProperties("basic", null, null, null, null, null, null, null))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> new SecurityConfig().keycloakRegistration(new AuthProperties("oidc", "http://h", null,
-                null, null, "", null))).isInstanceOf(IllegalStateException.class);
+        assertThatThrownBy(() -> SecurityConfig.registrations(new AuthProperties("oidc", "http://h", null, null, null, "",
+                null, null))).isInstanceOf(IllegalStateException.class);
     }
 }
