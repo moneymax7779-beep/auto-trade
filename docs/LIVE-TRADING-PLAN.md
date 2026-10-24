@@ -851,3 +851,44 @@ and a DRY_RUN account's orders go to a local Kite simulator.
   - The sandbox chaos day.
   - A UI page for the new API.
   - The cross-account limits and liquidity allocator (L6).
+
+**L3: per-user logins with Keycloak, 24 Oct evening (Mac only; GCP unchanged).** User: "start per-user logins with
+Keycloak".
+- **Switch:** `autotrade.auth.mode` (env `AUTOTRADE_AUTH_MODE`). `none` is the default and behaves as before: no login in
+  the app, the configured `autotrade.ui.execution-user` acts. `oidc` signs every page and API in with Keycloak.
+- **trading-core is the login app** (`SecurityConfig`, `AuthProperties`). It uses the authorization code flow as a
+  confidential client with PKCE.
+  - The browser reaches Keycloak at `public-base`; trading-core fetches tokens, keys and user info at `internal-base`.
+    The ID token's issuer is still checked against the public address.
+  - API calls without a session get 401 and the UI starts the sign-in again; pages redirect to Keycloak.
+  - POST `/api/kill`, `/api/kill/release`, `/api/stop`, `/api/exit-all` need the realm role `operator`.
+  - Health and the login flow are open. CSRF is guarded by `SameOriginFilter` plus a SameSite=Lax session cookie.
+  - Sign out ends the app session and the Keycloak session.
+- **Who acts:** `/api/execution/**` is forwarded as the signed-in Keycloak username, never a caller's header. Each user
+  needs an `acct.app_user` row whose `external_subject` is that username, plus a tenant membership. Without one the
+  worker answers 403 "no tenant".
+- **UI:** the header shows the user, an `OP` badge for operators, and Sign out. `GET /api/me` returns mode, user and
+  operator.
+- **Realm:** `bin/keycloak/bootstrap.sh --app-url <url> --secret-file <file>`. It is idempotent and runs kcadm inside
+  the container with the container's own admin. It sets up:
+  - realm `autotrade`: no self-registration, fixed usernames, brute-force lockout (5 failures), passwords of 12+
+    characters, an authenticator app (TOTP) required for every new user, email optional;
+  - role `operator`;
+  - client `autotrade-web`: code flow only, S256, a `roles` claim.
+  - The client secret goes to a mode-600 file and is never printed.
+- **Compose:** Keycloak under `/auth` on 127.0.0.1:8180, with `KC_HOSTNAME` = the browser address and backchannel
+  dynamic. Dev mode stores in the `autotrade-keycloak-data` volume. trading-core and ui-preview pass the
+  `AUTOTRADE_AUTH_*` variables through (default none).
+- **Verified on the Mac**, with two localhost test users that were deleted afterwards:
+  - A wrong password is refused.
+  - The first sign-in sets up the authenticator; later sign-ins ask for the code.
+  - The owner sees accounts; a user without a membership gets 403 from the worker.
+  - A non-operator gets 403 on kill and exit-all; sign out works.
+  - `SecurityConfigTest` covers 7 cases; `mvn install` passes.
+  - The preview on :8097 is back on mode none.
+- **Not done:**
+  - Keycloak on GCP: a Postgres database for it, `start` mode, an nginx `/auth/` route, `KC_HOSTNAME` = the public
+    https address.
+  - The owner's own Keycloak user (created by the user), and re-linking `app_user` local-owner to that username.
+  - Turning the mode on there.
+  - Removing the nginx password gate once logins are proven.

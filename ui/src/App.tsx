@@ -1,4 +1,6 @@
+import { useQuery } from "@tanstack/react-query";
 import { NavLink, Route, Routes } from "react-router";
+import { get } from "./api";
 import { AccountsPage } from "./pages/AccountsPage";
 import { ConfigPage } from "./pages/ConfigPage";
 import { IndexPage } from "./pages/IndexPage";
@@ -39,6 +41,7 @@ export function App() {
               </NavLink>
             ))}
           </nav>
+          <SignedIn />
         </div>
       </header>
       <main className="mx-auto max-w-7xl px-4 py-4">
@@ -57,5 +60,27 @@ export function App() {
         </Routes>
       </main>
     </div>
+  );
+}
+
+interface Me {
+  mode: "none" | "oidc";
+  user: string;
+  operator: boolean;
+  logout: boolean;
+}
+
+/** Who is signed in (Keycloak, autotrade.auth.mode=oidc) and a sign-out; nothing with mode none. */
+function SignedIn() {
+  const me = useQuery({ queryKey: ["me"], queryFn: () => get<Me>("/api/me"), staleTime: 60_000 });
+  if (!me.data || me.data.mode !== "oidc") return null;
+  return (
+    <form method="post" action="/logout" className="ml-auto flex shrink-0 items-center gap-2 text-sm">
+      <span className="text-muted" title={me.data.operator ? "operator: may use kill, stop and exit-all" : "no operator role"}>
+        {me.data.user}
+        {me.data.operator && <span className="ml-1 text-[10px] font-bold tracking-wider text-warn">OP</span>}
+      </span>
+      <button type="submit" className="rounded px-2 py-1 text-muted hover:bg-panel-2 hover:text-text">Sign out</button>
+    </form>
   );
 }

@@ -22,6 +22,11 @@ spring:
 server:
   address: 127.0.0.1             # loopback only until Phase 5 adds authentication
   port: ${AUTOTRADE_TRADING_PORT:8095}
+  forward-headers-strategy: framework   # behind nginx / the load balancer: the sign-in redirect uses the public https address
+  servlet:
+    session:
+      cookie:
+        same-site: lax
 
 management:
   endpoints:
@@ -155,6 +160,17 @@ autotrade:
   cues:
     enabled: true                  # A-109 (user 15 Oct ~08:31: ship the whole branch): collect from 15 Oct; features stay v12
     gift-poll-minutes: 5
+  # Per-user logins (L3, user 24 Oct 2026: "start per-user logins with Keycloak"). none = no login in the app (as before);
+  # oidc = Keycloak sign-in on every page and API, the signed-in user acts on the execution API, the realm role
+  # "operator" may use kill / stop / exit-all. Realm, client and roles: bin/keycloak/bootstrap.sh.
+  auth:
+    mode: ${AUTOTRADE_AUTH_MODE:none}
+    public-base: ${AUTOTRADE_AUTH_PUBLIC_BASE:}         # Keycloak as the browser reaches it, e.g. http://localhost:8180/auth
+    internal-base: ${AUTOTRADE_AUTH_INTERNAL_BASE:}     # as this service reaches it (default: public-base)
+    realm: autotrade
+    client-id: autotrade-web
+    client-secret: ${AUTOTRADE_AUTH_CLIENT_SECRET:}     # from the environment only, never in a file in the repo
+    operator-role: operator
   source:
     url: ${ZT_SOURCE_URL:jdbc:postgresql://127.0.0.1:5490/trading}
     username: ${ZT_SOURCE_USER:zerotrade}
