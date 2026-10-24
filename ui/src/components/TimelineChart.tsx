@@ -243,6 +243,7 @@ export function TimelineChart({ date, lines, markers = NO_MARKERS, trades = NO_T
       instance.subscribeCrosshairMove(onMove);
       instance.subscribeClick(onClick);
       unfollow = subscribeMoments(follow);
+      follow();                                 // a rebuilt chart shows the moment already pinned or hovered
     }
     return () => {
       unfollow();

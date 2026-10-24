@@ -394,7 +394,7 @@ export function SessionDetailPage() {
               {hasScores ? (
                 <>
                   <div className="mt-3 text-xs text-muted">Confirm and runner scores (0–100) over the day</div>
-                  <TimelineChart date={session?.session_date ?? "2026-01-01"} lines={scores} height={180} view={view} onView={setView} />
+                  <TimelineChart date={session?.session_date ?? "2026-01-01"} lines={scores} height={180} view={view} />
                 </>
               ) : (
                 <p className="mt-3 text-xs text-muted">{strategy} has no confirm or runner scores; its conditions are in the stage changes below.</p>

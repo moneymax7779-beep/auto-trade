@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type PointerEvent, type ReactNode, type RefObject } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type PointerEvent, type ReactNode, type RefObject } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { get } from "../api";
 import { useChartView, useMoment, type View } from "./chartView";
@@ -113,6 +113,7 @@ function Tape({ d, date, underlying, volume, view, setView, trades, pinned, setP
   bucket: "auto" | 30 | 60 | 300; setBucket: (b: "auto" | 30 | 60 | 300) => void; insets: TapeInsets;
 }) {
   const [ref, W] = useWidth<HTMLDivElement>();
+  const clipId = `oi-clip-${useId().replace(/:/g, "")}`;
   // the moment under the mouse, here or on the price chart above (shared)
   const [hover, setHover] = useMoment("cursor", date, underlying);
   const [drag, setDrag] = useState<{ a: number; b: number } | null>(null);
@@ -179,7 +180,7 @@ function Tape({ d, date, underlying, volume, view, setView, trades, pinned, setP
 
   const pos = (e: PointerEvent<SVGRectElement>) => { const b = (e.currentTarget.ownerSVGElement as SVGSVGElement).getBoundingClientRect();
     return ((e.clientX - b.left) / b.width) * W; };
-  const down = (e: PointerEvent<SVGRectElement>) => { e.currentTarget.setPointerCapture(e.pointerId); const m = inv(pos(e)); setDrag({ a: m, b: m }); };
+  const down = (e: PointerEvent<SVGRectElement>) => { if (e.button !== 0) return; e.currentTarget.setPointerCapture(e.pointerId); const m = inv(pos(e)); setDrag({ a: m, b: m }); };
   const move = (e: PointerEvent<SVGRectElement>) => { const m = inv(pos(e)); setHover(m); if (drag) setDrag({ a: drag.a, b: m }); };
   const up = () => {
     if (!drag) return;
@@ -207,11 +208,14 @@ function Tape({ d, date, underlying, volume, view, setView, trades, pinned, setP
         <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" className="select-none"
           aria-label={`${d.underlying} OI tape ${hm(view.a)}-${hm(view.b)}`}>
           {/* the day's trades as bands across every panel (the price chart above draws their entries and exits) */}
+          <defs>
+            <clipPath id={clipId}><rect x={L} y={0} width={Math.max(0, W - L - R)} height={H} /></clipPath>
+          </defs>
           {shown.map((t, i) => {
             const col = t.net >= 0 ? "var(--color-up)" : "var(--color-down)";
             const a = x(Math.max(view.a, t.a)), b = x(Math.min(view.b, t.b));
             return (
-              <g key={i}>
+              <g key={i} clipPath={`url(#${clipId})`}>
                 <rect x={a} y={top.cum} width={Math.max(2, b - a)} height={yEnd - top.cum} fill={col} opacity={0.07} />
                 <line x1={x(t.a)} x2={x(t.a)} y1={top.cum} y2={yEnd} stroke={col} strokeDasharray="3 3" opacity={0.5} />
                 <text x={a + 3} y={top.cum + 11 + (i % 3) * 12} className="fill-current text-[10px] opacity-80">{t.label}</text>
@@ -244,7 +248,7 @@ function Tape({ d, date, underlying, volume, view, setView, trades, pinned, setP
           {bars.map((b) => {
             const w = Math.max(0.8, (x(b.t + step / 60) - x(b.t)) / 2 - 0.4);
             return (
-              <g key={b.t}>
+              <g key={b.t} clipPath={`url(#${clipId})`}>
                 {b.ce !== 0 && <rect x={x(b.t)} width={w} y={Math.min(sFlow.y(0), sFlow.y(b.ce))} height={Math.abs(sFlow.y(b.ce) - sFlow.y(0))} fill={CALL} />}
                 {b.pe !== 0 && <rect x={x(b.t) + w} width={w} y={Math.min(sFlow.y(0), sFlow.y(b.pe))} height={Math.abs(sFlow.y(b.pe) - sFlow.y(0))} fill={PUT} />}
               </g>
@@ -255,20 +259,21 @@ function Tape({ d, date, underlying, volume, view, setView, trades, pinned, setP
           <path d={path((r) => r.foi, sFut)} fill="none" stroke="var(--color-muted)" strokeWidth={1.6} />
           {visVol.map((r) => {
             const w = Math.max(0.6, x(r.t + 1) - x(r.t) - 0.6);
-            return <rect key={r.t} x={x(r.t)} width={w} y={volY(r.v)} height={top.vol + panels[4].h - volY(r.v)} fill={r.surge ? SURGE : VOL} />;
+            return <rect key={r.t} clipPath={`url(#${clipId})`} x={x(r.t)} width={w} y={volY(r.v)} height={top.vol + panels[4].h - volY(r.v)} fill={r.surge ? SURGE : VOL} />;
           })}
           {visVol.length === 0 && <text x={L + 4} y={top.vol + panels[4].h / 2} className="fill-current text-[10px] opacity-60">no futures volume for this day</text>}
           {ticks.map((m) => (
             <text key={m} x={x(m)} y={H - 6} textAnchor="middle" className="fill-current text-[10px] opacity-60">{hm(m)}</text>
           ))}
-          {pin && <line x1={x(pin.t)} x2={x(pin.t)} y1={top.cum} y2={yEnd} stroke="var(--color-accent)" strokeWidth={1.5} />}
+          {pin && pin.t >= view.a && pin.t <= view.b && <line x1={x(pin.t)} x2={x(pin.t)} y1={top.cum} y2={yEnd} stroke="var(--color-accent)" strokeWidth={1.5} />}
           {hv && <line x1={x(hv.t)} x2={x(hv.t)} y1={top.cum} y2={yEnd} stroke="currentColor" strokeOpacity={0.35} />}
           {drag && Math.abs(drag.b - drag.a) > 0.5 && (
             <rect x={x(Math.min(drag.a, drag.b))} width={Math.abs(x(drag.b) - x(drag.a))} y={top.cum} height={yEnd - top.cum}
               fill="var(--color-accent)" opacity={0.12} />
           )}
-          <rect x={L} y={top.cum} width={Math.max(0, W - L - R)} height={yEnd - top.cum} fill="transparent" style={{ cursor: "crosshair" }}
+          <rect x={L} y={top.cum} width={Math.max(0, W - L - R)} height={yEnd - top.cum} fill="transparent" style={{ cursor: "crosshair", touchAction: "pan-y" }}
             onPointerDown={down} onPointerMove={move} onPointerUp={up} onPointerLeave={() => { setHover(null); }}
+            onPointerCancel={() => setDrag(null)}
             onDoubleClick={() => setView(FULL)} />
         </svg>
         {hv && (
@@ -299,6 +304,7 @@ function Strikes({ underlying, date, at, pinned, live }: { underlying: string; d
   const q = useQuery({
     queryKey: ["oi-strikes", underlying, date, at, back],
     queryFn: () => get<StrikesData>(`/api/oi-tape/strikes?underlying=${underlying}&date=${date}&at=${at}&back=${back}`),
+    placeholderData: (prev) => prev,          // keep the last ladder while the next loads (no 700 px collapse every 30 s)
   });
   const [ref, W] = useWidth<HTMLDivElement>();
   const d = q.data;
