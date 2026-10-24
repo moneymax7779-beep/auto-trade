@@ -53,7 +53,11 @@ autotrade:
       # ebs-v2 removed 2026-10-23 (A-171, user: "remove ebs from live"): out of sample on Oct 2024-Dec 2025 (A-168) 42 trades
       # -Rs 4,16,679, PF 0.80 (+Rs 3.52L / -Rs 7.69L by half). Its file and code stay; it returns only through a new registered test.
       - config/strategy/early-confirm-runner.v11.yaml      # ecr-v11 = v8 (expiry days only) with no limit on campaigns per side (user, 2026-10-01)
-      - config/strategy/opening-drive.v3.yaml              # odb-v3 = v2 with no limit on trades; a re-entry needs a fresh break (user, 2026-10-01)
+      # odb-v3 removed 2026-10-24 (A-184 PASS, user: "yes remove odb from live and keep it in shadow"): on the 27 tick days the
+      # live set without it made +Rs 39.02L vs +Rs 36.16L, win 58 % vs 53 %, better in both halves; odb-v3 alone -Rs 32K (PF 0.91,
+      # 10 of 16 trades failed within 3 minutes) and its 14 Oct losses tripped the kill switch that refused mac's 12:54 puts.
+      # Bars favour it (+Rs 4.41L on 2024-25) but overstate it (12 days both ways: +Rs 1.97L bars vs +Rs 24K ticks). It now
+      # runs as a shadow (below) to keep its forward record.
       # egb-v4 removed 2026-10-15 (A-095 PASS, A-105; user 14 Oct: "choose the best and make the changes"): 0 trades on
       # the 24 tick days, 6 on 169 bar days (1 win, PF 0.17); without it +Rs 75,795 on bar days, tick days unchanged,
       # every other strategy's trades unchanged. Its file and code stay; it returns only through a new registered test.
@@ -101,6 +105,8 @@ autotrade:
       # 2026-10-15 ~23:55 (A-114, user: "yes register A-114 and put odb-v9 in shadow"): odb-v3 + the 10:00 exit extended
       # to 15:15 only with futures RVOL >= 1 and the future on the trade's side of VWAP; own session, judged forward.
       - config/strategy/opening-drive.v9.yaml
+      # 2026-10-24 (A-184, user: "keep it in shadow"): odb-v3 after it left the live set; own session, judged forward.
+      - config/strategy/opening-drive.v3.yaml
       # 2026-10-19 ~19:00 (A-150, user: "add zbf-v10 as a shadow"): zbf-v10 after it left the live set (A-149); own session,
       # no capital shared with the live set, judged forward.
       - config/strategy/zone-break-flow.v10.yaml
