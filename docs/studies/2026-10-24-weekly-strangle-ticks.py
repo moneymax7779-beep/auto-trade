@@ -92,8 +92,8 @@ def run_cycle(e, start):
             if not legs and d == start and m == mn("09:50"):
                 for side in ("PE", "CE"):
                     k = nearest(side, ENTRY_PX)
-                    if k is None:
-                        return None
+                    if k is None:                              # this expiry is not captured yet (capture = nearest expiry)
+                        return {"skip": True}
                     picks[side] = mid((k, side))
                     sell(side, k, "entry ~Rs 30", when)
                 continue
@@ -139,6 +139,13 @@ def sequence(first_start, first_exp_min):
         if start > DAYS[-1]:
             break
         r = run_cycle(e, start)
+        while r and r.get("skip"):                             # after a mid-week stop the next week's expiry is not
+            i = DAYS.index(start) + 1                          # captured until it becomes the nearest: start a day later
+            start = DAYS[i] if i < len(DAYS) else None
+            if start is None or start > e:
+                r = None
+                break
+            r = run_cycle(e, start)
         if not r:
             break
         r.update(expiry=e, start=start)

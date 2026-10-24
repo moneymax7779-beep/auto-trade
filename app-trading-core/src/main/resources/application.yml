@@ -131,7 +131,9 @@ autotrade:
     token-source: zt                     # zt: read zt-tiger-v2's Upstox token (read-only); file: own token file only
     token-file: ${UPSTOX_TOKEN_FILE:.local/upstox/token.json}
     instrument-dir: .local/instruments   # NSE-*.json.gz / BSE-*.json.gz contract files (newest used)
-    strikes-each-side: 12
+    # 20 from 2026-10-24 (A-197, user: "widen strikes to 20"): the weekly short strangle's ~Rs 30 picks sit up to ~1,000 NIFTY
+    # points from ATM; at 12 (+-600 points) one of three checked entries was on the range edge. ~+64 % option ticks.
+    strikes-each-side: 20
     recenter-strikes: 8
   alerts:                                # --mode=auto only (replays never alert)
     telegram-file: .local/telegram/bot.env   # TELEGRAM_BOT_TOKEN=... and TELEGRAM_CHAT_ID=... (never logged); absent = log and UI only
