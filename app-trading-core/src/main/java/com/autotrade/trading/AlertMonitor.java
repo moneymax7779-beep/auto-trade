@@ -195,9 +195,9 @@ class AlertMonitor implements ApplicationRunner {
 
     private void session(boolean tradingDay, LocalDate today, LocalTime time) {
         Map<String, Object> row = jdbc.query("select id, status, summary::text summary from trade.session "
-                        + "where mode = 'PAPER_LIVE' and session_date = ? order by id desc limit 1",
+                        + "where mode = 'PAPER_LIVE' and account = ? and session_date = ? order by id desc limit 1",
                 rs -> rs.next() ? Map.<String, Object>of("id", rs.getLong("id"), "status", rs.getString("status"),
-                        "summary", rs.getString("summary")) : null, today);
+                        "summary", rs.getString("summary")) : null, trading.trading().account(), today);   // not SIGNAL-1
         boolean inWindow = tradingDay && !time.isBefore(LocalTime.of(9, 2)) && time.isBefore(LocalTime.of(15, 40));
         String status = row == null ? null : (String) row.get("status");
         if (inWindow && !"RUNNING".equals(status) && !"DONE".equals(status)) {

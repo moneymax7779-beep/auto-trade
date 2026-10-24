@@ -339,7 +339,8 @@ class SessionRunner implements ApplicationRunner {
         }
         org.springframework.jdbc.core.JdbcTemplate jdbc = new org.springframework.jdbc.core.JdbcTemplate(target);
         Integer liveDone = jdbc.queryForObject("select count(*) from trade.session where mode = 'PAPER_LIVE' "
-                + "and session_date = ? and status = 'DONE'", Integer.class, today);
+                + "and account = ? and session_date = ? and status = 'DONE'", Integer.class, properties.trading().account(),
+                today);                                             // PAPER-1's session, not the signal source's
         if (liveDone == null || liveDone == 0) {
             return;
         }

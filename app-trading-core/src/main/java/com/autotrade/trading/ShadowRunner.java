@@ -149,7 +149,8 @@ final class ShadowRunner {
                 }, sessionId);
         Object net = result.get("net");
         Long live = jdbc.query("select (summary->>'net')::bigint from trade.session where mode = 'PAPER_LIVE' "
-                + "and session_date = ? order by id desc limit 1", rs -> rs.next() ? rs.getLong(1) : null, session);
+                + "and account = ? and session_date = ? order by id desc limit 1", rs -> rs.next() ? rs.getLong(1) : null,
+                properties.trading().account(), session);           // PAPER-1, not the signal source (SIGNAL-1)
         text.append("Shadow net ₹").append(net).append(" · live net ₹").append(live == null ? "–" : live);
         return text.toString();
     }

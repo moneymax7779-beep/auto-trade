@@ -12,5 +12,22 @@ services:
       ZT_SOURCE_URL: jdbc:postgresql://10.20.0.10:5490/trading
       ZT_SOURCE_USER: autotrade_reader
       ZT_SOURCE_PASSWORD_FILE: /run/zt/runtime.env
+      # Live execution (user go-ahead 24 Oct 2026, "C2"): the copy group's signal source runs next to PAPER-1 on a tee of
+      # the live feed (PAPER-1 unchanged; a slow signal branch fails alone), recording exec.signal_decision; the UI's
+      # Accounts page reaches the execution worker through /api/execution.
+      AUTOTRADE_SIGNALSOURCE_ENABLED: "true"
+      AUTOTRADE_UI_EXECUTION_URL: http://execution:8096
     volumes:
       - ./.local/zt-source.env:/run/zt/runtime.env:ro
+
+  # The execution worker (profile "execution"): PAPER and DRY_RUN followers only, LIVE refused by the broker registry.
+  # The Kite app's key and secret are files in .local/kite-secrets (root-owned, readable by the container's uid 10001
+  # only); the day's access tokens go to .local/broker-sessions (uid 10001, mode 700). Telegram: .local/telegram (bot.env).
+  execution:
+    environment:
+      AUTOTRADE_EXECUTION_COPY_GROUP: LIVE-SET
+      AUTOTRADE_PUBLIC_BASE_URL: https://autotrade.136-82-45-194.sslip.io
+    volumes:
+      - ./.local/kite-secrets:/app/secrets:ro
+      - ./.local/broker-sessions:/app/broker-sessions
+      - ./.local/telegram:/app/telegram:ro
