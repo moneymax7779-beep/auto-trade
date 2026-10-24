@@ -6,7 +6,7 @@ moved >= 0.10 % in 60 s (ticks: every second; bars: the 1-minute close-to-close 
 strike that way. Exits X50 (+50 % / -50 %) and X100 (+100 % / -50 %), else the bid at 15:29:30 (bars: 15:29 close).
 Usage: python3 2026-10-24-expiry-spike-scalp.py
 """
-import importlib.util, os, statistics
+import importlib.util, os, statistics, sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 spec = importlib.util.spec_from_file_location("a189", os.path.join(HERE, "2026-10-24-expiry-close-squeeze.py"))
@@ -14,6 +14,8 @@ x = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(x)
 MOVE = 0.0010
 EXITS = {"X50": (0.50, 0.50), "X100": (1.00, 0.50)}
+if "--nostop" in sys.argv:                       # A-191: no stop; H = hold, T50 / T100 = target else hold
+    EXITS = {"H": (99.0, 99.0), "T50": (0.50, 99.0), "T100": (1.00, 99.0)}
 S0, S1, END = 15 * 3600 + 24 * 60, 15 * 3600 + 28 * 60, 15 * 3600 + 29 * 60 + 30
 TICK_SET = {d for d, _ in x.TICK_DAYS}
 
@@ -100,7 +102,8 @@ def summarize(name, rows):
         xs = [r[ex][0] for r in rows]
         if xs:
             print(f"  {ex}: mean {statistics.mean(xs):+.1%} median {statistics.median(xs):+.1%} win {sum(v > 0 for v in xs) / len(xs):.0%} "
-                  f"targets {sum(r[ex][1] == 'target' for r in rows)} stops {sum(r[ex][1] == 'stop' for r in rows)}")
+                  f"targets {sum(r[ex][1] == 'target' for r in rows)} stops {sum(r[ex][1] == 'stop' for r in rows)} "
+                  f"below -90 % {sum(v < -0.9 for v in xs)}")
 
 
 def hms(s):
@@ -118,7 +121,7 @@ if __name__ == "__main__":
             print(f"  {d} {u:6s} trigger {hms(trig[0])} but no quote"); continue
         rows.append(r)
         print(f"  {d} {u:6s} {hms(trig[0])} {'up  ' if trig[1] > 0 else 'down'} buy {r['ty']} {int(r['k'])} @ {r['entry']:.2f} | peak bid {r['peak']:+.0%} | "
-              f"X50 {r['X50'][0]:+.0%} ({r['X50'][1]} {hms(r['X50'][2])}) | X100 {r['X100'][0]:+.0%} ({r['X100'][1]} {hms(r['X100'][2])})")
+              " | ".join(f"{ex} {r[ex][0]:+.0%} ({r[ex][1]} {hms(r[ex][2])})" for ex in EXITS))
     summarize("tick days", rows)
     rows = []
     print("\nbar days, new regime (Aug-Sep 2026, not tick days, not held-out):")
@@ -132,5 +135,5 @@ if __name__ == "__main__":
             print(f"  {d} {u:6s} trigger but no bar"); continue
         rows.append(r)
         print(f"  {d} {u:6s} {r['t'] // 60}:{r['t'] % 60:02d} {'up  ' if trig[1] > 0 else 'down'} buy {r['ty']} {int(r['k'])} @ {r['entry']:.2f} | "
-              f"X50 {r['X50'][0]:+.0%} ({r['X50'][1]}) | X100 {r['X100'][0]:+.0%} ({r['X100'][1]})")
+              " | ".join(f"{ex} {r[ex][0]:+.0%} ({r[ex][1]})" for ex in EXITS))
     summarize("bar days Aug-Sep 2026", rows)
