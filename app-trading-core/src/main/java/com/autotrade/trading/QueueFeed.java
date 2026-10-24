@@ -50,6 +50,7 @@ final class QueueFeed implements LiveFeed {
             }
         } else if (!queue.offer(event)) {
             failure = "queue full (" + queue.size() + " events): the signal source fell behind";
+            queue.clear();                            // the branch fails on its next read; the events are not needed
         }
     }
 
@@ -68,6 +69,12 @@ final class QueueFeed implements LiveFeed {
 
     String failure() {
         return failure;
+    }
+
+    /** The reader is gone (it ended or failed): stop taking events and drop what is queued, so nothing is held. */
+    void release() {
+        stopped = true;
+        queue.clear();
     }
 
     @Override

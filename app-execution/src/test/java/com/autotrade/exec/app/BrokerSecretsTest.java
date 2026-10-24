@@ -20,12 +20,18 @@ class BrokerSecretsTest {
     void envAndFileReferencesResolveAndAnythingElseIsRefused() throws Exception {
         Files.writeString(dir.resolve("kite-api-key"), "from-file\n");
         BrokerSecrets secrets = new BrokerSecrets(dir, dir.resolve("sessions"),
-                Map.of("KITE_API_KEY", " from-env ", "EMPTY", " ")::get);
+                Map.of("KITE_API_KEY", " from-env ", "KITE_EMPTY", " ", "AUTOTRADE_DB_PASSWORD", "x")::get);
         assertThat(secrets.read("env:KITE_API_KEY")).isEqualTo("from-env");
         assertThat(secrets.read("file:kite-api-key")).isEqualTo("from-file");
+        secrets.writeToken(7, "{}");
+        try (var files = Files.list(dir.resolve("sessions"))) {
+            assertThat(files.map(f -> f.getFileName().toString())).containsExactly("kite-7.token");   // no .tmp left
+        }
         assertThatThrownBy(() -> secrets.read("env:KITE_API_SECRET")).hasMessageContaining("not set");
-        assertThatThrownBy(() -> secrets.read("env:EMPTY")).hasMessageContaining("not set");
+        assertThatThrownBy(() -> secrets.read("env:KITE_EMPTY")).hasMessageContaining("not set");
         assertThatThrownBy(() -> secrets.read("env:lower_case")).isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> secrets.read("env:AUTOTRADE_DB_PASSWORD")).as("only KITE_ variables")
+                .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> secrets.read("file:../etc/passwd")).isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> secrets.read("the-actual-secret")).isInstanceOf(IllegalArgumentException.class);
     }

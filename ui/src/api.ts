@@ -2,6 +2,14 @@
 
 export type Json = Record<string, unknown>;
 
+/**
+ * The live PAPER account's own sessions (PAPER-1), not the signal source's (SIGNAL-1, also PAPER_LIVE since the live
+ * execution signal source runs alongside it): what "the live session" means on every page.
+ */
+export function isPrimaryLive(row: { mode: string; account?: string }): boolean {
+  return row.mode === "PAPER_LIVE" && !(row.account ?? "").startsWith("SIGNAL-");
+}
+
 export async function get<T>(path: string): Promise<T> {
   const response = await fetch(path);
   if (!response.ok) throw new Error(`${response.status} ${response.statusText} for ${path}`);

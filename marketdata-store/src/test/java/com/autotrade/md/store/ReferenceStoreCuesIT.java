@@ -96,9 +96,12 @@ class ReferenceStoreCuesIT {
                 new ReferenceStore.Candle(ist("2026-10-22T09:15:00"), d22, 99, 99, 99, 99),              // has a daily row: ignored
                 new ReferenceStore.Candle(ist("2026-10-23T09:15:00"), d23, 15.8, 16.1, 15.3, 16.0),
                 new ReferenceStore.Candle(ist("2026-10-23T15:29:00"), d23, 16.9, 17.2, 16.7, 16.81),
+                new ReferenceStore.Candle(ist("2026-10-21T09:15:00"), LocalDate.of(2026, 10, 21), 14, 14, 14, 14),  // cut short
+                new ReferenceStore.Candle(ist("2026-10-21T11:02:00"), LocalDate.of(2026, 10, 21), 14, 14, 14, 13.9),
                 new ReferenceStore.Candle(ist("2026-10-26T09:15:00"), d26, 17.0, 17.0, 17.0, 17.0)));     // the session itself: never read
         List<DailyBar> bars = store.dailyBars("VIX_T", d26, 5);
-        assertThat(bars).extracting(DailyBar::session).containsExactly(d23, d22);
+        assertThat(bars).as("21 Oct's capture ended at 11:02: left out").extracting(DailyBar::session)
+                .containsExactly(d23, d22);
         assertThat(bars.getFirst().close()).isEqualTo(16.81);
         assertThat(bars.getFirst().open()).isEqualTo(15.8);
         assertThat(bars.getFirst().high()).isEqualTo(17.2);

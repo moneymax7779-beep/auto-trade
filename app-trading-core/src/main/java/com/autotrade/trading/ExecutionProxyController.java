@@ -22,9 +22,10 @@ import org.springframework.web.bind.annotation.RestController;
 /**
  * The UI's Accounts page talks to the execution workers (app-execution) through this same-origin pass-through:
  * {@code /api/execution/**} is forwarded as is (GET and POST, query and JSON body) to {@code autotrade.ui.execution-url}
- * (default http://127.0.0.1:8096). The caller's {@code X-Autotrade-User} goes along; when the request has none, the
- * configured {@code autotrade.ui.execution-user} is used (a single local user until Keycloak is in front, L3: it is
- * not authentication). The workers decide what that user may see and do.
+ * (default http://127.0.0.1:8096) as the configured {@code autotrade.ui.execution-user} (a single local user until
+ * Keycloak is in front, L3: it is not authentication). A caller's own {@code X-Autotrade-User} is ignored (code review
+ * 24 Oct 2026: anyone past the password gate could otherwise pick any user); cross-site POSTs are refused by
+ * {@link SameOriginFilter}. The workers decide what that user may see and do.
  */
 @RestController
 class ExecutionProxyController {
@@ -50,10 +51,9 @@ class ExecutionProxyController {
                     .body("{\"error\":\"bad path\"}".getBytes(StandardCharsets.UTF_8));  // only /api/execution is forwarded
         }
         String query = request.getQueryString();
-        String user = request.getHeader(USER);
         HttpRequest.Builder out = HttpRequest.newBuilder(URI.create(target + path + (query == null ? "" : "?" + query)))
                 .timeout(Duration.ofSeconds(150))                  // a flatten works orders to their end
-                .header(USER, user == null || user.isBlank() ? defaultUser : user);
+                .header(USER, defaultUser);                         // never the caller's own header (until Keycloak)
         if ("POST".equals(request.getMethod())) {
             out.header("Content-Type", MediaType.APPLICATION_JSON_VALUE)
                     .POST(HttpRequest.BodyPublishers.ofByteArray(body == null ? new byte[0] : body));

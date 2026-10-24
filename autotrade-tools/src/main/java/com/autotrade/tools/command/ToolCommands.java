@@ -180,7 +180,7 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                                                              mark a broker account's session after the day's login (audited)
                   kite-profile --name N --redirect-uri URL [--api-key-ref env:KITE_API_KEY]
                           [--api-secret-ref env:KITE_API_SECRET] [--ips 34.14.137.170] [--tenant owner]
-                          [--account LABEL [--client-id AB1234]]
+                          [--account LABEL --client-id AB1234]
                                                              a Zerodha app's credential profile (secret references only, never
                                                              values) and, with --account, attach it to a ZERODHA account
                   divergence-report --session D[,D] [--copy-group LIVE-SET] [--tenant owner] [--paper-session ID] [--out DIR]
@@ -502,8 +502,8 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
     /**
      * Live L3 (user go-ahead 24 Oct 2026, "C1"): a Zerodha (Kite Connect) app's credential profile. Only references are
      * stored ({@code file:<name>} in the execution container's secrets folder), never the key or secret themselves. With
-     * {@code --account}, the ZERODHA account uses it for its daily login; {@code --client-id} pins the Zerodha client id
-     * the login must come from (else the first login sets it).
+     * {@code --account}, the ZERODHA account uses it for its daily login and {@code --client-id} (required with it) pins
+     * the Zerodha client id the login must come from.
      */
     private int kiteProfile(ToolArgs args) {
         args.allowOnly(Set.of("name", "redirect-uri", "api-key-ref", "api-secret-ref", "ips", "tenant", "account",
@@ -511,10 +511,13 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
         if (!args.has("name") || !args.has("redirect-uri")) {
             return usage("kite-profile needs --name and --redirect-uri");
         }
+        if (args.has("account") && !args.has("client-id")) {     // a login is refused for an account without one
+            return usage("kite-profile --account needs --client-id (the Zerodha client id the daily login must come from)");
+        }
         String keyRef = args.get("api-key-ref", "env:KITE_API_KEY"), secretRef = args.get("api-secret-ref", "env:KITE_API_SECRET");
         for (String ref : List.of(keyRef, secretRef)) {
-            if (!ref.matches("file:[A-Za-z0-9._-]{1,64}") && !ref.matches("env:[A-Z][A-Z0-9_]{0,63}")) {
-                return usage("secret references are env:<NAME> or file:<name>, got " + ref + " (never the key or secret itself)");
+            if (!ref.matches("file:[A-Za-z0-9._-]{1,64}") && !ref.matches("env:KITE_[A-Z0-9_]{1,59}")) {
+                return usage("secret references are env:KITE_<NAME> or file:<name>, got " + ref + " (never the key or secret itself)");
             }
         }
         com.autotrade.account.AccountStore accounts = new com.autotrade.account.AccountStore(target);

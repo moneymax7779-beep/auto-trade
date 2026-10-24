@@ -111,9 +111,14 @@ case ",$PARTS," in *,own,*)
       && log "A-197 forward: $(tail -1 "$OUT/a197-forward.txt")" || log "A-197 forward tracker failed (see $OUT/a197-forward.txt)"
   fi
   if [ -f "$TR/2026-10-24-mac-vix-forward.py" ]; then
-    gcloud compute ssh zt-autotrade $G --command="sudo docker exec autotrade-postgres psql -U autotrade -d autotrade -X -At -F, -c \"select s.session_date, s.id, p.underlying, p.option_side, to_char(p.opened_at at time zone 'Asia/Kolkata','HH24:MI'), p.net, p.average_cost * p.quantity from trade.position p join trade.session s on s.id = p.session_id where s.session_date = '$DAY' and s.mode = 'PAPER_LIVE' and s.account = 'PAPER-1' and p.strategy_id = 'ma-cross' and p.quantity > 0\"" 2>/dev/null > "$OUT/a209-mac.csv"
-    $PY "$TR/2026-10-24-mac-vix-forward.py" "$DAY" < "$OUT/a209-mac.csv" > "$OUT/a209-forward.txt" 2>&1 \
-      && log "$(tail -1 "$OUT/a209-forward.txt")" || log "A-209 mac/VIX tracker failed (see $OUT/a209-forward.txt)"
+    gcloud compute ssh zt-autotrade $G --command="sudo docker exec autotrade-postgres psql -U autotrade -d autotrade -X -At -F, -c \"select s.session_date, s.id, p.underlying, p.option_side, to_char(p.opened_at at time zone 'Asia/Kolkata','HH24:MI'), p.net, p.average_cost * p.quantity from trade.position p join trade.session s on s.id = p.session_id where s.session_date = '$DAY' and s.mode = 'PAPER_LIVE' and s.account = 'PAPER-1' and p.strategy_id = 'ma-cross' and p.quantity > 0\"" 2>>"$OUT/errors.txt" > "$OUT/a209-mac.csv"
+    RC=$?
+    if [ $RC -ne 0 ]; then          # a failed read is not a day without mac trades: skip it, do not record it
+      log "A-209 mac/VIX tracker skipped: reading GCP failed (exit $RC); the day is not recorded"
+    else
+      $PY "$TR/2026-10-24-mac-vix-forward.py" "$DAY" < "$OUT/a209-mac.csv" > "$OUT/a209-forward.txt" 2>&1 \
+        && log "$(tail -1 "$OUT/a209-forward.txt")" || log "A-209 mac/VIX tracker failed (see $OUT/a209-forward.txt)"
+    fi
   fi
 esac
 

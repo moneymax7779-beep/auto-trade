@@ -163,7 +163,8 @@ class HistoryController {
         return query("select s.id session_id, s.session_date::text session_date, p.strategy_id, p.underlying, p.option_side, "
                 + "p.symbol, " + ist("p.opened_at") + ", " + ist("p.closed_at") + ", p.exit_reason, p.realised, p.costs, p.net, "
                 + "p.quantity, p.lot_size, p.average_cost, p.average_exit from trade.position p join trade.session s on s.id = p.session_id "
-                + "where s.mode = ? and p.closed_at is not null order by s.session_date, p.opened_at", mode);
+                + "where s.mode = ? and p.closed_at is not null and (s.mode <> 'PAPER_LIVE' or s.account not like 'SIGNAL-%') "
+                + "order by s.session_date, p.opened_at", mode);     // the live account only, never the signal source too
     }
 
     @GetMapping("/sessions/{id}/rejections")

@@ -193,4 +193,63 @@ class ExecutionLoopIT {
             });
         }
     }
+
+    @Test
+    void anExitForAnotherContractSellsNothingAndTheEndOfDaySquareOffClosesWithoutAKillSwitch() throws Exception {
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
+        AccountStore accounts = new AccountStore(dataSource);
+        CostModel costs = CostModel.from(ThresholdConfig.load(Path.of("..", "config", "costs",
+                "india-index-options-costs.v2.yaml")));
+        jdbc.update("insert into ref.instrument_snapshot (id, snapshot_date, source, file_sha256, instruments) values "
+                + "(900, ?, 'it', 'it', 1) on conflict do nothing", java.sql.Date.valueOf(today));
+        jdbc.update("insert into ref.instrument (snapshot_id, instrument_key, exchange_token, segment, exchange, type, "
+                + "underlying, trading_symbol, expiry, strike, lot_size, tick_size, freeze_quantity, weekly) values (900, "
+                + "'NSE_FO|47168', '47168', 'NSE_FO', 'NSE', 'PE', 'NIFTY', 'NIFTY 23100 PE', ?, 23100, 65, 0.05, 1755, true) "
+                + "on conflict do nothing", java.sql.Date.valueOf(today.plusDays(4)));
+        long tenant = accounts.ensureTenant("t-carol");
+        long user = accounts.ensureUser("kc-carol", "carol");
+        accounts.ensureMembership(tenant, user, "OWNER");
+        long signal = accounts.ensureSignalSourceAccount(tenant, user, "SIG-carol", 500_000, today,
+                "config/risk/signal-source.v2.yaml");
+        long group = accounts.ensureCopyGroup(tenant, "SET-carol", signal);
+        long follower = accounts.ensureFollowerAccount(tenant, user, "CAROL-KITE", BrokerType.ZERODHA, TradeMode.DRY_RUN,
+                500_000, EquityMode.FIXED, today, "../config/risk/follower-risk.v3.yaml", 100);
+        new FanOut(dataSource).subscribe(group, follower, List.of("opening-drive"), 1.0);
+        SignalDecisionStore decisions = new SignalDecisionStore(dataSource);
+        decisions.insert(new SignalDecision(group, 9300, today, java.time.Instant.now().minusSeconds(120), "opening-drive", 2,
+                "NIFTY", SignalDecision.Action.ENTER, "PE", null, "CONFIRMED", "IT", 3000047168L, "NSE_FO|47168",
+                "NIFTY 23100 PE", 65, 100, 130_000, 500_000, 20, "C:enter",
+                Map.of("strategy_lots", 1.0, "intended_lots", 1.0, "stop_pct", 25.0)));
+        QuoteSource none = (d, u, t, at) -> Double.NaN;
+        try (ExecutionLoop loop = new ExecutionLoop(dataSource, "t-carol", "SET-carol", "worker-C", costs, none, 1e9)) {
+            loop.tick(today, 20_000);
+            assertThat(jdbc.queryForObject("select status from exec.position where broker_account_id = ?", String.class,
+                    follower)).isEqualTo("OPEN");
+
+            // a (restarted) signal source exits another strike of the same strategy: nothing is sold
+            decisions.insert(new SignalDecision(group, 9301, today, java.time.Instant.now().minusSeconds(30), "opening-drive", 2,
+                    "NIFTY", SignalDecision.Action.EXIT, "PE", null, "EXIT", "IT", 3000047169L, "NSE_FO|47169",
+                    "NIFTY 23150 PE", 65, 120, 0, 500_000, 20, "C:exit", Map.of()));
+            loop.tick(today, 20_000);
+            assertThat(jdbc.queryForObject("select reject_code from exec.trade_intent i join exec.trade_batch b on "
+                    + "b.id = i.trade_batch_id join exec.signal_decision d on d.id = b.signal_decision_id where "
+                    + "i.broker_account_id = ? and d.action = 'EXIT'", String.class, follower)).isEqualTo("CONTRACT_MISMATCH");
+            assertThat(jdbc.queryForObject("select status from exec.position where broker_account_id = ?", String.class,
+                    follower)).isEqualTo("OPEN");
+            assertThat(jdbc.queryForObject("select count(*) from exec.order_execution where broker_account_id = ? "
+                    + "and order_side = 'SELL' and role <> 'STOP'", Integer.class, follower)).isZero();
+
+            // the end-of-day square-off closes it, without a kill switch (tomorrow trades normally)
+            assertThat(loop.squareOff(today)).singleElement().asString().startsWith("CAROL-KITE: ").contains("1300 sold");
+            assertThat(jdbc.queryForObject("select status || ':' || exit_reason from exec.position where broker_account_id = ?",
+                    String.class, follower)).isEqualTo("CLOSED:EOD_SQUARE_OFF");
+            assertThat(new KillSwitches(dataSource).engaged(accounts.byId(follower).orElseThrow(), "opening-drive",
+                    "NSE_FO|47168")).isNull();
+            assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? "
+                    + "and action = 'EOD_SQUARE_OFF'", Integer.class, follower)).isEqualTo(1);
+            assertThat(loop.squareOff(today)).as("nothing left open").isEmpty();
+        } finally {
+            jdbc.update("update acct.copy_group set enabled = false where id = ?", group);   // not served by "*" workers
+        }
+    }
 }

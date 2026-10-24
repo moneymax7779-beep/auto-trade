@@ -17,6 +17,7 @@ import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.HashMap;
 import java.util.HexFormat;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -39,21 +40,25 @@ import com.autotrade.zerodha.KiteConfig;
 import com.autotrade.zerodha.KiteHttp;
 import com.autotrade.zerodha.KiteSessionCheck;
 
+import tools.jackson.databind.json.JsonMapper;
+
 /**
  * The daily Kite login of a ZERODHA broker account (live plan sections 6 and 12, L3; user go-ahead 24 Oct 2026, "C1"):
  * <ol>
- *   <li>{@link #start}: an authorised user asks for the login page of an account; a one-time {@code state} (10 minutes)
- *       binds Kite's redirect to that account and user.</li>
+ *   <li>{@link #start}: a user allowed to act on the account asks for its login page; a one-time {@code state}
+ *       (10 minutes) binds Kite's redirect to that account and user.</li>
  *   <li>The user logs in at Zerodha themselves (password and TOTP stay with Zerodha); Kite redirects the browser to
  *       the app's redirect URL with a {@code request_token}.</li>
- *   <li>{@link #callback}: the request token is exchanged for the day's access token (with the app secret), the
- *       Zerodha client id must be the account's, the equity margin is read once (a read call), the token is stored
- *       in the session folder, acct.broker_session gets the new ACTIVE row (token reference, expiry 06:00 IST next
- *       morning) and the account's connection becomes ACTIVE; audited as SESSION_LOGIN.</li>
+ *   <li>{@link #callback}: the account must have its Zerodha client id pinned; the request token is exchanged for the
+ *       day's access token (with the app secret), the login must come from that client id, the equity margin is read
+ *       once (a read call), the token is stored in the session folder, acct.broker_session gets the new ACTIVE row
+ *       (token reference, expiry 06:00 IST next morning) and the account's connection becomes ACTIVE; audited as
+ *       SESSION_LOGIN.</li>
  * </ol>
- * Expired sessions are swept every minute (TOKEN_EXPIRED, token file deleted). At 08:30 IST on weekdays every enabled
- * ZERODHA DRY_RUN / LIVE account without an ACTIVE session gets its login link by Telegram. Nothing here places an
- * order, and LIVE trading stays refused by the broker registry.
+ * One login or expiry at a time per account (an in-process lock; one worker serves an account). Expired sessions are
+ * swept every minute, account by account (TOKEN_EXPIRED and the token file deleted only when no ACTIVE session is
+ * left). At 08:30 IST on weekdays every enabled ZERODHA DRY_RUN / LIVE account without an ACTIVE session gets its login
+ * link by Telegram. Nothing here places an order, and LIVE trading stays refused by the broker registry.
  */
 @Component
 class KiteLogin {
@@ -62,6 +67,7 @@ class KiteLogin {
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     private static final Duration STATE_LIFETIME = Duration.ofMinutes(10);
     private static final LocalTime TOKEN_FLUSH = LocalTime.of(6, 0);
+    private static final JsonMapper JSON = JsonMapper.builder().build();
 
     /** What a login attempt ended with, for the page the browser lands on. */
     record Result(boolean ok, String account, String message) {
@@ -80,6 +86,7 @@ class KiteLogin {
     private final BrokerSecrets secrets;
     private final KiteLoginProperties props;
     private final Map<String, Pending> pending = new ConcurrentHashMap<>();
+    private final Map<Long, Object> accountLocks = new ConcurrentHashMap<>();
     private final SecureRandom random = new SecureRandom();
     private final HttpClient telegram = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
 
@@ -94,9 +101,17 @@ class KiteLogin {
 
     /** The Zerodha login page for this account (the caller must be allowed to act on it). */
     URI start(Access.User user, long accountId) {
-        BrokerAccount account = zerodha(accountId);
-        Access.require(user.mayAct(account.tenantId()), "no right to act on " + account.displayName());
+        BrokerAccount account = accounts.byId(accountId).filter(a -> user.sees(a.tenantId()))
+                .orElseThrow(() -> new IllegalArgumentException("no such account"));       // other tenants: not revealed
+        Access.require(user.mayAct(account.tenantId()), "no right to act on this account");
+        if (account.brokerType() != BrokerType.ZERODHA) {
+            throw new IllegalArgumentException(account.displayName() + " is not a Zerodha account");
+        }
         Profile profile = profile(accountId);
+        if (profile.externalUserId() == null) {
+            throw new IllegalArgumentException(account.displayName() + " has no Zerodha client id: set it first "
+                    + "(bin/autotrade kite-profile ... --account " + account.displayName() + " --client-id XX0000)");
+        }
         sweepPending();
         byte[] bytes = new byte[16];
         random.nextBytes(bytes);
@@ -116,66 +131,101 @@ class KiteLogin {
             return new Result(false, null, "The account no longer exists.");
         }
         if (!"success".equals(status) || requestToken == null || requestToken.isBlank()) {
-            audit.audit(account, p.subject(), "SESSION_LOGIN_FAILED", Map.of("status", String.valueOf(status)));
+            safeAudit(account, p.subject(), "SESSION_LOGIN_FAILED", Map.of("status", String.valueOf(status)));
             return new Result(false, account.displayName(), "Zerodha did not complete the login (status " + status + ").");
         }
-        try {
-            Profile profile = profile(account.id());
-            KiteConfig config = config(secrets.read(profile.apiKeyRef()));
-            KiteAuth.Session session = new KiteAuth(config, new KiteHttp(config))
-                    .exchange(requestToken, secrets.read(profile.apiSecretRef()));
-            if (profile.externalUserId() != null && !profile.externalUserId().equalsIgnoreCase(session.userId())) {
-                audit.audit(account, p.subject(), "SESSION_LOGIN_WRONG_USER",
-                        Map.of("expected", profile.externalUserId(), "got", session.userId()));
-                return new Result(false, account.displayName(), "You logged in as " + session.userId() + ", but "
-                        + account.displayName() + " is Zerodha client " + profile.externalUserId()
-                        + ". Nothing was stored. Log out at Zerodha and log in with the right client id.");
-            }
-            double funds = new KiteSessionCheck(config, session.accessToken()).equityAvailable();
-            Instant expires = nextFlush(Instant.now());
-            secrets.writeToken(account.id(), "{\"accountId\":" + account.id() + ",\"userId\":\"" + session.userId()
-                    + "\",\"accessToken\":\"" + session.accessToken() + "\",\"loginTime\":\"" + session.loginTime()
-                    + "\",\"expiresAt\":\"" + expires + "\"}\n");
-            tx.executeWithoutResult(t -> {
-                jdbc.update("update acct.broker_session set status = 'EXPIRED' where broker_account_id = ? and status = 'ACTIVE'",
-                        account.id());
-                jdbc.update("insert into acct.broker_session (broker_account_id, token_ref, acquired_at, expires_at, "
-                        + "last_validated_at, status) values (?, ?, ?, ?, now(), 'ACTIVE')", account.id(),
-                        BrokerSecrets.tokenRef(account.id()), Timestamp.from(session.loginTime()), Timestamp.from(expires));
+        synchronized (lock(account.id())) {
+            Profile profile;
+            KiteAuth.Session session;
+            double funds;
+            Instant expires;
+            try {
+                profile = profile(account.id());
                 if (profile.externalUserId() == null) {
-                    jdbc.update("update acct.broker_account set external_broker_user_id = ? where id = ?", session.userId(),
-                            account.id());
+                    return new Result(false, account.displayName(), "No Zerodha client id is pinned for this account; "
+                            + "nothing was stored.");
                 }
-                accounts.setConnectionStatus(account.id(), "ACTIVE");
-            });
+                KiteConfig config = config(secrets.read(profile.apiKeyRef()));
+                session = new KiteAuth(config, new KiteHttp(config)).exchange(requestToken, secrets.read(profile.apiSecretRef()));
+                if (!profile.externalUserId().equalsIgnoreCase(session.userId())) {
+                    safeAudit(account, p.subject(), "SESSION_LOGIN_WRONG_USER",
+                            Map.of("expected", profile.externalUserId(), "got", session.userId()));
+                    return new Result(false, account.displayName(), "You logged in as " + session.userId() + ", but "
+                            + account.displayName() + " is Zerodha client " + profile.externalUserId()
+                            + ". Nothing was stored. Log out at Zerodha and log in with the right client id.");
+                }
+                funds = new KiteSessionCheck(config, session.accessToken()).equityAvailable();
+                expires = nextFlush(Instant.now());
+                Map<String, Object> file = new LinkedHashMap<>();
+                file.put("accountId", account.id());
+                file.put("userId", session.userId());
+                file.put("accessToken", session.accessToken());
+                file.put("loginTime", session.loginTime().toString());
+                file.put("expiresAt", expires.toString());
+                // the file first: Kite's newest token is the valid one, so it is never left pointing at an older one
+                secrets.writeToken(account.id(), JSON.writeValueAsString(file) + "\n");
+                tx.executeWithoutResult(t -> {
+                    jdbc.update("update acct.broker_session set status = 'EXPIRED' where broker_account_id = ? "
+                            + "and status = 'ACTIVE'", account.id());
+                    jdbc.update("insert into acct.broker_session (broker_account_id, token_ref, acquired_at, expires_at, "
+                            + "last_validated_at, status) values (?, ?, ?, ?, now(), 'ACTIVE')", account.id(),
+                            BrokerSecrets.tokenRef(account.id()), Timestamp.from(session.loginTime()), Timestamp.from(expires));
+                    accounts.setConnectionStatus(account.id(), "ACTIVE");
+                });
+            } catch (RuntimeException e) {
+                safeAudit(account, p.subject(), "SESSION_LOGIN_FAILED", Map.of("error", e.getClass().getSimpleName()));
+                log.warn("account {}: Kite login failed: {}", account.id(), e.getMessage());   // never holds a token
+                return new Result(false, account.displayName(), "The login could not be completed: " + e.getMessage());
+            }
             Map<String, Object> detail = new HashMap<>();
             detail.put("brokerUser", session.userId());
             detail.put("equityAvailable", funds);
             detail.put("expiresAt", expires.toString());
-            audit.audit(account, p.subject(), "SESSION_LOGIN", detail);
+            safeAudit(account, p.subject(), "SESSION_LOGIN", detail);
             log.info("account {} ({}): Kite session ACTIVE for {} until {}, equity available {}", account.id(),
                     account.displayName(), session.userId(), expires, Math.round(funds));
             return new Result(true, account.displayName(), "Logged in as Zerodha client " + session.userId()
                     + ". Session valid until " + ZonedDateTime.ofInstant(expires, IST).toLocalDateTime()
                     + " IST. Equity available: Rs " + String.format("%,.0f", funds) + ".");
-        } catch (RuntimeException e) {
-            audit.audit(account, p.subject(), "SESSION_LOGIN_FAILED", Map.of("error", e.getClass().getSimpleName()));
-            log.warn("account {}: Kite login failed: {}", account.id(), e.getMessage());   // the message never holds a token
-            return new Result(false, account.displayName(), "The login could not be completed: " + e.getMessage());
         }
     }
 
-    /** Sessions past their expiry: EXPIRED, the account TOKEN_EXPIRED (when it was ACTIVE), the token file deleted. */
+    /**
+     * Sessions past their expiry, account by account: the session EXPIRED; when no ACTIVE session is left (a login may
+     * have landed meanwhile) the account TOKEN_EXPIRED (if it was ACTIVE) and its token file deleted. One account's
+     * failure is logged and retried next minute; it never stops the others.
+     */
     @Scheduled(fixedDelay = 60_000, initialDelay = 5_000)
     void sweepExpired() {
-        List<Long> expired = jdbc.queryForList("update acct.broker_session set status = 'EXPIRED' where status = 'ACTIVE' "
-                + "and expires_at <= now() returning broker_account_id", Long.class);
-        for (long id : expired) {
-            jdbc.update("update acct.broker_account set connection_status = 'TOKEN_EXPIRED', updated_at = now() "
-                    + "where id = ? and connection_status = 'ACTIVE'", id);
-            secrets.deleteToken(id);
-            accounts.byId(id).ifPresent(a -> audit.audit(a, "kite-login", "SESSION_EXPIRED", Map.of()));
-            log.info("account {}: Kite session expired", id);
+        List<Map<String, Object>> expired = jdbc.queryForList("select id, broker_account_id from acct.broker_session "
+                + "where status = 'ACTIVE' and expires_at <= now() order by id");
+        for (Map<String, Object> row : expired) {
+            long sessionId = ((Number) row.get("id")).longValue();
+            long accountId = ((Number) row.get("broker_account_id")).longValue();
+            try {
+                synchronized (lock(accountId)) {
+                    Boolean noneLeft = tx.execute(t -> {
+                        jdbc.update("update acct.broker_session set status = 'EXPIRED' where id = ? and status = 'ACTIVE'",
+                                sessionId);
+                        boolean active = Boolean.TRUE.equals(jdbc.queryForObject("select exists (select 1 from "
+                                + "acct.broker_session where broker_account_id = ? and status = 'ACTIVE')", Boolean.class,
+                                accountId));
+                        if (!active) {
+                            jdbc.update("update acct.broker_account set connection_status = 'TOKEN_EXPIRED', updated_at = now() "
+                                    + "where id = ? and connection_status = 'ACTIVE'", accountId);
+                        }
+                        return !active;
+                    });
+                    if (Boolean.TRUE.equals(noneLeft)) {
+                        secrets.deleteToken(accountId);
+                        accounts.byId(accountId).ifPresent(a -> safeAudit(a, "kite-login", "SESSION_EXPIRED", Map.of()));
+                        log.info("account {}: Kite session expired", accountId);
+                    }
+                }
+            } catch (RuntimeException e) {
+                log.warn("account {}: expiring session {} failed (retried next minute): {}", accountId, sessionId,
+                        e.getMessage());
+            }
         }
     }
 
@@ -199,13 +249,17 @@ class KiteLogin {
 
     // ---------------------------------------------------------------------------------------------------------------
 
-    private BrokerAccount zerodha(long accountId) {
-        BrokerAccount account = accounts.byId(accountId).orElseThrow(() -> new IllegalArgumentException("no account "
-                + accountId));
-        if (account.brokerType() != BrokerType.ZERODHA) {
-            throw new IllegalArgumentException(account.displayName() + " is not a Zerodha account");
+    private Object lock(long accountId) {
+        return accountLocks.computeIfAbsent(accountId, id -> new Object());
+    }
+
+    /** An audit row; its failure never turns a completed login into a failed one (it is logged). */
+    private void safeAudit(BrokerAccount account, String actor, String action, Map<String, ?> detail) {
+        try {
+            audit.audit(account, actor, action, detail);
+        } catch (RuntimeException e) {
+            log.warn("account {}: audit {} not written: {}", account.id(), action, e.getMessage());
         }
-        return account;
     }
 
     private Profile profile(long accountId) {

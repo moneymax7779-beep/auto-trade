@@ -524,6 +524,14 @@ public final class FollowerSimulator {
         if (position == null) {
             return skip(p, "NOT_HELD", "the account holds no position to exit");
         }
+        long heldToken = ((Number) position.get("instrument_token")).longValue();
+        if (p.token() > 0 && heldToken != p.token()) {
+            // code review 24 Oct 2026: never sell a contract the account does not hold (a restarted signal source can
+            // exit a different strike than the follower's orphaned position); the held one is left to its broker stop,
+            // the end-of-day square-off or a flatten
+            return skip(p, "CONTRACT_MISMATCH", "the exit is for " + p.symbol() + " but the account holds another contract "
+                    + "of this strategy (instrument " + heldToken + ")");
+        }
         if (!(p.price() > 0) && !venue.broker()) {
             return reject(p, "NO_EXIT_PRICE", "the signal's exit price is unknown");
         }
@@ -904,7 +912,7 @@ public final class FollowerSimulator {
     /** The open position of a strategy on an underlying; {@code side} narrows to one straddle leg. */
     private Map<String, Object> openPosition(long accountId, String strategyId, String underlying, String side) {
         List<Map<String, Object>> rows = jdbc.queryForList("select id, entry_trade_intent_id, quantity_open, average_entry, "
-                + "sizing_scale from exec.position where broker_account_id = ? and strategy_id = ? and underlying = ? "
+                + "sizing_scale, instrument_token from exec.position where broker_account_id = ? and strategy_id = ? and underlying = ? "
                 + "and status = 'OPEN' and (?::text is null or option_side = ?) order by id limit 1", accountId, strategyId,
                 underlying, side, side);
         return rows.isEmpty() ? null : rows.getFirst();

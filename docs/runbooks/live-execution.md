@@ -135,3 +135,17 @@ docker stop autotrade-ui-preview                                                
 
 The page acts as `autotrade.ui.execution-user` (default `local-owner`). This is not a login: both ports are loopback
 only until Keycloak.
+
+## End-of-day square-off and contract checks (code review, 24 Oct 2026)
+
+- **15:20 IST, weekdays:** the worker flattens any follower position still open (`autotrade.execution.square-off-cron`).
+  Every live-set strategy is flat by 15:15, so this only acts when the signal source stopped sending (its failure also
+  raises a CRITICAL Telegram alert from trading-core). No kill switch is engaged; the audit log shows `EOD_SQUARE_OFF`.
+- **An EXIT for another contract** than the one the follower holds (a restarted signal source on a new strike) is
+  skipped as `CONTRACT_MISMATCH`; nothing is sold. The held position keeps its broker stop until the square-off or a
+  flatten.
+- **Daily Kite login:** `/api/execution/accounts/<id>/kite/login` (the 08:30 Telegram link). The account must have its
+  Zerodha client id pinned (`bin/autotrade kite-profile ... --account <name> --client-id <id>`); a login from another
+  client id is refused. Before the login (connection TOKEN_EXPIRED) entries are refused with `BROKER_SESSION`.
+- **Cross-site guard:** state-changing `/api` calls from another site are refused (`SameOriginFilter`); the UI and
+  scripts on the host are unaffected.

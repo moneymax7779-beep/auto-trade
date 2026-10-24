@@ -23,7 +23,8 @@ import java.util.regex.Pattern;
 final class BrokerSecrets {
 
     private static final Pattern NAME = Pattern.compile("[A-Za-z0-9._-]{1,64}");
-    private static final Pattern ENV = Pattern.compile("[A-Z][A-Z0-9_]{0,63}");
+    /** Only broker app variables (code review 24 Oct 2026: an env: reference must not reach e.g. the DB password). */
+    private static final Pattern ENV = Pattern.compile("KITE_[A-Z0-9_]{1,59}");
 
     private final Path secretsDir;
     private final Path sessionsDir;
@@ -50,7 +51,7 @@ final class BrokerSecrets {
             return value.strip();
         }
         if (ref == null || !ref.startsWith("file:") || !NAME.matcher(ref.substring(5)).matches()) {
-            throw new IllegalArgumentException("secret reference must be env:<NAME> or file:<name>, got " + ref);
+            throw new IllegalArgumentException("secret reference must be env:KITE_<NAME> or file:<name>, got " + ref);
         }
         Path file = secretsDir.resolve(ref.substring(5));
         try {
@@ -76,8 +77,12 @@ final class BrokerSecrets {
             Path target = sessionsDir.resolve("kite-" + accountId + ".token");
             Path tmp = Files.createTempFile(sessionsDir, "kite-" + accountId + "-", ".tmp",
                     PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
-            Files.writeString(tmp, content);
-            Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            try {
+                Files.writeString(tmp, content);
+                Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            } finally {
+                Files.deleteIfExists(tmp);              // never a stray copy of a token (gone after the move)
+            }
         } catch (IOException e) {
             throw new UncheckedIOException("cannot store the session of account " + accountId + " in " + sessionsDir, e);
         }

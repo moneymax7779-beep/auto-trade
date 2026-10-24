@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { Link } from "react-router";
-import { get, type PerformanceRow, type SessionRow } from "../api";
+import { get, type PerformanceRow, type SessionRow, isPrimaryLive } from "../api";
 import { STRATEGY_INFO, strategyShort } from "../components/strategies";
 import { ErrorNote, Loading, Panel, Pnl, Stat, Table } from "../components/ui";
 
@@ -26,7 +26,7 @@ export function PerformancePage() {
   // every day that had a live session (the calendar's grey days), and the session to link each day to
   const liveDays = useMemo(() => {
     const m = new Map<string, number>();
-    for (const s of sessions.data ?? []) if (s.mode === "PAPER_LIVE") m.set(s.session_date, Math.max(m.get(s.session_date) ?? 0, s.id));
+    for (const s of sessions.data ?? []) if (isPrimaryLive(s)) m.set(s.session_date, Math.max(m.get(s.session_date) ?? 0, s.id));
     return m;
   }, [sessions.data]);
   const days = useMemo(() => dayTotals(trades, liveDays), [trades, liveDays]);

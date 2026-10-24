@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link, NavLink, useParams, useSearchParams } from "react-router";
-import { get, parseSide, type LastDecisionRow, type PositionRow, type SessionRow, type Status, type TradePositionRow } from "../api";
+import { get, parseSide, type LastDecisionRow, type PositionRow, type SessionRow, type Status, type TradePositionRow, isPrimaryLive } from "../api";
 import { AlertBanner } from "../components/AlertBanner";
 import { LivePositions } from "../components/LivePositions";
 import { MarketCard } from "../components/MarketCard";
@@ -33,7 +33,7 @@ export function IndexPage() {
   const s = status.data!;
   const running = s.status !== "NO_SESSION" && s.session != null;
   // every day with a live session or the own capture, newest first (the dates the charts can show)
-  const liveSessions = (sessions.data ?? []).filter((r) => r.mode === "PAPER_LIVE");
+  const liveSessions = (sessions.data ?? []).filter(isPrimaryLive);
   const days = [...new Set([...liveSessions.map((r) => r.session_date), ...(captured.data ?? [])])].sort().reverse();
   const showLive = running && (!picked || picked === s.date);
   const day = showLive ? s.date! : picked ?? days[0];

@@ -241,6 +241,37 @@ public final class ExecutionLoop implements AutoCloseable {
         BrokerAccount account = accounts.byId(accountId).orElseThrow(() -> new IllegalArgumentException("no account "
                 + accountId));
         new KillSwitches(dataSource).engageAccount(account, "FLATTEN by " + actor + ": " + reason, actor);
+        return flattenOnLane(account, day, "FLATTEN");
+    }
+
+    /**
+     * End-of-day square-off (code review 24 Oct 2026): a follower closes only on its signal source's EXIT decisions, so
+     * when the signal source stopped mid-day its positions would stay open overnight (and block the next day's entries
+     * for that strategy). At the square-off time every account this worker holds that still has an open position is
+     * flattened like the Flatten button, but without a kill switch (the next day trades normally); audited
+     * EOD_SQUARE_OFF. Every strategy of the live set is flat by 15:15, so this is a safety net.
+     */
+    public List<String> squareOff(LocalDate day) {
+        List<String> lines = new ArrayList<>();
+        for (long accountId : List.copyOf(leases.keySet())) {
+            BrokerAccount account = accounts.byId(accountId).orElse(null);
+            Integer open = account == null ? 0 : jdbc.queryForObject("select count(*) from exec.position where "
+                    + "broker_account_id = ? and status = 'OPEN' and quantity_open > 0", Integer.class, accountId);
+            if (open == null || open == 0) {
+                continue;
+            }
+            try {
+                List<String> done = flattenOnLane(account, day, "EOD_SQUARE_OFF");
+                new KillSwitches(dataSource).audit(account, workerId, "EOD_SQUARE_OFF", java.util.Map.of("positions", done));
+                done.forEach(line -> lines.add(account.displayName() + ": " + line));
+            } catch (Exception e) {
+                lines.add(account.displayName() + ": square-off failed (" + e.getMessage() + ")");
+            }
+        }
+        return lines;
+    }
+
+    private List<String> flattenOnLane(BrokerAccount account, LocalDate day, String reason) throws Exception {
         FollowerRisk risk = risks.computeIfAbsent(account.id(), id -> FollowerRisk.load(Path.of(account.riskFile())));
         BrokerConnections.Route route = connections.route(account, risk);
         if (route.venue() == null) {
@@ -262,7 +293,7 @@ public final class ExecutionLoop implements AutoCloseable {
                         ? new FollowerSimulator(dataSource, costs, risk, route.venue(), quotes).asWorker(workerId, epoch)
                         : simulators.computeIfAbsent(account.id(), id -> new FollowerSimulator(dataSource, costs, risk,
                                 route.venue(), quotes).asWorker(workerId, epoch));
-                return simulator.flatten(account, day, this::flattenPrice, "FLATTEN");
+                return simulator.flatten(account, day, this::flattenPrice, reason);
             } finally {
                 if (borrowed) {
                     lease.close();

@@ -16,6 +16,10 @@ spring:
       pool-name: execution
   flyway:
     enabled: false
+  task:
+    scheduling:
+      pool:
+        size: 4                       # the follower tick, the Kite session sweep and the 08:30 Telegram never wait on each other
 
 server:
   address: 127.0.0.1

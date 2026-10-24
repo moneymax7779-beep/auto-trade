@@ -253,7 +253,12 @@ class SessionRunner implements ApplicationRunner {
 
     /** This process is the only live one for the account: any live session still RUNNING was orphaned. */
     private void closeOrphanedLiveSessions() {
-        int closed = new TradeStore(target).closeOrphanedLiveSessions(properties.trading().account());
+        TradeStore store = new TradeStore(target);
+        int closed = store.closeOrphanedLiveSessions(properties.trading().account());
+        TradingProperties.SignalSource signal = properties.signalSource();
+        if (signal != null && signal.on()) {                  // the signal source's live session (SIGNAL-1) too
+            closed += store.closeOrphanedLiveSessions(signal.accountLabel());
+        }
         if (closed > 0) {
             log.warn("marked {} live session(s) left RUNNING by an earlier crash or restart as STOPPED", closed);
         }
@@ -670,15 +675,27 @@ class SessionRunner implements ApplicationRunner {
             signalTimer.scheduleAtFixedRate(safe(signalSession::heartbeat), 1, 1, TimeUnit.SECONDS);
         }
         signalWorker = Thread.ofPlatform().name("signal-source-" + session).start(() -> {
+            String failure = null;
             try {
                 Map<String, Object> summary = signalSession.run();
                 log.info("signal source summary: {}", summary);
+                if ("FAILED".equals(String.valueOf(signalSession.status().get("status")))) {
+                    failure = "the signal session failed (see the trading-core log)";
+                }
             } catch (RuntimeException e) {
+                failure = String.valueOf(e.getMessage());
                 log.error("signal source failed (the session continues): {}", e.getMessage());
             } finally {
                 signalTimer.shutdownNow();
                 if (feed.failure() != null) {
+                    failure = feed.failure();
                     log.error("signal source stopped: {}", feed.failure());
+                }
+                feed.release();                       // nothing more is queued for a branch that no longer reads
+                if (failure != null && !replay && alerts != null) {   // code review 24 Oct 2026: a silent stop strands followers
+                    alerts.raise("signal-source", AlertService.Level.CRITICAL, "Signal source " + signal.accountLabel()
+                            + " stopped: " + failure + ". PAPER-1 continues; followers get no further signals today, so "
+                            + "their open positions get no EXIT signal (the worker's end-of-day square-off closes them).");
                 }
             }
         });

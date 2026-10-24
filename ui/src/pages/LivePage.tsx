@@ -3,8 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router";
 import {
   get, parseSide, post, rupees, type Equity, type LastDecisionRow, type MarketState, type RejectionRow,
-  type SessionRow, type Status, type StrategyView, type TradePositionRow,
-} from "../api";
+  type SessionRow, type Status, type StrategyView, type TradePositionRow, isPrimaryLive } from "../api";
 import { ConfirmButton, ErrorNote, Loading, Panel, Pnl, Stat } from "../components/ui";
 import { groupTrades, TradesTable } from "../components/TradesTable";
 import { LivePositions } from "../components/LivePositions";
@@ -173,7 +172,7 @@ function LastSession() {
   const [mode, setMode] = useState<string>("PAPER_LIVE");
   const [picked, setPicked] = useState<number | null>(null);
   const sessions = useQuery({ queryKey: ["sessions"], queryFn: () => get<SessionRow[]>("/api/sessions") });
-  const ofMode = (sessions.data ?? []).filter((row) => row.mode === mode);
+  const ofMode = (sessions.data ?? []).filter((row) => row.mode === mode && (mode !== "PAPER_LIVE" || isPrimaryLive(row)));
   const session = ofMode.find((row) => row.id === picked) ?? ofMode[0];
   const id = session?.id;
   const last = useQuery({

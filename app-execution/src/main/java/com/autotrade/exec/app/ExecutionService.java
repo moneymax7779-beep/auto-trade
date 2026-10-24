@@ -74,6 +74,18 @@ class ExecutionService implements DisposableBean {
         return properties.day() == null ? LocalDate.now(IST) : LocalDate.parse(properties.day());
     }
 
+    /**
+     * 15:20 IST, weekdays (the live set is flat by 15:15; Zerodha squares MIS off from about 15:20): any follower position
+     * still open is flattened without a kill switch (code review 24 Oct 2026: a stopped signal source sends no EXIT).
+     */
+    @Scheduled(cron = "${autotrade.execution.square-off-cron:0 20 15 * * MON-FRI}", zone = "Asia/Kolkata")
+    void squareOff() {
+        ExecutionLoop current = loop;
+        if (current != null) {
+            current.squareOff(day()).forEach(line -> log.warn("end-of-day square-off: {}", line));
+        }
+    }
+
     /** After the close (15:45 IST, weekdays): every broker-routed account this worker holds is reconciled. */
     @Scheduled(cron = "0 45 15 * * MON-FRI", zone = "Asia/Kolkata")
     void endOfDay() {

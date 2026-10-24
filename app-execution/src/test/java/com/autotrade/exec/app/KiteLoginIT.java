@@ -52,7 +52,7 @@ class KiteLoginIT {
     private static HikariDataSource dataSource;
     private static KiteSimulator kite;
     private static JdbcTemplate jdbc;
-    private static long account, wrongClientAccount;
+    private static long account, wrongClientAccount, unpinnedAccount;
     private static Access.User owner, viewer;
     private static KiteLogin login;
 
@@ -76,11 +76,14 @@ class KiteLoginIT {
                 EquityMode.FIXED, LocalDate.of(2026, 10, 26), "../config/risk/follower-risk.v3.yaml", 100);
         wrongClientAccount = accounts.ensureFollowerAccount(tenant, me, "ZERODHA-2", BrokerType.ZERODHA, TradeMode.DRY_RUN,
                 200_000, EquityMode.FIXED, LocalDate.of(2026, 10, 26), "../config/risk/follower-risk.v3.yaml", 100);
+        unpinnedAccount = accounts.ensureFollowerAccount(tenant, me, "ZERODHA-3", BrokerType.ZERODHA, TradeMode.DRY_RUN,
+                200_000, EquityMode.FIXED, LocalDate.of(2026, 10, 26), "../config/risk/follower-risk.v3.yaml", 100);
         long profile = jdbc.queryForObject("insert into acct.broker_credential_profile (tenant_id, broker_type, scope, name, "
                 + "api_key_ref, api_secret_ref) values (?, 'ZERODHA', 'TENANT_SHARED', 'KITE-1', 'file:kite-api-key', "
                 + "'file:kite-api-secret') returning id", Long.class, tenant);
-        jdbc.update("update acct.broker_account set credential_profile_id = ? where id in (?, ?)", profile, account,
-                wrongClientAccount);
+        jdbc.update("update acct.broker_account set credential_profile_id = ? where id in (?, ?, ?)", profile, account,
+                wrongClientAccount, unpinnedAccount);
+        jdbc.update("update acct.broker_account set external_broker_user_id = 'SIM001' where id = ?", account);
         jdbc.update("update acct.broker_account set external_broker_user_id = 'AB1234' where id = ?", wrongClientAccount);
         Path secrets = Files.createDirectories(dir.resolve("secrets"));
         Files.writeString(secrets.resolve("kite-api-key"), "sim-api-key\n");
@@ -157,6 +160,14 @@ class KiteLoginIT {
 
         assertThat(login.callback("req-10", "cancelled", state(login.start(owner, account))).ok()).isFalse();
         assertThat(login.callback("req-11", "success", "forged-state").ok()).isFalse();
+    }
+
+    @Test
+    void anAccountWithoutAPinnedClientIdCannotStartALogin() {
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> login.start(owner, unpinnedAccount))
+                .hasMessageContaining("no Zerodha client id");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> login.start(owner, 999_999))
+                .hasMessage("no such account");
     }
 
     @Test
