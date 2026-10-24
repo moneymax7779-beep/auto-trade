@@ -1,0 +1,45 @@
+# follower-risk v5 (user, 24 Oct 2026, for ZERODHA-1: "Allocation 2 lakh fixed, loss limit 20000, ecr and mac"): v3
+# unchanged except the daily loss limit, 10 % of the account's equity = Rs 20,000 on a fixed Rs 2,00,000. When the day's
+# net reaches it, new entries and adds are refused for the rest of the day; open positions keep their exits and their
+# broker stop. Cross-account limits (v4's "combined") are not needed for a single broker account.
+# Follower risk v3 (live execution L2, 19 Oct 2026, user: "work on rest of the implementation for multi user and multi
+# broker support"): v2 plus the broker order rules, for an account whose orders go to a broker (DRY_RUN against the
+# local Kite simulator now; LIVE only after the user's explicit go-ahead). Sizing and refusals are v2's (= paper-risk
+# v17's), so a v3 follower takes the same trades as a v2 one; only how its orders are worked differs. The order values
+# are paper-risk v17's (PAPER-1's OMS), the broker stop is the plan's (section 3: a resting stop-limit at the premium
+# stop, the signal's stop_pct, default 25 %). UNCALIBRATED: measured live slippage decides changes (a new file).
+version: follower-risk-v5
+name: follower-risk
+status: UNCALIBRATED
+
+capital:
+  daily_loss_pct: 10                   # v5: Rs 20,000 on Rs 2,00,000 (user's limit); v3 had 22 as paper-risk v17
+  max_premium_per_trade_pct: 100
+  max_open_premium_pct: 100            # premium in use + this entry <= equity (paper-risk v17's capital check)
+  broker_funds_buffer_pct: 10          # the broker's available funds must exceed the entry premium by 10 %
+
+positions:                             # as paper-risk v17
+  max_open_positions: 4
+  max_lots_per_underlying: 400
+
+sizing:                                # as paper-risk v17
+  rvol_boost_threshold: 1.5
+  rvol_boost_factor: 1.5
+
+simulation:                            # PAPER followers (simulated fills) only
+  adverse_bps: 0
+
+orders:                                # as paper-risk v17 orders (PAPER-1's OMS)
+  entry_buffer_ticks: 4                # marketable limit: the broker's ask + 4 ticks
+  entry_timeout_sec: 10                # what is unfilled after this is cancelled; the position is what filled
+  exit_buffer_ticks: 4                 # sell limit: bid − max(4 ticks, exit_buffer_pct of the bid)
+  exit_buffer_pct: 1.0
+  exit_chase_sec: 2                    # an unfilled exit is re-priced at the new touch after this
+  exit_chase_max: 6                    # re-pricings before the exit crosses exit_cross_pct through the touch
+  exit_cross_pct: 5
+  tick: 0.05                           # index option price step
+  poll_ms: 250                         # how often the order book is pulled while an order works
+
+broker_stop:                           # plan section 3: catastrophic stop resting at the broker after every entry fill
+  default_stop_pct: 25                 # when the signal carries no stop_pct (the strategies publish theirs)
+  limit_offset_pct: 5                  # its limit this far below the trigger (paper-risk v17 stop_limit_offset_pct)
