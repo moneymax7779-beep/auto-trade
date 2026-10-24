@@ -1,7 +1,6 @@
 package com.autotrade.trading;
 
 import java.security.Principal;
-import java.util.Locale;
 import java.util.Map;
 
 import org.springframework.beans.factory.annotation.Value;
@@ -30,7 +29,7 @@ class MeController {
         if (!auth.oidc()) {
             return Map.of("mode", "none", "user", defaultUser, "operator", true, "logout", false);
         }
-        String operator = "ROLE_" + auth.operatorRole().toUpperCase(Locale.ROOT);
+        String operator = auth.operatorAuthority();
         boolean isOperator = principal instanceof Authentication a
                 && a.getAuthorities().stream().anyMatch(g -> operator.equals(g.getAuthority()));
         return Map.of("mode", "oidc", "user", principal == null ? "" : principal.getName(), "operator", isOperator,
