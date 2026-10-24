@@ -21,10 +21,14 @@ services:
       - ./.local/zt-source.env:/run/zt/runtime.env:ro
 
   # The execution worker (profile "execution"): PAPER and DRY_RUN followers only, LIVE refused by the broker registry.
-  # The Kite app's key and secret are files in .local/kite-secrets (root-owned, readable by the container's uid 10001
-  # only); the day's access tokens go to .local/broker-sessions (uid 10001, mode 700). Telegram: .local/telegram (bot.env).
+  # The Kite app's key and secret: KITE_API_KEY / KITE_API_SECRET in the VM's root-only .env (user's choice 24 Oct 2026;
+  # the credential profile references env:KITE_API_KEY / env:KITE_API_SECRET), passed to this container only; files in
+  # .local/kite-secrets remain possible (file:<name>). The day's access tokens go to .local/broker-sessions (uid 10001,
+  # mode 700). Telegram: .local/telegram (bot.env).
   execution:
     environment:
+      KITE_API_KEY: ${KITE_API_KEY:-}
+      KITE_API_SECRET: ${KITE_API_SECRET:-}
       AUTOTRADE_EXECUTION_COPY_GROUP: LIVE-SET
       AUTOTRADE_PUBLIC_BASE_URL: https://autotrade.136-82-45-194.sslip.io
     volumes:

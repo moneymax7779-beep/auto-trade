@@ -178,8 +178,8 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
                                                              fan out the signal source's decisions and run PAPER/DRY_RUN followers
                   account-session --label L --status ACTIVE|DISCONNECTED [--tenant owner]
                                                              mark a broker account's session after the day's login (audited)
-                  kite-profile --name N --redirect-uri URL [--api-key-ref file:kite-api-key]
-                          [--api-secret-ref file:kite-api-secret] [--ips 34.14.137.170] [--tenant owner]
+                  kite-profile --name N --redirect-uri URL [--api-key-ref env:KITE_API_KEY]
+                          [--api-secret-ref env:KITE_API_SECRET] [--ips 34.14.137.170] [--tenant owner]
                           [--account LABEL [--client-id AB1234]]
                                                              a Zerodha app's credential profile (secret references only, never
                                                              values) and, with --account, attach it to a ZERODHA account
@@ -511,10 +511,10 @@ public class ToolCommands implements ApplicationRunner, ExitCodeGenerator {
         if (!args.has("name") || !args.has("redirect-uri")) {
             return usage("kite-profile needs --name and --redirect-uri");
         }
-        String keyRef = args.get("api-key-ref", "file:kite-api-key"), secretRef = args.get("api-secret-ref", "file:kite-api-secret");
+        String keyRef = args.get("api-key-ref", "env:KITE_API_KEY"), secretRef = args.get("api-secret-ref", "env:KITE_API_SECRET");
         for (String ref : List.of(keyRef, secretRef)) {
-            if (!ref.matches("file:[A-Za-z0-9._-]{1,64}")) {
-                return usage("secret references are file:<name>, got " + ref + " (never the key or secret itself)");
+            if (!ref.matches("file:[A-Za-z0-9._-]{1,64}") && !ref.matches("env:[A-Z][A-Z0-9_]{0,63}")) {
+                return usage("secret references are env:<NAME> or file:<name>, got " + ref + " (never the key or secret itself)");
             }
         }
         com.autotrade.account.AccountStore accounts = new com.autotrade.account.AccountStore(target);
