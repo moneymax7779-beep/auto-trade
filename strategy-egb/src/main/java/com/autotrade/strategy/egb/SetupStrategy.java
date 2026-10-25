@@ -123,6 +123,10 @@ abstract class SetupStrategy implements Strategy {
      */
     protected abstract Entry evaluate(FeatureSnapshot s, LocalTime time, boolean canEnter, Map<String, Boolean> c);
 
+    /** The entry {@link #evaluate} just returned was vetoed by a filter (A-217); a setup may then allow a later try. */
+    protected void entryVetoed() {
+    }
+
     @Override
     public Decision decide(FeatureSnapshot s, PositionView position) {
         Instant now = s.time();
@@ -142,6 +146,7 @@ abstract class SetupStrategy implements Strategy {
         Entry entry = evaluate(s, time, window && !expiringIndex && !position.open() && Double.isFinite(spot), c);
         if (entry != null && !filtersPass(entry, s, c)) {
             entry = null;                                    // A-087 / A-088: the setup's trade, vetoed by its filter
+            entryVetoed();
         }
         if (entry != null && quietFrom != null && !time.isBefore(quietFrom) && time.isBefore(quietUntil)) {
             // A-103: the quiet window lets only an A-grade entry through (IV pct or IV rising, and breadth its way)
@@ -151,6 +156,7 @@ abstract class SetupStrategy implements Strategy {
             c.put("quiet_window_a_grade", grade);
             if (!grade) {
                 entry = null;
+                entryVetoed();
             }
         }
 
