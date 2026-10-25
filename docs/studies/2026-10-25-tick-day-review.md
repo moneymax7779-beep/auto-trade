@@ -190,5 +190,8 @@ crowd etr on expiry afternoons. If you want to pursue it, the next step is a reg
 4. **Monday 26 Oct:**
    - start the GCP VM before 08:30
      (`gcloud compute instances start zt-autotrade --zone=asia-south1-a --project=zt-tiger-v2-prod --account=satyajava704@gmail.com`);
+   - switch ZERODHA-1 to ecr only (A-226, your decision 25 Oct): once the VM is up, Accounts page → ZERODHA-1 → Manage →
+     strategies: early-confirm-runner only, or I run
+     `POST /api/execution/accounts/1/settings {"strategies":["early-confirm-runner"]}`;
    - do the Kite login for ZERODHA-1 before 09:15;
    - after 15:45, compare ZERODHA-1 with PAPER-1 (DRY_RUN day 1 of 3).

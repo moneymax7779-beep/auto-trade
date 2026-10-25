@@ -15,12 +15,20 @@ import com.autotrade.strategy.OptionSide;
  * <p>
  * v2 (A-079, {@code setup.require_vwap_side: true}): a cross up enters only with the index above the session VWAP, a
  * cross down only below it (a cross against the VWAP is a bounce inside the day's trend). Absent = v1.
+ * <p>
+ * v8 (A-224, from the A-223 trade anatomy): optional entry filters, each absent = off: {@code setup.skip_gap_against_pct}
+ * (the open gapped more than that % against the cross), {@code setup.max_vwap_against_atr} (the index more than that many
+ * ATR on the wrong side of VWAP), {@code setup.no_entry_from} / {@code setup.no_entry_until} (a midday pause),
+ * {@code setup.skip_counter_drift_min_pct} / {@code setup.skip_counter_drift_max_pct} (a mild move against the cross since
+ * the open), {@code setup.min_stop_atr} (a swing stop closer than that many ATR).
  */
 final class MaCross extends SetupStrategy {
 
     private final double maxStopAtr;
     private final double rewardToRisk;
     private final boolean requireVwapSide;
+    private final double skipGapAgainstPct, maxVwapAgainstAtr, counterDriftMin, counterDriftMax, minStopAtr;
+    private final java.time.LocalTime pauseFrom, pauseUntil;
     private double previousDiff = Double.NaN;
 
     MaCross(ThresholdConfig c) {
@@ -28,6 +36,13 @@ final class MaCross extends SetupStrategy {
         maxStopAtr = c.getDouble("setup.max_stop_atr");
         rewardToRisk = c.getDouble("setup.reward_to_risk");
         requireVwapSide = c.has("setup.require_vwap_side") && c.getBoolean("setup.require_vwap_side");
+        skipGapAgainstPct = c.has("setup.skip_gap_against_pct") ? c.getDouble("setup.skip_gap_against_pct") : Double.NaN;
+        maxVwapAgainstAtr = c.has("setup.max_vwap_against_atr") ? c.getDouble("setup.max_vwap_against_atr") : Double.NaN;
+        counterDriftMin = c.has("setup.skip_counter_drift_min_pct") ? c.getDouble("setup.skip_counter_drift_min_pct") : Double.NaN;
+        counterDriftMax = c.has("setup.skip_counter_drift_max_pct") ? c.getDouble("setup.skip_counter_drift_max_pct") : Double.NaN;
+        minStopAtr = c.has("setup.min_stop_atr") ? c.getDouble("setup.min_stop_atr") : Double.NaN;
+        pauseFrom = c.has("setup.no_entry_from") ? c.getTime("setup.no_entry_from") : null;
+        pauseUntil = c.has("setup.no_entry_until") ? c.getTime("setup.no_entry_until") : null;
     }
 
     @Override
@@ -58,7 +73,41 @@ final class MaCross extends SetupStrategy {
         if (!stopOk) {
             return null;
         }
+        if (!v8FiltersPass(st, spot, atr, risk, crossUp ? 1 : -1, time, c)) {
+            return null;
+        }
         double target = crossUp ? spot + rewardToRisk * risk : spot - rewardToRisk * risk;
         return new Entry(crossUp ? OptionSide.CE : OptionSide.PE, stop, target, crossUp ? "EMA_CROSS_UP" : "EMA_CROSS_DOWN");
+    }
+
+    /** A-224 filters (each off when its key is absent); records which one refused in the conditions. */
+    private boolean v8FiltersPass(StructureFeatures st, double spot, double atr, double risk, int sign, LocalTime time,
+                                  Map<String, Boolean> c) {
+        double open = st.dayOpen(), prev = st.prevClose();
+        if (!Double.isNaN(skipGapAgainstPct) && open > 0 && prev > 0 && sign * (open - prev) / prev * 100 < -skipGapAgainstPct) {
+            c.put("gap_ok", false);
+            return false;
+        }
+        double vwap = st.vwapSpotProxy();
+        if (!Double.isNaN(maxVwapAgainstAtr) && Double.isFinite(vwap) && atr > 0 && sign * (spot - vwap) < -maxVwapAgainstAtr * atr) {
+            c.put("vwap_ok", false);
+            return false;
+        }
+        if (pauseFrom != null && pauseUntil != null && !time.isBefore(pauseFrom) && time.isBefore(pauseUntil)) {
+            c.put("pause_ok", false);
+            return false;
+        }
+        if (!Double.isNaN(counterDriftMin) && !Double.isNaN(counterDriftMax) && open > 0) {
+            double drift = sign * (spot - open) / open * 100;
+            if (drift >= -counterDriftMax && drift < -counterDriftMin) {
+                c.put("drift_ok", false);
+                return false;
+            }
+        }
+        if (!Double.isNaN(minStopAtr) && atr > 0 && risk < minStopAtr * atr) {
+            c.put("stop_room_ok", false);
+            return false;
+        }
+        return true;
     }
 }

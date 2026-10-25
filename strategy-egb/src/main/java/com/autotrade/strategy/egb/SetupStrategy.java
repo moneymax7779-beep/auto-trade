@@ -13,6 +13,7 @@ import java.util.Map;
 import com.autotrade.config.ThresholdConfig;
 import com.autotrade.core.time.MarketTime;
 import com.autotrade.features.snapshot.FeatureSnapshot;
+import com.autotrade.features.snapshot.StructureFeatures;
 import com.autotrade.strategy.Decision;
 import com.autotrade.strategy.MarketState;
 import com.autotrade.strategy.OptionSide;
@@ -73,6 +74,13 @@ abstract class SetupStrategy implements Strategy {
 
     private Entry plan;
     private Instant enteredAt;
+    /** A-221: conditional time stop (absent = a plain time stop). */
+    private final boolean keepIfWorking;
+    private final double keepMinR;
+    private double entrySpot = Double.NaN;
+    private double trailStop = Double.NaN;
+    private boolean kept;
+    private double lastSwingSeen = Double.NaN;
     private boolean exitSent;
     private Map<String, Boolean> lastConditions = Map.of();
 
@@ -82,6 +90,8 @@ abstract class SetupStrategy implements Strategy {
         this.lastNewEntry = config.getTime("scope.last_new_entry");
         this.flatBy = config.getTime("scope.flat_by");
         this.timeStopMin = config.getInt("scope.time_stop_min");
+        this.keepIfWorking = config.has("exits.time_stop_keep_if_working") && config.getBoolean("exits.time_stop_keep_if_working");
+        this.keepMinR = config.has("exits.time_stop_keep_min_r") ? config.getDouble("exits.time_stop_keep_min_r") : 0.5;
         this.ivPercentileMin = config.has("filters.iv_percentile_min") ? config.getDouble("filters.iv_percentile_min") : Double.NaN;
         this.breadthMinAgree = config.has("filters.breadth_min_agree") ? config.getDouble("filters.breadth_min_agree") : Double.NaN;
         this.profitLockArmPct = config.has("exits.profit_lock_arm_pct") ? config.getDouble("exits.profit_lock_arm_pct") : Double.NaN;
@@ -162,7 +172,7 @@ abstract class SetupStrategy implements Strategy {
 
         List<OrderIntent> orders = new ArrayList<>();
         if (position.open()) {
-            String exit = exitReason(position.side(), spot, now, time, s.structure().vwapSpotProxy());
+            String exit = exitReason(position.side(), spot, now, time, s.structure().vwapSpotProxy(), s.structure());
             if (exit == null) {
                 exit = customExit(s, position, time);              // a family's own exit (A-122); none by default
             }
@@ -190,6 +200,10 @@ abstract class SetupStrategy implements Strategy {
                         premiumStopPct, strikeOffset));
                 plan = entry;
                 enteredAt = now;
+                entrySpot = spot;
+                trailStop = entry.stop();
+                kept = false;
+                lastSwingSeen = Double.NaN;
             }
         }
         lastConditions = Collections.unmodifiableMap(c);
@@ -225,7 +239,7 @@ abstract class SetupStrategy implements Strategy {
         return customExit(s, position.side(), time);
     }
 
-    private String exitReason(OptionSide side, double spot, Instant now, LocalTime time, double vwap) {
+    private String exitReason(OptionSide side, double spot, Instant now, LocalTime time, double vwap, StructureFeatures st) {
         if (!time.isBefore(flatBy)) {
             return "FLAT_BY";
         }
@@ -233,16 +247,42 @@ abstract class SetupStrategy implements Strategy {
             return null;
         }
         double sign = side == OptionSide.CE ? 1 : -1;
+        if (kept) {                                           // A-221: a kept trade trails each new swing in its favour
+            double swing = sign > 0 ? st.lastSwingLow() : st.lastSwingHigh();
+            if (Double.isFinite(swing) && swing != lastSwingSeen) {
+                lastSwingSeen = swing;
+                if (sign * (swing - trailStop) > 0 && sign * (spot - swing) > 0) {
+                    trailStop = swing;
+                }
+            }
+        }
+        double stop = keepIfWorking && Double.isFinite(trailStop) ? trailStop : plan.stop();
         if (useTarget && Double.isFinite(plan.target()) && sign * (spot - plan.target()) >= 0) {
             return "TARGET";
         }
-        if (Double.isFinite(plan.stop()) && sign * (spot - plan.stop()) < 0) {
-            return "STOP";
+        if (Double.isFinite(stop) && sign * (spot - stop) < 0) {
+            return kept && stop != plan.stop() ? "TRAIL_STOP" : "STOP";
         }
         if (vwapTrail3m && threeMinuteClose(time) && Double.isFinite(vwap) && sign * (spot - vwap) < 0) {
             return "VWAP_TRAIL";
         }
-        if (timeStopMin > 0 && enteredAt != null && Duration.between(enteredAt, now).toMinutes() >= timeStopMin) {
+        if (timeStopMin > 0 && !kept && enteredAt != null && Duration.between(enteredAt, now).toMinutes() >= timeStopMin) {
+            if (!keepIfWorking) {
+                return "TIME_" + timeStopMin;
+            }
+            if (!threeMinuteClose(time)) {
+                return null;                                  // A-221: decided at the first 3-minute close from here
+            }
+            double r = Math.abs(entrySpot - plan.stop());
+            boolean working = Double.isFinite(r) && sign * (spot - entrySpot) >= keepMinR * r;
+            double ema20 = st.ema20();
+            boolean intact = Double.isFinite(ema20) && sign * (spot - ema20) > 0
+                    && (!Double.isFinite(vwap) || sign * (spot - vwap) > 0);
+            if (working && intact) {
+                kept = true;
+                lastSwingSeen = sign > 0 ? st.lastSwingLow() : st.lastSwingHigh();   // only swings confirmed from now on
+                return null;
+            }
             return "TIME_" + timeStopMin;
         }
         return null;
