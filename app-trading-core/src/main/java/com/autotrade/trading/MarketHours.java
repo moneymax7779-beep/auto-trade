@@ -40,6 +40,12 @@ class MarketHours {
         }
         this.calendar = config == null ? null : new SessionClock(config);
         this.calendarYears = config == null ? Set.of() : years(config.holidays());
+        int year = LocalDate.now(MarketTime.IST).getYear();
+        if (config != null && !calendarYears.contains(year)) {
+            // code review 25 Oct 2026: without this year's holidays the charts cannot tell the actual previous trading
+            // day and fall back to "within 10 days"; add the year's holidays to a new exchange file version
+            log.warn("market hours: the exchange calendar lists no holidays for {}; add them (new exchange file version)", year);
+        }
     }
 
     /** For tests: a known calendar, or null for the weekday fallback. */

@@ -43,6 +43,18 @@ final class MaCross extends SetupStrategy {
         minStopAtr = c.has("setup.min_stop_atr") ? c.getDouble("setup.min_stop_atr") : Double.NaN;
         pauseFrom = c.has("setup.no_entry_from") ? c.getTime("setup.no_entry_from") : null;
         pauseUntil = c.has("setup.no_entry_until") ? c.getTime("setup.no_entry_until") : null;
+        // code review 25 Oct 2026: half a pair must not silently switch its filter off
+        pair(c, "setup.no_entry_from", "setup.no_entry_until");
+        pair(c, "setup.skip_counter_drift_min_pct", "setup.skip_counter_drift_max_pct");
+        if (pauseFrom != null && !pauseFrom.isBefore(pauseUntil)) {
+            throw new IllegalArgumentException("setup.no_entry_from must be before setup.no_entry_until");
+        }
+    }
+
+    private static void pair(ThresholdConfig c, String a, String b) {
+        if (c.has(a) != c.has(b)) {
+            throw new IllegalArgumentException(a + " and " + b + " must be set together");
+        }
     }
 
     @Override

@@ -161,4 +161,15 @@ class LevelsServiceTest {
         assertThat(levels).extracting(LevelsService.Level::name, LevelsService.Level::price)
                 .containsExactly(tuple("PMH", 930.0), tuple("PML", 1.0));
     }
+
+    @Test
+    void aSessionCountsOnlyWhenItsDataCoversTheContinuousSession() {
+        java.time.LocalTime t0915 = java.time.LocalTime.of(9, 15), t1529 = java.time.LocalTime.of(15, 29);
+        org.assertj.core.api.Assertions.assertThat(LevelsService.covers(t0915, t1529)).isTrue();
+        org.assertj.core.api.Assertions.assertThat(LevelsService.covers(java.time.LocalTime.of(11, 0), t1529))
+                .as("capture started late after a restart").isFalse();
+        org.assertj.core.api.Assertions.assertThat(LevelsService.covers(t0915, java.time.LocalTime.of(13, 0)))
+                .as("capture stopped at 13:00").isFalse();
+        org.assertj.core.api.Assertions.assertThat(LevelsService.covers(null, null)).isFalse();
+    }
 }

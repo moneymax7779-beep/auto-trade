@@ -174,7 +174,9 @@ class LevelsService {
     /**
      * Sessions before {@code day}, newest first: the own tick capture (md.index_tick) and the stored one-minute bars
      * (hist.candle), the own capture on a date both hold. Back to the start of the previous calendar month when the
-     * period levels need them, else two weeks. Cached for 10 minutes: earlier sessions do not change during the day.
+     * period levels need them, else two weeks. A past session never changes, so each date's range is read once per
+     * source and kept (code review 25 Oct 2026: re-aggregating weeks of raw ticks took ~4 s per index and view); a date
+     * with no data is asked again after 10 minutes (a sync may have loaded it since).
      */
     private List<DailyRange> priorSessions(LocalDate day, String underlying, boolean periodFromFeatures) {
         String key = day + "|" + underlying + "|" + periodFromFeatures;
@@ -186,42 +188,92 @@ class LevelsService {
         LocalDate weekStart = day.with(TemporalAdjusters.previousOrSame(DayOfWeek.MONDAY));
         LocalDate from = periodFromFeatures ? day.minusWeeks(2)
                 : java.util.Collections.min(List.of(day.withDayOfMonth(1).minusMonths(1), weekStart.minusWeeks(1)));
-        List<DailyRange> value = merge(ownSessions(day, underlying, from), candleSessions(day, underlying, from));
+        List<DailyRange> value = merge(ranges("own", underlying, from, day, now), ranges("bars", underlying, from, day, now));
         priorCache.put(key, new CachedPrior(now, value));
         return value;
     }
 
-    /** Own-capture sessions in [from, day): high / low before 15:15, the last tick as the close (the official close). */
-    private List<DailyRange> ownSessions(LocalDate day, String underlying, LocalDate from) {
+    /** A date's range from one source, or none (null) with the time it was found missing. */
+    private record DayEntry(long at, DailyRange range) {
+    }
+
+    private final Map<String, DayEntry> dayRanges = new ConcurrentHashMap<>();
+
+    /** The source's complete sessions in [from, day), newest first, querying only the dates not yet known. */
+    private List<DailyRange> ranges(String source, String underlying, LocalDate from, LocalDate day, long now) {
+        LocalDate first = null, last = null;
+        for (LocalDate d = from; d.isBefore(day); d = d.plusDays(1)) {
+            DayEntry e = dayRanges.get(source + "|" + underlying + "|" + d);
+            if (e == null || (e.range() == null && now - e.at() >= 600_000)) {
+                first = first == null ? d : first;
+                last = d;
+            }
+        }
+        if (first != null) {
+            Map<LocalDate, DailyRange> found = new java.util.HashMap<>();
+            for (DailyRange r : source.equals("own") ? ownSessions(underlying, first, last.plusDays(1))
+                    : candleSessions(underlying, first, last.plusDays(1))) {
+                found.put(r.day(), r);
+            }
+            for (LocalDate d = first; !d.isAfter(last); d = d.plusDays(1)) {
+                dayRanges.put(source + "|" + underlying + "|" + d, new DayEntry(now, found.get(d)));
+            }
+        }
+        List<DailyRange> out = new ArrayList<>();
+        for (LocalDate d = day.minusDays(1); !d.isBefore(from); d = d.minusDays(1)) {
+            DayEntry e = dayRanges.get(source + "|" + underlying + "|" + d);
+            if (e != null && e.range() != null) {
+                out.add(e.range());
+            }
+        }
+        return out;
+    }
+
+    /**
+     * A session counts only when its data covers the whole continuous session: the first price by {@link #COVER_FROM}
+     * and the last at or after {@link #COVER_UNTIL} (code review 25 Oct 2026: a capture that started late after a
+     * restart would otherwise beat the complete bar day and draw a PDH / PDL without the morning).
+     */
+    static final LocalTime COVER_FROM = LocalTime.of(9, 20), COVER_UNTIL = LocalTime.of(15, 14);
+
+    static boolean covers(LocalTime firstPrice, LocalTime lastPrice) {
+        return firstPrice != null && lastPrice != null && !firstPrice.isAfter(COVER_FROM) && !lastPrice.isBefore(COVER_UNTIL);
+    }
+
+    /** Own-capture sessions in [from, until): high / low before 15:15, the last tick as the close (the official close). */
+    private List<DailyRange> ownSessions(String underlying, LocalDate from, LocalDate until) {
         String time = "(t.recv_ts at time zone '" + IST + "')::time";
+        String session = time + " >= '09:15' and " + time + " < '15:30'";
         return jdbc.query("select t.session_date, max(t.price) filter (where " + time + " >= '09:15' and " + time + " < ?), "
                         + "min(t.price) filter (where " + time + " >= '09:15' and " + time + " < ?), "
                         + "(array_agg(t.price order by t.recv_ts desc, t.src_seq desc))[1], "
                         + "max(t.price) filter (where " + time + " >= '09:15' and " + time + " < ?), "
-                        + "min(t.price) filter (where " + time + " >= '09:15' and " + time + " < ?) "
+                        + "min(t.price) filter (where " + time + " >= '09:15' and " + time + " < ?), "
+                        + "min(" + time + ") filter (where " + session + "), max(" + time + ") filter (where " + session + ") "
                         + "from md.index_tick t join md.load_manifest l on l.id = t.manifest_id and l.status = 'ACTIVE' "
-                        + "where t.underlying = ? and t.recv_ts >= ? and t.recv_ts < ? and t.session_date < ? "
-                        + "group by 1 having count(*) filter (where " + time + " >= '09:15' and " + time + " < ?) > 0 "
-                        + "order by 1 desc",
-                (rs, i) -> new DailyRange(rs.getObject(1, LocalDate.class), rs.getDouble(2), rs.getDouble(3),
-                        rs.getDouble(4), rs.getDouble(5), rs.getDouble(6)),
+                        + "where t.underlying = ? and t.recv_ts >= ? and t.recv_ts < ? and t.session_date >= ? "
+                        + "and t.session_date < ? group by 1 order by 1 desc",
+                (rs, i) -> covers(rs.getObject(7, LocalTime.class), rs.getObject(8, LocalTime.class))
+                        ? new DailyRange(rs.getObject(1, LocalDate.class), rs.getDouble(2), rs.getDouble(3), rs.getDouble(4),
+                        rs.getDouble(5), rs.getDouble(6)) : null,
                 PDH_PDL_UNTIL, PDH_PDL_UNTIL, OR_UNTIL, OR_UNTIL, underlying, ts(from, LocalTime.MIN),
-                ts(day, LocalTime.MIN), day, PDH_PDL_UNTIL);
+                ts(until, LocalTime.MIN), from, until).stream().filter(java.util.Objects::nonNull).toList();
     }
 
-    /** Bar sessions in [from, day): high / low of the bars before 15:15, the 15:29 bar's close. */
-    private List<DailyRange> candleSessions(LocalDate day, String underlying, LocalDate from) {
+    /** Bar sessions in [from, until): high / low of the bars before 15:15, the 15:29 bar's close. */
+    private List<DailyRange> candleSessions(String underlying, LocalDate from, LocalDate until) {
         String time = "(bar_start at time zone '" + IST + "')::time";
         return jdbc.query("select (bar_start at time zone '" + IST + "')::date d, max(high) filter (where " + time + " < ?), "
                         + "min(low) filter (where " + time + " < ?), (array_agg(close order by bar_start desc))[1], "
-                        + "max(high) filter (where " + time + " < ?), min(low) filter (where " + time + " < ?) "
+                        + "max(high) filter (where " + time + " < ?), min(low) filter (where " + time + " < ?), "
+                        + "min(" + time + "), max(" + time + ") "
                         + "from hist.candle where underlying = ? and kind = 'INDEX' and bar_start >= ? and bar_start < ? "
-                        + "and " + time + " between '09:15' and '15:29' group by 1 "
-                        + "having count(*) filter (where " + time + " < ?) > 0 order by 1 desc",
-                (rs, i) -> new DailyRange(rs.getObject(1, LocalDate.class), rs.getDouble(2), rs.getDouble(3),
-                        rs.getDouble(4), rs.getDouble(5), rs.getDouble(6)),
+                        + "and " + time + " between '09:15' and '15:29' group by 1 order by 1 desc",
+                (rs, i) -> covers(rs.getObject(7, LocalTime.class), rs.getObject(8, LocalTime.class))
+                        ? new DailyRange(rs.getObject(1, LocalDate.class), rs.getDouble(2), rs.getDouble(3), rs.getDouble(4),
+                        rs.getDouble(5), rs.getDouble(6)) : null,
                 PDH_PDL_UNTIL, PDH_PDL_UNTIL, OR_UNTIL, OR_UNTIL, underlying, ts(from, LocalTime.MIN),
-                ts(day, LocalTime.MIN), PDH_PDL_UNTIL);
+                ts(until, LocalTime.MIN)).stream().filter(java.util.Objects::nonNull).toList();
     }
 
     /** Both sources' sessions, newest first; the own capture on a date both hold (it is what live features read). */
