@@ -194,7 +194,16 @@ public record FeatureConfig(
                 features.has("options_chain.oi_zscore") && features.getBoolean("options_chain.oi_zscore"),
                 features.has("cues.enabled") && features.getBoolean("cues.enabled"),
                 features.has("preopen.enabled") && features.getBoolean("preopen.enabled"),
-                features.has("options_chain.atm_band_strikes") ? features.getInt("options_chain.atm_band_strikes") : 2);
+                atmBandStrikes(features));
+    }
+
+    /** v15: options_chain.atm_band_strikes (2 when absent); refused at load unless 1-10, so a typo never yields NaN all day. */
+    private static int atmBandStrikes(ThresholdConfig features) {
+        int band = features.has("options_chain.atm_band_strikes") ? features.getInt("options_chain.atm_band_strikes") : 2;
+        if (band < 1 || band > 10) {
+            throw new IllegalArgumentException(features.sourceName() + ": options_chain.atm_band_strikes must be 1-10, was " + band);
+        }
+        return band;
     }
 
     /** True when the file defines the v3 feature sections. */

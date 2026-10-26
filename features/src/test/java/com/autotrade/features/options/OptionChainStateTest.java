@@ -136,6 +136,41 @@ class OptionChainStateTest {
 
         OptionsFeatures shifted = chain.snapshot(T0, 23305, 10, spot);   // ATM 23300: 23350 / 23400 missing on one side
         assertThat(shifted.atmBandShare3m()).isNaN();
+
+        // A-240: the same change, absolute: (5 x 12,000) - (5 x 4,000) = +40,000 OI units over 3 minutes
+        assertThat(features.atmBandNet3m()).isEqualTo(40_000.0);
+        assertThat(features.atmBandNet5m()).as("no OI 5 minutes back").isNaN();
+        assertThat(features.atmBandNet10m()).isNaN();
+        assertThat(shifted.atmBandNet3m()).isNaN();
+    }
+
+    /**
+     * A-239 / A-240 (features v15, atm_band_strikes 5): the band is ATM 23200 +- 5 strikes (22950-23450). Calls written
+     * (+3,000 each) and puts covered (-1,000 each) over 10 minutes give a negative differential: (11 x -1,000) -
+     * (11 x 3,000) = -44,000; a strike at +-5 missing makes it NaN, so a +-2 answer is never passed off as +-5.
+     */
+    @Test
+    void v15BandIsAtmPlusMinusFiveAndNetIsAbsolute() {
+        FeatureConfig config = TestConfig.load("v15");
+        assertThat(config.atmBandStrikes()).isEqualTo(5);
+        assertThat(TestConfig.load().atmBandStrikes()).as("files before v15").isEqualTo(2);
+        OptionChainState chain = new OptionChainState(config, new SessionClock(config), SESSION);
+        long token = 1;
+        for (double strike = 22950; strike <= 23450; strike += 50) {
+            for (OptionTick.OptionType type : OptionTick.OptionType.values()) {
+                boolean put = type == OptionTick.OptionType.PE;
+                chain.onOption(tick(token, strike, type, 100_000, T0.minus(Duration.ofMinutes(11))));
+                chain.onOption(tick(token, strike, type, 100_000 + (put ? -1_000 : 3_000), T0.minusSeconds(30)));
+                token++;
+            }
+        }
+        TimedSeries spot = new TimedSeries(Duration.ofMinutes(15));
+        spot.add(T0.minusSeconds(1), 23205);
+        OptionsFeatures features = chain.snapshot(T0, 23205, 10, spot);
+        assertThat(features.atmBandNet3m()).isEqualTo(-44_000.0);
+        assertThat(features.atmBandNet10m()).isEqualTo(-44_000.0);
+        assertThat(features.atmBandShare3m()).isCloseTo(-44_000.0 / 2_200_000, org.assertj.core.api.Assertions.within(1e-12));
+        assertThat(chain.snapshot(T0, 23255, 10, spot).atmBandNet3m()).as("ATM 23250: 23500 not captured").isNaN();
     }
 
     private static OptionTick tick(long token, double strike, OptionTick.OptionType type, double oi, Instant time) {
