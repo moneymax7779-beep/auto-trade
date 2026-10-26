@@ -133,6 +133,14 @@ abstract class SetupStrategy implements Strategy {
      */
     protected abstract Entry evaluate(FeatureSnapshot s, LocalTime time, boolean canEnter, Map<String, Boolean> c);
 
+    /**
+     * The lots of the entry in units of the file's {@code position.intended_lots} (A-240: a half-size entry sends 1 of 2);
+     * 1 by default, so a family with intended_lots 1 always buys its full budget.
+     */
+    protected int entryLots(Entry entry) {
+        return 1;
+    }
+
     /** The entry {@link #evaluate} just returned was vetoed by a filter (A-217); a setup may then allow a later try. */
     protected void entryVetoed() {
     }
@@ -196,7 +204,7 @@ abstract class SetupStrategy implements Strategy {
             profitLockArmed = false;
             trailPeak = Double.NaN;
             if (entry != null) {
-                orders.add(new OrderIntent(OrderIntent.Action.ENTER, entry.side(), 1, Stage.CONFIRMED, entry.reason(),
+                orders.add(new OrderIntent(OrderIntent.Action.ENTER, entry.side(), entryLots(entry), Stage.CONFIRMED, entry.reason(),
                         premiumStopPct, strikeOffset));
                 plan = entry;
                 enteredAt = now;

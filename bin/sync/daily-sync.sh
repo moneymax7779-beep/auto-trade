@@ -120,6 +120,13 @@ case ",$PARTS," in *,own,*)
         && log "$(tail -1 "$OUT/a209-forward.txt")" || log "A-209 mac/VIX tracker failed (see $OUT/a209-forward.txt)"
     fi
   fi
+  # 3d. A-243 (user 2026-10-26): A-242's S1 retest-bounce (calls + put mirror) on the own capture just loaded, frozen rules,
+  # with the previous session's closing-squeeze flag and the own-expiry flag; read once at 40 trades.
+  if [ -f "$TR/2026-10-26-closing-squeeze-forward.py" ]; then
+    env A243_OUT="$HOME_DIR/a243" PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin /usr/bin/python3 \
+      "$TR/2026-10-26-closing-squeeze-forward.py" "$DAY" > "$OUT/a243-forward.txt" 2>&1 \
+      && log "$(tail -1 "$OUT/a243-forward.txt")" || log "A-243 S1 forward tracker failed (see $OUT/a243-forward.txt)"
+  fi
 esac
 
 # 4. zt-tiger-v2's capture -> zt_archive

@@ -1,0 +1,34 @@
+# Market-phase table, row "Structural Expansion" (A-239; user 2026-10-26, NIFTY BANK column dropped). Values fixed in the
+# ledger before the replay. Buy the call 1 strike ITM when, on one 1-minute close: within the last 10 closes the index
+# came within 0.25 ATR(3m) of ORL / PDL / prior ORL / PWL (and closed no more than that below it) and now closes >= 0.5
+# ATR above it and above the previous close; VIX flat (15-min change within 1 % of its level); futures up with OI up over
+# 15 min (long build-up) and RVOL >= 1.0; ATM +-5 (put - call) OI change > 0 over 3 and 5 min with put OI rising; FII
+# index-futures long share up.
+version: mpe-v1
+strategy: market-phase-expansion
+status: UNCALIBRATED
+source: "user-request-2026-10-26 (market-phase table; ledger A-239)"
+
+scope:
+  entry_from: "09:45"
+  last_new_entry: "14:30"              # exclusive
+  flat_by: "15:15"
+  time_stop_min: 30
+  skip_expiring_index: false
+
+setup:
+  phase: EXPANSION
+  bounce_window_min: 10
+  touch_atr: 0.25
+  bounce_atr: 0.5
+  vix_flat_pct: 1.0                    # "Stable / Flat"
+  min_rvol_tod: 1.0                    # "Sustained Vol"
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 1                     # the table's ITM call
+
+exits:
+  premium_stop_pct: 25
+  use_target: false                    # stop = a close 0.25 ATR below the support; else 30 min / 15:15

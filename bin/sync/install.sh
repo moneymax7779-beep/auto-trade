@@ -6,8 +6,9 @@
 set -eu
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"; DEST="$HOME/.autotrade-sync"; mkdir -p "$DEST/logs"
 cp "$REPO/bin/sync/daily-sync.sh" "$REPO/bin/sync/vm-export-day.sh" "$DEST/" && chmod 755 "$DEST"/*.sh
-mkdir -p "$DEST/trackers" "$DEST/a197" "$DEST/a209"   # nightly forward trackers (A-197, A-209), run by daily-sync.sh step 3b/3c
-cp "$REPO/docs/studies/2026-10-24-weekly-strangle-ticks.py" "$REPO/docs/studies/2026-10-24-mac-vix-forward.py" "$DEST/trackers/"
+mkdir -p "$DEST/trackers" "$DEST/a197" "$DEST/a209" "$DEST/a243"   # nightly forward trackers (A-197, A-209, A-243): steps 3b-3d
+cp "$REPO/docs/studies/2026-10-24-weekly-strangle-ticks.py" "$REPO/docs/studies/2026-10-24-mac-vix-forward.py" \
+   "$REPO/docs/studies/2026-10-26-closing-squeeze.py" "$REPO/docs/studies/2026-10-26-closing-squeeze-forward.py" "$DEST/trackers/"
 if [ -f "$REPO/.local/telegram/bot.env" ]; then cp "$REPO/.local/telegram/bot.env" "$DEST/bot.env" && chmod 600 "$DEST/bot.env"; fi
 PLIST="$HOME/Library/LaunchAgents/com.autotrade.daily-sync.plist"
 sed -e "s|/Users/satyasiripuram/Desktop/Dev/Code/auto-trade/bin/sync/daily-sync.sh|$DEST/daily-sync.sh|" \

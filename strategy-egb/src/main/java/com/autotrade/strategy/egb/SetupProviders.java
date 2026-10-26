@@ -114,4 +114,25 @@ public final class SetupProviders {
             return "atm-oi-burst";
         }
     }
+
+    public static final class MarketPhaseSqueezeProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "market-phase-squeeze";
+        }
+    }
+
+    public static final class MarketPhaseExpansionProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "market-phase-expansion";
+        }
+    }
+
+    public static final class MarketPhaseAvalancheProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "market-phase-avalanche";
+        }
+    }
 }

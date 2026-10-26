@@ -1,0 +1,32 @@
+# Market-phase table, row "Institutional Squeeze" (A-239; user 2026-10-26: "I want strategies from these and then replay on
+# tick days", NIFTY BANK column dropped: "ignore NIFTY BANK for now"). Every value fixed in the ledger before the replay.
+# Buy the ATM call when, on one 1-minute close: the index broke above ORH / PDH / prior ORH / PWH within the last 5 closes
+# and is still above it; VIX < 14 and up over 15 min; futures up with OI down over 15 min (short covering) and futures
+# time-of-day RVOL >= 1.5; ATM +-5 call OI falling and put OI rising over 3 min (features v15); FII index-futures long
+# share up in the last published participant-OI file.
+version: mps-v1
+strategy: market-phase-squeeze
+status: UNCALIBRATED
+source: "user-request-2026-10-26 (market-phase table; ledger A-239)"
+
+scope:
+  entry_from: "09:45"
+  last_new_entry: "14:30"              # exclusive
+  flat_by: "15:15"
+  time_stop_min: 30                    # A-233 / A-238's primary hold
+  skip_expiring_index: false
+
+setup:
+  phase: SQUEEZE
+  break_window_min: 5                  # the break may be up to 5 closes old while the other columns line up
+  vix_max: 14                          # the table's "Low & Rising (<14)"
+  min_rvol_tod: 1.5                    # "High Vol": futures volume >= 1.5x its normal for the time of day
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 25                 # A-233's premium stop
+  use_target: false                    # stop = a close back below the broken level; else 30 min / 15:15

@@ -1,0 +1,61 @@
+# Market-phase table, row "Institutional Squeeze", relaxed (A-240; user 2026-10-26: "Check these now -- be honest and true in implementing",
+# four relaxations + the pasted VWAP / box / OI-anticipation maths and NIFTY / SENSEX parameters). v1 = A-239's strict row.
+# Relaxed: FII sizes (half size unless yesterday's FII long share moved the trade's way) and blocks only at extremes; VIX
+# absolute bounds; futures build-up over 5 (NIFTY) / 10 (SENSEX) minutes; more price setups (see MarketPhaseRelaxed).
+# Every value fixed in the ledger before the replay.
+version: mps-v2
+strategy: market-phase-squeeze
+status: UNCALIBRATED
+source: "user-request-2026-10-26 (relaxed market-phase table; ledger A-240)"
+
+scope:
+  entry_from: "09:45"
+  last_new_entry: "14:30"              # exclusive
+  flat_by: "15:15"
+  time_stop_min: 30
+  skip_expiring_index: false
+
+setup:
+  phase: SQUEEZE
+  min_rvol_tod: 1.5
+  relaxed: true                        # A-240: MarketPhaseRelaxed
+  # per index (user's paste: NIFTY 3-min, SENSEX 5-min; ATR14 of that candle)
+  candle_min_nifty: 3
+  candle_min_sensex: 5
+  box_candles_nifty: 10                # 30 minutes of 3-min candles
+  box_candles_sensex: 8                # 40 minutes of 5-min candles
+  box_max_atr_nifty: 0.40
+  box_max_atr_sensex: 0.35
+  breakout_buffer_atr_nifty: 0.05
+  breakout_buffer_atr_sensex: 0.06
+  vwap_band_atr_nifty: 0.15
+  vwap_band_atr_sensex: 0.12
+  futures_window_min_nifty: 5          # "rolling 5-to-10 minute" build-up: NIFTY 5, SENSEX 10
+  futures_window_min_sensex: 10
+  coi_fast_min_nifty: 3                # ATM +-5 OI differential windows: NIFTY 3 / 5, SENSEX 5 / 10
+  coi_slow_min_nifty: 5
+  coi_fast_min_sensex: 5
+  coi_slow_min_sensex: 10
+  vwap_touch_window_min: 15
+  anticipation_distance_atr: 0.20
+  anticipation_k: 3.0                  # surge = >= 3x the day's mean |fast differential| (the fixed 1,000,000 is the NIFTY median)
+  anticipation_stop_atr: 0.25          # "tight stop"
+  break_window_min: 5                  # A-239's level break, unchanged
+  bounce_window_min: 10                # A-239's support bounce, unchanged
+  touch_atr: 0.25
+  bounce_atr: 0.5
+  vix_max: 16                          # calls: VIX below 16
+  vix_min: 13                          # puts: VIX above 13 ...
+  vix_crush_pct: 2.0                   # ... and not down more than 2 % in 15 minutes
+  fii_block_below: 7.55                # calls blocked only at FII long share < its 5th percentile (Sep 2025-Aug 2026)
+  fii_block_above: 21.72               # puts blocked only above its 95th percentile
+  max_trades_per_day: 2                # per index
+
+position:
+  premium_budget: 250000               # the full plan (2 lots); a half-size entry buys 1 of the 2
+  intended_lots: 2
+  strike_offset: 0
+
+exits:
+  premium_stop_pct: 25
+  use_target: false                    # stop = the setup's level (box edge, VWAP lower band, level, or 0.25 ATR); 30 min; 15:15

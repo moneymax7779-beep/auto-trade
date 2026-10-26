@@ -19,3 +19,6 @@ com.autotrade.strategy.egb.SetupProviders$OpeningRangeBreakoutProvider
 com.autotrade.strategy.egb.SetupProviders$OpeningDriveMomentumProvider
 com.autotrade.strategy.egb.SetupProviders$ZoneBreakFlowProvider
 com.autotrade.strategy.egb.SetupProviders$AtmOiBurstProvider
+com.autotrade.strategy.egb.SetupProviders$MarketPhaseSqueezeProvider
+com.autotrade.strategy.egb.SetupProviders$MarketPhaseExpansionProvider
+com.autotrade.strategy.egb.SetupProviders$MarketPhaseAvalancheProvider

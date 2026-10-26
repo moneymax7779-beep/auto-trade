@@ -27,8 +27,7 @@ public final class OptionChainState {
 
     /** Longer than the longest lookback (15-minute premium high) so the value at its start is kept. */
     private static final Duration RETENTION = Duration.ofMinutes(20);
-    /** A-157 / A-158: the band and windows of the ATM OI burst shares. */
-    private static final int ATM_BAND = 2;
+    /** A-157 / A-158: the windows of the ATM OI burst shares (the band is config.atmBandStrikes(), 2 before v15). */
     private static final int[] BAND_WINDOWS_MIN = {1, 3, 5};
 
     /** Recent state of one option contract. */
@@ -235,11 +234,12 @@ public final class OptionChainState {
                 wallOiChangePct(callBarrier, time), wallOiChangePct(putSupport, time),
                 oiZ("CE", ce, windows, nearOi, time), oiZ("PE", pe, windows, nearOi, time),
                 bandShare(time, atm, step, 0), bandShare(time, atm, step, 1), bandShare(time, atm, step, 2),
-                bandSide(time, atm, step, true), bandSide(time, atm, step, false));
+                bandSide(time, atm, step, true), bandSide(time, atm, step, false),
+                bandNet(time, atm, step, 3), bandNet(time, atm, step, 5), bandNet(time, atm, step, 10));
     }
 
     /**
-     * A-157 / A-158: over the ATM ± 2 strikes, (Δ put OI − Δ call OI) in the window ending now, divided by those
+     * A-157 / A-158: over the ATM ± 2 strikes (± N from features v15, A-239), (Δ put OI − Δ call OI) in the window ending now, divided by those
      * contracts' OI at the window start; NaN when any of them lacks an OI at either end.
      */
     private double bandShare(Instant time, double atm, double step, int window) {
@@ -251,11 +251,24 @@ public final class OptionChainState {
         return bandChange(time, atm, step, 3, calls ? 1 : 2);
     }
 
-    /** side 0: Δ puts − Δ calls; 1: Δ calls; 2: Δ puts; each over the band's OI at the window start (NaN if incomplete). */
+    /** A-240: Δ puts − Δ calls over the band in the window ending now, absolute (OI units); NaN if incomplete. */
+    private double bandNet(Instant time, double atm, double step, int minutes) {
+        return bandChange(time, atm, step, minutes, 0, false);
+    }
+
     private double bandChange(Instant time, double atm, double step, int minutes, int side) {
+        return bandChange(time, atm, step, minutes, side, true);
+    }
+
+    /**
+     * side 0: Δ puts − Δ calls; 1: Δ calls; 2: Δ puts; each over the band's OI at the window start when {@code share},
+     * else absolute (NaN if incomplete).
+     */
+    private double bandChange(Instant time, double atm, double step, int minutes, int side, boolean share) {
         Instant from = time.minus(Duration.ofMinutes(minutes));
         double net = 0, base = 0;
-        for (int k = -ATM_BAND; k <= ATM_BAND; k++) {
+        int band = config.atmBandStrikes();
+        for (int k = -band; k <= band; k++) {
             for (boolean call : new boolean[] {true, false}) {
                 Contract contract = find(atm + k * step, call);
                 if (contract == null || contract.oi.isEmpty()) {
@@ -273,7 +286,7 @@ public final class OptionChainState {
                 }
             }
         }
-        return base > 0 ? net / base : Double.NaN;
+        return !(base > 0) ? Double.NaN : share ? net / base : net;
     }
 
     /**
@@ -611,7 +624,7 @@ public final class OptionChainState {
         double n = Double.NaN;
         return new OptionsFeatures(expiry == null ? null : expiry.toString(), n, n, contracts.size(), n, n, n, n, n, n, n,
                 n, "UNKNOWN", "UNKNOWN", n, n, n, n, false, false, n, n, n, n, n, n, n, n, n, "NONE", n, n, n, n, n, n,
-                n, n, n, n, n, n, n, n, n, n, n, n);
+                n, n, n, n, n, n, n, n, n, n, n, n, n, n, n);
     }
 
     static double midPrice(OptionTick tick) {

@@ -1,0 +1,31 @@
+# Market-phase table, row "Institutional Avalanche" (A-239; user 2026-10-26, NIFTY BANK column dropped). Values fixed in
+# the ledger before the replay. Buy the ATM put when, on one 1-minute close: the index broke below ORL / PDL / prior ORL /
+# PWL within the last 5 closes and is still below it; VIX spiking (up over 15 min and >= 3 % above the previous close);
+# futures down with OI up over 15 min (short build-up) and RVOL >= 1.5; ATM +-5 put OI falling and call OI rising over
+# 3 min; FII index-futures long share down.
+version: mpa-v1
+strategy: market-phase-avalanche
+status: UNCALIBRATED
+source: "user-request-2026-10-26 (market-phase table; ledger A-239)"
+
+scope:
+  entry_from: "09:45"
+  last_new_entry: "14:30"              # exclusive
+  flat_by: "15:15"
+  time_stop_min: 30
+  skip_expiring_index: false
+
+setup:
+  phase: AVALANCHE
+  break_window_min: 5
+  vix_spike_day_pct: 3.0               # "Spiking Sharply"
+  min_rvol_tod: 1.5                    # "High Vol"
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 25
+  use_target: false                    # stop = a close back above the broken level; else 30 min / 15:15
