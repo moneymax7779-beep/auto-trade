@@ -20,3 +20,4 @@ com.autotrade.strategy.egb.SetupProviders$OpeningDriveMomentumProvider
 com.autotrade.strategy.egb.SetupProviders$ZoneBreakFlowProvider
 com.autotrade.strategy.egb.SetupProviders$AtmOiBurstProvider
 com.autotrade.strategy.egb.SetupProviders$OiBurstCrossProvider
+com.autotrade.strategy.egb.SetupProviders$OiBurstAlldayProvider

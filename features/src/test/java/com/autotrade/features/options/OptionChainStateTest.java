@@ -131,6 +131,8 @@ class OptionChainStateTest {
         OptionsFeatures features = chain.snapshot(T0, 23205, 10, spot);
         assertThat(features.atmBandShare3m()).isCloseTo(0.04, org.assertj.core.api.Assertions.within(1e-12));
         assertThat(features.atmBandShare5m()).as("no OI 5 minutes back").isNaN();
+        assertThat(features.atmBandShare2m()).as("A-257: the same change inside 2 minutes")
+                .isCloseTo(0.04, org.assertj.core.api.Assertions.within(1e-12));
         assertThat(features.atmBandCallShare3m()).isCloseTo(0.02, org.assertj.core.api.Assertions.within(1e-12));   // A-161
         assertThat(features.atmBandPutShare3m()).isCloseTo(0.06, org.assertj.core.api.Assertions.within(1e-12));
 

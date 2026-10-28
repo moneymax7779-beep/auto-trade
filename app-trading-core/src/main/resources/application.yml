@@ -132,6 +132,10 @@ autotrade:
       # held to 15:15 instead of 12:30 (29 tick days +Rs 33.2 L vs v8 +Rs 23.8 L, better in both halves); own session,
       # judged forward against obc-v8 on the same days.
       - config/strategy/oi-burst-cross.v11.yaml
+      # 2026-10-29 (A-258, user: "yes port and deploy oba-v1 as shadow"): oba-v1 = obc-v8's signal at any time of the
+      # day (09:21-14:30, up to 3 entries, flat 15:15); 29 tick days +Rs 39.7 L (H1 +7.7 L, H2 +32.0 L), in sample and
+      # concentrated in a few trades; own session, judged forward.
+      - config/strategy/oi-burst-allday.v1.yaml
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"

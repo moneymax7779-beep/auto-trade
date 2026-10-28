@@ -31,6 +31,23 @@ import com.autotrade.strategy.OptionSide;
  * A-254 ({@code exits.atr_stop_mult}): the stop is the tighter of the above and the entry -+ that many ATR3m.
  * A-255 ({@code exits.trail_arm_atr}, {@code exits.trail_atr}): once a close is that many ATR3m in favour, exit on a close
  * {@code trail_atr} ATR3m below the best close since the entry.
+ * <p>
+ * A-256 ({@code setup.early_until}): before that time the 3-minute share must reach {@code setup.early_share3_min_<index>}
+ * instead; a smaller burst then is not an event (it neither enters nor ends the day).
+ * <p>
+ * A-257 ({@code setup.early_share1_min_<index>}, {@code setup.early_share2_min_<index>}): before {@code early_until} a burst
+ * is instead the 1-minute or the 2-minute share at or beyond its own threshold, remembered {@code setup.early_memory_min}
+ * minutes; the entry needs a remembered burst on the side the close is on relative to the EMA.
+ * <p>
+ * A-258 (family {@code oi-burst-allday}; {@code setup.max_entries_per_day} > 1, {@code setup.reversal_ends_day: false}):
+ * up to that many entries a day, one position at a time; a burst against the day's direction is skipped instead of
+ * ending the day; a re-entry needs a new burst (one that switched on after the last trade ended).
+ * <p>
+ * A-261 ({@code exits.counter_burst_by_time: true}): the counter-burst exit uses the threshold of the minute it fires in
+ * ({@code early_share3_min_*} before {@code early_until}, else {@code share3_min_*}).
+ * <p>
+ * A-265 ({@code setup.skip_fresh_buildup: true}): no entry when the futures price/OI state shows fresh build-up in the
+ * trade's own direction (FRESH_LONG for a call, FRESH_SHORT for a put); that burst is not traded (one-event days end).
  */
 final class OiBurstCross extends SetupStrategy {
 
@@ -42,6 +59,9 @@ final class OiBurstCross extends SetupStrategy {
     private final boolean freshCross;
     private final double structureBufferPct;
     private final boolean counterBurst;
+    private final boolean counterBurstByTime;
+    private final boolean skipFreshBuildup;
+    private int vetoedBurst = -1000;
     private int heldSide;
     private final int burstMemoryMin;
     private final double share1Min;
@@ -52,6 +72,20 @@ final class OiBurstCross extends SetupStrategy {
     private double entrySpot = Double.NaN;
     private double entryAtr = Double.NaN;
     private double bestFav = Double.NaN;
+    private final int earlyUntil;
+    private final double earlyShare3Min;
+    private final double earlyShare1Min;
+    private final double earlyShare2Min;
+    private final int earlyMemoryMin;
+    private int lastEarlyUp = -1000;
+    private int lastEarlyDown = -1000;
+    private final int maxEntries;
+    private final boolean reversalEndsDay;
+    private int entries;
+    private boolean inTrade;
+    private boolean prevBurst;
+    private int burstStart = -1000;
+    private int lastExit = -1000;
     private int lastUpBurst = -1000;
     private int lastDownBurst = -1000;
 
@@ -70,11 +104,27 @@ final class OiBurstCross extends SetupStrategy {
         freshCross = !c.has("setup.fresh_cross") || c.getBoolean("setup.fresh_cross");
         structureBufferPct = c.has("exits.structure_buffer_pct") ? c.getDouble("exits.structure_buffer_pct") : Double.NaN;
         counterBurst = c.has("exits.counter_burst") && c.getBoolean("exits.counter_burst");
+        counterBurstByTime = c.has("exits.counter_burst_by_time") && c.getBoolean("exits.counter_burst_by_time");
+        skipFreshBuildup = c.has("setup.skip_fresh_buildup") && c.getBoolean("setup.skip_fresh_buildup");
         burstMemoryMin = c.has("setup.burst_memory_min") ? c.getInt("setup.burst_memory_min") : 0;
         atrStopMult = c.has("exits.atr_stop_mult") ? c.getDouble("exits.atr_stop_mult") : Double.NaN;
         trailArmAtr = c.has("exits.trail_arm_atr") ? c.getDouble("exits.trail_arm_atr") : Double.NaN;
         trailAtr = c.has("exits.trail_atr") ? c.getDouble("exits.trail_atr") : Double.NaN;
         String ix = nifty ? "nifty" : "sensex";
+        maxEntries = c.has("setup.max_entries_per_day") ? c.getInt("setup.max_entries_per_day") : 1;
+        reversalEndsDay = !c.has("setup.reversal_ends_day") || c.getBoolean("setup.reversal_ends_day");
+        if (c.has("setup.early_until")) {
+            LocalTime t = LocalTime.parse(c.getString("setup.early_until"));
+            earlyUntil = t.getHour() * 60 + t.getMinute();
+            earlyShare3Min = c.has("setup.early_share3_min_" + ix) ? c.getDouble("setup.early_share3_min_" + ix) : Double.NaN;
+        } else {
+            earlyUntil = -1;
+            earlyShare3Min = Double.NaN;
+        }
+        boolean rolling = c.has("setup.early_share1_min_" + ix);
+        earlyShare1Min = rolling ? c.getDouble("setup.early_share1_min_" + ix) : Double.NaN;
+        earlyShare2Min = rolling ? c.getDouble("setup.early_share2_min_" + ix) : Double.NaN;
+        earlyMemoryMin = rolling ? c.getInt("setup.early_memory_min") : 0;
         share1Min = burstMemoryMin > 0 ? c.getDouble("setup.share1_min_" + ix) : Double.NaN;
         share5Min = burstMemoryMin > 0 ? c.getDouble("setup.share5_min_" + ix) : Double.NaN;
     }
@@ -113,20 +163,57 @@ final class OiBurstCross extends SetupStrategy {
             }
             int last = crossed > 0 ? lastUpBurst : lastDownBurst;
             burst = crossed != 0 && minute - last <= burstMemoryMin;
+        } else if (minute < earlyUntil && earlyMemoryMin > 0) {   // A-257: rolling extreme 1- or 2-minute burst
+            double s2 = o.atmBandShare2m();
+            boolean up = s1 >= earlyShare1Min || s2 >= earlyShare2Min;
+            boolean down = s1 <= -earlyShare1Min || s2 <= -earlyShare2Min;   // NaN compares false
+            if (up && !down) {
+                lastEarlyUp = minute;
+            } else if (down && !up) {
+                lastEarlyDown = minute;
+            }
+            int last = crossed > 0 ? lastEarlyUp : lastEarlyDown;
+            burst = crossed != 0 && minute - last <= earlyMemoryMin;
         } else {
-            burst = crossed != 0 && Double.isFinite(s3) && Double.isFinite(s1) && s3 * crossed >= share3Min
+            double need = minute < earlyUntil ? earlyShare3Min : share3Min;   // A-256: an extreme burst before early_until
+            burst = crossed != 0 && Double.isFinite(s3) && Double.isFinite(s1) && s3 * crossed >= need
                     && (nifty ? s1 * crossed > 0 : s1 * crossed >= 0);
         }
         c.put("ema_cross", crossed != 0);
         c.put("oi_burst", burst);
+        if (burst && !prevBurst) {
+            burstStart = minute;
+        }
+        prevBurst = burst;
+        if (inTrade && canEnter) {                            // flat again: the last trade ended (or never filled)
+            inTrade = false;
+            lastExit = minute;
+        }
         if (!canEnter || firstEventSeen || !burst) {
             return null;
         }
-        firstEventSeen = true;                                // the day's first event, continuation or not
+        if (entries > 0 && burstStart <= lastExit) {
+            return null;                                      // A-258: a re-entry needs a new burst
+        }
+        if (burstStart == vetoedBurst) {
+            return null;                                      // A-265: this burst was vetoed
+        }
+        if (maxEntries == 1) {
+            firstEventSeen = true;                            // the day's first event, continuation or not
+        }
         boolean continuation = Double.isFinite(st.dayOpen()) && Math.signum(spot - st.dayOpen()) == crossed;
         c.put("continuation", continuation);
         if (!continuation) {
+            firstEventSeen |= reversalEndsDay;
             return null;
+        }
+        if (skipFreshBuildup) {                               // A-265: fresh build-up in the trade's own direction
+            boolean buildup = (crossed > 0 ? "FRESH_LONG" : "FRESH_SHORT").equals(s.futures().oiState());
+            c.put("fut_oi_veto", buildup);
+            if (buildup) {
+                vetoedBurst = burstStart;
+                return null;
+            }
         }
         double stop = Double.isNaN(structureBufferPct) ? (crossed > 0 ? extreme(false) : extreme(true))
                 : structureStop(st, spot, crossed);
@@ -137,6 +224,9 @@ final class OiBurstCross extends SetupStrategy {
         if (!Double.isFinite(stop) || crossed * (spot - stop) <= 0) {
             return null;
         }
+        entries++;
+        firstEventSeen |= entries >= maxEntries;
+        inTrade = true;
         heldSide = crossed;
         entrySpot = spot;
         entryAtr = st.atr3m();
@@ -163,7 +253,9 @@ final class OiBurstCross extends SetupStrategy {
     @Override
     protected String customExit(FeatureSnapshot s, OptionSide side, LocalTime time) {
         double s3 = s.options().atmBandShare3m();
-        if (counterBurst && heldSide != 0 && Double.isFinite(s3) && s3 * heldSide <= -share3Min) {
+        int minute = time.getHour() * 60 + time.getMinute();
+        double against = counterBurstByTime && minute < earlyUntil ? earlyShare3Min : share3Min;   // A-261
+        if (counterBurst && heldSide != 0 && Double.isFinite(s3) && s3 * heldSide <= -against) {
             return "COUNTER_BURST";
         }
         // A-255: armed at +trail_arm_atr x ATR3m (close basis), exit trail_atr x ATR3m below the best close since entry

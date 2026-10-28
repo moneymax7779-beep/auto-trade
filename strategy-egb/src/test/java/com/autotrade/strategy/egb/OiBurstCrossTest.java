@@ -135,6 +135,36 @@ class OiBurstCrossTest {
                 .satisfies(o -> assertThat(o.reason()).isEqualTo("TRAIL_ATR"));
     }
 
+    /**
+     * A-258 oba-v1 (open 22,800): an up burst at 09:31 above the EMA but below the open (a reversal) is skipped, not the end
+     * of the day; a new up burst above the open at 10:00 enters; after that trade the same burst still on does not
+     * re-enter; a new burst does; three entries a day at most. v8, on the same minutes, stops at the 09:31 reversal.
+     */
+    @Test
+    void allDayEntersAgainOnlyOnANewBurstAndSkipsReversals() {
+        for (String file : new String[] {"oi-burst-allday.v1.yaml", "oi-burst-cross.v8.yaml"}) {
+            Strategy s = Strategies.load(Path.of("..", "config", "strategy", file)).create("NIFTY", Snapshots.SESSION);
+            PositionView call = new PositionView(true, OptionSide.CE, 1, 100, null, 110);
+            java.util.List<String> entries = new java.util.ArrayList<>();
+            for (int m = 556; m <= 610; m++) {
+                String t = String.format("%02d:%02d", m / 60, m % 60);
+                double spot = m <= 571 ? 22710 + (m - 556) : 22730 + (m - 572) * 3.0;
+                double s3 = switch (t) {
+                    case "09:31", "10:00", "10:01", "10:02", "10:04", "10:07", "10:10" -> 0.2;
+                    default -> 0.0;
+                };
+                boolean held = t.equals("10:01") || t.equals("10:05") || t.equals("10:08");
+                Snapshots snap = snap(spot, 22800, s3, Math.signum(s3) * 0.01).set("structure.dayLow", 22600.0)
+                        .set("structure.dayHigh", 22900.0).set("structure.atr3m", 10.0);
+                if (!s.decide(snap.at(t), held ? call : PositionView.FLAT).orders().isEmpty() && !held) {
+                    entries.add(t);
+                }
+            }
+            assertThat(entries).as(file).isEqualTo(file.contains("allday") ? java.util.List.of("10:00", "10:04", "10:07")
+                    : java.util.List.of());
+        }
+    }
+
     @Test
     void theFileLoadsForBothIndices() {
         assertThat(Strategies.load(Path.of("..", "config", "strategy", "oi-burst-cross.v1.yaml")).create("SENSEX",

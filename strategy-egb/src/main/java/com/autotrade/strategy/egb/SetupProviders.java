@@ -121,4 +121,11 @@ public final class SetupProviders {
             return "oi-burst-cross";
         }
     }
+
+    public static final class OiBurstAlldayProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "oi-burst-allday";
+        }
+    }
 }
