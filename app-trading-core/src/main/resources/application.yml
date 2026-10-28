@@ -128,6 +128,10 @@ autotrade:
       # stop = the tighter of PDH/ORH (PDL/ORL) +- 0.1 % and 2 x ATR3m; ATR trail (arm +2, exit 3 off the best close);
       # counter-burst exit; flat 12:30. In sample on 29 tick days (+Rs 23.8 L); its own PAPER session, read at 30 trades.
       - config/strategy/oi-burst-cross.v8.yaml
+      # 2026-10-28 (A-260 PASS, user: "yes register and run both on tick days ... do what is needed"): obc-v11 = obc-v8
+      # held to 15:15 instead of 12:30 (29 tick days +Rs 33.2 L vs v8 +Rs 23.8 L, better in both halves); own session,
+      # judged forward against obc-v8 on the same days.
+      - config/strategy/oi-burst-cross.v11.yaml
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"

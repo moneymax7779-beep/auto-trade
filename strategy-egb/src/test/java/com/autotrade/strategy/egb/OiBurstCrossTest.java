@@ -139,6 +139,8 @@ class OiBurstCrossTest {
     void theFileLoadsForBothIndices() {
         assertThat(Strategies.load(Path.of("..", "config", "strategy", "oi-burst-cross.v1.yaml")).create("SENSEX",
                 Snapshots.SESSION)).isNotNull();
+        assertThat(Strategies.load(Path.of("..", "config", "strategy", "oi-burst-cross.v11.yaml")).create("SENSEX",
+                Snapshots.SESSION)).as("A-260 obc-v11").isNotNull();
         assertThat(Map.of()).isEmpty();
     }
 }
