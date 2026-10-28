@@ -1,0 +1,33 @@
+# obc-v6 = obc-v4 + a stop at the tighter of the structure stop and entry -+ 2.0 x ATR3m (A-254; multiple from the 2 Sep-5 Oct
+# half: winners' worst adverse move 1.5 ATR). Rest = obc-v4.
+version: obc-v6
+strategy: oi-burst-cross
+status: UNCALIBRATED
+source: "user-request-2026-10-28 (ledger A-254)"
+
+scope:
+  entry_from: "09:21"                  # the study's 09:20-11:00 minutes, seen by the engine one snapshot later
+  last_new_entry: "11:01"              # exclusive
+  flat_by: "12:30"                     # the study's exit
+  time_stop_min: 0
+  skip_expiring_index: false           # the study included expiry days
+
+setup:
+  ema_period: 20                       # EMA of 1-minute closes, seeded with the previous close
+  cross_lookback_min: 3
+  fresh_cross: false                   # v3/v4: the close on the burst's side of the EMA is enough
+  share3_min_nifty: 0.0612             # ATM +- 2 net OI flow share over 3 minutes (A-250 P1 95th percentile)
+  share3_min_sensex: 0.0816
+  stop_lookback_min: 10                # stop: the 10-minute extreme of minute closes before entry
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 50                 # v2/v4: emergency only
+  structure_buffer_pct: 0.1            # v2/v4: stop = a close beyond PDH/ORH (puts) or PDL/ORL (calls) +- 0.1 %
+  counter_burst: true                  # v2/v4: exit on a 3-minute burst beyond the threshold against the trade
+  atr_stop_mult: 2.0                   # A-254: stop = the tighter of the structure stop and entry -+ 2.0 x ATR3m
+  use_target: false

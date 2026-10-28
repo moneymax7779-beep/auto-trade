@@ -114,4 +114,11 @@ public final class SetupProviders {
             return "atm-oi-burst";
         }
     }
+
+    public static final class OiBurstCrossProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "oi-burst-cross";
+        }
+    }
 }

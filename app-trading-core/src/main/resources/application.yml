@@ -123,6 +123,11 @@ autotrade:
       # 2026-10-23 (A-179, user: "put covering-only aob variant and run replay"): aob-v5 = aob-v2 entering only on covering
       # bursts (A-178: covering +6.2 bp vs writing +1.5 bp on 17 tick days, CI includes zero); own session, judged forward.
       - config/strategy/atm-oi-burst.v5.yaml
+      # 2026-10-28 (A-255 PASS, user: "deploy v8 as it is on GCP"): obc-v8 = ATM +- 2 OI burst (3-minute share at the
+      # A-250 95th percentile) with the close on its side of EMA20, the day's first event, continuation only, 09:21-11:00;
+      # stop = the tighter of PDH/ORH (PDL/ORL) +- 0.1 % and 2 x ATR3m; ATR trail (arm +2, exit 3 off the best close);
+      # counter-burst exit; flat 12:30. In sample on 29 tick days (+Rs 23.8 L); its own PAPER session, read at 30 trades.
+      - config/strategy/oi-burst-cross.v8.yaml
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"

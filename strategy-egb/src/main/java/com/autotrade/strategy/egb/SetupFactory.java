@@ -25,7 +25,8 @@ public final class SetupFactory implements StrategyFactory {
             Map.entry("opening-range-breakout", OpeningRangeBreakout::new),   // A-082
             Map.entry("opening-drive-momentum", OpeningDriveMomentum::new),   // A-085
             Map.entry("zone-break-flow", ZoneBreakFlow::new),   // A-131 (zbf-v10 live PAPER from 19 Oct, A-148)
-            Map.entry("atm-oi-burst", AtmOiBurst::new));   // A-158
+            Map.entry("atm-oi-burst", AtmOiBurst::new),   // A-158
+            Map.entry("oi-burst-cross", c -> new OiBurstCross(c, "NIFTY")));   // A-251 (per-index threshold)
 
     private final ThresholdConfig config;
     private final Function<ThresholdConfig, Strategy> family;
@@ -37,6 +38,9 @@ public final class SetupFactory implements StrategyFactory {
         }
         this.config = config;
         family.apply(config);                                         // fail at load on a missing key, not mid-session
+        if (config.strategy().equals("oi-burst-cross")) {
+            new OiBurstCross(config, "SENSEX");                          // A-251: the SENSEX threshold too
+        }
     }
 
     @Override
@@ -71,6 +75,9 @@ public final class SetupFactory implements StrategyFactory {
 
     @Override
     public Strategy create(String underlying, LocalDate session) {
+        if (config.strategy().equals("oi-burst-cross")) {
+            return new OiBurstCross(config, underlying);                 // A-251: per-index threshold
+        }
         return family.apply(config);
     }
 }
