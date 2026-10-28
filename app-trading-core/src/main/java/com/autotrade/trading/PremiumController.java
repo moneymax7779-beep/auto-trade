@@ -9,7 +9,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
-import javax.sql.DataSource;
 
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -34,8 +33,8 @@ class PremiumController {
     private final JdbcTemplate jdbc;
     private final Map<String, Cached> cache = new ConcurrentHashMap<>();
 
-    PremiumController(DataSource target) {
-        this.jdbc = new JdbcTemplate(target);
+    PremiumController(ChartDb db) {
+        this.jdbc = db.jdbc();                               // the charts pool, never the engine's (28 Oct 2026)
     }
 
     @GetMapping("/api/premium")

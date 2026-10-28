@@ -12,8 +12,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
-import javax.sql.DataSource;
-
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -29,7 +27,9 @@ import com.autotrade.core.time.MarketTime;
  * <p>
  * Cost control (a day holds millions of option ticks): today is computed incrementally (each call reads only the
  * ticks after the previous call); an earlier day is computed once and kept, and not at all during market hours
- * (09:00-15:50 IST weekdays) unless already kept, so it never competes with the live session for the database.
+ * (09:00-15:50 IST weekdays) unless already kept, so it never competes with the live session for the database. A
+ * complete day is also kept in md.chart_day_cache ({@link ChartDb}, 28 Oct 2026), so a restart or deploy does not read
+ * its ticks again, and a kept day shows at any hour. All reads use the charts pool, never the engine's.
  * In {@code --mode=auto} a background warmer reads each recorded index's newest minute every minute of the session, so
  * today's series is always current and every read stays small.
  */
@@ -42,12 +42,13 @@ class PcrController implements org.springframework.beans.factory.DisposableBean 
     static final LocalTime OPEN = LocalTime.of(9, 15), CLOSE = LocalTime.of(15, 31);
 
     /** One day and index: each contract's latest [isPut, OI], the per-minute series and how far the ticks were read. */
-    private static final class Day {
+    static final class Day {
         final LocalDate expiry;
         final Map<Long, double[]> latest = new HashMap<>();
         final List<Object> series = new ArrayList<>();
         Instant readUntil;
         boolean complete;
+        int contracts;
 
         Day(LocalDate expiry, Instant start) {
             this.expiry = expiry;
@@ -56,6 +57,7 @@ class PcrController implements org.springframework.beans.factory.DisposableBean 
     }
 
     private final JdbcTemplate jdbc;
+    private final ChartDb db;
     // bounded like the OI tape's cache (every day ever viewed used to stay in memory)
     private final Map<String, Day> days = java.util.Collections.synchronizedMap(new LinkedHashMap<>(16, 0.75f, true) {
         @Override
@@ -69,9 +71,10 @@ class PcrController implements org.springframework.beans.factory.DisposableBean 
     private java.util.concurrent.ScheduledExecutorService warmer;
     private volatile Instant lastWarn = Instant.EPOCH;
 
-    PcrController(DataSource target, TradingProperties properties, org.springframework.boot.ApplicationArguments args,
+    PcrController(ChartDb db, TradingProperties properties, org.springframework.boot.ApplicationArguments args,
                   MarketHours market) {
-        this.jdbc = new JdbcTemplate(target);
+        this.db = db;
+        this.jdbc = db.jdbc();
         this.underlyings = List.copyOf(properties.trading().underlyings());
         this.args = args;
         this.market = market;
@@ -126,6 +129,9 @@ class PcrController implements org.springframework.beans.factory.DisposableBean 
         out.put("underlying", u);
         String key = day + "|" + u;
         Day d = days.get(key);
+        if (d == null) {
+            d = kept(key, day, u);                          // one small read, at any hour
+        }
         if (d == null && !day.equals(today) && market.busy(now)) {
             out.put("deferred", true);                      // an earlier day is computed after the close
             out.put("series", List.of());
@@ -152,9 +158,12 @@ class PcrController implements org.springframework.beans.factory.DisposableBean 
                         ? written.truncatedTo(java.time.temporal.ChronoUnit.MINUTES) : end;
                 read(d, day, u, until);
                 d.complete = !until.isBefore(end);
+                if (d.complete) {
+                    db.save(KIND, day, u, encode(d));
+                }
             }
             out.put("expiry", d.expiry.toString());
-            out.put("contracts", d.latest.size());
+            out.put("contracts", d.contracts);
             out.put("series", List.copyOf(d.series));
         }
         return out;
@@ -194,7 +203,51 @@ class PcrController implements org.springframework.beans.factory.DisposableBean 
                         Math.round(call)));
             }
         }
+        d.contracts = d.latest.size();
         d.readUntil = until;
+    }
+
+    static final String KIND = "pcr";
+    private static final int FORMAT = 1;
+
+    /** The kept complete day, now in memory; null when none is kept. */
+    private Day kept(String key, LocalDate day, String u) {
+        byte[] payload = db.load(KIND, day, u);
+        Day d = payload == null ? null : decode(payload);
+        return d == null ? null : days.computeIfAbsent(key, k -> d);
+    }
+
+    /** A complete day: its expiry, contract count and series (time, PCR, put OI, call OI). */
+    static byte[] encode(Day d) {
+        return ChartDb.encode(out -> {
+            out.writeInt(FORMAT);
+            out.writeLong(d.expiry.toEpochDay());
+            out.writeInt(d.contracts);
+            out.writeInt(d.series.size());
+            for (Object row : d.series) {
+                List<?> r = (List<?>) row;
+                out.writeUTF((String) r.get(0));
+                out.writeDouble(((Number) r.get(1)).doubleValue());
+                out.writeLong(((Number) r.get(2)).longValue());
+                out.writeLong(((Number) r.get(3)).longValue());
+            }
+        });
+    }
+
+    static Day decode(byte[] payload) {
+        return ChartDb.decode(payload, in -> {
+            if (in.readInt() != FORMAT) {
+                return null;
+            }
+            Day d = new Day(LocalDate.ofEpochDay(in.readLong()), Instant.EPOCH);
+            d.contracts = in.readInt();
+            int n = in.readInt();
+            for (int i = 0; i < n; i++) {
+                d.series.add(List.of(in.readUTF(), in.readDouble(), in.readLong(), in.readLong()));
+            }
+            d.complete = true;
+            return d;
+        });
     }
 
     private static Timestamp ts(LocalDate day, LocalTime time) {

@@ -15,8 +15,6 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.TreeSet;
 
-import javax.sql.DataSource;
-
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -48,7 +46,9 @@ import com.autotrade.core.time.MarketTime;
  * Cost control, as {@link PcrController}: one pass over the day's ticks kept in memory (a few hundred KB per index and
  * day); today read incrementally (each call reads only ticks since the last), an earlier day once and not at all during
  * market hours (09:00-15:50 IST weekdays) unless already kept. In {@code --mode=auto} a warmer reads every recorded
- * index every 30 s of the session, so a page's read stays small.
+ * index every 30 s of the session, so a page's read stays small. A complete day is also kept in md.chart_day_cache
+ * ({@link ChartDb}, 28 Oct 2026), so a restart or deploy does not read its ticks again, and a kept day shows at any hour.
+ * All reads use the charts pool, never the engine's.
  */
 @RestController
 @RequestMapping("/api/oi-tape")
@@ -105,6 +105,7 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
     }
 
     private final JdbcTemplate jdbc;
+    private final ChartDb db;
     private final Map<String, Day> days = java.util.Collections.synchronizedMap(new LinkedHashMap<>(16, 0.75f, true) {
         @Override
         protected boolean removeEldestEntry(Map.Entry<String, Day> eldest) {
@@ -116,9 +117,10 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
     private final MarketHours market;
     private java.util.concurrent.ScheduledExecutorService warmer;
 
-    OiTapeController(DataSource target, TradingProperties properties, org.springframework.boot.ApplicationArguments args,
+    OiTapeController(ChartDb db, TradingProperties properties, org.springframework.boot.ApplicationArguments args,
                      MarketHours market) {
-        this.jdbc = new JdbcTemplate(target);
+        this.db = db;
+        this.jdbc = db.jdbc();
         this.underlyings = List.copyOf(properties.trading().underlyings());
         this.args = args;
         this.market = market;
@@ -259,13 +261,16 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
      */
     private boolean deferred(LocalDate day, String u) {
         ZonedDateTime now = ZonedDateTime.now(MarketTime.IST);
-        return market.busy(now) && !day.equals(now.toLocalDate()) && !days.containsKey(day + "|" + u);
+        return market.busy(now) && !day.equals(now.toLocalDate()) && !days.containsKey(day + "|" + u) && kept(day, u) == null;
     }
 
     /** The day, read up to now (today) or to the close; null when the capture has no options for it. */
     Day day(LocalDate day, String u) {
         String key = day + "|" + u;
         Day d = days.get(key);
+        if (d == null) {
+            d = kept(day, u);
+        }
         if (d == null) {
             List<LocalDate> expiries = jdbc.query("select min(expiry) from md.option_tick where session_date = ? and "
                             + "underlying = ? and expiry >= ? and recv_ts >= ? and recv_ts < ?",
@@ -281,9 +286,82 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
                 Instant until = readableUntil(Instant.now(), end);
                 read(d, u, until);
                 d.complete = !until.isBefore(end);
+                if (d.complete) {
+                    db.save(KIND, day, u, encode(d));
+                }
             }
         }
         return d;
+    }
+
+    static final String KIND = "oi-tape";
+    private static final int FORMAT = 1;
+
+    /** The kept complete day, now in memory; null when none is kept. */
+    private Day kept(LocalDate day, String u) {
+        byte[] payload = db.load(KIND, day, u);
+        Day d = payload == null ? null : decode(payload);
+        return d == null ? null : days.computeIfAbsent(day + "|" + u, k -> d);
+    }
+
+    /** A complete day: every per-step array and the pre-open seeds, as read. */
+    static byte[] encode(Day d) {
+        return ChartDb.encode(out -> {
+            out.writeInt(FORMAT);
+            out.writeLong(d.date.toEpochDay());
+            out.writeLong(d.expiry.toEpochDay());
+            out.writeBoolean(d.futExpiry != null);
+            if (d.futExpiry != null) {
+                out.writeUTF(d.futExpiry);
+            }
+            out.writeInt(d.steps);
+            ChartDb.writeDoubles(out, d.spot);
+            ChartDb.writeDoubles(out, d.futPx);
+            ChartDb.writeDoubles(out, d.futOi);
+            for (Map<Double, double[]> side : List.of(d.calls, d.puts)) {
+                out.writeInt(side.size());
+                for (Map.Entry<Double, double[]> e : side.entrySet()) {
+                    out.writeDouble(e.getKey());
+                    ChartDb.writeDoubles(out, e.getValue());
+                }
+            }
+            for (Map<Double, Double> seed : List.of(d.seedCalls, d.seedPuts)) {
+                out.writeInt(seed.size());
+                for (Map.Entry<Double, Double> e : seed.entrySet()) {
+                    out.writeDouble(e.getKey());
+                    out.writeDouble(e.getValue());
+                }
+            }
+        });
+    }
+
+    static Day decode(byte[] payload) {
+        return ChartDb.decode(payload, in -> {
+            if (in.readInt() != FORMAT) {
+                return null;
+            }
+            Day d = new Day(LocalDate.ofEpochDay(in.readLong()), LocalDate.ofEpochDay(in.readLong()));
+            d.futExpiry = in.readBoolean() ? in.readUTF() : null;
+            d.steps = in.readInt();
+            System.arraycopy(ChartDb.readDoubles(in, STEPS), 0, d.spot, 0, STEPS);
+            System.arraycopy(ChartDb.readDoubles(in, STEPS), 0, d.futPx, 0, STEPS);
+            System.arraycopy(ChartDb.readDoubles(in, STEPS), 0, d.futOi, 0, STEPS);
+            for (Map<Double, double[]> side : List.of(d.calls, d.puts)) {
+                int n = in.readInt();
+                for (int i = 0; i < n; i++) {
+                    side.put(in.readDouble(), ChartDb.readDoubles(in, STEPS));
+                }
+            }
+            for (Map<Double, Double> seed : List.of(d.seedCalls, d.seedPuts)) {
+                int n = in.readInt();
+                for (int i = 0; i < n; i++) {
+                    seed.put(in.readDouble(), in.readDouble());
+                }
+            }
+            d.readUntil = ts(d.date, CLOSE).toInstant();
+            d.complete = true;
+            return d;
+        });
     }
 
     /** How far a day can be read at {@code now}: whole steps written by the capture ({@link #WRITE_LAG}), or the close. */

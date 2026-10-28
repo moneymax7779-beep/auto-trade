@@ -10,7 +10,6 @@ import java.util.Map;
 import java.util.TreeMap;
 import java.util.concurrent.ConcurrentHashMap;
 
-import javax.sql.DataSource;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -61,8 +60,8 @@ class SurgeController {
     private final Map<String, Map<String, Object>> flows = new ConcurrentHashMap<>();
     private volatile HikariDataSource zt;
 
-    SurgeController(DataSource dataSource, TradingProperties properties) {
-        this.jdbc = new JdbcTemplate(dataSource);
+    SurgeController(ChartDb db, TradingProperties properties) {
+        this.jdbc = db.jdbc();                               // the charts pool, never the engine's (28 Oct 2026)
         this.properties = properties;
     }
 
