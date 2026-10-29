@@ -165,6 +165,35 @@ class OiBurstCrossTest {
         }
     }
 
+    /**
+     * A-266: with the previous close 22,700, an open at 22,800 is a +0.44 % gap: obc-v13 takes no call (with the gap) but
+     * still takes a put (against it) on another day; an open at 22,750 (+0.22 %) is under 0.4 % and the call is taken.
+     */
+    @Test
+    void aBigOpeningGapBlocksEntriesInItsDirectionOnly() {
+        java.util.function.BiFunction<Double, Double, Snapshots> at = (spot, s3) -> snap(spot, 22800, s3, Math.signum(s3) * 0.01)
+                .set("structure.dayLow", 22600.0).set("structure.dayHigh", 22950.0).set("structure.atr3m", 10.0);
+        Strategy up = Strategies.load(Path.of("..", "config", "strategy", "oi-burst-cross.v13.yaml")).create("NIFTY", Snapshots.SESSION);
+        for (int m = 556; m <= 570; m++) {
+            up.decide(at.apply(22790.0 + (m - 556), 0.0).at(String.format("%02d:%02d", m / 60, m % 60)), PositionView.FLAT);
+        }
+        assertThat(up.decide(at.apply(22830.0, 0.2).at("09:31"), PositionView.FLAT).orders()).as("call with a +0.44 % gap").isEmpty();
+
+        Strategy down = Strategies.load(Path.of("..", "config", "strategy", "oi-burst-cross.v13.yaml")).create("NIFTY", Snapshots.SESSION);
+        for (int m = 556; m <= 570; m++) {
+            down.decide(at.apply(22810.0 - (m - 556), 0.0).at(String.format("%02d:%02d", m / 60, m % 60)), PositionView.FLAT);
+        }
+        assertThat(down.decide(at.apply(22770.0, -0.2).at("09:31"), PositionView.FLAT).orders()).as("put against the gap").hasSize(1);
+
+        Strategy small = Strategies.load(Path.of("..", "config", "strategy", "oi-burst-cross.v13.yaml")).create("NIFTY", Snapshots.SESSION);
+        java.util.function.BiFunction<Double, Double, Snapshots> at2 = (spot, s3) -> snap(spot, 22750, s3, Math.signum(s3) * 0.01)
+                .set("structure.dayLow", 22600.0).set("structure.dayHigh", 22950.0).set("structure.atr3m", 10.0);
+        for (int m = 556; m <= 570; m++) {
+            small.decide(at2.apply(22740.0 + (m - 556), 0.0).at(String.format("%02d:%02d", m / 60, m % 60)), PositionView.FLAT);
+        }
+        assertThat(small.decide(at2.apply(22780.0, 0.2).at("09:31"), PositionView.FLAT).orders()).as("+0.22 % gap").hasSize(1);
+    }
+
     @Test
     void theFileLoadsForBothIndices() {
         assertThat(Strategies.load(Path.of("..", "config", "strategy", "oi-burst-cross.v1.yaml")).create("SENSEX",

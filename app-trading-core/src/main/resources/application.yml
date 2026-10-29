@@ -69,6 +69,11 @@ autotrade:
       # Its file and code stay; it returns only through a new registered test.
       - config/strategy/ma-cross.v1.yaml                   # mac-v1 forward test in PAPER (A-067, user 2026-10-09 20:40: "run it in paper"); A-066 test PASS, held-out FAIL on one trade; never the expiring index; Rs 2.5L budget; last, so the others take the capital first
       - config/strategy/opening-drive-momentum.v4.yaml     # odm-v4 live from 14 Oct (A-093) = odm-v3 (A-089) + peak trail (arm +50 %, exit 15 % off the peak; A-091 PASS, thin): never worse than v3 on 23 tick days (+Rs 1.55L), 13 Oct +Rs 35K; last, so the others take the capital first
+      # 2026-10-29 (A-267, user: "make one on PAPER mode other one in shadow choose which one and deploy"): obc-v13 = obc-v11
+      # (ATM +- 2 OI burst, one entry 09:21-11:00, flat 15:15) + A-266's gap rule (no entry in the direction of an opening
+      # gap >= 0.4 %); 29 tick days +Rs 36.7 L alone, held-out unchanged. Inside the set A-262 measured obc-v11 at +Rs 16.3 L
+      # for the set but -Rs 8.6 L for the four above (capital and kill switch shared); last, so the others take the capital first.
+      - config/strategy/oi-burst-cross.v13.yaml
       # zbf-v10 removed 2026-10-19 after one live session (A-149, user 19 Oct ~16:50: "remove zbf-v10 from the live set"):
       # live 19 Oct only (A-148), 3 trades, 3 losses, -Rs 1,49,446 (the set's day -Rs 1,16,673; without it +Rs 32,774).
       # Its file and code stay; it returns only through a new registered test.
@@ -136,6 +141,9 @@ autotrade:
       # day (09:21-14:30, up to 3 entries, flat 15:15); 29 tick days +Rs 39.7 L (H1 +7.7 L, H2 +32.0 L), in sample and
       # concentrated in a few trades; own session, judged forward.
       - config/strategy/oi-burst-allday.v1.yaml
+      # 2026-10-29 (A-267): oba-v4 = oba-v1 + A-266's gap rule (29 tick days +Rs 41.7 L vs +Rs 39.7 L, better in both halves;
+      # held-out +Rs 15K on one changed trade); own session, judged forward against oba-v1 on the same days.
+      - config/strategy/oi-burst-allday.v4.yaml
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"

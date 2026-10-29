@@ -48,6 +48,9 @@ import com.autotrade.strategy.OptionSide;
  * <p>
  * A-265 ({@code setup.skip_fresh_buildup: true}): no entry when the futures price/OI state shows fresh build-up in the
  * trade's own direction (FRESH_LONG for a call, FRESH_SHORT for a put); that burst is not traded (one-event days end).
+ * <p>
+ * A-266 ({@code setup.skip_gap_continuation_pct}): no entry in the direction of the day's opening gap when the gap
+ * (open vs previous close) is at least that many percent; entries against the gap are unaffected; the burst is not traded.
  */
 final class OiBurstCross extends SetupStrategy {
 
@@ -61,6 +64,7 @@ final class OiBurstCross extends SetupStrategy {
     private final boolean counterBurst;
     private final boolean counterBurstByTime;
     private final boolean skipFreshBuildup;
+    private final double skipGapPct;
     private int vetoedBurst = -1000;
     private int heldSide;
     private final int burstMemoryMin;
@@ -106,6 +110,7 @@ final class OiBurstCross extends SetupStrategy {
         counterBurst = c.has("exits.counter_burst") && c.getBoolean("exits.counter_burst");
         counterBurstByTime = c.has("exits.counter_burst_by_time") && c.getBoolean("exits.counter_burst_by_time");
         skipFreshBuildup = c.has("setup.skip_fresh_buildup") && c.getBoolean("setup.skip_fresh_buildup");
+        skipGapPct = c.has("setup.skip_gap_continuation_pct") ? c.getDouble("setup.skip_gap_continuation_pct") : Double.NaN;
         burstMemoryMin = c.has("setup.burst_memory_min") ? c.getInt("setup.burst_memory_min") : 0;
         atrStopMult = c.has("exits.atr_stop_mult") ? c.getDouble("exits.atr_stop_mult") : Double.NaN;
         trailArmAtr = c.has("exits.trail_arm_atr") ? c.getDouble("exits.trail_arm_atr") : Double.NaN;
@@ -211,6 +216,14 @@ final class OiBurstCross extends SetupStrategy {
             boolean buildup = (crossed > 0 ? "FRESH_LONG" : "FRESH_SHORT").equals(s.futures().oiState());
             c.put("fut_oi_veto", buildup);
             if (buildup) {
+                vetoedBurst = burstStart;
+                return null;
+            }
+        }
+        if (Double.isFinite(skipGapPct) && st.prevClose() > 0 && Double.isFinite(st.dayOpen())) {   // A-266
+            boolean gapChase = crossed * (st.dayOpen() - st.prevClose()) / st.prevClose() * 100 >= skipGapPct;
+            c.put("gap_veto", gapChase);
+            if (gapChase) {
                 vetoedBurst = burstStart;
                 return null;
             }
