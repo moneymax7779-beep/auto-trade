@@ -81,4 +81,22 @@ class ChartDbIT {
         manifest("NIFTY", "ACTIVE");
         assertThat(charts.load("oi-tape", DAY, "NIFTY")).as("the day was loaded again: computed again").isNull();
     }
+
+    /** 29 Oct 2026: a finished day's JSON answer (surges, premium, levels) comes back as it was kept. */
+    @Test
+    void aFinishedDaysJsonAnswerIsKeptAndReadBack() {
+        LocalDate day = LocalDate.of(2026, 10, 20);
+        new JdbcTemplate(engine).update("insert into md.load_manifest (kind, session_date, underlying, source_name, "
+                + "source_detail, datasets, status, tool_version) values ('CAPTURE', ?, 'SENSEX', 'test', 'test', '{options}', "
+                + "'ACTIVE', 'test')", day);
+        java.util.Map<String, Object> answer = new java.util.LinkedHashMap<>();
+        answer.put("underlying", "SENSEX");
+        answer.put("index", java.util.List.of(java.util.List.of("09:15", 74100.5), java.util.List.of("09:16", 74102.0)));
+        answer.put("optionsExpiry", null);
+        charts.saveJson("surges", day, "SENSEX", answer);
+        assertThat(charts.loadJson("surges", day, "SENSEX")).isEqualTo(answer);
+        assertThat(charts.loadJson("surges", day, "NIFTY")).isNull();
+        assertThat(ChartDb.finished(day)).isTrue();
+        assertThat(ChartDb.finished(LocalDate.now(com.autotrade.core.time.MarketTime.IST).plusDays(1))).isFalse();
+    }
 }

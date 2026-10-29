@@ -24,7 +24,19 @@ const NAV = [
   ["/config", "Config"],
 ] as const;
 
+/** A family member (signed in without the operator role) sees their own accounts and the index chart pages; the rest is the owner's. */
+const MEMBER_NAV = [
+  ["/accounts", "My accounts"],
+  ["/index/NIFTY", "NIFTY"],          // the same index chart pages as the owner's (user, 29 Oct 2026), read-only
+  ["/index/SENSEX", "SENSEX"],
+  ["/index/BANKNIFTY", "BANKNIFTY"],
+] as const;
+
 export function App() {
+  const me = useQuery({ queryKey: ["me"], queryFn: () => get<Me>("/api/me"), staleTime: 60_000 });
+  if (me.isLoading) return null;
+  const member = me.data?.mode === "oidc" && !me.data.operator;
+  const nav = member ? MEMBER_NAV : NAV;
   return (
     <div className="min-h-full">
       <header className="sticky top-0 z-10 border-b border-line bg-bg/90 backdrop-blur">
@@ -34,7 +46,7 @@ export function App() {
             <span className="rounded bg-warn/15 px-1.5 py-0.5 text-[10px] font-bold tracking-wider text-warn">PAPER</span>
           </div>
           <nav className="flex min-w-0 gap-1 overflow-x-auto">
-            {NAV.map(([to, label]) => (
+            {nav.map(([to, label]) => (
               <NavLink key={to} to={to}
                 className={({ isActive }) => `rounded px-3 py-1.5 text-sm ${isActive ? "bg-panel-2 font-semibold" : "text-muted hover:text-text"}`}>
                 {label}
@@ -45,6 +57,12 @@ export function App() {
         </div>
       </header>
       <main className="mx-auto max-w-7xl px-4 py-4">
+        {member ? (
+          <Routes>
+            <Route path="/index/:underlying" element={<IndexPage />} />
+            <Route path="*" element={<AccountsPage />} />
+          </Routes>
+        ) : (
         <Routes>
           <Route path="/" element={<LivePage />} />
           <Route path="/live" element={<LivePage />} />
@@ -58,6 +76,7 @@ export function App() {
           <Route path="/config" element={<ConfigPage />} />
           <Route path="/accounts" element={<AccountsPage />} />
         </Routes>
+        )}
       </main>
     </div>
   );

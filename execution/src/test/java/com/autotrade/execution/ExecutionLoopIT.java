@@ -151,6 +151,9 @@ class ExecutionLoopIT {
                         TradeMode.DRY_RUN, 500_000, EquityMode.FIXED, today, "../config/risk/follower-risk.v3.yaml", 100);
                 new FanOut(dataSource).subscribe(groups[i], followers[2], List.of("opening-drive"), 1.0);
             }
+            // subscribed before the session's decisions (V27: a mid-session subscription takes no earlier entry)
+            jdbc.update("update acct.strategy_subscription set enabled_at = now() - interval '1 hour' where copy_group_id = ?",
+                    groups[i]);
             new SignalDecisionStore(dataSource).insert(new SignalDecision(groups[i], 9200 + i, today, java.time.Instant.now().minusSeconds(60),
                     "opening-drive", 2, "NIFTY", SignalDecision.Action.ENTER, "PE", null, "CONFIRMED", "IT", 3000047168L,
                     "NSE_FO|47168", "NIFTY 23100 PE", 65, 100, 130_000, 500_000, 20, "M:" + i,
@@ -215,6 +218,8 @@ class ExecutionLoopIT {
         long follower = accounts.ensureFollowerAccount(tenant, user, "CAROL-KITE", BrokerType.ZERODHA, TradeMode.DRY_RUN,
                 500_000, EquityMode.FIXED, today, "../config/risk/follower-risk.v3.yaml", 100);
         new FanOut(dataSource).subscribe(group, follower, List.of("opening-drive"), 1.0);
+        jdbc.update("update acct.strategy_subscription set enabled_at = now() - interval '1 hour' where copy_group_id = ?",
+                group);                                     // subscribed before the session's decisions (V27)
         SignalDecisionStore decisions = new SignalDecisionStore(dataSource);
         decisions.insert(new SignalDecision(group, 9300, today, java.time.Instant.now().minusSeconds(120), "opening-drive", 2,
                 "NIFTY", SignalDecision.Action.ENTER, "PE", null, "CONFIRMED", "IT", 3000047168L, "NSE_FO|47168",

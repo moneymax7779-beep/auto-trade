@@ -40,8 +40,8 @@ import com.autotrade.execution.KillSwitches;
  * <ul>
  *   <li>{@code GET /api/execution/accounts/{id}/details}: settings, Zerodha client id, credential profile, the daily
  *       loss limit, strategy subscriptions, the broker session and today's P&amp;L;</li>
- *   <li>{@code GET /api/execution/accounts/{id}/positions?day=} and {@code .../pnl?days=}: positions of a day and the
- *       daily realised net;</li>
+ *   <li>{@code GET /api/execution/accounts/{id}/positions?day=}, {@code .../pnl?days=} and {@code .../ledger?days=}:
+ *       positions of a day, the daily realised net, and the account's ledger (opening and closing equity per day);</li>
  *   <li>{@code GET /api/execution/credential-profiles}, {@code GET /api/execution/strategy-ids}: what a form offers;</li>
  *   <li>{@code POST /api/execution/accounts}: a new follower account (OWNER / ADMIN);</li>
  *   <li>{@code POST /api/execution/accounts/{id}/settings}: allocation, equity mode, daily loss limit, mode, enabled,
@@ -138,27 +138,85 @@ class AccountAdminController {
                 + "and status = 'CLOSED' and closed_at > now() - make_interval(days => ?) group by 1 order by 1 desc", id, n);
     }
 
+    /**
+     * The account's own ledger (29 Oct 2026, user: "its own ledger"), newest day first: per day with closed trades (and
+     * today while it has open ones) the opening equity as the follower sizes it (allocation + capital movements, plus the
+     * realised net since the equity date when COMPOUNDING), trades, wins, gross, charges, net, closing equity (opening +
+     * net, as acct.ledger_day) and, once the broker was reconciled, its net and the difference.
+     */
+    @GetMapping("/api/execution/accounts/{id}/ledger")
+    List<Map<String, Object>> ledger(@RequestHeader(value = Access.HEADER, required = false) String subject,
+                                     @PathVariable long id, @RequestParam(defaultValue = "60") int days) {
+        BrokerAccount a = visible(access.user(subject), id);
+        List<Map<String, Object>> rows = jdbc.queryForList("select (coalesce(closed_at, opened_at) at time zone "
+                + "'Asia/Kolkata')::date as day, count(*) filter (where status = 'CLOSED') trades, "
+                + "count(*) filter (where status = 'CLOSED' and realised_gross - coalesce(charges, 0) > 0) wins, "
+                + "count(*) filter (where status <> 'CLOSED') open, "
+                + "coalesce(sum(realised_gross) filter (where status = 'CLOSED'), 0) gross, "
+                + "coalesce(sum(charges) filter (where status = 'CLOSED'), 0) charges "
+                + "from exec.position where broker_account_id = ? group by 1 order by 1", id);
+        Map<LocalDate, Map<String, Object>> broker = new LinkedHashMap<>();
+        jdbc.queryForList("select session_date, broker_net, difference from acct.ledger_day where broker_account_id = ?", id)
+                .forEach(r -> broker.put(((java.sql.Date) r.get("session_date")).toLocalDate(), r));
+        List<Map<String, Object>> out = new ArrayList<>();
+        double realisedBefore = 0;                    // since the equity date, as the follower's sizing counts it
+        for (Map<String, Object> r : rows) {
+            LocalDate day = ((java.sql.Date) r.get("day")).toLocalDate();
+            double gross = ((Number) r.get("gross")).doubleValue(), charges = ((Number) r.get("charges")).doubleValue();
+            double net = gross - charges;
+            double opening = com.autotrade.account.CapitalPolicy.equity(a, accounts.capitalMovements(id, day),
+                    day.isBefore(a.equityFrom()) ? 0 : realisedBefore);
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("day", day.toString());
+            row.put("openingEquity", round(opening));
+            row.put("trades", ((Number) r.get("trades")).intValue());
+            row.put("wins", ((Number) r.get("wins")).intValue());
+            row.put("open", ((Number) r.get("open")).intValue());
+            row.put("gross", round(gross));
+            row.put("charges", round(charges));
+            row.put("net", round(net));
+            row.put("closingEquity", round(opening + net));
+            Map<String, Object> b = broker.get(day);
+            row.put("brokerNet", b == null ? null : b.get("broker_net"));
+            row.put("difference", b == null ? null : b.get("difference"));
+            out.add(row);
+            if (!day.isBefore(a.equityFrom())) {
+                realisedBefore += net;
+            }
+        }
+        java.util.Collections.reverse(out);
+        return out.subList(0, Math.min(out.size(), Math.max(1, Math.min(days, 366))));
+    }
+
+    private static double round(double v) {
+        return Math.round(v * 100) / 100.0;
+    }
+
     @GetMapping("/api/execution/credential-profiles")
     List<Map<String, Object>> profiles(@RequestHeader(value = Access.HEADER, required = false) String subject) {
         Access.User user = access.user(subject);
         List<Map<String, Object>> out = new ArrayList<>();
         for (long tenant : user.tenants()) {                      // names and settings only, never a secret value
-            out.addAll(jdbc.queryForList("select id, name, broker_type, redirect_uri, array_to_string(registered_ips, ',') ips, "
-                    + "status from acct.broker_credential_profile where tenant_id = ? order by name", tenant));
+            out.addAll(jdbc.queryForList("select id, tenant_id, name, broker_type, redirect_uri, array_to_string(registered_ips, "
+                    + "',') ips, status from acct.broker_credential_profile where tenant_id = ? order by name", tenant));
         }
         return out;
     }
 
-    /** Strategy ids a follower can take: those its tenant's copy groups have published or are subscribed to. */
+    /**
+     * Strategy ids a follower can take: those the copy groups its tenant may follow (its own and those shared with it)
+     * have published, and those its own accounts are subscribed to (never another tenant's subscriptions).
+     */
     @GetMapping("/api/execution/strategy-ids")
     List<String> strategyIds(@RequestHeader(value = Access.HEADER, required = false) String subject) {
         Access.User user = access.user(subject);
         Set<String> ids = new LinkedHashSet<>();
         for (long tenant : user.tenants()) {
-            ids.addAll(jdbc.queryForList("select distinct d.strategy_id from exec.signal_decision d join acct.copy_group g "
-                    + "on g.id = d.copy_group_id where g.tenant_id = ? and d.session_date > current_date - 60", String.class, tenant));
-            ids.addAll(jdbc.queryForList("select distinct s.strategy_id from acct.strategy_subscription s join acct.copy_group g "
-                    + "on g.id = s.copy_group_id where g.tenant_id = ?", String.class, tenant));
+            Long[] groups = accounts.followableCopyGroups(tenant).toArray(new Long[0]);
+            ids.addAll(jdbc.queryForList("select distinct strategy_id from exec.signal_decision where copy_group_id = any(?) "
+                    + "and session_date > current_date - 60", String.class, (Object) groups));
+            ids.addAll(jdbc.queryForList("select distinct s.strategy_id from acct.strategy_subscription s join "
+                    + "acct.broker_account a on a.id = s.broker_account_id where a.tenant_id = ?", String.class, tenant));
         }
         return ids.stream().sorted().toList();
     }
@@ -203,7 +261,7 @@ class AccountAdminController {
             Integer taken = jdbc.queryForObject("select count(*) from acct.broker_account where tenant_id = ? and display_name = ?",
                     Integer.class, tenant, name);
             require(taken != null && taken == 0, "an account named " + name + " already exists");
-            Long owner = jdbc.queryForObject("select id from acct.app_user where external_subject = ?", Long.class, user.subject());
+            long owner = owner(user, tenant);
             long created = accounts.ensureFollowerAccount(tenant, owner, name, broker, mode, allocation, equityMode, from,
                     DEFAULT_RISK, 100);
             jdbc.update("update acct.broker_account set credential_profile_id = ?, external_broker_user_id = ?, "
@@ -270,6 +328,11 @@ class AccountAdminController {
             }
             if (body.enabled() != null) {
                 jdbc.update("update acct.broker_account set enabled = ?, updated_at = now() where id = ?", body.enabled(), id);
+                if (body.enabled() && !a.enabled()) {
+                    // switched back on: it follows from now, not the entries it missed while off (code review 29 Oct)
+                    jdbc.update("update acct.strategy_subscription set enabled_at = now() where broker_account_id = ? "
+                            + "and enabled", id);
+                }
                 changed.put("enabled", body.enabled());
             }
             if (body.clientId() != null) {
@@ -287,7 +350,7 @@ class AccountAdminController {
                 List<String> wanted = strategyList(body.strategies());
                 long group = copyGroup(a.tenantId());
                 jdbc.update("update acct.strategy_subscription set enabled = false where broker_account_id = ? "
-                        + "and copy_group_id = ?", id, group);
+                        + "and copy_group_id = ? and not (strategy_id = any(?))", id, group, wanted.toArray(new String[0]));
                 if (!wanted.isEmpty()) {
                     fanOut.subscribe(group, id, wanted, 1.0);
                 }
@@ -305,26 +368,48 @@ class AccountAdminController {
 
     // ------------------------------------------------------------------------------------------------- helpers
 
+    /**
+     * Whose account a new one is: the caller's, unless they are the ADMIN of a family member's tenant (one the owner's
+     * signals are shared with), then that member's whatever their role (OWNER, TRADER, VIEWER, AUDITOR); the caller
+     * when the tenant has no such member. In the owner's own tenant it is always the caller.
+     */
+    private long owner(Access.User user, long tenant) {
+        long caller = jdbc.queryForObject("select id from acct.app_user where external_subject = ?", Long.class, user.subject());
+        Integer shared = jdbc.queryForObject("select count(*) from acct.copy_group_share where tenant_id = ?", Integer.class,
+                tenant);
+        if (!"ADMIN".equals(user.roles().get(tenant)) || shared == null || shared == 0) {
+            return caller;
+        }
+        return jdbc.queryForList("select app_user_id from acct.tenant_membership where tenant_id = ? and role <> 'ADMIN' "
+                + "order by case role when 'OWNER' then 0 when 'TRADER' then 1 when 'VIEWER' then 2 else 3 end, app_user_id "
+                + "limit 1", Long.class, tenant).stream().findFirst().orElse(caller);
+    }
+
     private BrokerAccount visible(Access.User user, long id) {
         return accounts.byId(id).filter(a -> user.sees(a.tenantId()))
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "no such account"));
     }
 
-    /** The copy group subscriptions go to: the worker's configured group, else the tenant's only enabled group. */
+    /**
+     * The copy group subscriptions go to, among those the tenant may follow (its own and those shared with it): the
+     * worker's configured group, else the only one.
+     */
     private long copyGroup(long tenant) {
         String name = properties.copyGroup();
-        List<Long> ids = "*".equals(name) || name.contains(",")
-                ? jdbc.queryForList("select id from acct.copy_group where tenant_id = ? and enabled", Long.class, tenant)
-                : jdbc.queryForList("select id from acct.copy_group where tenant_id = ? and name = ?", Long.class, tenant, name);
+        Long[] followable = accounts.followableCopyGroups(tenant).toArray(new Long[0]);
+        List<Long> ids = "*".equals(name) || name.contains(",") ? List.of(followable)
+                : jdbc.queryForList("select id from acct.copy_group where id = any(?) and name = ?", Long.class,
+                        followable, name);
         if (ids.size() > 1) {                    // several (drills): the live set's group, LIVE-SET, when it is one of them
-            List<Long> live = jdbc.queryForList("select id from acct.copy_group where tenant_id = ? and name = 'LIVE-SET' "
-                    + "and enabled", Long.class, tenant);
-            if (live.size() == 1 && ids.contains(live.getFirst())) {
+            List<Long> live = jdbc.queryForList("select id from acct.copy_group where id = any(?) and name = 'LIVE-SET'",
+                    Long.class, (Object) ids.toArray(new Long[0]));
+            if (live.size() == 1) {
                 return live.getFirst();
             }
         }
-        require(ids.size() == 1, ids.isEmpty() ? "the tenant has no copy group yet (it is created by the first signal-source "
-                + "session)" : "the tenant has several copy groups and none is LIVE-SET");
+        require(ids.size() == 1, ids.isEmpty() ? "the tenant has no copy group to follow yet (the owner's is created by the "
+                + "first signal-source session and shared with a family member when they are added)"
+                : "the tenant may follow several copy groups and none is LIVE-SET");
         return ids.getFirst();
     }
 

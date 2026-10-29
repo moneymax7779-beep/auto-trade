@@ -52,6 +52,9 @@ class SurgeController {
         }
     }
 
+    private static final String KIND = "surges";
+
+    private final ChartDb db;
     private final JdbcTemplate jdbc;
     private final TradingProperties properties;
     private final Map<String, Map<LocalTime, Double>> medians = new ConcurrentHashMap<>();
@@ -61,6 +64,7 @@ class SurgeController {
     private volatile HikariDataSource zt;
 
     SurgeController(ChartDb db, TradingProperties properties) {
+        this.db = db;
         this.jdbc = db.jdbc();                               // the charts pool, never the engine's (28 Oct 2026)
         this.properties = properties;
     }
@@ -83,13 +87,16 @@ class SurgeController {
         return result;
     }
 
-    private LocalDate latestDay() {
+    LocalDate latestDay() {
         List<LocalDate> days = jdbc.query("select session_date from md.index_tick order by recv_ts desc limit 1",
                 (rs, i) -> rs.getObject(1, LocalDate.class));
         return days.isEmpty() ? null : days.getFirst();
     }
 
-    /** A finished day is computed once; today is recomputed at most every 20 seconds. */
+    /**
+     * A finished day is computed once and kept in md.chart_day_cache (a restart or deploy reads it back); today is
+     * recomputed at most every 20 seconds.
+     */
     Map<String, Object> cached(LocalDate day, String underlying) {
         String key = day + "|" + underlying;
         boolean today = day.equals(LocalDate.now(MarketTime.IST));
@@ -98,7 +105,14 @@ class SurgeController {
         if (hit != null && (!today || now - hit.at() < 20_000)) {
             return hit.value();
         }
-        Map<String, Object> value = compute(day, underlying, today);
+        boolean finished = ChartDb.finished(day);
+        Map<String, Object> value = finished ? db.loadJson(KIND, day, underlying) : null;
+        if (value == null) {
+            value = compute(day, underlying, today);
+            if (finished) {
+                db.saveJson(KIND, day, underlying, value);
+            }
+        }
         cache.put(key, new Cached(now, value));
         return value;
     }

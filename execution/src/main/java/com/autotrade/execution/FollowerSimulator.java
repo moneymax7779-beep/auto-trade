@@ -459,8 +459,13 @@ public final class FollowerSimulator {
     /** The tenant's broker-routed accounts (DRY_RUN, LIVE) that the combined limits cover. */
     private static final String TENANT_BROKER_ACCOUNTS = "select id from acct.broker_account where tenant_id = ? "
             + "and enabled and account_role = 'FOLLOWER_TRADE' and trade_mode = ?";
-    /** The same, only those that can take the trade now: connected and not killed. */
-    private static final String TENANT_BROKER_ACCOUNTS_TAKING = TENANT_BROKER_ACCOUNTS
+    /**
+     * Broker-routed accounts of one mode, of any tenant entitled to a copy group (its own or one it is shared with), that
+     * can take a trade now: connected and not killed. Parameters: the copy group (twice), the mode.
+     */
+    private static final String GROUP_BROKER_ACCOUNTS_TAKING = "select id from acct.broker_account where tenant_id in "
+            + "(select tenant_id from acct.copy_group where id = ? union select tenant_id from acct.copy_group_share "
+            + "where copy_group_id = ?) and enabled and account_role = 'FOLLOWER_TRADE' and trade_mode = ?"
             + " and connection_status not in ('TOKEN_EXPIRED', 'TOKEN_REJECTED', 'DISCONNECTED') and not exists (select 1 "
             + "from exec.kill_switch k where k.scope = 'ACCOUNT' and k.broker_account_id = acct.broker_account.id "
             + "and k.released_at is null)";
@@ -503,9 +508,9 @@ public final class FollowerSimulator {
 
     /**
      * L6 liquidity allocator (risk v4 {@code share_liquidity}): the account's share of a decision's usable depth = its
-     * allocation over the allocations of the tenant's broker-routed accounts of the same mode subscribed to the strategy in
-     * the copy group that can take it now (connected, not killed): several accounts buying one strike at the same second
-     * compete for one book. 1 otherwise.
+     * allocation over the allocations of the broker-routed accounts of the same mode subscribed to the strategy in the
+     * copy group that can take it now (connected, not killed), across every tenant entitled to the group (29 Oct 2026:
+     * family members' accounts buy the same strike at the same second from the same book as the owner's). 1 otherwise.
      */
     private double liquidityShare(Day day, Pending p) {
         FollowerRisk.Combined c = risk.combined();
@@ -514,8 +519,8 @@ public final class FollowerSimulator {
         }
         Double all = jdbc.queryForObject("select coalesce(sum(a.allocated_capital), 0) from acct.broker_account a "
                 + "join acct.strategy_subscription s on s.broker_account_id = a.id and s.enabled where s.copy_group_id = ? "
-                + "and s.strategy_id = ? and a.id in (" + TENANT_BROKER_ACCOUNTS_TAKING + ")", Double.class, p.copyGroupId(),
-                p.strategyId(), day.account.tenantId(), day.account.tradeMode().name());
+                + "and s.strategy_id = ? and a.id in (" + GROUP_BROKER_ACCOUNTS_TAKING + ")", Double.class, p.copyGroupId(),
+                p.strategyId(), p.copyGroupId(), p.copyGroupId(), day.account.tradeMode().name());
         return all == null || all <= 0 ? 1 : Math.min(1, day.account.allocatedCapital() / all);
     }
 

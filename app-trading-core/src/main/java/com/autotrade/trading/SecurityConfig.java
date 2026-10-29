@@ -52,8 +52,9 @@ import org.springframework.web.filter.OncePerRequestFilter;
  *       client) on every page and API except health and the login flow itself. A script's API call without a session
  *       gets 401 with {@value #SIGN_IN_HEADER} (the UI then reloads the page, which signs in again); a page, or an API
  *       link opened in a browser (the daily Kite login link, Zerodha's redirect back), goes to the Keycloak sign-in and
- *       comes back to it afterwards. The PAPER system controls (kill, release, stop, exit-all) need the realm role
- *       {@code operator}. A sign-in lasts at most {@code autotrade.auth.max-session} (default 12 h, Keycloak's own
+ *       comes back to it afterwards. Every API except {@link #MEMBER_APIS} needs the realm role {@code operator}
+ *       (the owner) except {@link #MEMBER_CHART_GETS}: a family member signed in without it reaches their own accounts and the
+ *       index chart pages. A sign-in lasts at most {@code autotrade.auth.max-session} (default 12 h, Keycloak's own
  *       maximum), however busy the page is, so disabling a user or removing a role in Keycloak takes effect by then.
  *       The signed-in user's name is who acts on the execution API ({@link ExecutionProxyController}); what they may see
  *       and do there is decided by their tenant roles.</li>
@@ -74,6 +75,22 @@ class SecurityConfig {
 
     /** The PAPER system controls on trading-core's own API. */
     private static final String[] OPERATOR_POSTS = {"/api/kill", "/api/kill/release", "/api/stop", "/api/exit-all"};
+
+    /**
+     * What a signed-in user without the operator role reaches (29 Oct 2026, family members): who they are, and the
+     * execution API, which scopes every call to their tenants.
+     */
+    static final String[] MEMBER_APIS = {"/api/me", "/api/execution", "/api/execution/**"};
+
+    /**
+     * And, read-only, what the NIFTY / SENSEX / BANKNIFTY chart pages read (user, 29 Oct 2026: "I just the demo user to
+     * see the chart that admin sees exactly"): the live status, the session list and one session's last decisions and
+     * positions, the surge / premium / OI tape / PCR / levels charts, alerts and cues. A session's full decisions, orders
+     * and rejections, research, replay and config stay the operator's, and so does every POST.
+     */
+    static final String[] MEMBER_CHART_GETS = {"/api/status", "/api/sessions", "/api/sessions/*/last-decisions",
+            "/api/sessions/*/positions", "/api/surges", "/api/premium", "/api/oi-tape", "/api/oi-tape/**", "/api/pcr",
+            "/api/levels", "/api/alerts", "/api/cues"};
 
     @Bean
     SecurityFilterChain securityChain(HttpSecurity http, AuthProperties auth) throws Exception {
@@ -97,6 +114,9 @@ class SecurityConfig {
                         .requestMatchers("/actuator/health", "/actuator/health/**", "/login/**", "/oauth2/**", "/error")
                         .permitAll()
                         .requestMatchers(HttpMethod.POST, OPERATOR_POSTS).hasAuthority(auth.operatorAuthority())
+                        .requestMatchers(MEMBER_APIS).authenticated()
+                        .requestMatchers(HttpMethod.GET, MEMBER_CHART_GETS).authenticated()
+                        .requestMatchers("/api/**", "/actuator/**").hasAuthority(auth.operatorAuthority())
                         .anyRequest().authenticated())
                 .oauth2Login(o -> o.clientRegistrationRepository(registrations)
                         .authorizedClientRepository(new HttpSessionOAuth2AuthorizedClientRepository())

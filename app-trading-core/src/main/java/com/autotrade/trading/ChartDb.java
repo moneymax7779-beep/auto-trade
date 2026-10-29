@@ -8,6 +8,7 @@ import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Map;
 import java.util.zip.GZIPInputStream;
 import java.util.zip.GZIPOutputStream;
 
@@ -99,6 +100,30 @@ class ChartDb implements DisposableBean {
         } catch (RuntimeException e) {
             log.warn("chart cache: cannot keep {} {} {}: {}", kind, day, underlying, e.toString());
         }
+    }
+
+    private static final tools.jackson.databind.json.JsonMapper JSON = tools.jackson.databind.json.JsonMapper.builder().build();
+
+    /**
+     * A finished day's JSON answer (surges, premium, levels; 29 Oct 2026: after every restart these were computed again
+     * from the day's ticks, 1-5 s each) kept like the day's other charts; null when none is kept or the day was loaded
+     * again since.
+     */
+    @SuppressWarnings("unchecked")
+    Map<String, Object> loadJson(String kind, LocalDate day, String underlying) {
+        byte[] payload = load(kind, day, underlying);
+        return payload == null ? null : decode(payload, in -> (Map<String, Object>) JSON.readValue(in.readAllBytes(), Map.class));
+    }
+
+    void saveJson(String kind, LocalDate day, String underlying, Map<String, Object> value) {
+        save(kind, day, underlying, encode(out -> out.write(JSON.writeValueAsBytes(value))));
+    }
+
+    /** No more ticks will come for the day: before today, or today from 16:00 IST (the session stops at 15:45). */
+    static boolean finished(LocalDate day) {
+        LocalDate today = LocalDate.now(com.autotrade.core.time.MarketTime.IST);
+        return day.isBefore(today) || (day.equals(today)
+                && !java.time.LocalTime.now(com.autotrade.core.time.MarketTime.IST).isBefore(java.time.LocalTime.of(16, 0)));
     }
 
     @Override

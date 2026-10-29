@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import {
-  get, postJson, type AccountDetails, type CredentialProfile, type ExecPosition, type PnlDay,
+  get, postJson, type AccountDetails, type CredentialProfile, type ExecMe, type ExecPosition, type LedgerRow,
 } from "../api";
 import { ErrorNote, Loading, Panel, Table } from "../components/ui";
 
@@ -16,7 +16,8 @@ const primary = "rounded bg-accent px-3 py-1 text-sm font-semibold text-white di
 
 /** Strategy ids a follower can take: the live set (trading-core) plus what the copy group published or has subscribed. */
 function useStrategyIds() {
-  const live = useQuery({ queryKey: ["strategies-live"],
+  // the owner's live set (an operator API: a family member gets 403 and sees the published ids only)
+  const live = useQuery({ queryKey: ["strategies-live"], retry: false,
     queryFn: () => get<{ live: { strategy: string; version: string }[] }>("/api/strategies") });
   const published = useQuery({ queryKey: ["exec-strategy-ids"], queryFn: () => get<string[]>("/api/execution/strategy-ids") });
   return useMemo(() => {
@@ -58,7 +59,11 @@ const amount = (s: string) => {
   return s.trim() === "" || !Number.isFinite(n) ? null : n;
 };
 
-export function AddAccountPanel({ onDone }: { onDone: (text: string, ok: boolean) => void }) {
+export function AddAccountPanel({ tenants, onDone }: {
+  /** Tenants the caller manages (an admin also manages family members'): whose account this is. */
+  tenants: ExecMe["tenants"];
+  onDone: (text: string, ok: boolean) => void;
+}) {
   const client = useQueryClient();
   const profiles = useQuery({ queryKey: ["exec-profiles"],
     queryFn: () => get<CredentialProfile[]>("/api/execution/credential-profiles") });
@@ -72,9 +77,12 @@ export function AddAccountPanel({ onDone }: { onDone: (text: string, ok: boolean
   const [loss, setLoss] = useState("");
   const [strategies, setStrategies] = useState<string[]>([]);
   const [enabled, setEnabled] = useState(true);
-  const zerodhaProfiles = (profiles.data ?? []).filter((p) => p.broker_type === "ZERODHA" && p.status === "ACTIVE");
+  const [tenantId, setTenantId] = useState<number | "">(tenants.length === 1 ? tenants[0].id : "");
+  const zerodhaProfiles = (profiles.data ?? []).filter((p) => p.broker_type === "ZERODHA" && p.status === "ACTIVE"
+    && (tenantId === "" || p.tenant_id === tenantId));
   useEffect(() => {
-    if (profile === "" && zerodhaProfiles.length === 1) setProfile(zerodhaProfiles[0].name);
+    if (zerodhaProfiles.length === 1 && profile !== zerodhaProfiles[0].name) setProfile(zerodhaProfiles[0].name);
+    else if (profile !== "" && !zerodhaProfiles.some((p) => p.name === profile)) setProfile("");
   }, [zerodhaProfiles, profile]);
 
   const create = useMutation({
@@ -82,17 +90,18 @@ export function AddAccountPanel({ onDone }: { onDone: (text: string, ok: boolean
       name: name.trim(), broker, mode: broker === "PAPER" ? "PAPER" : "DRY_RUN",
       clientId: broker === "ZERODHA" ? clientId.trim() : null, credentialProfile: broker === "ZERODHA" ? profile || null : null,
       allocation: amount(allocation), equityMode, dailyLossLimit: amount(loss), strategies, enabled,
+      tenantId: tenantId === "" ? null : tenantId,
     }),
     onSuccess: (r) => {
       onDone(`${r.name} created (${broker === "PAPER" ? "PAPER" : "DRY_RUN"})`, true);
       setOpen(false); setName(""); setClientId(""); setAllocation(""); setLoss(""); setStrategies([]);
-      client.invalidateQueries({ queryKey: ["exec-accounts"] });
+      ["exec-accounts", "exec-members", "exec-audit"].forEach((k) => client.invalidateQueries({ queryKey: [k] }));
     },
     onError: (e) => onDone(e instanceof Error ? e.message : String(e), false),
   });
   const alloc = amount(allocation);
   const lossValue = amount(loss);
-  const ready = name.trim().length >= 2 && alloc != null && alloc > 0 && (broker === "PAPER" || clientId.trim().length >= 6)
+  const ready = tenantId !== "" && name.trim().length >= 2 && alloc != null && alloc > 0 && (broker === "PAPER" || clientId.trim().length >= 6)
     && (lossValue == null || (lossValue > 0 && alloc != null && lossValue <= alloc));
 
   return (
@@ -104,6 +113,13 @@ export function AddAccountPanel({ onDone }: { onDone: (text: string, ok: boolean
       ) : (
         <div className="space-y-3">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            {tenants.length > 1 && <Field label="Whose account" hint="family members trade their own money">
+              <select className={input} value={tenantId}
+                onChange={(e) => setTenantId(e.target.value === "" ? "" : Number(e.target.value))}>
+                <option value="">choose…</option>
+                {tenants.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+              </select>
+            </Field>}
             <Field label="Account name"><input className={input} value={name} placeholder="e.g. ZERODHA-2"
               onChange={(e) => setName(e.target.value)} /></Field>
             <Field label="Broker">
@@ -116,7 +132,8 @@ export function AddAccountPanel({ onDone }: { onDone: (text: string, ok: boolean
               <Field label="Zerodha client id" hint="the daily Kite login must come from it">
                 <input className={input} value={clientId} placeholder="AB1234"
                   onChange={(e) => setClientId(e.target.value.toUpperCase())} /></Field>
-              <Field label="Kite app">
+              <Field label="Kite app" hint={zerodhaProfiles.length === 0 ? "no Kite app for this person yet: PAPER until "
+                + "their own broker connection is set up" : undefined}>
                 <select className={input} value={profile} onChange={(e) => setProfile(e.target.value)}>
                   {zerodhaProfiles.length !== 1 && <option value="">choose…</option>}
                   {zerodhaProfiles.map((p) => <option key={p.id} value={p.name}>{p.name}</option>)}
@@ -154,8 +171,14 @@ export function AddAccountPanel({ onDone }: { onDone: (text: string, ok: boolean
   );
 }
 
-export function AccountDetailPanel({ accountId, onClose, onDone }: {
-  accountId: number; onClose: () => void; onDone: (text: string, ok: boolean) => void;
+export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDone }: {
+  accountId: number;
+  /** OWNER / ADMIN of the account's tenant: may change its settings; anyone else sees them read-only. */
+  canManage: boolean;
+  /** May act on it (OWNER, ADMIN, TRADER): the broker login. */
+  canAct: boolean;
+  onClose: () => void;
+  onDone: (text: string, ok: boolean) => void;
 }) {
   const client = useQueryClient();
   const details = useQuery({ queryKey: ["exec-details", accountId], refetchInterval: 10000,
@@ -163,8 +186,8 @@ export function AccountDetailPanel({ accountId, onClose, onDone }: {
   const [day, setDay] = useState("");
   const positions = useQuery({ queryKey: ["exec-positions", accountId, day], refetchInterval: 10000,
     queryFn: () => get<ExecPosition[]>(`/api/execution/accounts/${accountId}/positions${day ? `?day=${day}` : ""}`) });
-  const pnl = useQuery({ queryKey: ["exec-pnl", accountId], refetchInterval: 30000,
-    queryFn: () => get<PnlDay[]>(`/api/execution/accounts/${accountId}/pnl?days=30`) });
+  const ledger = useQuery({ queryKey: ["exec-ledger", accountId], refetchInterval: 30000,
+    queryFn: () => get<LedgerRow[]>(`/api/execution/accounts/${accountId}/ledger?days=60`) });
 
   const d = details.data;
   const [form, setForm] = useState<{ allocation: string; equityMode: string; loss: string; mode: string; enabled: boolean;
@@ -198,7 +221,7 @@ export function AccountDetailPanel({ accountId, onClose, onDone }: {
     onSuccess: (r) => {
       onDone(`${r.name}: settings saved`, true);
       setForm(null);
-      ["exec-details", "exec-accounts", "exec-audit"].forEach((k) => client.invalidateQueries({ queryKey: [k] }));
+      ["exec-details", "exec-accounts", "exec-members", "exec-audit"].forEach((k) => client.invalidateQueries({ queryKey: [k] }));
     },
     onError: (e) => onDone(e instanceof Error ? e.message : String(e), false),
   });
@@ -206,7 +229,10 @@ export function AccountDetailPanel({ accountId, onClose, onDone }: {
   if (details.isLoading || !form) return <Panel title="Account"><Loading what="account" /></Panel>;
   if (details.error) return <Panel title="Account"><ErrorNote error={details.error} /></Panel>;
   const a = d!;
-  const total30 = (pnl.data ?? []).reduce((sum, r) => sum + Number(r.net ?? 0), 0);
+  const ledgerRows = ledger.data ?? [];
+  const totalNet = ledgerRows.reduce((sum, r) => sum + r.net, 0);
+  const startEquity = ledgerRows.length ? ledgerRows[ledgerRows.length - 1].openingEquity : null;
+  const lastEquity = ledgerRows.length ? ledgerRows[0].closingEquity : null;
   const kite = a.broker === "ZERODHA";
   const sessionActive = a.session?.status === "ACTIVE";
 
@@ -222,10 +248,24 @@ export function AccountDetailPanel({ accountId, onClose, onDone }: {
           {kite && <span><span className="text-muted">Kite session </span>
             <span className={sessionActive ? "text-up" : "text-down"}>{sessionActive ? `active until ${a.session!.expires}` : "not logged in"}</span>
           </span>}
-          {kite && <a className={primary} href={`/api/execution/accounts/${a.id}/kite/login`} target="_blank" rel="noreferrer">
+          {kite && canAct && <a className={primary} href={`/api/execution/accounts/${a.id}/kite/login`} target="_blank" rel="noreferrer">
             {sessionActive ? "Log in to Kite again" : "Log in to Kite"}</a>}
         </div>
 
+        {!canManage ? (
+          <div className="rounded border border-line p-3 text-sm">
+            <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Settings</div>
+            <div className="flex flex-wrap gap-x-6 gap-y-1">
+              <span><span className="text-muted">Allocation </span>{rupees(a.allocatedCapital)}</span>
+              <span><span className="text-muted">Equity </span>{a.equityMode}</span>
+              <span><span className="text-muted">Daily loss limit </span>{a.dailyLossLimit == null ? "risk file %" : rupees(a.dailyLossLimit)}</span>
+              <span><span className="text-muted">Mode </span>{a.mode}</span>
+              <span><span className="text-muted">Following </span>
+                {a.strategies.filter((s) => s.enabled).map((s) => s.strategy_id).join(", ") || "nothing"}</span>
+            </div>
+            <p className="mt-2 text-xs text-muted">Only the account's owner or the admin changes these.</p>
+          </div>
+        ) : (
         <div className="rounded border border-line p-3">
           <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Settings</div>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
@@ -265,6 +305,7 @@ export function AccountDetailPanel({ accountId, onClose, onDone }: {
               allocation for new entries only.</span>
           </div>
         </div>
+        )}
 
         <div>
           <div className="mb-2 flex items-center gap-2">
@@ -290,15 +331,25 @@ export function AccountDetailPanel({ accountId, onClose, onDone }: {
 
         <div>
           <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
-            Daily P&amp;L, last 30 days · total <span className={total30 >= 0 ? "text-up" : "text-down"}>{rupees(total30)}</span>
+            Ledger · {ledgerRows.length} days · net <span className={totalNet >= 0 ? "text-up" : "text-down"}>{rupees(totalNet)}</span>
+            {startEquity != null && lastEquity != null && <> · equity {rupees(startEquity)} → {rupees(lastEquity)}</>}
+            <span className="ml-2 font-normal normal-case">(click a day for its positions)</span>
           </div>
-          {pnl.error ? <ErrorNote error={pnl.error} /> : (
-            <Table rows={pnl.data ?? []} empty="No closed trades yet." columns={[
-              { key: "d", label: "Day", render: (r) => <span className="num">{r.day}</span> },
-              { key: "t", label: "Trades", align: "right", render: (r) => <span className="num">{r.trades}</span> },
+          {ledger.error ? <ErrorNote error={ledger.error} /> : (
+            <Table rows={ledgerRows} empty="No trades yet." rowStyle={(r) => r.day === day ? { background: "var(--color-panel-2)" } : undefined}
+              columns={[
+              { key: "d", label: "Day", render: (r) => <button className="num underline decoration-dotted" onClick={() => setDay(r.day)}>{r.day}</button> },
+              { key: "o", label: "Opening", align: "right", render: (r) => <span className="num">{rupees(r.openingEquity)}</span> },
+              { key: "t", label: "Trades", align: "right", render: (r) => <span className="num">{r.trades}{r.open ? ` + ${r.open} open` : ""}</span> },
               { key: "w", label: "Won", align: "right", render: (r) => <span className="num">{r.wins}</span> },
+              { key: "g", label: "Gross", align: "right", render: (r) => <span className="num">{rupees(r.gross)}</span> },
+              { key: "c", label: "Charges", align: "right", render: (r) => <span className="num">{rupees(r.charges)}</span> },
               { key: "n", label: "Net", align: "right", render: (r) => (
-                <span className={`num ${Number(r.net) >= 0 ? "text-up" : "text-down"}`}>{rupees(Number(r.net))}</span>) },
+                <span className={`num ${r.net >= 0 ? "text-up" : "text-down"}`}>{rupees(r.net)}</span>) },
+              { key: "e", label: "Closing", align: "right", render: (r) => <span className="num">{rupees(r.closingEquity)}</span> },
+              { key: "b", label: "Broker", align: "right", render: (r) => r.brokerNet == null ? <span className="text-muted">–</span>
+                  : <span className={`num ${Math.abs(r.difference ?? 0) >= 1 ? "text-down" : ""}`}>{rupees(r.brokerNet)}
+                    {Math.abs(r.difference ?? 0) >= 1 ? ` (diff ${rupees(r.difference)})` : ""}</span> },
             ]} />
           )}
         </div>

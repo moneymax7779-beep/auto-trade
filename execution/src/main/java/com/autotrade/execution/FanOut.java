@@ -12,8 +12,12 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * One signal decision becomes one trade batch and one trade intent per follower that subscribes to its strategy
  * (zt-tiger-v2's pipeline, docs/LIVE-TRADING-PLAN.md section 1). Committed before any execution; idempotent: a decision
  * is batched once (key SIG:decision key) and each account gets one intent (key decision key:account). Eligible
- * followers: role FOLLOWER_TRADE, enabled, an enabled subscription of the group for the strategy. The intent's mode is
- * the subscription's override, else the account's trade mode; a LIVE intent also needs the account's live flag.
+ * followers: role FOLLOWER_TRADE, enabled, an enabled subscription of the group for the strategy, and a tenant entitled
+ * to the group (its own, or one it is shared with: {@code acct.copy_group_share}; each such tenant gets its own batch).
+ * The intent's mode is the subscription's override, else the account's trade mode; a LIVE intent also needs the
+ * account's live flag. An ENTER or ADD reaches a follower only when its subscription was enabled before the decision
+ * ({@code enabled_at}, V27: no entry hours late at the signal's old price); exits always do. A subscription made after
+ * the session's day (a replay, a back-test of followers) takes the whole day.
  */
 public final class FanOut {
 
@@ -26,10 +30,11 @@ public final class FanOut {
     /** Fans out every not yet batched decision of the group's day; returns the number of intents created. */
     public int fanOut(long copyGroupId, LocalDate day) {
         Date date = Date.valueOf(day);
-        // one batch per decision
+        // one batch per decision and entitled tenant: the group's own and each tenant it is shared with (V27)
         jdbc.update("insert into exec.trade_batch (tenant_id, copy_group_id, signal_decision_id, source, idempotency_key, "
-                + "status) select g.tenant_id, d.copy_group_id, d.id, 'SIGNAL', 'SIG:' || d.idempotency_key, 'CREATED' "
-                + "from exec.signal_decision d join acct.copy_group g on g.id = d.copy_group_id "
+                + "status) select t.tenant_id, d.copy_group_id, d.id, 'SIGNAL', 'SIG:' || d.idempotency_key, 'CREATED' "
+                + "from exec.signal_decision d join (select g.id, g.tenant_id from acct.copy_group g "
+                + "union select s.copy_group_id, s.tenant_id from acct.copy_group_share s) t on t.id = d.copy_group_id "
                 + "where d.copy_group_id = ? and d.session_date = ? "
                 + "on conflict (tenant_id, idempotency_key) do nothing", copyGroupId, date);
         // one intent per subscribed, eligible follower
@@ -45,6 +50,8 @@ public final class FanOut {
                 + "where d.copy_group_id = ? and d.session_date = ? and a.account_role = 'FOLLOWER_TRADE' and a.enabled "
                 + "and a.tenant_id = b.tenant_id "
                 + "and (coalesce(s.mode_override, a.trade_mode) <> 'LIVE' or a.live_trading_enabled) "
+                + "and (d.action = 'EXIT' or s.enabled_at <= d.decided_at "
+                + "or (s.enabled_at at time zone 'Asia/Kolkata')::date > d.session_date) "
                 + "on conflict (tenant_id, broker_account_id, idempotency_key) do nothing", copyGroupId, date);
         jdbc.update("update exec.trade_batch b set status = 'FANNED_OUT' from exec.signal_decision d "
                 + "where d.id = b.signal_decision_id and d.copy_group_id = ? and d.session_date = ? and b.status = 'CREATED'",
@@ -52,12 +59,16 @@ public final class FanOut {
         return created;
     }
 
-    /** Subscribes a follower account to strategies of a copy group (enabled), once per strategy. */
+    /**
+     * Subscribes a follower account to strategies of a copy group (enabled), once per strategy. A subscription that was
+     * off counts from now ({@code enabled_at}); one already on keeps its time.
+     */
     public void subscribe(long copyGroupId, long brokerAccountId, List<String> strategyIds, double sizeMultiplier) {
         for (String strategyId : strategyIds) {
             jdbc.update("insert into acct.strategy_subscription (copy_group_id, broker_account_id, strategy_id, enabled, "
                     + "size_multiplier) values (?, ?, ?, true, ?) on conflict (copy_group_id, broker_account_id, strategy_id) "
-                    + "do update set enabled = true, size_multiplier = excluded.size_multiplier",
+                    + "do update set enabled = true, size_multiplier = excluded.size_multiplier, enabled_at = case "
+                    + "when acct.strategy_subscription.enabled then acct.strategy_subscription.enabled_at else now() end",
                     copyGroupId, brokerAccountId, strategyId, sizeMultiplier);
         }
     }

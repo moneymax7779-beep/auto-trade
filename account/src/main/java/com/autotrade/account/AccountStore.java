@@ -113,6 +113,19 @@ public final class AccountStore {
                 tenantId, name);
     }
 
+    /** Shares a copy group with another tenant (a family member's), once: their subscribed accounts then follow it (V27). */
+    public void shareCopyGroup(long copyGroupId, long tenantId, long grantedByAppUserId) {
+        jdbc.update("insert into acct.copy_group_share (copy_group_id, tenant_id, granted_by) values (?, ?, ?) "
+                + "on conflict (copy_group_id, tenant_id) do nothing", copyGroupId, tenantId, grantedByAppUserId);
+    }
+
+    /** Enabled copy groups a tenant's accounts may follow: its own and those shared with it, by id. */
+    public List<Long> followableCopyGroups(long tenantId) {
+        return jdbc.queryForList("select id from acct.copy_group where enabled and (tenant_id = ? or id in "
+                + "(select copy_group_id from acct.copy_group_share where tenant_id = ?)) order by id", Long.class,
+                tenantId, tenantId);
+    }
+
     public Optional<BrokerAccount> byId(long id) {
         return jdbc.query("select " + ACCOUNT_COLUMNS + " from acct.broker_account a where a.id = ?", AccountStore::account,
                 id).stream().findFirst();

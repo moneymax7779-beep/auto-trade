@@ -56,6 +56,13 @@ class SecurityConfigTest {
         String other() {
             return "ok";
         }
+
+        @org.springframework.web.bind.annotation.GetMapping({"/api/sessions", "/api/configs", "/api/execution/accounts",
+                "/api/execution", "/actuator/info", "/api/surges", "/api/sessions/7/positions", "/api/sessions/7/decisions",
+                "/api/oi-tape/strikes", "/api/runs"})
+        String read() {
+            return "ok";
+        }
     }
 
     static MockMvc mvc(WebApplicationContext context) {
@@ -168,7 +175,27 @@ class SecurityConfigTest {
                 mvc.perform(post(path).with(user("viewer"))).andExpect(status().isForbidden());
                 mvc.perform(post(path).with(user("satya", "ROLE_OPERATOR"))).andExpect(status().isOk());
             }
-            mvc.perform(post("/api/replay").with(user("viewer"))).andExpect(status().isOk());
+            mvc.perform(post("/api/replay").with(user("satya", "ROLE_OPERATOR"))).andExpect(status().isOk());
+        }
+
+        /**
+         * 29 Oct 2026, family members: without the operator role, /api/me, the execution API (tenant-scoped) and, read-only,
+         * what the index chart pages read; nothing else, and no POST.
+         */
+        @Test
+        void aMemberWithoutTheOperatorRoleReachesTheirAccountsAndTheChartsOnly(WebApplicationContext context) throws Exception {
+            MockMvc mvc = mvc(context);
+            for (String path : List.of("/api/me", "/api/execution", "/api/execution/accounts", "/api/sessions", "/api/surges",
+                    "/api/sessions/7/positions", "/api/oi-tape/strikes")) {
+                mvc.perform(get(path).with(user("member"))).andExpect(status().isOk());
+            }
+            for (String path : List.of("/api/configs", "/actuator/info", "/api/sessions/7/decisions", "/api/runs")) {
+                mvc.perform(get(path).with(user("member"))).andExpect(status().isForbidden());
+                mvc.perform(get(path).with(user("satya", "ROLE_OPERATOR"))).andExpect(status().isOk());
+            }
+            mvc.perform(post("/api/replay").with(user("member"))).andExpect(status().isForbidden());
+            mvc.perform(post("/api/kill").with(user("member"))).andExpect(status().isForbidden());
+            mvc.perform(get("/accounts").with(user("member"))).andExpect(status().isNotFound());   // a page: signed in is enough
         }
     }
 

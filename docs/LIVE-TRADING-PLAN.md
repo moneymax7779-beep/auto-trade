@@ -902,3 +902,51 @@ Keycloak".
   - The owner's own Keycloak user (created by the user), and re-linking `app_user` local-owner to that username.
   - Turning the mode on there.
   - Removing the nginx password gate once logins are proven.
+
+**Family members, steps 1 and 2, 29 Oct (branch `feature/multi-user`; GCP unchanged).** User: "family only, yes my own
+other broker accounts, yes start steps 1 and 2 on a branch". The branch is main 6582de7 plus the two L3 Keycloak commits
+(cherry-picked from `feature/live-execution`) plus:
+- **One tenant per family member.** Their capital, limits, kill switches, positions and audit stay apart from the
+  owner's. The ADMIN who adds them is also ADMIN of their tenant (help, emergency flatten).
+- **V27 `acct.copy_group_share`.** The owner's signal group (LIVE-SET) is shared with a member's tenant explicitly. The
+  fan-out makes one batch per decision for each entitled tenant (own + shared), and intents only for that tenant's
+  subscribed accounts. A tenant without a share gets nothing, even with a subscription (tested).
+- **Liquidity allocator across tenants.** Family accounts buy the same strike at the same second from the same book, so
+  an account's share of the usable depth now counts every entitled tenant's accounts. Combined premium/lot limits stay
+  per tenant (each person's own money).
+- **trading-core:** without the realm role `operator`, a signed-in user reaches only `/api/me` and `/api/execution/**`
+  (scoped to their tenants by the worker). Sessions, research, replay, config, charts, strategies and alerts are the
+  owner's (403). The UI shows such a user a single "My accounts" page.
+- **app-execution:**
+  - `GET /api/execution/me`: the caller's tenants, role in each, ADMIN or not.
+  - `GET/POST /api/execution/admin/members`, `POST .../{username}/status` (ADMIN): add a member (their Keycloak
+    username, role OWNER / TRADER / VIEWER) in a new tenant that follows the admin's signal groups; disable/enable.
+    Audited. No password is handled: the login is made in Keycloak.
+  - `/api/execution/status` through the UI shows only the caller's tenants' accounts (the host's own call without the
+    header, the watchdog, still sees all). Before this, it listed every account to anyone.
+  - Strategy-ids lists what the followable groups publish and the tenant's own subscriptions (it showed every
+    subscription of the group's tenant before).
+  - A STRATEGY or INSTRUMENT kill switch names its tenant when the caller acts for several (it picked the first).
+  - The worker needs schema V27 (`REQUIRED_SCHEMA`); `.local/deploy-exec.sh` SCHEMA=27 at the deploy.
+- **UI:** "Owner" column when you see several tenants; Kill / Flatten / Kite login only where the role may act; settings
+  read-only unless OWNER/ADMIN; "Whose account" when creating one for a member; a Family members panel (ADMIN).
+- **Tests:** `FamilyMembersIT` (add a member, their account follows the shared group in their own tenant, no access to
+  the owner's account by any call, status scoping, disable takes effect at once, the stranger tenant gets no intent);
+  `SecurityConfigTest` (a member reaches only their APIs); existing isolation, pipeline and loop tests unchanged.
+- **Not done (next):** Keycloak on GCP and the switch (runbook `docs/runbooks/family-members.md`); a member's own
+  broker connection (step 3: their Zerodha client and Kite app; until then their accounts are PAPER); per-member
+  Telegram alerts; Kotak Neo and Upstox order adapters (step 4, user 29 Oct: "Kotak Neo, Kite, Upstox").
+- **Code review, same evening (fixed on the branch):**
+  - *Late subscriptions (pre-existing, made worse by sharing):* a subscription made or enabled during a session took
+    every earlier ENTER/ADD of the day at the signal's old price. On GCP on 29 Oct, `demo` (created 10:42) booked the
+    09:43 SENSEX entry at 235.20 and shows +Rs 1,62,564 that it could never have made; on a LIVE account it would buy
+    hours late. Now `acct.strategy_subscription.enabled_at` (V27): entries and adds reach a follower only when its
+    subscription was on before the decision; exits always; switching an account or a strategy back on counts from then;
+    a subscription made after the session's day (replays, follower back-tests) still takes the whole day.
+  - A family member's account created by the admin belongs to the member (`app_user_id`), not the admin.
+  - A STRATEGY or INSTRUMENT kill switch can cover every tenant the caller acts for (`allTenants`: the owner stops a
+    bad strategy for the whole family at once); the UI offers "everyone's".
+  - Kite apps are listed with their tenant; a member's account is offered only their own tenant's app (none until step
+    3, so it says so) instead of the owner's app the worker would then refuse.
+  - UI: Release only on switches the caller may release; the Kite login only for roles that may act; with an older
+    worker (no `/api/execution/me`) the controls stay as before instead of disappearing.

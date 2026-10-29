@@ -30,7 +30,7 @@ class ExecutionService implements DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(ExecutionService.class);
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
-    static final int REQUIRED_SCHEMA = 25;          // V25: acct.broker_account.daily_loss_limit
+    static final int REQUIRED_SCHEMA = 27;          // V27: acct.copy_group_share (the fan-out reads it)
 
     private final DataSource dataSource;
     private final ExecutionProperties properties;

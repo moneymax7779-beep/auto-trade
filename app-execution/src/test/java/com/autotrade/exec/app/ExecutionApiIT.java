@@ -90,7 +90,7 @@ class ExecutionApiIT {
 
         // another tenant's account: not found, whatever the call
         assertThat(status(() -> api.engage("kc-bob", new AccountsController.Engage("ACCOUNT", aliceAccount, null, null,
-                "x")))).isEqualTo(404);
+                "x", null, null)))).isEqualTo(404);
         assertThat(status(() -> api.audit("kc-bob", aliceAccount))).isEqualTo(404);
         assertThat(status(() -> {
             try {
@@ -104,11 +104,11 @@ class ExecutionApiIT {
         // a viewer reads, never acts; only an admin engages GLOBAL_LIVE
         assertThat(api.accounts("kc-viewer")).hasSize(1);
         assertThat(status(() -> api.engage("kc-viewer", new AccountsController.Engage("ACCOUNT", aliceAccount, null, null,
-                "x")))).isEqualTo(403);
+                "x", null, null)))).isEqualTo(403);
         assertThat(status(() -> api.engage("kc-alice", new AccountsController.Engage("GLOBAL_LIVE", null, null, null,
-                "x")))).isEqualTo(403);
+                "x", null, null)))).isEqualTo(403);
         Map<String, Object> global = api.engage("kc-admin", new AccountsController.Engage("GLOBAL_LIVE", null, null, null,
-                "drill"));
+                "drill", null, null));
         assertThat(api.switches("kc-bob")).extracting(s -> s.scope()).contains("GLOBAL_LIVE");
         assertThat(status(() -> api.release("kc-bob", (Long) global.get("id")))).isEqualTo(403);
         assertThat(api.release("kc-admin", (Long) global.get("id"))).containsEntry("released", true);
@@ -116,7 +116,7 @@ class ExecutionApiIT {
 
     @Test
     void anOwnersKillSwitchIsTheirsAloneAndFlattenNeedsItsConfirmation() throws Exception {
-        long id = (Long) api.engage("kc-alice", new AccountsController.Engage("ACCOUNT", aliceAccount, null, null, "drill"))
+        long id = (Long) api.engage("kc-alice", new AccountsController.Engage("ACCOUNT", aliceAccount, null, null, "drill", null, null))
                 .get("id");
         assertThat(api.switches("kc-alice")).extracting(s -> s.id()).contains(id);
         assertThat(api.switches("kc-bob")).extracting(s -> s.id()).doesNotContain(id);

@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import {
-  get, postJson, type AuditRow, type ExecutionAccount, type KillSwitch, type WorkerStatus,
+  get, postJson, type AuditRow, type ExecMe, type ExecutionAccount, type KillSwitch, type WorkerStatus,
 } from "../api";
 import { ErrorNote, Loading, Panel, Table } from "../components/ui";
 import { AccountDetailPanel, AddAccountPanel } from "./AccountManagement";
+import { MembersPanel } from "./MembersPanel";
 
 // Live execution: the caller's broker accounts across copy groups, kill switches, flatten and the audit log. Every call
 // goes to the execution workers (app-execution) through trading-core; the workers scope it to the user's tenants.
@@ -58,6 +59,8 @@ export function AccountsPage() {
     refetchInterval: 5000 });
   const switches = useQuery({ queryKey: ["exec-switches"], queryFn: () => get<KillSwitch[]>("/api/execution/kill-switches"),
     refetchInterval: 5000 });
+  // the caller's tenants and role in each (29 Oct 2026, family members): what they may do on which account
+  const me = useQuery({ queryKey: ["exec-me"], queryFn: () => get<ExecMe>("/api/execution/me"), staleTime: 30_000 });
   const [auditAccount, setAuditAccount] = useState<number | "">("");
   const audit = useQuery({
     queryKey: ["exec-audit", auditAccount],
@@ -65,7 +68,7 @@ export function AccountsPage() {
     refetchInterval: 10000,
   });
   const [flattenFor, setFlattenFor] = useState<number | null>(null);
-  const [managed, setManaged] = useState<number | null>(null);
+  const [openAccount, setOpenAccount] = useState<number | null>(null);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
 
   const act = useMutation({
@@ -83,9 +86,35 @@ export function AccountsPage() {
   const rows = accounts.data!.filter((a) => a.role === "FOLLOWER_TRADE");
   const names = new Map(accounts.data!.map((a) => [a.id, a.name]));
   const s = status.data;
+  // a worker without /api/execution/me (older build): show the controls as before; the worker refuses what is not allowed
+  const legacy = me.isError;
+  const tenants = new Map((me.data?.tenants ?? []).map((t) => [t.id, t]));
+  const mayAct = (tenantId: number) => legacy || (tenants.get(tenantId)?.mayAct ?? false);
+  const manages = (tenantId: number) => legacy || (tenants.get(tenantId)?.manages ?? false);
+  const several = tenants.size > 1;
+  const legacyTenants = legacy ? [...new Set(rows.map((a) => a.tenantId))].map((id) => ({ id, name: String(id), role: "?",
+    mayAct: true, manages: true })) : [];
+  const acting = legacy ? legacyTenants : [...tenants.values()].filter((t) => t.mayAct);
+  const managed = legacy ? legacyTenants : [...tenants.values()].filter((t) => t.manages);
 
   return (
     <div className="space-y-4">
+      {me.data && !me.data.admin ? (
+        <Panel title="Your access" right={s && (s.stale ? <Badge text="STALE" tone="down" /> : <Badge text="RUNNING" tone="up" />)}>
+          <div className="space-y-1 text-sm">
+            {me.data.tenants.map((t) => (
+              <div key={t.id} className="flex flex-wrap gap-x-6 gap-y-1">
+                <span><span className="text-muted">Role </span><span className="font-semibold">{t.role}</span></span>
+                <span className="text-muted">{t.manages ? "you may change your accounts' capital and strategies, log in to "
+                  + "the broker, stop and flatten them" : t.mayAct ? "you may log in to the broker, stop and flatten your "
+                  + "accounts" : "you can see your accounts; changes are made by the admin"}</span>
+                <span><span className="text-muted">Follows </span>{(t.follows ?? []).join(", ") || "nothing yet"}</span>
+              </div>
+            ))}
+            <p className="text-xs text-muted">PAPER and DRY_RUN only: no real orders. Open positions are squared off at 15:20.</p>
+          </div>
+        </Panel>
+      ) : (
       <Panel title="Execution worker" right={s && (s.stale ? <Badge text="STALE" tone="down" /> : <Badge text="TICKING" tone="up" />)}>
         {status.error ? <ErrorNote error={status.error} /> : !s ? <Loading what="worker" /> : (
           <div className="flex flex-wrap gap-x-8 gap-y-2 text-sm">
@@ -98,6 +127,7 @@ export function AccountsPage() {
           </div>
         )}
       </Panel>
+      )}
 
       {message && (
         <div className={`rounded border px-3 py-2 text-sm ${message.ok ? "border-up/40 text-up" : "border-down/40 text-down"}`}>
@@ -109,6 +139,8 @@ export function AccountsPage() {
       <Panel title="Follower accounts" right={<span className="text-xs text-muted">{rows.length} accounts</span>}>
         <Table rows={rows} columns={[
           { key: "n", label: "Account", render: (a) => <span className="font-semibold">{a.name}</span> },
+          ...(several ? [{ key: "o", label: "Owner", render: (a: ExecutionAccount) =>
+            <span className="text-xs">{tenants.get(a.tenantId)?.name ?? a.tenantId}</span> }] : []),
           { key: "b", label: "Broker", render: (a) => a.broker },
           { key: "m", label: "Mode", render: (a) => <Badge text={a.mode} tone={modeTone(a.mode)} /> },
           { key: "c", label: "Session", render: (a) => a.broker === "PAPER" ? <span className="text-muted">–</span>
@@ -123,11 +155,13 @@ export function AccountsPage() {
           { key: "a", label: "", render: (a) => (
             <div className="flex flex-wrap gap-1.5">
               <button className="rounded border border-accent/60 px-2 py-0.5 text-xs text-accent hover:bg-accent/10"
-                onClick={() => setManaged(managed === a.id ? null : a.id)}>{managed === a.id ? "Close" : "Manage"}</button>
-              {a.broker === "ZERODHA" && a.connection !== "ACTIVE" && (
+                onClick={() => setOpenAccount(openAccount === a.id ? null : a.id)}>
+                {openAccount === a.id ? "Close" : manages(a.tenantId) ? "Manage" : "Details"}</button>
+              {mayAct(a.tenantId) && a.broker === "ZERODHA" && a.connection !== "ACTIVE" && (
                 <a className="rounded border border-line px-2 py-0.5 text-xs hover:bg-panel-2" target="_blank" rel="noreferrer"
                   href={`/api/execution/accounts/${a.id}/kite/login`}>Log in to Kite</a>
               )}
+              {mayAct(a.tenantId) && <>
               <button className="rounded border border-warn/60 px-2 py-0.5 text-xs text-warn hover:bg-warn/10" disabled={act.isPending}
                 onClick={() => {
                   const reason = window.prompt(`Stop new entries on ${a.name}: reason`);
@@ -136,6 +170,7 @@ export function AccountsPage() {
                 }}>Kill</button>
               <button className="rounded border border-down/60 px-2 py-0.5 text-xs text-down hover:bg-down/10"
                 onClick={() => setFlattenFor(flattenFor === a.id ? null : a.id)}>Flatten…</button>
+              </>}
             </div>
           ) },
         ]} />
@@ -152,24 +187,33 @@ export function AccountsPage() {
         )}
       </Panel>
 
-      {managed != null && (
-        <AccountDetailPanel key={managed} accountId={managed} onClose={() => setManaged(null)}
+      {openAccount != null && (
+        <AccountDetailPanel key={openAccount} accountId={openAccount} onClose={() => setOpenAccount(null)}
+          canManage={manages(accounts.data!.find((a) => a.id === openAccount)?.tenantId ?? -1)}
+          canAct={mayAct(accounts.data!.find((a) => a.id === openAccount)?.tenantId ?? -1)}
           onDone={(text, ok) => setMessage({ ok, text })} />
       )}
 
-      <AddAccountPanel onDone={(text, ok) => setMessage({ ok, text })} />
+      {managed.length > 0 && <AddAccountPanel tenants={managed} onDone={(text, ok) => setMessage({ ok, text })} />}
 
-      <KillSwitchPanel switches={switches} accounts={rows} names={names} busy={act.isPending}
+      {me.data?.admin && <MembersPanel onDone={(text, ok) => setMessage({ ok, text })} />}
+
+      {acting.length > 0 && <>
+      <KillSwitchPanel switches={switches} accounts={rows.filter((a) => mayAct(a.tenantId))} names={names} busy={act.isPending}
+        tenants={acting} admin={me.data?.admin ?? legacy} canRelease={(k) => k.tenantId == null ? (me.data?.admin ?? legacy)
+          : mayAct(k.tenantId)}
         onEngage={(body) => act.mutate({ path: "/api/execution/kill-switches", body, done: "kill switch engaged" })}
         onRelease={(id) => act.mutate({ path: `/api/execution/kill-switches/${id}/release`, body: {}, done: `switch ${id} released` })} />
 
       <Panel title="Flatten all">
         <p className="mb-2 text-sm text-muted">
-          Every follower account you may act on: kill switch, broker stops off, every open position sold.
+          Every follower account you may act on{several ? ` (${acting.map((t) => t.name).join(", ")})` : ""}: kill switch,
+          broker stops off, every open position sold.
         </p>
         <TypedConfirm word="FLATTEN ALL" label="Flatten all accounts" busy={act.isPending} onConfirm={(reason) =>
           act.mutate({ path: "/api/execution/flatten-all", body: { confirm: "FLATTEN ALL", reason }, done: "flatten all done" })} />
       </Panel>
+      </>}
 
       <Panel title="Audit log" right={
         <select className="rounded border border-line bg-bg px-2 py-1 text-xs" value={auditAccount}
@@ -192,11 +236,16 @@ export function AccountsPage() {
   );
 }
 
-function KillSwitchPanel({ switches, accounts, names, busy, onEngage, onRelease }: {
+function KillSwitchPanel({ switches, accounts, names, busy, tenants, admin, canRelease, onEngage, onRelease }: {
   switches: { data?: KillSwitch[]; error: unknown; isLoading: boolean };
   accounts: ExecutionAccount[];
   names: Map<number, string>;
   busy: boolean;
+  /** Tenants the caller may act for: a strategy or contract switch names one when there are several. */
+  tenants: ExecMe["tenants"];
+  admin: boolean;
+  /** Whether the caller may release this switch (its tenant's actor; a tenant-less one: an admin). */
+  canRelease: (k: KillSwitch) => boolean;
   onEngage: (body: Record<string, unknown>) => void;
   onRelease: (id: number) => void;
 }) {
@@ -204,7 +253,10 @@ function KillSwitchPanel({ switches, accounts, names, busy, onEngage, onRelease 
   const [accountId, setAccountId] = useState<number | "">("");
   const [target, setTarget] = useState("");
   const [reason, setReason] = useState("");
-  const ready = reason.trim() !== "" && (scope === "GLOBAL_LIVE" || (scope === "ACCOUNT" ? accountId !== "" : target.trim() !== ""));
+  const [tenantId, setTenantId] = useState<number | "all" | "">(tenants.length === 1 ? tenants[0].id : "");
+  const needsTenant = (scope === "STRATEGY" || scope === "INSTRUMENT") && tenants.length > 1;
+  const ready = reason.trim() !== "" && (!needsTenant || tenantId !== "")
+    && (scope === "GLOBAL_LIVE" || (scope === "ACCOUNT" ? accountId !== "" : target.trim() !== ""));
   return (
     <Panel title="Kill switches" right={<span className="text-xs text-muted">entries and adds stop; exits never</span>}>
       {switches.error ? <ErrorNote error={switches.error} /> : (
@@ -214,10 +266,10 @@ function KillSwitchPanel({ switches, accounts, names, busy, onEngage, onRelease 
               : k.strategyId ?? k.instrumentKey ?? "every LIVE account" },
           { key: "r", label: "Reason", render: (k) => <span className="text-xs">{k.reason}</span> },
           { key: "b", label: "By", render: (k) => <span className="text-xs">{k.engagedBy} · {dateTime(k.engagedAt)}</span> },
-          { key: "x", label: "", render: (k) => (
+          { key: "x", label: "", render: (k) => canRelease(k) ? (
             <button className="rounded border border-line px-2 py-0.5 text-xs hover:bg-panel-2" disabled={busy}
               onClick={() => onRelease(k.id)}>Release</button>
-          ) },
+          ) : null },
         ]} />
       )}
       <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-line pt-3">
@@ -226,7 +278,7 @@ function KillSwitchPanel({ switches, accounts, names, busy, onEngage, onRelease 
           <option value="ACCOUNT">Account</option>
           <option value="STRATEGY">Strategy (all your accounts)</option>
           <option value="INSTRUMENT">Contract (all your accounts)</option>
-          <option value="GLOBAL_LIVE">Every LIVE account (admin)</option>
+          {admin && <option value="GLOBAL_LIVE">Every LIVE account (admin)</option>}
         </select>
         {scope === "ACCOUNT" && (
           <select className="rounded border border-line bg-bg px-2 py-1 text-sm" value={accountId}
@@ -240,6 +292,15 @@ function KillSwitchPanel({ switches, accounts, names, busy, onEngage, onRelease 
             placeholder={scope === "STRATEGY" ? "strategy id, e.g. opening-drive" : "contract key, e.g. NSE_FO|47168"}
             onChange={(e) => setTarget(e.target.value)} />
         )}
+        {needsTenant && (
+          <select className="rounded border border-line bg-bg px-2 py-1 text-sm" value={tenantId}
+            onChange={(e) => setTenantId(e.target.value === "" || e.target.value === "all" ? e.target.value as "" | "all"
+              : Number(e.target.value))}>
+            <option value="">whose accounts…</option>
+            <option value="all">everyone's ({tenants.length})</option>
+            {tenants.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+        )}
         <input className="w-56 rounded border border-line bg-bg px-2 py-1 text-sm" placeholder="reason" value={reason}
           onChange={(e) => setReason(e.target.value)} />
         <button className="rounded border border-down/60 px-3 py-1 text-sm font-semibold text-down hover:bg-down/10 disabled:opacity-40"
@@ -251,6 +312,8 @@ function KillSwitchPanel({ switches, accounts, names, busy, onEngage, onRelease 
               strategyId: scope === "STRATEGY" ? target.trim() : null,
               instrumentKey: scope === "INSTRUMENT" ? target.trim() : null,
               reason: reason.trim(),
+              tenantId: needsTenant && tenantId !== "all" ? tenantId : null,
+              allTenants: needsTenant && tenantId === "all",
             });
             setReason("");
           }}>Engage</button>

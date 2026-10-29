@@ -30,10 +30,12 @@ class PremiumController {
     private record Cached(long at, Map<String, Object> value) {
     }
 
+    private final ChartDb db;
     private final JdbcTemplate jdbc;
     private final Map<String, Cached> cache = new ConcurrentHashMap<>();
 
     PremiumController(ChartDb db) {
+        this.db = db;
         this.jdbc = db.jdbc();                               // the charts pool, never the engine's (28 Oct 2026)
     }
 
@@ -49,7 +51,15 @@ class PremiumController {
         if (hit != null && (!today || now - hit.at() < 30_000)) {
             return hit.value();
         }
-        Map<String, Object> value = compute(day, u, LocalDate.parse(expiry), strike);
+        boolean finished = ChartDb.finished(day);
+        String kind = "premium:" + expiry + ":" + strike;      // one strike's day, kept like the day's other charts
+        Map<String, Object> value = finished ? db.loadJson(kind, day, u) : null;
+        if (value == null) {
+            value = compute(day, u, LocalDate.parse(expiry), strike);
+            if (finished && !((List<?>) value.get("CE")).isEmpty()) {     // an empty strike is not kept
+                db.saveJson(kind, day, u, value);
+            }
+        }
         if (cache.size() > 500) {
             cache.clear();
         }

@@ -110,7 +110,12 @@ class AccountsController {
                 || s.scope().equals("INSTRUMENT") : user.sees(s.tenantId())).toList();
     }
 
-    record Engage(String scope, Long accountId, String strategyId, String instrumentKey, String reason) {
+    /**
+     * For STRATEGY and INSTRUMENT: {@code tenantId}, which tenant's accounts (needed when the caller may act for several),
+     * or {@code allTenants}, one switch for each tenant they may act for (the owner stopping a strategy for the family).
+     */
+    record Engage(String scope, Long accountId, String strategyId, String instrumentKey, String reason, Long tenantId,
+                  Boolean allTenants) {
     }
 
     @PostMapping("/api/execution/kill-switches")
@@ -121,6 +126,16 @@ class AccountsController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "a reason is required");
         }
         String scope = e.scope() == null ? "" : e.scope();
+        if (Boolean.TRUE.equals(e.allTenants()) && (scope.equals("STRATEGY") || scope.equals("INSTRUMENT"))) {
+            List<Long> tenants = user.tenants().stream().filter(user::mayAct).toList();
+            Access.require(!tenants.isEmpty(), "no tenant you may act for");
+            List<Long> ids = new ArrayList<>();
+            for (long tenant : tenants) {
+                ids.add(kills.engage(tenant, scope, null, scope.equals("STRATEGY") ? e.strategyId() : null,
+                        scope.equals("INSTRUMENT") ? e.instrumentKey() : null, e.reason(), user.subject()));
+            }
+            return Map.of("id", ids.getFirst(), "ids", ids);
+        }
         long id = switch (scope) {
             case "GLOBAL_LIVE" -> {
                 Access.require(user.admin(), "GLOBAL_LIVE needs ADMIN");
@@ -130,14 +145,10 @@ class AccountsController {
                 BrokerAccount a = own(user, e.accountId());
                 yield kills.engage(a.tenantId(), scope, a.id(), null, null, e.reason(), user.subject());
             }
-            case "STRATEGY" -> {
-                long tenant = actingTenant(user);
-                yield kills.engage(tenant, scope, null, e.strategyId(), null, e.reason(), user.subject());
-            }
-            case "INSTRUMENT" -> {
-                Access.require(user.tenants().stream().anyMatch(user::mayAct), "no tenant you may act for");
-                yield kills.engage(actingTenant(user), scope, null, null, e.instrumentKey(), e.reason(), user.subject());
-            }
+            case "STRATEGY" -> kills.engage(actingTenant(user, e.tenantId()), scope, null, e.strategyId(), null, e.reason(),
+                    user.subject());
+            case "INSTRUMENT" -> kills.engage(actingTenant(user, e.tenantId()), scope, null, null, e.instrumentKey(), e.reason(),
+                    user.subject());
             default -> throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "scope: GLOBAL_LIVE, ACCOUNT, STRATEGY "
                     + "or INSTRUMENT");
         };
@@ -210,8 +221,20 @@ class AccountsController {
         return a;
     }
 
-    private static long actingTenant(Access.User user) {
-        return user.tenants().stream().filter(user::mayAct).findFirst()
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.FORBIDDEN, "no tenant you may act for"));
+    /**
+     * The tenant a STRATEGY or INSTRUMENT switch is for: the one asked for (the caller must be able to act for it), else
+     * the caller's only such tenant (29 Oct 2026: an owner who is ADMIN of family members' tenants must say whose).
+     */
+    private static long actingTenant(Access.User user, Long requested) {
+        if (requested != null) {
+            Access.require(user.sees(requested) && user.mayAct(requested), "no right to act for tenant " + requested);
+            return requested;
+        }
+        List<Long> acting = user.tenants().stream().filter(user::mayAct).toList();
+        Access.require(!acting.isEmpty(), "no tenant you may act for");
+        if (acting.size() > 1) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "you act for several tenants: give tenantId");
+        }
+        return acting.getFirst();
     }
 }

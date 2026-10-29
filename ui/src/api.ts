@@ -358,6 +358,22 @@ export interface WorkerStatus {
   accounts: AccountTurn[];
 }
 
+/** GET /api/execution/me: the signed-in user's tenants and role in each (family members: their own tenant only). */
+export interface ExecMe {
+  user: string;
+  admin: boolean;
+  tenants: { id: number; name: string; role: string; mayAct: boolean; manages: boolean; follows?: string[] }[];
+}
+
+/** GET /api/execution/admin/members (ADMIN): each tenant the caller administers, its members and the groups it follows. */
+export interface MemberTenant {
+  tenantId: number;
+  tenant: string;
+  members: { username: string; display_name: string; status: string; role: string }[];
+  accounts: number;
+  follows: { id: number; name: string; owner: string }[];
+}
+
 export interface ExecutionAccount {
   id: number;
   tenantId: number;
@@ -435,6 +451,21 @@ export interface ExecPosition {
   status: string;
 }
 
+/** GET /api/execution/accounts/{id}/ledger?days=: the account's own ledger, newest day first. */
+export interface LedgerRow {
+  day: string;
+  openingEquity: number;
+  trades: number;
+  wins: number;
+  open: number;
+  gross: number;
+  charges: number;
+  net: number;
+  closingEquity: number;
+  brokerNet: number | null;
+  difference: number | null;
+}
+
 /** GET /api/execution/accounts/{id}/pnl?days= */
 export interface PnlDay {
   day: string;
@@ -446,6 +477,8 @@ export interface PnlDay {
 /** GET /api/execution/credential-profiles: a broker app's settings, never its secrets */
 export interface CredentialProfile {
   id: number;
+  /** whose app it is: a member's account can only use an app of its own tenant */
+  tenant_id: number;
   name: string;
   broker_type: string;
   redirect_uri: string | null;
