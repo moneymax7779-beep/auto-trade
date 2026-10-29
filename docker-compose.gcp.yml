@@ -49,6 +49,10 @@ services:
       KC_DB_USERNAME: keycloak
       KC_DB_PASSWORD: ${KC_DB_PASSWORD:?set in .env}
       KC_HOSTNAME: https://autotrade.136-82-45-194.sslip.io/auth
+      # The admin console only at the VM's own address, reached through an SSH tunnel (user 29 Oct 2026, option 1:
+      # the site's password gate stays on everything; the console's bearer tokens clash with that gate anyway):
+      #   gcloud compute ssh zt-autotrade ... -- -N -L 8180:127.0.0.1:8180   then http://localhost:8180/auth/admin/
+      KC_HOSTNAME_ADMIN: http://localhost:8180/auth
       KC_HTTP_ENABLED: "true"
       KC_PROXY_HEADERS: xforwarded
     depends_on:
