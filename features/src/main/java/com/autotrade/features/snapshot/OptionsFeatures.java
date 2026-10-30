@@ -69,5 +69,14 @@ public record OptionsFeatures(
         double atmBandCallShare3m,
         double atmBandPutShare3m,
         /** A-257: atmBandShare over the last 2 minutes (same band and definition). */
-        double atmBandShare2m) {
+        double atmBandShare2m,
+        /**
+         * A-272: the OI change of the calls / of the puts over the ATM ± 5 strikes in the 2 minutes ending now, in contracts
+         * (not a share); strikes without an OI at both ends are left out; NaN when none has both.
+         */
+        double atmBand5CallChange2m,
+        double atmBand5PutChange2m,
+        /** A-275: the same over the last 5 minutes (BSE publishes OI every 2½-3 minutes: a 2-minute window often has none). */
+        double atmBand5CallChange5m,
+        double atmBand5PutChange5m) {
 }

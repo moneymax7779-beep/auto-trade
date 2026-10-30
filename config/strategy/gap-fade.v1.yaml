@@ -1,0 +1,31 @@
+# Gap fade, v1 (ledger A-270; user 2026-10-29 ~22:30: "yes register A-270 and build and run replay I want to see it").
+# From A-269's descriptive arm: on the 16 gap index-days of 2 Sep-29 Oct, fading every >= 0.4 % gap made +Rs 8.59 L (PF 8.2)
+# in a quote-level simulation, 3 same-day-expiry trades giving 76 % of it; those days are not evidence for this file.
+# Evidence: the HELD_OUT 22-25 Sep (read once), then forward as a PAPER shadow judged at 30 trades.
+# - gap: the day's open (the first index price) vs the previous close, at least 0.4 % either way;
+# - entry: the 09:31 snapshot, the ATM option against the gap (put after a gap up, call after a gap down);
+# - target: a minute close at or through the previous close; stop: a minute close beyond ORH (gap up) / ORL (gap down);
+# - flat by 15:15; one trade per index per day; the expiring index is included (A-269 included it).
+version: gfd-v1
+strategy: gap-fade
+status: UNCALIBRATED
+source: "user-request-2026-10-29 (ledger A-270; values from A-269, fixed at registration)"
+
+scope:
+  entry_from: "09:31"
+  last_new_entry: "09:32"              # exclusive: the 09:31 snapshot only
+  flat_by: "15:15"
+  time_stop_min: 0
+  skip_expiring_index: false
+
+setup:
+  min_gap_pct: 0.4
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 50                 # emergency only; the opening-range stop comes first
+  use_target: true                     # the previous close

@@ -135,6 +135,10 @@ class OptionChainStateTest {
                 .isCloseTo(0.04, org.assertj.core.api.Assertions.within(1e-12));
         assertThat(features.atmBandCallShare3m()).isCloseTo(0.02, org.assertj.core.api.Assertions.within(1e-12));   // A-161
         assertThat(features.atmBandPutShare3m()).isCloseTo(0.06, org.assertj.core.api.Assertions.within(1e-12));
+        // A-272: ATM +- 5 in contracts over 2 minutes; 23400 PE (inside +- 5) has no OI 2 minutes back and is left out
+        assertThat(features.atmBand5CallChange2m()).isEqualTo(5 * 4_000.0);
+        assertThat(features.atmBand5PutChange2m()).isEqualTo(5 * 12_000.0);
+        assertThat(features.atmBand5CallChange5m()).as("A-275: no OI 5 minutes back").isNaN();
 
         OptionsFeatures shifted = chain.snapshot(T0, 23305, 10, spot);   // ATM 23300: 23350 / 23400 missing on one side
         assertThat(shifted.atmBandShare3m()).isNaN();

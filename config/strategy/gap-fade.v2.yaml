@@ -1,0 +1,38 @@
+# Gap fade, v2 = v1 + the OI gate (ledger A-272; user 2026-10-29 ~22:55: "yes register and run on tick days only").
+# The gate (an outside AI's rule, applied as given; mirrored for gap downs): at 09:31, over the ATM +- 5 strikes, the OI
+# change of calls and puts in the last 2 minutes; gap up: buy the put only if calls are being added >= 1.5x the puts (and
+# > 0); gap down: buy the call only if puts lead 1.5x. A-271 (descriptive, 18 gap days): allowed 5 (all won, +7.39 L),
+# blocked 11 (-0.25 L) and both held-out 24 Sep losers. Every tick day is already seen: evidence is forward days only.
+#
+# v1:
+# From A-269's descriptive arm: on the 16 gap index-days of 2 Sep-29 Oct, fading every >= 0.4 % gap made +Rs 8.59 L (PF 8.2)
+# in a quote-level simulation, 3 same-day-expiry trades giving 76 % of it; those days are not evidence for this file.
+# Evidence: the HELD_OUT 22-25 Sep (read once), then forward as a PAPER shadow judged at 30 trades.
+# - gap: the day's open (the first index price) vs the previous close, at least 0.4 % either way;
+# - entry: the 09:31 snapshot, the ATM option against the gap (put after a gap up, call after a gap down);
+# - target: a minute close at or through the previous close; stop: a minute close beyond ORH (gap up) / ORL (gap down);
+# - flat by 15:15; one trade per index per day; the expiring index is included (A-269 included it).
+version: gfd-v2
+strategy: gap-fade
+status: UNCALIBRATED
+source: "user-request-2026-10-29 (ledger A-272; the gate as the outside AI gave it, fixed at registration)"
+
+scope:
+  entry_from: "09:31"
+  last_new_entry: "09:32"              # exclusive: the 09:31 snapshot only
+  flat_by: "15:15"
+  time_stop_min: 0
+  skip_expiring_index: false
+
+setup:
+  min_gap_pct: 0.4
+  oi_gate_ratio: 1.5                   # A-272: the fading side's writers ahead 1.5:1 over ATM +- 5, the last 2 minutes
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 50                 # emergency only; the opening-range stop comes first
+  use_target: true                     # the previous close

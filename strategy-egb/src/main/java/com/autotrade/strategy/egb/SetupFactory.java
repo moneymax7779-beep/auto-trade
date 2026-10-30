@@ -27,7 +27,8 @@ public final class SetupFactory implements StrategyFactory {
             Map.entry("zone-break-flow", ZoneBreakFlow::new),   // A-131 (zbf-v10 live PAPER from 19 Oct, A-148)
             Map.entry("atm-oi-burst", AtmOiBurst::new),   // A-158
             Map.entry("oi-burst-cross", c -> new OiBurstCross(c, "NIFTY")),   // A-251 (per-index threshold)
-            Map.entry("oi-burst-allday", c -> new OiBurstCross(c, "NIFTY")));   // A-258: obc's signal all day
+            Map.entry("oi-burst-allday", c -> new OiBurstCross(c, "NIFTY")),   // A-258: obc's signal all day
+            Map.entry("gap-fade", GapFade::new));   // A-270
 
     private final ThresholdConfig config;
     private final Function<ThresholdConfig, Strategy> family;

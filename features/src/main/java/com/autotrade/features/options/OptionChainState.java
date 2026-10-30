@@ -235,7 +235,31 @@ public final class OptionChainState {
                 wallOiChangePct(callBarrier, time), wallOiChangePct(putSupport, time),
                 oiZ("CE", ce, windows, nearOi, time), oiZ("PE", pe, windows, nearOi, time),
                 bandShare(time, atm, step, 0), bandShare(time, atm, step, 1), bandShare(time, atm, step, 2),
-                bandSide(time, atm, step, true), bandSide(time, atm, step, false), bandChange(time, atm, step, 2, 0));
+                bandSide(time, atm, step, true), bandSide(time, atm, step, false), bandChange(time, atm, step, 2, 0),
+                bandDelta(time, atm, step, 5, 2, true), bandDelta(time, atm, step, 5, 2, false),
+                bandDelta(time, atm, step, 5, 5, true), bandDelta(time, atm, step, 5, 5, false));
+    }
+
+    /**
+     * A-272: the OI change in contracts of the calls (or puts) over ATM ± {@code band} strikes in the {@code minutes}
+     * ending now; a strike without an OI at both ends is left out (as A-271 measured it); NaN when none has both.
+     */
+    private double bandDelta(Instant time, double atm, double step, int band, int minutes, boolean calls) {
+        Instant from = time.minus(Duration.ofMinutes(minutes));
+        double sum = 0;
+        boolean any = false;
+        for (int k = -band; k <= band; k++) {
+            Contract contract = find(atm + k * step, calls);
+            if (contract == null || contract.oi.isEmpty()) {
+                continue;
+            }
+            double start = contract.oi.valueAt(from), now = contract.oi.latest();
+            if (start > 0 && now > 0) {
+                sum += now - start;
+                any = true;
+            }
+        }
+        return any ? sum : Double.NaN;
     }
 
     /**
@@ -611,7 +635,7 @@ public final class OptionChainState {
         double n = Double.NaN;
         return new OptionsFeatures(expiry == null ? null : expiry.toString(), n, n, contracts.size(), n, n, n, n, n, n, n,
                 n, "UNKNOWN", "UNKNOWN", n, n, n, n, false, false, n, n, n, n, n, n, n, n, n, "NONE", n, n, n, n, n, n,
-                n, n, n, n, n, n, n, n, n, n, n, n, n);
+                n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n);
     }
 
     static double midPrice(OptionTick tick) {

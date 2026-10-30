@@ -128,4 +128,11 @@ public final class SetupProviders {
             return "oi-burst-allday";
         }
     }
+
+    public static final class GapFadeProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "gap-fade";
+        }
+    }
 }

@@ -149,6 +149,10 @@ autotrade:
       # 2026-10-29 (A-267): oba-v4 = oba-v1 + A-266's gap rule (29 tick days +Rs 41.7 L vs +Rs 39.7 L, better in both halves;
       # held-out +Rs 15K on one changed trade); own session, judged forward against oba-v1 on the same days.
       - config/strategy/oi-burst-allday.v4.yaml
+      # 2026-10-30 (A-279, user: "go ahead" on the shadow): gfd-v4b = the gap fade with the data-driven entry (A-275) and the
+      # exit at the previous-close fill; 2 years of bars +Rs 1.00 L PF 1.03 (A-277), so near break-even; own session, read
+      # once at 30 forward trades.
+      - config/strategy/gap-fade.v4b.yaml
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"

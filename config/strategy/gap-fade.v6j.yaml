@@ -1,0 +1,62 @@
+# Gap fade, v6j (ledger A-277, stage 1 descriptive; user 2026-10-30 ~00:35: "the exit has to be based on the data ...
+# target has to be dynamic"): gfd-v4b's entry; at the fill the trade is not closed: runner, exit on a futures-volume minute >= 3x normal moving against the position.
+# Opening-range stop, premium stop and flat_by 15:15 stay as the safety net. Tick days are all seen.
+#
+# v4b:
+# Gap fade, v4b (no futures check; ledger A-275; user 2026-10-29 ~23:25: "it should be based on the data only, shouldn't be
+# fixed 09.31"; "yes register A, B, C and run on tick days"): no fixed entry minute. From 09:31 to 11:00 the first minute
+# snapshot where the checks hold enters: the gap alive (not filled, the opening range not closed beyond in its direction),
+# the OI gate over ATM +- 5 on 5 minutes true on 2 snapshots in a row, the minute close back through the open or VWAP.
+# Exits as v3. Tick days are all seen: evidence is forward days only.
+#
+# v3 = v2 + a touch target (ledger A-274; user 2026-10-29 ~23:10: "register v3 with touch target and run on tick
+# days"): exit as soon as the index touches the previous close after the entry (the session's low / high reaches it),
+# without waiting for a minute close there (22 Oct SENSEX: touched 11:12, never closed there, the 0DTE call then hit its
+# premium stop: -1.02 L vs +2.73 L). Tick days are all seen: evidence is forward days only.
+#
+# v2 = v1 + the OI gate (ledger A-272; user 2026-10-29 ~22:55: "yes register and run on tick days only").
+# The gate (an outside AI's rule, applied as given; mirrored for gap downs): at 09:31, over the ATM +- 5 strikes, the OI
+# change of calls and puts in the last 2 minutes; gap up: buy the put only if calls are being added >= 1.5x the puts (and
+# > 0); gap down: buy the call only if puts lead 1.5x. A-271 (descriptive, 18 gap days): allowed 5 (all won, +7.39 L),
+# blocked 11 (-0.25 L) and both held-out 24 Sep losers. Every tick day is already seen: evidence is forward days only.
+#
+# v1:
+# From A-269's descriptive arm: on the 16 gap index-days of 2 Sep-29 Oct, fading every >= 0.4 % gap made +Rs 8.59 L (PF 8.2)
+# in a quote-level simulation, 3 same-day-expiry trades giving 76 % of it; those days are not evidence for this file.
+# Evidence: the HELD_OUT 22-25 Sep (read once), then forward as a PAPER shadow judged at 30 trades.
+# - gap: the day's open (the first index price) vs the previous close, at least 0.4 % either way;
+# - entry: the 09:31 snapshot, the ATM option against the gap (put after a gap up, call after a gap down);
+# - target: a minute close at or through the previous close; stop: a minute close beyond ORH (gap up) / ORL (gap down);
+# - flat by 15:15; one trade per index per day; the expiring index is included (A-269 included it).
+version: gfd-v6j
+strategy: gap-fade
+status: UNCALIBRATED
+source: "user-request-2026-10-30 (ledger A-277 stage 1)"
+
+scope:
+  entry_from: "09:31"
+  last_new_entry: "11:01"              # A-275: any snapshot 09:31-11:00 (exclusive end)
+  flat_by: "15:15"
+  time_stop_min: 0
+  skip_expiring_index: false
+
+setup:
+  min_gap_pct: 0.4
+  oi_gate_ratio: 1.5                   # the fading side's writers ahead 1.5:1 over ATM +- 5
+  event_entry: true                    # A-275: the first snapshot where the checks hold, not a fixed minute
+  oi_gate_window_min: 5                # over the last 5 minutes (BSE publishes OI every 2.5-3 minutes)
+  oi_gate_persist: 2                   # true on this snapshot and the one before
+  futures_agree: false                 # futures OI state FRESH_SHORT / LONG_UNWIND / NEUTRAL after a gap up (mirrored)
+  price_confirm: true                  # the minute close below the open or VWAP after a gap up (mirrored)
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 50                 # emergency only; the opening-range stop comes first
+  use_target: true                     # the previous close, on a minute close
+  touch_target: true                   # A-274: and on a touch (the session's low / high reaching it), exit at that snapshot
+  runner: true
+  run_volagainst_rvol: 3
