@@ -43,13 +43,21 @@ if [ "$DAY" = "$TODAY" ] && [ "$H" -lt 1550 ]; then finish "too early: the sessi
 docker exec autotrade-postgres pg_isready -q || finish "FAILED: local Docker/Postgres is not running" 1
 log "start $DAY parts $PARTS"
 
-# 1. wait for GCP to finish the live session and its shadow replays (up to 90 minutes)
-for i in $(seq 1 18); do
-  R=$(gcloud compute ssh zt-autotrade $G --command="sudo docker exec autotrade-postgres psql -U autotrade -d autotrade -X -At -c \"select count(*) from trade.session where status = 'RUNNING' and session_date = '$DAY'\"" 2>/dev/null | tr -d '[:space:]')
-  [ "$R" = "0" ] && break
-  log "GCP sessions still running for $DAY: '$R' (check $i)"; sleep 300
+# 1. wait for GCP to finish the live session and every shadow replay (up to 3 hours). No RUNNING session is not enough on
+# its own: the shadows run one after another, and on 30 Oct the check fell between two of them at 16:23, 1 h 45 min
+# before the last one ended (21 shadows took 15:40-18:09). vm-day-status.sh also counts the configured shadow files with
+# no finished session yet; when that list cannot be read ('?'), two checks in a row with nothing running will do.
+gcloud compute scp "$HOME_DIR/vm-day-status.sh" zt-autotrade:/tmp/vm-day-status.sh $G >> "$LOG" 2>&1 || finish "FAILED: scp" 1
+R=; P=; idle=0
+for i in $(seq 1 36); do
+  S=$(gcloud compute ssh zt-autotrade $G --command="sudo bash /tmp/vm-day-status.sh $DAY" 2>/dev/null | tail -1)
+  R=${S%% *}; P=${S##* }
+  [ "$R" = 0 ] && [ "$P" = 0 ] && break
+  if [ "$R" = 0 ] && [ "$P" = "?" ]; then idle=$((idle + 1)); [ "$idle" -ge 2 ] && break; else idle=0; fi
+  log "GCP for $DAY: running '$R', shadow files still to run '$P' (check $i)"; sleep 300
 done
-[ "$R" = "0" ] || finish "FAILED: GCP still has a running session for $DAY after 90 minutes" 1
+[ "$R" = 0 ] || finish "FAILED: GCP still has a running session for $DAY after 3 hours" 1
+[ "$P" = 0 ] || log "warning: shadow files without a finished session for $DAY: '$P' (a failed file, or the list was unreadable); syncing anyway"
 
 # 2. start the export on the VM (detached), unless this day's export is already complete in the bucket
 complete=1   # each requested part's last marker
