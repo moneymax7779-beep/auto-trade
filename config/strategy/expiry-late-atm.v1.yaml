@@ -1,0 +1,30 @@
+# Late expiry one-sided ATM buy, v1 (ledger A-283; user 2026-10-30: "after 3.20PM buying one side which has direction CE
+# or PE with 30% target" -> "pre-register option 1 with (a), ATM, exit at 50% loss" -> "run the replay I want to see it").
+# The expiring index on its expiry day: at each snapshot 15:20-15:28 the synthetic spot (strike + call - put; the index
+# feed is frozen after 15:15) against the previous snapshot's; a move >= 0.10 % buys the option that way at the strike
+# nearest the synthetic spot; sold on the quote reaching +30 % or -50 % of the average cost, else flat at 15:29.
+# The engine checks the trigger once a minute (the registered A-283 rule checks every second). Tick days 29 Sep - 22 Oct
+# only: later expiries are frozen for the A-194 / A-283 forward read.
+version: ela-v1
+strategy: expiry-late-atm
+status: UNCALIBRATED
+source: "user-request-2026-10-30 (ledger A-283, fixed at registration)"
+
+scope:
+  entry_from: "15:20"
+  last_new_entry: "15:29"              # snapshots 15:20-15:28
+  flat_by: "15:29"
+  time_stop_min: 0
+  skip_expiring_index: false           # the strategy itself trades only the expiring index
+
+setup:
+  min_move_pct: 0.10
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # replaced per entry by the strike nearest the synthetic spot
+
+exits:
+  premium_stop_pct: 50                 # resting stop and the bracket's stop
+  premium_target_pct: 30               # the bracket's target, on every quote

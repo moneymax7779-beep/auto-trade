@@ -1,0 +1,29 @@
+# Late expiry trend buy, no stop, v2 (ledger A-284; user 2026-10-30: "buy at the right time and exit after 30% or 50 %, lets
+# not keep stop loss, whenever there is proper direction trend then do it, orders should be filled"). Expiring index on its
+# expiry day: at a snapshot 15:20-15:28 the synthetic spot up >= 0.15 % over 3 minutes, every minute up, above its 15:15 value
+# (mirrored down) buys the option that way at the strike nearest it; sold on the quote reaching +30 %, else flat at 15:29.
+# Replays with paper-risk.v20 (CAS fills).
+version: ela-v2
+strategy: expiry-late-atm
+status: UNCALIBRATED
+source: "user-request-2026-10-30 (ledger A-284, fixed at registration)"
+
+scope:
+  entry_from: "15:20"
+  last_new_entry: "15:29"              # snapshots 15:20-15:28
+  flat_by: "15:29"
+  time_stop_min: 0
+  skip_expiring_index: false           # the strategy itself trades only the expiring index
+
+setup:
+  trend_minutes: 3                     # A-284: a 3-minute trend
+  min_trend_pct: 0.15
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # replaced per entry by the strike nearest the synthetic spot
+
+exits:
+  premium_stop_pct: 100                # A-284: no stop (the whole premium)
+  premium_target_pct: 30               # the bracket's target, on every quote

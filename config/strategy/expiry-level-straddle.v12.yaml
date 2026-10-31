@@ -1,0 +1,38 @@
+# els-v12 = els-v10 + a time stop: both legs sold 60 minutes after the entry if the +90 % target has not hit (ledger A-286,
+# registered 31 Oct 2026 before any computation; the rule came from the A-285 tick days, which are seen). Rest unchanged.
+# NIFTY expiry-day level / compression break straddle, v10 = v5 with the exit at 15:29 (user 2026-10-30: "change sell timing to
+# sell both or one at 3.30PM"; options trade until 15:30, the engine's last minute check is 15:29) = the +90 % arm (ledger A-285; user 2026-10-30: "on expiry day
+# NIFTY only for now, when it crosses any of the level or compression break out buy both near +-50 or ATM ... almost same
+# premium PE and CE very near the spot price and try 10% of total premium 20% 30% 50% 90%"; "it has to be after 12.30PM";
+# chosen: 12:30-14:30, all levels, closest-premium pair, no stop / hold to 15:15, one a day). The first level cross (ORH,
+# ORL, PDH, PDL, VWAP, previous week / month high and low, a multiple of 100) or compression box break in 12:30-14:30 buys
+# the call / put pair with the closest asks of ATM - 50, ATM, ATM + 50; both sold at +90 % of the combined premium paid
+# (checked on every quote), else at 15:29. No stop.
+version: els-v12
+strategy: expiry-level-straddle
+status: UNCALIBRATED
+source: "user-request-2026-10-30 (ledger A-286, fixed at registration)"
+
+scope:
+  underlying: NIFTY
+  entry_from: "12:30"
+  entry_until: "14:30"
+  flat_by: "15:29"                     # user 30 Oct: sell at 3.30 PM (the last minute check)
+
+setup:
+  round_step: 100
+
+compression:                           # as ebs-v2 (egb-v1)
+  range_vs_session_max: 0.66
+  ema_gap_atr_max: 0.30
+  volume_rate_ratio_max: 1.0
+  memory_min: 30
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+
+exits:
+  target_pct: 90                       # combined bid >= (1 + 90 %) x the combined premium paid
+  premium_stop_pct: 100                # no stop
+  time_stop_min: 60                    # A-286: sell both 60 minutes after entry if the target has not hit
