@@ -482,7 +482,8 @@ class SessionRunner implements ApplicationRunner {
             // replay-speed (market seconds per second; 0 = as fast as possible) lets the UI be watched
             // replay-source own: auto-trade's own live capture, the same ticks the live session saw (zt: zt-tiger-v2's)
             com.autotrade.core.event.SessionEventSource events = bars
-                    ? new BarReplaySource(target, new IndexWeightFiles(Path.of("config", "reference", "weights")))
+                    ? new BarReplaySource(target, new IndexWeightFiles(Path.of("config", "reference", "weights")),
+                            t.barOptionsWithoutExtremes())
                     : t.replayFromOwnCapture() ? new OwnCaptureSource(target) : new ZtSessionSource(source, false);
             feed = new ReplayAsLiveFeed(events, session, t.underlyings(), t.replaySpeed());
         } else if ("upstox".equals(t.feed()) && !upstoxFailed.contains(session)) {

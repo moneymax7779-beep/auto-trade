@@ -31,6 +31,9 @@ public final class OptionChainState {
     private static final int ATM_BAND = 2;
     private static final int[] BAND_WINDOWS_MIN = {1, 3, 5};
 
+    /** A-283: the last synthetic spot, the anchor for the next one. */
+    private double lastSynthetic = Double.NaN;
+
     /** Recent state of one option contract. */
     static final class Contract {
         final double strike;
@@ -237,7 +240,34 @@ public final class OptionChainState {
                 bandShare(time, atm, step, 0), bandShare(time, atm, step, 1), bandShare(time, atm, step, 2),
                 bandSide(time, atm, step, true), bandSide(time, atm, step, false), bandChange(time, atm, step, 2, 0),
                 bandDelta(time, atm, step, 5, 2, true), bandDelta(time, atm, step, 5, 2, false),
-                bandDelta(time, atm, step, 5, 5, true), bandDelta(time, atm, step, 5, 5, false));
+                bandDelta(time, atm, step, 5, 5, true), bandDelta(time, atm, step, 5, 5, false),
+                syntheticSpot(time, atm));
+    }
+
+    /** A-283: strike + call mid - put mid at the strike nearest the last value (first: ATM), both sides quoted in 60 s. */
+    private double syntheticSpot(Instant time, double atm) {
+        double anchor = Double.isFinite(lastSynthetic) ? lastSynthetic : atm;
+        double best = Double.NaN, bestDistance = Double.POSITIVE_INFINITY;
+        for (Contract call : contracts.values()) {
+            if (!call.call || !fresh(call.last, time) || Math.abs(call.strike - anchor) >= bestDistance) {
+                continue;
+            }
+            Contract put = find(call.strike, false);
+            if (put == null || !fresh(put.last, time)) {
+                continue;
+            }
+            best = call.strike + midPrice(call.last) - midPrice(put.last);
+            bestDistance = Math.abs(call.strike - anchor);
+        }
+        if (Double.isFinite(best)) {
+            lastSynthetic = best;
+        }
+        return best;
+    }
+
+    private static boolean fresh(OptionTick tick, Instant time) {
+        return tick != null && !tick.bids().isEmpty() && !tick.asks().isEmpty() && tick.bids().price(0) > 0
+                && tick.asks().price(0) > 0 && !tick.receivedAt().isBefore(time.minusSeconds(60));
     }
 
     /**
@@ -635,7 +665,7 @@ public final class OptionChainState {
         double n = Double.NaN;
         return new OptionsFeatures(expiry == null ? null : expiry.toString(), n, n, contracts.size(), n, n, n, n, n, n, n,
                 n, "UNKNOWN", "UNKNOWN", n, n, n, n, false, false, n, n, n, n, n, n, n, n, n, "NONE", n, n, n, n, n, n,
-                n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n);
+                n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n);
     }
 
     static double midPrice(OptionTick tick) {

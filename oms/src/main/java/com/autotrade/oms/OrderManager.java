@@ -125,13 +125,20 @@ public final class OrderManager implements Consumer<OrderUpdate> {
     /** What {@code strategyId} holds in {@code underlying} (never another strategy's position). */
     public synchronized PositionView view(String strategyId, String underlying) {
         List<ManagedPosition> held = positionsOf(strategyId, underlying);
+        int closedToday = 0;
+        for (ManagedPosition position : closed) {
+            if (position.strategy.equals(strategyId) && position.underlying.equals(underlying) && position.boughtQuantity > 0) {
+                closedToday++;
+            }
+        }
         if (held.isEmpty()) {
-            return PositionView.FLAT;
+            return PositionView.flat(closedToday);
         }
         ManagedPosition position = held.getFirst();
         double[] quote = lastQuotes.get(position.contract.token());
         double bid = quote == null || !(quote[0] > 0) ? Double.NaN : quote[0];
-        return new PositionView(true, position.side, position.lots(), position.averageCost, position.openedAt, bid);
+        return new PositionView(true, position.side, position.lots(), position.averageCost, position.openedAt, bid,
+                closedToday);
     }
 
     /** Buys {@code lots} to open a position with the default premium stop; returns the risk decision. */
@@ -165,6 +172,14 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         live.put(position.key(), position);
         buy(position, lots, stage);
         return decision;
+    }
+
+    /**
+     * A-283: closes {@code strategyId}'s position in {@code underlying} when its bid reaches {@code targetPct} above or
+     * {@code stopPct} below its average cost, checked on every quote (the straddle bracket, one leg).
+     */
+    public synchronized void bracket(String strategyId, String underlying, double targetPct, double stopPct) {
+        brackets.put(key(strategyId, underlying), new Bracket(targetPct / 100.0, stopPct / 100.0));
     }
 
     /**
@@ -329,8 +344,8 @@ public final class OrderManager implements Consumer<OrderUpdate> {
     }
 
     /**
-     * A live straddle's combined exit as percentages {target, stop} of the premium paid; null for a
-     * single-leg position or once the bracket has fired.
+     * A live bracket's exit as percentages {target, stop} of the premium paid (a straddle's combined, or a single
+     * leg's, A-283); null without one, once it has fired or once its positions are closed.
      */
     public synchronized double[] bracket(String strategyId, String underlying) {
         Bracket bracket = brackets.get(key(strategyId, underlying));
@@ -391,7 +406,8 @@ public final class OrderManager implements Consumer<OrderUpdate> {
 
     /**
      * Closes a straddle once its legs' combined bid reaches the target or the stop against the
-     * combined premium paid. Checked only when no entry order is still working (the size is final).
+     * combined premium paid. Checked only when no entry order is still working and no entry slice is still to be
+     * sent (the size is final).
      */
     private void checkBrackets() {
         for (Map.Entry<String, Bracket> entry : List.copyOf(brackets.entrySet())) {
@@ -404,7 +420,8 @@ public final class OrderManager implements Consumer<OrderUpdate> {
             double paid = 0;
             double value = 0;
             for (ManagedPosition leg : legs) {
-                if (leg.state != ManagedPosition.State.OPEN || !working(leg.entryOrders).isEmpty()) {
+                if (leg.state != ManagedPosition.State.OPEN || !working(leg.entryOrders).isEmpty()
+                        || leg.pendingEntryQuantity > 0) {
                     paid = Double.NaN;
                     break;
                 }
@@ -925,6 +942,9 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         live.remove(position.key());
         closed.add(position);
         listener.closed(position);
+        if (positionsOf(position.strategy, position.underlying).isEmpty()) {
+            brackets.remove(key(position.strategy, position.underlying));   // never carried to a later position
+        }
         if (!position.leg.isEmpty() && "ENTRY_NOT_FILLED".equals(position.exitReason)) {
             // one leg of a straddle never filled: never keep the other as a naked position
             brackets.remove(key(position.strategy, position.underlying));

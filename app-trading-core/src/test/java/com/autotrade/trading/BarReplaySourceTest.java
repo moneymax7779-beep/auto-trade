@@ -100,4 +100,15 @@ class BarReplaySourceTest {
         assertThat(c.weightPercent()).isEqualTo(9.1);
         assertThat(c.previousClose()).isEqualTo(2790.0);
     }
+
+    @Test
+    void withoutExtremesAnOptionIsQuotedAtItsOpenUntilItsCloseWhileTheIndexKeepsItsHighAndLow() {
+        List<MarketEvent> e = BarReplaySource.events(List.of(
+                bar("NSE_FO|O", "OPTION", T0, 100, 110, 95, 105, 65, 12_000.0),
+                bar("NSE_INDEX|Nifty 50", "INDEX", T0, 22532.4, 22553.95, 22506.35, 22544.5, 0, null)), Map.of(), Map.of(), true);
+        assertThat(e.stream().filter(x -> x instanceof OptionTick).map(x -> ((OptionTick) x).lastPrice()).toList())
+                .containsExactly(100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 105.0, 105.0);
+        assertThat(e.stream().filter(x -> x instanceof IndexTick).map(x -> ((IndexTick) x).price()).toList())
+                .contains(22506.35, 22553.95);
+    }
 }

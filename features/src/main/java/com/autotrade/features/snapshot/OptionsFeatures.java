@@ -78,5 +78,11 @@ public record OptionsFeatures(
         double atmBand5PutChange2m,
         /** A-275: the same over the last 5 minutes (BSE publishes OI every 2½-3 minutes: a 2-minute window often has none). */
         double atmBand5CallChange5m,
-        double atmBand5PutChange5m) {
+        double atmBand5PutChange5m,
+        /**
+         * A-283: the synthetic spot of this expiry, strike + call mid - put mid at the strike nearest the previous value
+         * (first: nearest ATM) with both sides quoted (bid and ask > 0) in the last 60 s; NaN when none. The index feed
+         * freezes 15:15-15:28 on the exchange's closing session, the options do not.
+         */
+        double syntheticSpot) {
 }

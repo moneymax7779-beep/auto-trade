@@ -384,6 +384,9 @@ public final class TradingSession {
                     result = oms.enter(strategyId, underlying, intent.side(), contract.get(), lots,
                             intent.stage().name(), market, stopPct);
                 }
+                if (result.approved() && Double.isFinite(intent.targetPct())) {
+                    oms.bracket(strategyId, underlying, intent.targetPct(), stopPct);   // A-283: premium target on quotes
+                }
                 logDecision(strategyId, underlying, intent, lots, result, contract.get());
                 candidate(strategyId, underlying, snapshot, decision, intent, result.approved(), result.reason());
                 if (signals != null && result.approved()) {
@@ -402,8 +405,34 @@ public final class TradingSession {
             case ENTER_STRADDLE -> {
                 double atm = snapshot.options().atmStrike();
                 double step = snapshot.options().strikeStep();
-                var call = contracts.find(underlying, intent.legStrike(OptionSide.CE, atm, step), OptionSide.CE);
-                var put = contracts.find(underlying, intent.legStrike(OptionSide.PE, atm, step), OptionSide.PE);
+                boolean balanced = intent.strikeOffset() == OrderIntent.BALANCED_PAIR;
+                var call = balanced ? java.util.Optional.<Contract>empty()
+                        : contracts.find(underlying, intent.legStrike(OptionSide.CE, atm, step), OptionSide.CE);
+                var put = balanced ? java.util.Optional.<Contract>empty()
+                        : contracts.find(underlying, intent.legStrike(OptionSide.PE, atm, step), OptionSide.PE);
+                if (balanced) {                                                    // A-285: the closest asks near ATM
+                    double best = Double.POSITIVE_INFINITY;
+                    int bestDistance = Integer.MAX_VALUE;
+                    for (int kc = -1; kc <= 1; kc++) {
+                        for (int kp = -1; kp <= 1; kp++) {
+                            var c = contracts.find(underlying, atm + kc * step, OptionSide.CE);
+                            var p = contracts.find(underlying, atm + kp * step, OptionSide.PE);
+                            double callAsk = c.isEmpty() ? Double.NaN : oms.ask(c.get());
+                            double putAsk = p.isEmpty() ? Double.NaN : oms.ask(p.get());
+                            if (!(callAsk > 0) || !(putAsk > 0)) {
+                                continue;
+                            }
+                            double diff = Math.abs(callAsk - putAsk);
+                            int distance = Math.abs(kc) + Math.abs(kp);
+                            if (diff < best - 1e-9 || Math.abs(diff - best) <= 1e-9 && distance < bestDistance) {
+                                best = diff;
+                                bestDistance = distance;
+                                call = c;
+                                put = p;
+                            }
+                        }
+                    }
+                }
                 if (call.isEmpty() || put.isEmpty()) {
                     rejected(strategyId, underlying, "ENTER STRADDLE", "no quotes for the chosen strikes yet");
                     candidate(strategyId, underlying, snapshot, decision, intent, false, "no quotes for the chosen strikes yet");
@@ -773,7 +802,7 @@ public final class TradingSession {
         // closed: the average exit from the realised P&L over everything bought
         m.put("exitPrice", p.quantity() == 0 && p.boughtQuantity() > 0
                 ? Math.round((p.averageCost() + p.realised() / p.boughtQuantity()) * 100) / 100.0 : null);
-        double[] bracket = p.leg().isEmpty() ? null : oms.bracket(p.strategy(), p.underlying());
+        double[] bracket = oms.bracket(p.strategy(), p.underlying());   // a straddle's, or a single leg's (A-283)
         m.put("targetPct", bracket == null ? null : bracket[0]);
         m.put("stopPct", bracket == null ? null : bracket[1]);
         m.put("stages", p.stages());

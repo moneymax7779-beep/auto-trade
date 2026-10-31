@@ -55,6 +55,8 @@ abstract class SetupStrategy implements Strategy {
     private final double quietBreadthMinAgree;
     private final boolean skipExpiringIndex;
     private final double premiumStopPct;
+    /** A-283: a premium target sold on the quote that reaches it (the order manager's bracket); NaN = none. */
+    private final double premiumTargetPct;
     private final int strikeOffset;
     /** A-064/A-065: exit on a 3-minute close (09:15-based bars) back through the session VWAP. Default off. */
     private final boolean vwapTrail3m;
@@ -88,6 +90,7 @@ abstract class SetupStrategy implements Strategy {
         this.profitLockFloorPct = config.has("exits.profit_lock_floor_pct") ? config.getDouble("exits.profit_lock_floor_pct") : Double.NaN;
         this.skipExpiringIndex = config.getBoolean("scope.skip_expiring_index");
         this.premiumStopPct = config.getDouble("exits.premium_stop_pct");
+        this.premiumTargetPct = config.has("exits.premium_target_pct") ? config.getDouble("exits.premium_target_pct") : Double.NaN;
         this.strikeOffset = config.getInt("position.strike_offset");
         this.vwapTrail3m = config.has("exits.vwap_trail_3m") && config.getBoolean("exits.vwap_trail_3m");
         this.useTarget = !config.has("exits.use_target") || config.getBoolean("exits.use_target");
@@ -181,7 +184,7 @@ abstract class SetupStrategy implements Strategy {
             trailPeak = Double.NaN;
             if (entry != null) {
                 orders.add(new OrderIntent(OrderIntent.Action.ENTER, entry.side(), 1, Stage.CONFIRMED, entry.reason(),
-                        premiumStopPct, strikeOffset));
+                        premiumStopPct, strikeOffset(entry, s), premiumTargetPct, Double.NaN));
                 plan = entry;
                 enteredAt = now;
             }
@@ -207,6 +210,11 @@ abstract class SetupStrategy implements Strategy {
         }
         trailPeak = Math.max(trailPeak, position.bid());
         return position.bid() <= trailPeak * (1 - trailGivebackPct / 100.0) ? "TRAIL_" + Math.round(trailGivebackPct) : null;
+    }
+
+    /** The entry's strike in strikes from ATM (the file's {@code position.strike_offset}; A-283 overrides it). */
+    protected int strikeOffset(Entry entry, FeatureSnapshot s) {
+        return strikeOffset;
     }
 
     /** A family's own exit signal for an open position, checked after the frame's exits; null = none (default). */

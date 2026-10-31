@@ -227,6 +227,7 @@ class OrderManagerTest {
 
         assertThat(oms.livePositions()).isEmpty();
         assertThat(oms.closedPositions().getFirst().exitReason()).isEqualTo("ENTRY_NOT_FILLED");
+        assertThat(oms.view("NIFTY").closedToday()).as("an entry that never filled is not a trade").isZero();
     }
 
     @Test

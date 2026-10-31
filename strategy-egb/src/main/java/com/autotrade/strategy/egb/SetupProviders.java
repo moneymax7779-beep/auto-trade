@@ -135,4 +135,18 @@ public final class SetupProviders {
             return "gap-fade";
         }
     }
+
+    public static final class ExpiryLateAtmProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "expiry-late-atm";
+        }
+    }
+
+    public static final class ExpiryLevelStraddleProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "expiry-level-straddle";
+        }
+    }
 }

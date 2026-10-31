@@ -59,15 +59,22 @@ final class BarReplaySource implements SessionEventSource {
 
     private final JdbcTemplate jdbc;
     private final IndexWeightFiles weights;
+    private final boolean optionsWithoutExtremes;
 
     BarReplaySource(DataSource target, IndexWeightFiles weights) {
+        this(target, weights, false);
+    }
+
+    /** {@code optionsWithoutExtremes}: options quoted at their bar's open and close only (replay-source bars-close). */
+    BarReplaySource(DataSource target, IndexWeightFiles weights, boolean optionsWithoutExtremes) {
         this.jdbc = new JdbcTemplate(target);
         this.weights = weights;
+        this.optionsWithoutExtremes = optionsWithoutExtremes;
     }
 
     @Override
     public String name() {
-        return "bars";
+        return optionsWithoutExtremes ? "bars-close" : "bars";
     }
 
     @Override
@@ -86,7 +93,7 @@ final class BarReplaySource implements SessionEventSource {
         for (String u : underlyings) {
             weightsByUnderlying.put(u, weights == null ? Map.of() : weights.weights(u, session));
         }
-        List<MarketEvent> events = events(bars, previousClose, weightsByUnderlying);
+        List<MarketEvent> events = events(bars, previousClose, weightsByUnderlying, optionsWithoutExtremes);
         long n = 0;
         for (MarketEvent event : events) {
             sink.accept(event);
@@ -133,6 +140,12 @@ final class BarReplaySource implements SessionEventSource {
 
     /** The synthetic ticks of a day's bars, in time order (pure: tested without a database). */
     static List<MarketEvent> events(List<Bar> bars, Map<String, Double> previousClose, Map<String, Map<String, Double>> weights) {
+        return events(bars, previousClose, weights, false);
+    }
+
+    /** As above; {@code optionsWithoutExtremes}: an option is quoted at its open until its close (no high or low). */
+    static List<MarketEvent> events(List<Bar> bars, Map<String, Double> previousClose, Map<String, Map<String, Double>> weights,
+                                    boolean optionsWithoutExtremes) {
         List<MarketEvent> out = new ArrayList<>(bars.size() * 8);
         Map<String, long[]> running = new HashMap<>();          // key -> {cumulative volume, cumulative price*volume x100}
         List<Bar> ordered = new ArrayList<>(bars);
@@ -160,7 +173,9 @@ final class BarReplaySource implements SessionEventSource {
             run[1] += Math.round(b.close() * 100) * b.volume();
             double vwap = run[0] > 0 ? run[1] / 100.0 / run[0] : Double.NaN;
             boolean up = b.close() >= b.open();
-            double[] prices = {b.open(), up ? b.low() : b.high(), up ? b.high() : b.low(), b.close()};
+            double[] prices = optionsWithoutExtremes && b.kind().equals("OPTION")
+                    ? new double[] {b.open(), b.open(), b.open(), b.close()}
+                    : new double[] {b.open(), up ? b.low() : b.high(), up ? b.high() : b.low(), b.close()};
             for (int i = 0; i < prices.length; i++) {
                 for (int repeat = 0; repeat < 2; repeat++) {
                     Instant at = b.start().plusMillis((long) ((OFFSETS[i] + repeat * REPEAT_AFTER) * 1000));

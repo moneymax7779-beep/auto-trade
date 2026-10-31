@@ -82,7 +82,16 @@ public record TradingProperties(Trading trading, Source source, Upstox upstox, S
 
         /** --mode=replay only: "bars" replays the stored Upstox one-minute bars (hist.candle); no zt-tiger-v2 needed. */
         public boolean replayFromBars() {
-            return "bars".equalsIgnoreCase(replaySource);
+            return "bars".equalsIgnoreCase(replaySource) || barOptionsWithoutExtremes();
+        }
+
+        /**
+         * --mode=replay only: "bars-close" is "bars" with every option quoted only at its bar's open and close, not its
+         * high and low: the bars do not say when within the minute a call and a put made their extremes, and "bars"
+         * plays both at the same offsets (A-285: a straddle's combined target hit on aligned extremes). A lower bound.
+         */
+        public boolean barOptionsWithoutExtremes() {
+            return "bars-close".equalsIgnoreCase(replaySource);
         }
 
         /** The underlyings strategies trade: {@code trade-underlyings}, else every recorded underlying. */

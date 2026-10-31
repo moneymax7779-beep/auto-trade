@@ -17,6 +17,12 @@ package com.autotrade.strategy;
 public record OrderIntent(Action action, OptionSide side, int lots, Stage stage, String reason, double premiumStopPct,
                           int strikeOffset, double targetPct, double premiumBudget, double stopPoints) {
 
+    /**
+     * A-285: as a straddle's {@code strikeOffset}, the executor picks the call and the put each from ATM - 1, ATM, ATM + 1
+     * strikes so that their asks are closest (ties: the pair nearest ATM).
+     */
+    public static final int BALANCED_PAIR = 99;
+
     public enum Action {
         ENTER,
         ADD,

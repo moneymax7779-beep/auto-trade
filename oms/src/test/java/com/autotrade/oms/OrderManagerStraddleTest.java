@@ -89,6 +89,11 @@ class OrderManagerStraddleTest {
         quotes("14:14:54", 21.70, 21.90, 89.35, 89.55);
         assertThat(oms.livePositions()).isEmpty();
         assertThat(oms.closedPositions()).hasSize(2).allSatisfy(leg -> assertThat(leg.exitReason()).isEqualTo("TARGET_30"));
+        assertThat(oms.view("ebs", "NIFTY")).satisfies(v -> {
+            assertThat(v.open()).isFalse();
+            assertThat(v.closedToday()).isEqualTo(2);
+        });
+        assertThat(oms.bracket("ebs", "NIFTY")).as("the bracket went with the legs").isNull();
         assertThat(oms.reconcile()).isTrue();
     }
 
