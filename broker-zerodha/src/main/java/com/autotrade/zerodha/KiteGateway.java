@@ -216,7 +216,22 @@ public final class KiteGateway implements BrokerConnection {
         Instant time = KiteHttp.time(q.path("timestamp").asString(""));
         return new Quote(instrumentKey, buy.path("price").asDouble(0), buy.path("quantity").asLong(0),
                 sell.path("price").asDouble(0), sell.path("quantity").asLong(0), q.path("last_price").asDouble(0),
-                time == null ? Instant.now() : time);
+                time == null ? Instant.now() : time, levels(q.path("depth").path("buy")),
+                levels(q.path("depth").path("sell")));
+    }
+
+    /** Kite's five depth levels, best first; an empty level (price or quantity 0) ends the list. */
+    private static List<Quote.Level> levels(JsonNode side) {
+        List<Quote.Level> levels = new ArrayList<>();
+        for (JsonNode level : side) {
+            double price = level.path("price").asDouble(0);
+            long quantity = level.path("quantity").asLong(0);
+            if (!(price > 0) || quantity <= 0) {
+                break;
+            }
+            levels.add(new Quote.Level(price, quantity));
+        }
+        return levels;
     }
 
     @Override

@@ -71,7 +71,7 @@ public final class BrokerConnections implements AutoCloseable {
             return new Route(null, null, "no order adapter for " + account.brokerType() + " yet");
         }
         try {
-            BrokerAdapter.DryRun dryRun = adapter.dryRun(account);
+            BrokerAdapter.DryRun dryRun = adapter.dryRun(account, risk.orders());
             opened.put(account.id(), dryRun);
             BrokerVenue venue = new BrokerVenue(dataSource, dryRun.connection(), risk.orders(), freeze::of,
                     dryRun.beforeOrder());

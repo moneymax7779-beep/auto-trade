@@ -23,6 +23,9 @@ public interface BrokerAdapter {
 
     BrokerType broker();
 
-    /** Opens the DRY_RUN connection of an account (never a real broker). */
-    DryRun dryRun(BrokerAccount account) throws IOException;
+    /**
+     * Opens the DRY_RUN connection of an account: orders always go to the adapter's simulator, never to a real broker;
+     * {@code rules} say where its book comes from ({@link OrderRules#brokerMarket()}: the broker's own read API).
+     */
+    DryRun dryRun(BrokerAccount account, OrderRules rules) throws IOException;
 }

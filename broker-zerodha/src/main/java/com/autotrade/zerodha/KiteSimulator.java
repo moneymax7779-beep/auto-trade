@@ -22,6 +22,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 
+import com.autotrade.broker.Quote;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
@@ -61,7 +62,30 @@ public final class KiteSimulator implements AutoCloseable {
         }
     }
 
-    private record Book(double bid, long bidQuantity, double ask, long askQuantity, double last) {
+    /**
+     * A contract's book: price levels best first on each side (quantities are used up by our fills until the next quote
+     * replaces the book) and the last traded price.
+     */
+    private static final class Book {
+        final double[] bidPx, askPx;
+        final long[] bidQty, askQty;
+        final double last;
+
+        Book(List<Quote.Level> bids, List<Quote.Level> asks, double last) {
+            bidPx = bids.stream().mapToDouble(Quote.Level::price).toArray();
+            bidQty = bids.stream().mapToLong(Quote.Level::quantity).toArray();
+            askPx = asks.stream().mapToDouble(Quote.Level::price).toArray();
+            askQty = asks.stream().mapToLong(Quote.Level::quantity).toArray();
+            this.last = last;
+        }
+
+        double bid() {
+            return bidPx.length == 0 ? 0 : bidPx[0];
+        }
+
+        double last() {
+            return last;
+        }
     }
 
     private static final class Order {
@@ -105,6 +129,7 @@ public final class KiteSimulator implements AutoCloseable {
     private boolean staleOnce;
     private List<Order> previousBook = List.of();
     private int requests;
+    private final Map<String, Integer> requestsByOperation = new HashMap<>();
 
     /** Listens on 127.0.0.1 ({@code port} 0 = any free port); {@code timeoutMillis}: how long a TIMEOUT fault stalls. */
     public KiteSimulator(int port, String apiKey, String apiSecret, long timeoutMillis) throws IOException {
@@ -133,11 +158,33 @@ public final class KiteSimulator implements AutoCloseable {
         return this;
     }
 
-    /** The executable book of a contract; resting orders that it reaches fill now. */
+    /** The executable book of a contract (top of book only); resting orders that it reaches fill now. */
     public synchronized void quote(String exchange, String symbol, double bid, long bidQuantity, double ask,
                                    long askQuantity, double last) {
-        books.put(exchange + ":" + symbol, new Book(bid, bidQuantity, ask, askQuantity, last));
+        depth(exchange, symbol, level(bid, bidQuantity), level(ask, askQuantity), last);
+    }
+
+    /**
+     * The book with its levels (best first); an order fills level by level up to its limit, at each level's price.
+     * Resting orders that it reaches fill now.
+     */
+    public synchronized void depth(String exchange, String symbol, List<Quote.Level> bids, List<Quote.Level> asks,
+                                   double last) {
+        books.put(exchange + ":" + symbol, new Book(bids, asks, last));
         orders.values().stream().filter(o -> (o.exchange + ":" + o.symbol).equals(exchange + ":" + symbol)).forEach(this::match);
+    }
+
+    /** The same book by our instrument key ({@code NSE_FO|47168}). */
+    public synchronized void depth(String instrumentKey, List<Quote.Level> bids, List<Quote.Level> asks, double last) {
+        Listing l = byKey(instrumentKey);
+        if (l == null) {
+            throw new IllegalArgumentException("not listed: " + instrumentKey);
+        }
+        depth(l.exchange(), l.tradingSymbol(), bids, asks, last);
+    }
+
+    private static List<Quote.Level> level(double price, long quantity) {
+        return price > 0 && quantity > 0 ? List.of(new Quote.Level(price, quantity)) : List.of();
     }
 
     /** The same quote by our instrument key ({@code NSE_FO|47168}). */
@@ -222,6 +269,30 @@ public final class KiteSimulator implements AutoCloseable {
         return requests;
     }
 
+    /**
+     * What our orders took from a contract's book since {@code since}, by price: the quantity bought ({@code side} BUY,
+     * taken from the asks) or sold (SELL, from the bids). Holdings given with {@link #holding} are not counted.
+     */
+    public synchronized Map<Double, Long> taken(String instrumentKey, String side, Instant since) {
+        Listing l = byKey(instrumentKey);
+        Map<Double, Long> taken = new HashMap<>();
+        if (l == null) {
+            return taken;
+        }
+        for (Trade t : trades) {
+            if (!t.orderId().equals("0") && t.side().equals(side) && t.exchange().equals(l.exchange())
+                    && t.symbol().equals(l.tradingSymbol()) && t.time() != null && !t.time().isBefore(since)) {
+                taken.merge(t.price(), t.quantity(), Long::sum);
+            }
+        }
+        return taken;
+    }
+
+    /** Requests of one operation so far: place, modify, cancel, orders, trades, quote, margins, positions, session. */
+    public synchronized int requests(String operation) {
+        return requestsByOperation.getOrDefault(operation, 0);
+    }
+
     // ------------------------------------------------------------------ HTTP
 
     private void handle(HttpExchange ex) throws IOException {
@@ -233,6 +304,7 @@ public final class KiteSimulator implements AutoCloseable {
         Fault fault;
         synchronized (this) {
             requests++;
+            requestsByOperation.merge(op, 1, Integer::sum);
             Deque<Fault> queue = faults.get(op);
             fault = queue == null ? null : queue.poll();
             fault = fault == Fault.NONE ? null : fault;
@@ -464,7 +536,8 @@ public final class KiteSimulator implements AutoCloseable {
         }
         if (fillStopOnCancel && o.type.equals("SL") && !terminal(o)) {
             Book b = books.get(o.exchange + ":" + o.symbol);
-            fill(o, o.quantity - o.filled, b == null ? o.price : Math.max(o.price, Math.min(b.bid(), o.trigger)));
+            fill(o, o.quantity - o.filled, b == null || !(b.bid() > 0) ? o.price
+                    : Math.max(o.price, Math.min(b.bid(), o.trigger)));
         }
         if (terminal(o)) {
             return status(400, error("InputException", "Order cannot be cancelled as it is " + o.status.toLowerCase()
@@ -479,7 +552,10 @@ public final class KiteSimulator implements AutoCloseable {
         return o.status.equals("COMPLETE") || o.status.equals("CANCELLED") || o.status.equals("REJECTED");
     }
 
-    /** Fills what the book reaches: whole lots, at most the book's quantity (and the partial-fill fraction). */
+    /**
+     * Fills what the book reaches, level by level up to the order's limit, at each level's price: whole lots, at most
+     * each level's quantity (used up by the fill), and the partial-fill fraction.
+     */
     private void match(Order o) {
         if (terminal(o)) {
             return;
@@ -497,17 +573,22 @@ public final class KiteSimulator implements AutoCloseable {
             o.status = "OPEN";
         }
         boolean buy = o.side.equals("BUY");
-        double touch = buy ? b.ask() : b.bid();
-        long depth = buy ? b.askQuantity() : b.bidQuantity();
-        if (!(touch > 0) || depth <= 0 || (buy ? o.price < touch : o.price > touch)) {
-            return;
-        }
+        double[] px = buy ? b.askPx : b.bidPx;
+        long[] qty = buy ? b.askQty : b.bidQty;
         long open = o.quantity - o.filled;
         long want = o.entry && partialFraction < 1 && o.filled == 0
                 ? Math.max(o.lot, (long) Math.floor(o.quantity * partialFraction / o.lot) * o.lot) : open;
-        long quantity = Math.min(Math.min(open, want), depth / o.lot * o.lot);
-        if (quantity > 0) {
-            fill(o, quantity, touch);
+        want = Math.min(open, want);
+        for (int i = 0; i < px.length && want > 0; i++) {
+            if (!(px[i] > 0) || (buy ? o.price < px[i] : o.price > px[i])) {
+                break;                                          // levels are best first: the rest are out of reach too
+            }
+            long quantity = Math.min(want, qty[i] / o.lot * o.lot);
+            if (quantity > 0) {
+                fill(o, quantity, px[i]);
+                qty[i] -= quantity;
+                want -= quantity;
+            }
         }
     }
 
@@ -604,16 +685,28 @@ public final class KiteSimulator implements AutoCloseable {
                 continue;
             }
             ObjectNode depth = json.createObjectNode();
-            depth.set("buy", json.createArrayNode().add(json.createObjectNode().put("price", b.bid())
-                    .put("quantity", b.bidQuantity()).put("orders", 1)));
-            depth.set("sell", json.createArrayNode().add(json.createObjectNode().put("price", b.ask())
-                    .put("quantity", b.askQuantity()).put("orders", 1)));
+            depth.set("buy", side(b.bidPx, b.bidQty));
+            depth.set("sell", side(b.askPx, b.askQty));
             ObjectNode q = json.createObjectNode().put("instrument_token", l.instrumentToken()).put("last_price", b.last())
                     .put("timestamp", ts(clock.get()));
             q.set("depth", depth);
             data.set(key, q);
         }
         return data;
+    }
+
+    /** Kite's five depth levels of one side: the book's levels with quantity left, then empty levels. */
+    private ArrayNode side(double[] px, long[] qty) {
+        ArrayNode levels = json.createArrayNode();
+        for (int i = 0; i < px.length && levels.size() < 5; i++) {
+            if (qty[i] > 0) {
+                levels.add(json.createObjectNode().put("price", px[i]).put("quantity", qty[i]).put("orders", 1));
+            }
+        }
+        while (levels.size() < 5) {
+            levels.add(json.createObjectNode().put("price", 0).put("quantity", 0).put("orders", 0));
+        }
+        return levels;
     }
 
     private ObjectNode positions() {

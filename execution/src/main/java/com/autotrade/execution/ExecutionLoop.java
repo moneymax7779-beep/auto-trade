@@ -73,6 +73,17 @@ public final class ExecutionLoop implements AutoCloseable {
 
     public ExecutionLoop(DataSource dataSource, String tenant, String copyGroups, String workerId, CostModel costs,
                          QuoteSource quotes, double brokerFunds) {
+        this(dataSource, tenant, copyGroups, workerId, costs, quotes, brokerFunds, BrokerSessions.NONE,
+                com.autotrade.zerodha.KiteConfig.REAL_API);
+    }
+
+    /**
+     * @param sessions    the accounts' real broker sessions, read by DRY_RUN accounts whose risk file reads the broker's
+     *                    market ({@code orders.dry_run_market: BROKER})
+     * @param kiteApiBase Kite's API for those reads
+     */
+    public ExecutionLoop(DataSource dataSource, String tenant, String copyGroups, String workerId, CostModel costs,
+                         QuoteSource quotes, double brokerFunds, BrokerSessions sessions, java.net.URI kiteApiBase) {
         this.dataSource = dataSource;
         this.jdbc = new JdbcTemplate(dataSource);
         this.transactions = new TransactionTemplate(new org.springframework.jdbc.datasource.DataSourceTransactionManager(
@@ -84,7 +95,8 @@ public final class ExecutionLoop implements AutoCloseable {
         this.workerId = workerId;
         this.costs = costs;
         this.quotes = quotes;
-        this.connections = new BrokerConnections(dataSource, brokerFunds);
+        this.connections = new BrokerConnections(dataSource, brokerFunds,
+                List.of(new ZerodhaDryRunAdapter(dataSource, brokerFunds, sessions, kiteApiBase)));
         this.reconciler = new BrokerReconciler(dataSource, costs);
     }
 

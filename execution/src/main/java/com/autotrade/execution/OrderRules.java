@@ -13,12 +13,15 @@ import com.autotrade.config.ThresholdConfig;
  *       touch;</li>
  *   <li>protective stop: a resting stop-limit sell at the premium stop (the signal's {@code stop_pct}, else
  *       {@code defaultStopPct}) with its limit {@code stopLimitOffsetPct} % below the trigger;</li>
- *   <li>{@code tick}: the price step of index options (Rs 0.05).</li>
+ *   <li>{@code tick}: the price step of index options (Rs 0.05);</li>
+ *   <li>{@code brokerMarket} (v6, {@code orders.dry_run_market: BROKER}): a DRY_RUN account reads the real broker
+ *       (its instrument list, quotes with depth, funds) and only its orders go to the local simulator, filled against the
+ *       broker's book of that moment; otherwise (STORED, the default) the simulator's book is our stored bid and ask.</li>
  * </ul>
  */
 public record OrderRules(int entryBufferTicks, double entryTimeoutSec, int exitBufferTicks, double exitBufferPct,
                          double exitChaseSec, int exitChaseMax, double exitCrossPct, double defaultStopPct,
-                         double stopLimitOffsetPct, double tick, double pollMs) {
+                         double stopLimitOffsetPct, double tick, double pollMs, boolean brokerMarket) {
 
     /** The rules of a risk file, or null when it has none (v1, v2: simulated fills only). */
     static OrderRules from(ThresholdConfig c) {
@@ -30,12 +33,21 @@ public record OrderRules(int entryBufferTicks, double entryTimeoutSec, int exitB
                 c.getDouble("orders.exit_chase_sec"), c.getInt("orders.exit_chase_max"),
                 c.getDouble("orders.exit_cross_pct"), c.getDouble("broker_stop.default_stop_pct"),
                 c.getDouble("broker_stop.limit_offset_pct"), c.has("orders.tick") ? c.getDouble("orders.tick") : 0.05,
-                c.has("orders.poll_ms") ? c.getDouble("orders.poll_ms") : 250);
+                c.has("orders.poll_ms") ? c.getDouble("orders.poll_ms") : 250, dryRunMarket(c));
+    }
+
+    private static boolean dryRunMarket(ThresholdConfig c) {
+        String market = c.has("orders.dry_run_market") ? c.getString("orders.dry_run_market") : "STORED";
+        return switch (market) {
+            case "STORED" -> false;
+            case "BROKER" -> true;
+            default -> throw new IllegalArgumentException("orders.dry_run_market must be STORED or BROKER, got " + market);
+        };
     }
 
     /** The same rules with the waits shortened (tests against the in-process simulator). */
     public OrderRules fast() {
         return new OrderRules(entryBufferTicks, 0.2, exitBufferTicks, exitBufferPct, 0.05, exitChaseMax, exitCrossPct,
-                defaultStopPct, stopLimitOffsetPct, tick, 5);
+                defaultStopPct, stopLimitOffsetPct, tick, 5, brokerMarket);
     }
 }

@@ -2,6 +2,7 @@ package com.autotrade.zerodha;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.assertj.core.api.Assertions.within;
 
 import java.io.StringReader;
 import java.util.ArrayList;
@@ -19,6 +20,7 @@ import com.autotrade.broker.OrderSide;
 import com.autotrade.broker.OrderStatus;
 import com.autotrade.broker.OrderType;
 import com.autotrade.broker.OrderUpdate;
+import com.autotrade.broker.Quote;
 import com.autotrade.zerodha.KiteSimulator.Fault;
 
 /** The Kite adapter against the local simulator: login, orders, the book, and every broker fault of plan section 4. */
@@ -97,6 +99,29 @@ class KiteGatewayTest {
         });
         assertThat(gateway.trades()).singleElement().satisfies(t -> assertThat(t.price()).isEqualTo(100.0));
         assertThat(gateway.quote(KEY).ask()).isEqualTo(100.0);
+    }
+
+    @Test
+    void theQuoteCarriesTheDepthLevelsAndABuyWalksThemUpToItsLimit() {
+        sim.depth(KEY, List.of(new Quote.Level(99.5, 650), new Quote.Level(99.0, 1300)),
+                List.of(new Quote.Level(100.0, 650), new Quote.Level(100.5, 1300), new Quote.Level(101.0, 6500)), 99.8);
+        Quote q = gateway.quote(KEY);
+        assertThat(q.ask()).isEqualTo(100.0);
+        assertThat(q.askQuantity()).isEqualTo(650);
+        assertThat(q.asks()).containsExactly(new Quote.Level(100.0, 650), new Quote.Level(100.5, 1300),
+                new Quote.Level(101.0, 6500));
+        assertThat(q.bids()).containsExactly(new Quote.Level(99.5, 650), new Quote.Level(99.0, 1300));
+
+        gateway.place(buy("D1E1", 2600, 100.5));                   // 650 at 100.00 + 1,300 at 100.50; 650 rest open
+        BrokerOrder first = gateway.orderByTag("D1E1").orElseThrow();
+        assertThat(first.filledQuantity()).isEqualTo(1950);
+        assertThat(first.averagePrice()).isCloseTo((650 * 100.0 + 1300 * 100.5) / 1950, within(1e-9));
+        assertThat(first.status()).isEqualTo(OrderStatus.PARTIALLY_FILLED);
+        assertThat(gateway.quote(KEY).asks()).as("our fills used the levels up")
+                .containsExactly(new Quote.Level(101.0, 6500));
+        gateway.place(buy("D2E1", 650, 100.5));
+        assertThat(gateway.orderByTag("D2E1").orElseThrow().filledQuantity()).as("nothing left at or under 100.50")
+                .isZero();
     }
 
     @Test
