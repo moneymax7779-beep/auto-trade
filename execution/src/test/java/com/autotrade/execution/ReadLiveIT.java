@@ -193,6 +193,9 @@ class ReadLiveIT {
         assertThat(orderCalls()).as("no place, modify or cancel ever reaches Kite").isZero();
         assertThat(kite.requests("quote")).as("each child priced from Kite's book").isGreaterThanOrEqualTo(2);
         assertThat(kite.requests("margins")).as("funds read from Kite").isPositive();
+        // Kite's balance never falls for a simulated buy: what the simulator holds is taken off it
+        assertThat(dryRun.connection().availableFunds()).isCloseTo(800_000 - (650 * 100.0 + 650 * 100.15 + 845 * 100.5),
+                org.assertj.core.api.Assertions.within(0.01));
         assertThat(jdbc.queryForList("select role, status from exec.order_execution where broker_account_id = ? "
                 + "and role = 'STOP'", s.broker().id())).as("the protective stop rests in the simulator").isNotEmpty();
     }
@@ -215,6 +218,22 @@ class ReadLiveIT {
         assertThat(position.get("quantity_open")).isEqualTo(0L);
         assertThat(position.get("status")).isEqualTo("CLOSED");
         assertThat(orderCalls()).as("the stop rested and sold in the simulator only").isZero();
+    }
+
+    @Test
+    void aDrillOnAnotherDayIsRefusedBecauseTheBrokersMarketIsTodays() {
+        Setup s = setup();
+        LocalDate past = DAY.minusDays(7);
+        QuoteSource none = (d, u, t, at) -> Double.NaN;
+        try (ExecutionLoop loop = new ExecutionLoop(dataSource, "owner", "READLIVE-" + seq, "drill-w", costs, none, 1e9,
+                a -> session.get(), kite.baseUri())) {
+            loop.tick(past, 5_000);
+            assertThat(loop.status()).filteredOn(a -> a.accountId() == s.broker().id()).singleElement().satisfies(a -> {
+                assertThat(a.state()).isEqualTo("REFUSED");
+                assertThat(a.lastResult()).contains("only today's session");
+            });
+        }
+        assertThat(kite.requests()).as("a refused drill never reads the broker").isZero();
     }
 
     @Test

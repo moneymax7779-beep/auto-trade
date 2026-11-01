@@ -171,6 +171,13 @@ public final class ExecutionLoop implements AutoCloseable {
                         signature);
             }
             FollowerRisk risk = risks.computeIfAbsent(account.id(), id -> FollowerRisk.load(Path.of(account.riskFile())));
+            if (risk.orders() != null && risk.orders().brokerMarket()
+                    && !day.equals(LocalDate.now(java.time.ZoneId.of("Asia/Kolkata")))) {
+                // the broker's market is today's: a drill replaying another day would price its decisions at today's book
+                record(account, null, null, "REFUSED", "reads the broker's live market, so it serves only today's session, "
+                        + "not " + day + "; nothing sent");
+                return;
+            }
             BrokerConnections.Route route = connections.route(account, risk);
             if (route.venue() == null) {
                 record(account, route, null, "REFUSED", route.description() + "; nothing sent");

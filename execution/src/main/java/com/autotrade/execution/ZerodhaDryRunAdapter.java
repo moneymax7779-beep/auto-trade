@@ -111,7 +111,8 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
         SimulatorMarket listings = new SimulatorMarket(sim, simInstruments, dataSource);
         seedHoldings(account, sim, listings);
         KiteReads reads = new KiteReads(account);
-        ReadLiveConnection connection = new ReadLiveConnection(reads, simulator, q -> book(q, reads, sim, simInstruments));
+        ReadLiveConnection connection = new ReadLiveConnection(reads, simulator, q -> book(q, reads, sim, simInstruments),
+                sim::usedMargin);
         return new DryRun(connection, o -> { }, "Kite simulator " + sim.baseUri() + ", book and funds read from Kite "
                 + kiteApiBase.getHost(), sim);
     }

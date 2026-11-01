@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.function.DoubleSupplier;
 import java.util.function.UnaryOperator;
 
 import com.autotrade.broker.BrokerCapabilities;
@@ -21,7 +22,8 @@ import com.autotrade.broker.Quote;
 
 /**
  * A DRY_RUN connection that reads the real broker and trades a simulator (multi-broker plan section 3.2, step K1): funds
- * and quotes (with depth) come from the broker's read API; every order call, the order and trade books, positions and
+ * and quotes (with depth) come from the broker's read API (the funds less what the simulator's orders and positions
+ * hold: the real balance never falls for a simulated buy, and the broker would count it); every order call, the order and trade books, positions and
  * updates belong to the simulator. Each broker quote is handed to {@code book} first, so the simulator fills our order
  * against the broker's book of that moment; the quote returned is the book as the simulator then holds it (what our own
  * recent fills took is gone from it), so prices follow the book our orders really face.
@@ -38,6 +40,7 @@ public final class ReadLiveConnection implements BrokerConnection {
     private final BrokerConnection broker;
     private final BrokerConnection simulator;
     private final UnaryOperator<Quote> book;
+    private final DoubleSupplier committed;
     private final Map<String, Instant> refreshed = new ConcurrentHashMap<>();
 
     /** How often the book of a contract with a resting stop is read from the broker again. */
@@ -47,11 +50,14 @@ public final class ReadLiveConnection implements BrokerConnection {
      * @param broker    the real broker's connection, used for reads only (wrapped read-only here)
      * @param simulator where orders go
      * @param book      sets the simulator's book of a contract from a broker quote and returns that book as a quote
+     * @param committed the premium the simulator's open buy orders and positions hold (taken off the broker's funds)
      */
-    public ReadLiveConnection(BrokerConnection broker, BrokerConnection simulator, UnaryOperator<Quote> book) {
+    public ReadLiveConnection(BrokerConnection broker, BrokerConnection simulator, UnaryOperator<Quote> book,
+                              DoubleSupplier committed) {
         this.broker = readOnly(broker);
         this.simulator = simulator;
         this.book = book;
+        this.committed = committed;
     }
 
     @Override
@@ -66,7 +72,7 @@ public final class ReadLiveConnection implements BrokerConnection {
 
     @Override
     public double availableFunds() {
-        return broker.availableFunds();
+        return broker.availableFunds() - Math.max(0, committed.getAsDouble());
     }
 
     @Override
@@ -136,11 +142,6 @@ public final class ReadLiveConnection implements BrokerConnection {
     public void close() {
         simulator.close();
         broker.close();
-    }
-
-    /** The real account's own positions (for a check that nothing was traded there by hand; never reconciled against). */
-    public List<BrokerPosition> brokerPositions() {
-        return broker.positions();
     }
 
     /** {@code c} with every order call refused: reads pass, place / modify / cancel / updates throw. */

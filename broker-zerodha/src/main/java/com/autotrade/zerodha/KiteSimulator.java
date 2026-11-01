@@ -606,7 +606,7 @@ public final class KiteSimulator implements AutoCloseable {
     }
 
     /** Margin in use: the premium paid net of sales, plus what open buy orders block. */
-    private double usedMargin() {
+    public synchronized double usedMargin() {
         double used = 0;
         for (Order o : orders.values()) {
             if (o.side.equals("BUY") && !terminal(o)) {
