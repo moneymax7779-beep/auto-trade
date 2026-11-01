@@ -52,4 +52,15 @@ class BoxTest {
         off.onSpot(OPEN.plusSeconds(61), 23002, null);
         assertThat(off.snapshot(OPEN.plusSeconds(62), Double.NaN).boxHigh()).isNaN();
     }
+
+    @Test
+    void theLastMinuteCloseIsKeptWithoutABoxToo() {
+        FeatureConfig v12 = config("features.v12.yaml");
+        assertThat(v12.boxMinutes()).as("features v12 has no box").isZero();
+        StructureState s = new StructureState(v12, OPEN, Optional.empty());
+        minute(s, 0, 23000, 23004);
+        s.onSpot(OPEN.plusSeconds(61), 23006, null);                  // closes bar 0
+        // A-287 review: this was NaN without box_minutes, which silently disabled every reader of it
+        assertThat(s.snapshot(OPEN.plusSeconds(62), Double.NaN).lastMinuteClose()).isEqualTo(23004);
+    }
 }

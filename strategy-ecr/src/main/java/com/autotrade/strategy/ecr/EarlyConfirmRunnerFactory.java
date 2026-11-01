@@ -52,8 +52,19 @@ public final class EarlyConfirmRunnerFactory implements StrategyFactory {
     /** Resting premium stop the executor must place with every entry (percent below average cost). */
     @Override
     public java.util.List<String> requiredFeatureSections() {
-        // v4 onward reads the features-v3 sections (levels, book, premium, volatility, CAS).
-        return config.ext() == null ? java.util.List.of() : java.util.List.of("levels");
+        // v4 onward reads the features-v3 sections (levels, book, premium, volatility, CAS); v9 / v10 box and zone breaks
+        // read the trailing box / tested zone, which only a features file with them has (A-287 review)
+        java.util.List<String> sections = new java.util.ArrayList<>();
+        if (config.ext() != null) {
+            sections.add("levels");
+        }
+        if (config.boxLevels()) {
+            sections.add("structure.box_minutes");
+        }
+        if (config.zoneLevels()) {
+            sections.add("structure.zone_minutes");
+        }
+        return java.util.List.copyOf(sections);
     }
 
     @Override

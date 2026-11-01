@@ -450,10 +450,18 @@ class SessionRunner implements ApplicationRunner {
         for (ThresholdConfig file : strategyFiles) {
             StrategyFactory factory = Strategies.create(file);
             for (String section : factory.requiredFeatureSections()) {
-                if (!featuresFile.has(section)) {
-                    throw new IllegalStateException(file.sourceName() + " needs feature section '" + section
-                            + "' (features file " + t.featuresFile() + " lacks it)");
+                // a section, or a switch inside one (e.g. structure.box_minutes), which must then be on (> 0)
+                boolean off = !featuresFile.has(section)
+                        || featuresFile.get(section) instanceof Number n && n.doubleValue() <= 0;
+                if (!off) {
+                    continue;
                 }
+                String problem = file.sourceName() + " needs feature section '" + section + "' (features file "
+                        + t.featuresFile() + " lacks it or has it off)";
+                if (!(replay && t.missingFeaturesAllowed())) {
+                    throw new IllegalStateException(problem);
+                }
+                log.warn("{}: replay runs anyway (allow-missing-features), so that part of the strategy is inert", problem);
             }
             strategies.add(factory);
         }

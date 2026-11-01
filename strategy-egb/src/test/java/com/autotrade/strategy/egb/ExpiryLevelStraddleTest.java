@@ -55,4 +55,35 @@ class ExpiryLevelStraddleTest {
         assertThat(strategy.decide(Snapshots.bullishCoil().at("13:41"), holding).orders()).singleElement()
                 .satisfies(o -> assertThat(o.reason()).isEqualTo("TIME_STOP"));
     }
+
+    @Test
+    void v14SellsBothLegsOnAFalseBreakOfTheCrossedLevel() {
+        Strategy v14 = Strategies.load(Path.of("..", "config", "strategy", "expiry-level-straddle.v14.yaml"))
+                .create("NIFTY", Snapshots.SESSION);
+        for (int m = 0; m < 40; m++) {                                  // 12:00-12:39 just under the ORH, median volume 1000
+            v14.decide(Snapshots.bullishCoil().set("futures.volumeLastMinute", 1000L).at(LocalTime.of(12, m) + ":30"),
+                    PositionView.FLAT);
+        }
+        assertThat(v14.decide(Snapshots.bullishCoil().set("spot", 23126.0).set("futures.volumeLastMinute", 1000L)
+                .at("12:40:30"), PositionView.FLAT).orders()).singleElement()
+                .satisfies(o -> assertThat(o.targetPct()).as("no combined target").isNaN());
+        var openedAt = Snapshots.SESSION.atTime(LocalTime.of(12, 40, 31)).atZone(MarketTime.IST).toInstant();
+        PositionView holding = new PositionView(true, OptionSide.CE, 75, 40.0, openedAt, 30.0, 0, 0.9);
+        // one snapshot a minute, so each is that minute's close; the volume is the minute just closed
+        assertThat(v14.decide(Snapshots.bullishCoil().set("spot", 23110.0).set("futures.volumeLastMinute", 1000L)
+                .at("12:41:30"), holding).orders()).as("12:40 closed above the ORH").isEmpty();
+        assertThat(v14.decide(Snapshots.bullishCoil().set("spot", 23108.0).set("futures.volumeLastMinute", 900L)
+                .at("12:42:30"), holding).orders()).as("one quiet close under it").isEmpty();
+        assertThat(v14.decide(Snapshots.bullishCoil().set("spot", 23108.0).set("futures.volumeLastMinute", 900L)
+                .at("12:43:30"), holding).orders()).singleElement()
+                .satisfies(o -> assertThat(o.reason()).isEqualTo("FALSE_BREAK"));
+    }
+
+    @Test
+    void aFileWithTheBoxBreakOnNeedsAFeaturesFileWithTheBox() {
+        assertThat(FACTORY.requiredFeatureSections()).as("els-v12: box break on, as A-285 was written")
+                .containsExactly("structure.box_minutes");
+        assertThat(Strategies.load(Path.of("..", "config", "strategy", "expiry-level-straddle.v17.yaml"))
+                .requiredFeatureSections()).as("els-v17: level crosses only").isEmpty();
+    }
 }

@@ -30,7 +30,12 @@ import com.autotrade.strategy.Strategy;
  * (compression as ebs), buys a call and a put: of ATM - 1, ATM, ATM + 1 strikes the pair with the closest asks
  * ({@link OrderIntent#BALANCED_PAIR}). The executor sells both at the combined target (and the stop, 100 % = none); this
  * strategy sells them at {@code flat_by}, or {@code exits.time_stop_min} minutes after the position opened when that is set
- * (A-286; 0 or absent = none). One a day.
+ * (A-286; 0 or absent = none). With an {@code exits.signals} block the market-data exits of {@link StraddleExits} sell both
+ * legs too (A-287), and without {@code exits.target_pct} there is no combined target. One a day.
+ *
+ * <p>The box break needs the features file's {@code structure.box_minutes} (the trailing box); with
+ * {@code setup.box_break: false} only level crosses trigger. Absent = on, as A-285 was written: such a file is refused by a
+ * features file without the box (features v12 has none, so A-285 to A-287 ran on level crosses only).
  */
 final class ExpiryLevelStraddle implements Strategy {
 
@@ -39,9 +44,17 @@ final class ExpiryLevelStraddle implements Strategy {
     private final LocalTime entryFrom, entryUntil, flatBy;
     private final double roundStep, rangeVsSessionMax, emaGapAtrMax, volumeRateRatioMax, budget, targetPct, stopPct;
     private final int memoryMin, timeStopMin;
+    private final boolean boxBreakOn;
     private double previousSpot = Double.NaN, previousBoxHigh = Double.NaN, previousBoxLow = Double.NaN;
     private Instant compressionUntil;
-    private boolean asked, held, done;
+    private boolean asked, held, done, exitAsked;
+    private final StraddleExits exits;
+    private double askedLevel = Double.NaN, triggerLevel = Double.NaN;   // the level of the asked / the held entry's cross
+    private boolean askedUp, triggerUp;
+
+    /** A level the spot crossed: its name (e.g. {@code ORH}, {@code ROUND_22700}) and price. */
+    private record Cross(String name, double level) {
+    }
 
     ExpiryLevelStraddle(ThresholdConfig c) {
         config = c;
@@ -55,9 +68,16 @@ final class ExpiryLevelStraddle implements Strategy {
         volumeRateRatioMax = c.getDouble("compression.volume_rate_ratio_max");
         memoryMin = c.getInt("compression.memory_min");
         budget = c.getDouble("position.premium_budget");
-        targetPct = c.getDouble("exits.target_pct");
+        targetPct = c.has("exits.target_pct") ? c.getDouble("exits.target_pct") : Double.NaN;
         stopPct = c.getDouble("exits.premium_stop_pct");
         timeStopMin = c.has("exits.time_stop_min") ? c.getInt("exits.time_stop_min") : 0;
+        exits = StraddleExits.configured(c) ? new StraddleExits(c) : null;
+        boxBreakOn = boxBreak(c);
+    }
+
+    /** Whether {@code c} triggers on compression box breaks too (absent = yes, as A-285 was written). */
+    static boolean boxBreak(ThresholdConfig c) {
+        return !c.has("setup.box_break") || c.getBoolean("setup.box_break");
     }
 
     @Override
@@ -84,9 +104,12 @@ final class ExpiryLevelStraddle implements Strategy {
             compressionUntil = now.plus(Duration.ofMinutes(memoryMin));
         }
         boolean compressedRecently = compressionUntil != null && !now.isAfter(compressionUntil);
-        String crossed = crossed(st, previousSpot, spot);
-        boolean boxBreak = compressedRecently && Double.isFinite(previousSpot) && Double.isFinite(spot)
-                && (previousSpot <= previousBoxHigh && spot > previousBoxHigh || previousSpot >= previousBoxLow && spot < previousBoxLow);
+        Cross crossed = crossed(st, previousSpot, spot);
+        boolean breakUp = previousSpot <= previousBoxHigh && spot > previousBoxHigh;
+        boolean boxBreak = boxBreakOn && compressedRecently && Double.isFinite(previousSpot) && Double.isFinite(spot)
+                && (breakUp || previousSpot >= previousBoxLow && spot < previousBoxLow);
+        double level = crossed != null ? crossed.level() : breakUp ? previousBoxHigh : previousBoxLow;
+        boolean movingUp = spot > previousSpot;
         boolean window = !time.isBefore(entryFrom) && time.isBefore(entryUntil);
         boolean trigger = crossed != null || boxBreak;
         if (Double.isFinite(spot)) {
@@ -103,15 +126,25 @@ final class ExpiryLevelStraddle implements Strategy {
         c.put("box_break", boxBreak);
 
         List<OrderIntent> orders = List.of();
+        if (position.open() && !held) {
+            triggerLevel = askedLevel;
+            triggerUp = askedUp;
+        }
+        String signal = exits == null ? null : exits.update(s, position, triggerLevel, triggerUp);
         if (position.open()) {
             held = true;
-            if (!time.isBefore(flatBy)) {
+            if (exitAsked) {
+                // the executor is already selling (or cannot, e.g. no bid): asking again changes nothing
+            } else if (!time.isBefore(flatBy)) {
                 orders = List.of(OrderIntent.exit(position.side(), Stage.CONFIRMED, "FLAT_BY"));
-                done = true;
+                done = exitAsked = true;
             } else if (timeStopMin > 0 && position.openedAt() != null
                     && !now.isBefore(position.openedAt().plus(Duration.ofMinutes(timeStopMin)))) {
                 orders = List.of(OrderIntent.exit(position.side(), Stage.CONFIRMED, "TIME_STOP"));
-                done = true;
+                done = exitAsked = true;
+            } else if (signal != null) {
+                orders = List.of(OrderIntent.exit(position.side(), Stage.CONFIRMED, signal));
+                done = exitAsked = true;
             }
         } else if (held || position.closedToday() > 0) {
             held = false;                                    // the target closed it, possibly before this strategy saw
@@ -120,8 +153,10 @@ final class ExpiryLevelStraddle implements Strategy {
             asked = false;                                   // refused before any position existed: the next trigger may try
         } else if (!done && mine && continuous && st.orComplete() && window && trigger) {
             orders = List.of(OrderIntent.straddle(OrderIntent.BALANCED_PAIR, budget, targetPct, stopPct, Stage.CONFIRMED,
-                    crossed != null ? "CROSS_" + crossed : "BOX_BREAK"));
+                    crossed != null ? "CROSS_" + crossed.name() : "BOX_BREAK"));
             asked = true;
+            askedLevel = level;
+            askedUp = movingUp;
         }
         Stage stage = done ? Stage.EXITED : position.open() || asked ? Stage.CONFIRMED
                 : trigger && mine && window ? Stage.ARMED : mine ? Stage.WATCH : Stage.IDLE;
@@ -132,8 +167,8 @@ final class ExpiryLevelStraddle implements Strategy {
         return new Decision(now, s.underlying(), state, view, putView, orders);
     }
 
-    /** The name of a level the spot crossed from {@code before} to {@code now} (touching it counts), or null. */
-    private String crossed(StructureFeatures st, double before, double now) {
+    /** The level the spot crossed from {@code before} to {@code now} (touching it counts), or null. */
+    private Cross crossed(StructureFeatures st, double before, double now) {
         if (!Double.isFinite(before) || !Double.isFinite(now) || before == now) {
             return null;
         }
@@ -150,11 +185,11 @@ final class ExpiryLevelStraddle implements Strategy {
         for (Map.Entry<String, Double> e : levels.entrySet()) {
             double l = e.getValue();
             if (Double.isFinite(l) && (before < l && now >= l || before > l && now <= l)) {
-                return e.getKey();
+                return new Cross(e.getKey(), l);
             }
         }
         double lo = Math.min(before, now), hi = Math.max(before, now);
         double round = Math.ceil(lo / roundStep) * roundStep;
-        return round <= hi && round > lo ? "ROUND_" + Math.round(round) : null;
+        return round <= hi && round > lo ? new Cross("ROUND_" + Math.round(round), round) : null;
     }
 }

@@ -111,6 +111,7 @@ public final class TradingSession {
     private final RiskEngine risk;
     private PaperBroker broker;
     private OrderManager oms;
+    private static final LocalTime OPTIONS_CLOSE = LocalTime.of(15, 30);
     private final ContractResolver contracts;
     private final Map<String, FeatureEngine> engines = new LinkedHashMap<>();
     private final Map<String, List<Slot>> strategies = new HashMap<>();
@@ -194,6 +195,7 @@ public final class TradingSession {
             feed.run(this::onEvent);
             synchronized (lock) {
                 engines.values().forEach(FeatureEngine::finish);
+                settleExpired();
                 if (!oms.livePositions().isEmpty()) {
                     oms.exitAll("SESSION_END");
                 }
@@ -212,6 +214,29 @@ public final class TradingSession {
 
     public void stop() {
         feed.stop();
+    }
+
+    /**
+     * When the feed ran to the options' close (15:30 IST), an option expiring today that is still held (one nobody bid
+     * for, so the exit could not sell it) settles for cash at its intrinsic value against the last spot, as the exchange
+     * settles it. A feed that ended earlier (zt-tiger-v2 history stops at 15:15) leaves it to the end-of-session exit.
+     */
+    private void settleExpired() {
+        if (clock.get().atZone(MarketTime.IST).toLocalTime().isBefore(OPTIONS_CLOSE)) {
+            return;
+        }
+        for (ManagedPosition position : List.copyOf(oms.livePositions())) {
+            double spot = lastSpot.getOrDefault(position.underlying(), Double.NaN);
+            double strike = position.contract().strike();
+            if (!contracts.expiresToday(position.contract().token()) || !Double.isFinite(spot) || !Double.isFinite(strike)) {
+                continue;
+            }
+            double intrinsic = Math.max(0, position.side() == OptionSide.CE ? spot - strike : strike - spot);
+            double price = Math.floor(intrinsic * 20) / 20;                   // whole ticks of 0.05
+            log.info("{} {} settled at expiry: {} at {} (spot {})", position.underlying(), position.contract().symbol(),
+                    position.quantity(), price, spot);
+            oms.settleAtExpiry(position.contract().token(), price);
+        }
     }
 
     /** Saves every feature snapshot (the live decision evidence, and later IV history) through {@code writer}. */

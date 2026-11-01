@@ -57,7 +57,8 @@ public record TradingProperties(Trading trading, Source source, Upstox upstox, S
                           List<String> strategyFiles, String featuresFile, String exchangeFile, String costsFile,
                           String riskFile, long pollIntervalMs, long recheckWindowMs, String startAt, String stopAfter,
                           String feed, double replaySpeed, List<String> tradeUnderlyings, String replaySource,
-                          List<String> shadowStrategyFiles, Double replayEquity, Boolean replaySnapshots) {
+                          List<String> shadowStrategyFiles, Double replayEquity, Boolean replaySnapshots,
+                          Boolean allowMissingFeatures) {
 
         /**
          * --mode=replay only: the equity the replayed day starts from (risk v8/v9 size from it), so consecutive days can
@@ -73,6 +74,14 @@ public record TradingProperties(Trading trading, Source source, Upstox upstox, S
          */
         public boolean storeReplaySnapshots() {
             return Boolean.TRUE.equals(replaySnapshots);
+        }
+
+        /**
+         * --mode=replay only: run a strategy file whose required features file setting is off (logged), to reproduce a run
+         * from before the check existed (A-287 review); live and serve always refuse it. Absent = refuse.
+         */
+        public boolean missingFeaturesAllowed() {
+            return Boolean.TRUE.equals(allowMissingFeatures);
         }
 
         /** --mode=replay only: "own" replays auto-trade's own live capture (md.*), anything else zt-tiger-v2. */

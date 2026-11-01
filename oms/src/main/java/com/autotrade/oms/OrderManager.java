@@ -19,6 +19,7 @@ import java.util.function.Supplier;
 
 import com.autotrade.broker.BrokerGateway;
 import com.autotrade.broker.BrokerPosition;
+import com.autotrade.broker.ExpirySettlement;
 import com.autotrade.broker.OrderRequest;
 import com.autotrade.broker.OrderSide;
 import com.autotrade.broker.OrderType;
@@ -137,8 +138,56 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         ManagedPosition position = held.getFirst();
         double[] quote = lastQuotes.get(position.contract.token());
         double bid = quote == null || !(quote[0] > 0) ? Double.NaN : quote[0];
+        List<PositionView.Leg> legs = new ArrayList<>();
+        for (ManagedPosition leg : held) {
+            double[] legQuote = lastQuotes.get(leg.contract.token());
+            legs.add(new PositionView.Leg(leg.side, leg.contract.strike(), leg.quantity, leg.averageCost,
+                    legQuote == null || !(legQuote[0] > 0) ? Double.NaN : legQuote[0]));
+        }
         return new PositionView(true, position.side, position.lots(), position.averageCost, position.openedAt, bid,
-                closedToday);
+                closedToday, valueRatio(held), List.copyOf(legs));
+    }
+
+    /**
+     * Exchange cash settlement of an option expiring today at {@code price} (its intrinsic value) for every live position
+     * in it, when the broker settles itself (the paper broker; a real broker's are settled by the exchange): the
+     * position's working sells fill at that price, or one is placed first, and it closes as {@code EXPIRY_SETTLEMENT}.
+     */
+    public synchronized void settleAtExpiry(long token, double price) {
+        if (!(broker instanceof ExpirySettlement settlement)) {
+            return;
+        }
+        boolean held = false;
+        for (ManagedPosition position : List.copyOf(live.values())) {
+            if (position.contract.token() != token) {
+                continue;
+            }
+            held = true;
+            exit(position, "EXPIRY_SETTLEMENT");             // places the sell unless an exit already works
+            position.exitReason = "EXPIRY_SETTLEMENT";
+        }
+        // a second round fills the sell an exit places only once settlement cancelled its working entry orders
+        for (int round = 0; round < 2 && held; round++) {
+            settlement.settle(token, price);
+            held = live.values().stream().anyMatch(p -> p.contract.token() == token);
+        }
+    }
+
+    /** What {@code legs} are worth at their bids over what they cost; NaN while any leg is not fully open or unquoted. */
+    private double valueRatio(List<ManagedPosition> legs) {
+        double paid = 0;
+        double value = 0;
+        for (ManagedPosition leg : legs) {
+            if (leg.state != ManagedPosition.State.OPEN || !working(leg.entryOrders).isEmpty()
+                    || leg.pendingEntryQuantity > 0) {
+                return Double.NaN;
+            }
+            double[] quote = lastQuotes.get(leg.contract.token());
+            double bid = quote != null ? quote[0] : leg.lastBid;
+            paid += leg.averageCost * leg.quantity;
+            value += bid * leg.quantity;
+        }
+        return paid > 0 && value >= 0 ? value / paid : Double.NaN;
     }
 
     /** Buys {@code lots} to open a position with the default premium stop; returns the risk decision. */
@@ -417,25 +466,13 @@ public final class OrderManager implements Consumer<OrderUpdate> {
                 brackets.remove(entry.getKey());
                 continue;
             }
-            double paid = 0;
-            double value = 0;
-            for (ManagedPosition leg : legs) {
-                if (leg.state != ManagedPosition.State.OPEN || !working(leg.entryOrders).isEmpty()
-                        || leg.pendingEntryQuantity > 0) {
-                    paid = Double.NaN;
-                    break;
-                }
-                double[] quote = lastQuotes.get(leg.contract.token());
-                double bid = quote != null ? quote[0] : leg.lastBid;
-                paid += leg.averageCost * leg.quantity;
-                value += bid * leg.quantity;
-            }
-            if (!(paid > 0) || Double.isNaN(value)) {
+            double ratio = valueRatio(legs);
+            if (Double.isNaN(ratio)) {
                 continue;
             }
             Bracket bracket = entry.getValue();
-            String reason = value >= paid * (1 + bracket.target()) ? "TARGET_" + Math.round(bracket.target() * 100)
-                    : value <= paid * (1 - bracket.stop()) ? "STOP_" + Math.round(bracket.stop() * 100) : null;
+            String reason = ratio >= 1 + bracket.target() ? "TARGET_" + Math.round(bracket.target() * 100)
+                    : ratio <= 1 - bracket.stop() ? "STOP_" + Math.round(bracket.stop() * 100) : null;
             if (reason != null) {
                 brackets.remove(entry.getKey());
                 for (ManagedPosition leg : legs) {

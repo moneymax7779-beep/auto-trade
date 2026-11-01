@@ -13,7 +13,7 @@ class ShadowRunnerTest {
     @Test
     void aFailingFileIsReportedAndTheRestStillRun() {
         TradingProperties.Trading trading = new TradingProperties.Trading("P", List.of("NIFTY"), "base", null, null, null, null,
-                null, null, 250, 3000, "09:00", "15:45", "upstox", 0, null, "own", null, null, null);
+                null, null, 250, 3000, "09:00", "15:45", "upstox", 0, null, "own", null, null, null, null);
         ShadowRunner runner = new ShadowRunner(new TradingProperties(trading, null, null, null), null);
 
         ShadowRunner.Outcome outcome = runner.run(LocalDate.of(2026, 10, 23),
@@ -29,7 +29,7 @@ class ShadowRunnerTest {
     @Test
     void noFilesIsNothingToDo() {
         TradingProperties.Trading trading = new TradingProperties.Trading("P", List.of("NIFTY"), "base", null, null, null, null,
-                null, null, 250, 3000, "09:00", "15:45", "upstox", 0, null, "own", null, null, null);
+                null, null, 250, 3000, "09:00", "15:45", "upstox", 0, null, "own", null, null, null, null);
         ShadowRunner.Outcome outcome = new ShadowRunner(new TradingProperties(trading, null, null, null), null)
                 .run(LocalDate.of(2026, 10, 23), List.of());
         assertThat(outcome.summary()).isNull();

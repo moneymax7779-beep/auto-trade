@@ -14,6 +14,7 @@ import java.util.function.Supplier;
 import com.autotrade.broker.BrokerCapabilities;
 import com.autotrade.broker.BrokerGateway;
 import com.autotrade.broker.BrokerPosition;
+import com.autotrade.broker.ExpirySettlement;
 import com.autotrade.broker.OrderRequest;
 import com.autotrade.broker.OrderSide;
 import com.autotrade.broker.OrderStatus;
@@ -32,7 +33,7 @@ import com.autotrade.core.event.OptionTick;
  * earliest-placed first, so what one takes is gone for the next and the rest waits for a later tick.
  * Feed it every market event, in order.
  */
-public final class PaperBroker implements BrokerGateway, Consumer<MarketEvent> {
+public final class PaperBroker implements BrokerGateway, ExpirySettlement, Consumer<MarketEvent> {
 
     private static final class Order {
         final OrderRequest request;
@@ -149,6 +150,31 @@ public final class PaperBroker implements BrokerGateway, Consumer<MarketEvent> {
         holdings.forEach((token, holding) -> positions.add(
                 new BrokerPosition(token, holding.symbol, holding.quantity, holding.averagePrice)));
         return positions;
+    }
+
+    @Override
+    public synchronized void settle(long instrumentToken, double price) {
+        Holding holding = holdings.get(instrumentToken);
+        long held = holding == null ? 0 : holding.quantity;
+        for (Order order : List.copyOf(orders.values())) {
+            if (order.status.isTerminal() || order.request.instrumentToken() != instrumentToken) {
+                continue;
+            }
+            if (order.request.side() == OrderSide.SELL && held > 0) {
+                long quantity = Math.min(order.remaining(), held);
+                held -= quantity;
+                order.filled += quantity;
+                order.notional += quantity * price;
+                order.status = order.remaining() == 0 ? OrderStatus.FILLED : OrderStatus.PARTIALLY_FILLED;
+                book(order, quantity, price);
+                emit(order, quantity, price, "expiry settlement");
+                if (order.remaining() == 0) {
+                    continue;
+                }
+            }
+            order.status = OrderStatus.CANCELLED;
+            emit(order, 0, 0, "cancelled at expiry");
+        }
     }
 
     /**

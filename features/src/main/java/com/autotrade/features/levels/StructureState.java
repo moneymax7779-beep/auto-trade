@@ -204,7 +204,6 @@ public final class StructureState {
             zoneHighTouches = Double.isFinite(tolerance) ? touches(b -> b.high() >= ceiling - tolerance) : 0;
         }
         zoneBars.addLast(latest);
-        lastMinuteClose = latest.close();
         while (zoneBars.size() > size) {
             zoneBars.removeFirst();
         }
@@ -298,6 +297,7 @@ public final class StructureState {
             vwapCrossings.addLast(bar.end().toEpochMilli());
         }
         previousOneMinuteClose = bar.close();
+        lastMinuteClose = bar.close();                       // every features file (A-287 review: was only with a box)
         int box = config.boxMinutes();
         if (box > 0) {
             // the box excludes this bar: the bars before it, so a close beyond it is a break
@@ -313,7 +313,6 @@ public final class StructureState {
                 boxHigh = high;
                 boxLow = low;
             }
-            lastMinuteClose = bar.close();
         }
         if (config.zoneMinutes() > 0) {
             zone(bar);

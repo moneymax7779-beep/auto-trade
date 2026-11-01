@@ -49,6 +49,11 @@ final class ContractResolver {
         }
     }
 
+    /** Whether {@code token} is an option of this session's quotes that expires today. */
+    boolean expiresToday(long token) {
+        return seen.values().stream().anyMatch(q -> q.token() == token && session.equals(q.expiry()));
+    }
+
     /** True once option quotes show {@code underlying}'s nearest expiry is this session. */
     boolean expiresToday(String underlying) {
         return session.equals(nearestExpiry.get(underlying));
@@ -64,9 +69,9 @@ final class ContractResolver {
                 : master.option(underlying, quote.expiry(), strike, side.name());
         return Optional.of(instrument
                 .map(i -> new Contract(quote.token(), i.instrumentKey(), quote.symbol(), exchange, i.lotSize(),
-                        i.tickSize(), i.maxLotsPerOrder()))
+                        i.tickSize(), i.maxLotsPerOrder(), strike))
                 .orElse(new Contract(quote.token(), "ZT|" + quote.token(), quote.symbol(), exchange, quote.lotSize(),
-                        DEFAULT_TICK, DEFAULT_MAX_LOTS)));
+                        DEFAULT_TICK, DEFAULT_MAX_LOTS, strike)));
     }
 
     private static String key(String underlying, double strike, String type) {

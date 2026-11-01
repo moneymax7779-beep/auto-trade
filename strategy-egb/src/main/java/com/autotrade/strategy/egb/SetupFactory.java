@@ -62,6 +62,13 @@ public final class SetupFactory implements StrategyFactory {
         return config.version();
     }
 
+    /** A-287 review: the straddle's box break reads the trailing box, which only a features file with a box has. */
+    @Override
+    public java.util.List<String> requiredFeatureSections() {
+        return config.strategy().equals("expiry-level-straddle") && ExpiryLevelStraddle.boxBreak(config)
+                ? java.util.List.of("structure.box_minutes") : java.util.List.of();
+    }
+
     @Override
     public double premiumStopPct() {
         return config.getDouble("exits.premium_stop_pct");

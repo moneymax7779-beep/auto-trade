@@ -181,6 +181,54 @@ class OrderManagerStraddleTest {
         assertThat(sent).isEmpty();
     }
 
+    @Test
+    void theViewShowsEachLegWithItsStrikeAndBid() {
+        Contract call = new Contract(7, "NSE_FO|7", "NIFTY 23300 CE", "NSE", 65, 0.05, 27, 23300);
+        Contract put = new Contract(8, "NSE_FO|8", "NIFTY 23300 PE", "NSE", 65, 0.05, 27, 23300);
+        quotes("13:54:00", 42.00, 42.20, 40.30, 40.50);
+        oms.enterStraddle("els", "NIFTY", call, put, 100_000, "CONFIRMED", market("13:54"), Double.NaN, 100);
+        quotes("13:54:01", 42.00, 42.20, 40.30, 40.50);
+        assertThat(oms.view("els", "NIFTY").legs()).hasSize(2).allSatisfy(leg -> {
+            assertThat(leg.strike()).isEqualTo(23300);
+            assertThat(leg.quantity()).isPositive();
+        }).extracting(com.autotrade.strategy.PositionView.Leg::bid).containsExactly(42.00, 40.30);
+    }
+
+    @Test
+    void aLegNobodyBidsForAtTheCloseSettlesAtItsIntrinsicValue() {
+        quotes("13:54:00", 42.00, 42.20, 40.30, 40.50);
+        oms.enterStraddle("els", "NIFTY", CALL, PUT, 100_000, "CONFIRMED", market("13:54"), Double.NaN, 100);
+        quotes("13:54:01", 42.00, 42.20, 40.30, 40.50);
+        quotes("15:29:00", 120.00, 120.50, 0, 0.05);                    // the put has no bid left
+        oms.exit("els", "NIFTY", "FLAT_BY");
+        quotes("15:29:01", 120.00, 120.50, 0, 0.05);
+        assertThat(oms.livePositions()).as("the call sold, the put could not").singleElement()
+                .satisfies(leg -> assertThat(leg.leg()).isEqualTo("PE"));
+
+        clock.set(at("15:30:05"));
+        oms.settleAtExpiry(8, 0.0);                                      // spot far above 23300: worth nothing
+
+        assertThat(oms.livePositions()).isEmpty();
+        assertThat(oms.closedPositions()).filteredOn(p -> p.leg().equals("PE")).singleElement().satisfies(p -> {
+            assertThat(p.exitReason()).isEqualTo("EXPIRY_SETTLEMENT");
+            assertThat(p.realised()).isEqualTo(-40.50 * p.boughtQuantity(), org.assertj.core.data.Offset.offset(1e-6));
+        });
+        assertThat(oms.reconcile()).as("the paper broker settled it too").isTrue();
+    }
+
+    @Test
+    void anOpenLegWithNoExitYetIsSoldAtSettlement() {
+        quotes("13:54:00", 42.00, 42.20, 40.30, 40.50);
+        oms.enterStraddle("els", "NIFTY", CALL, PUT, 100_000, "CONFIRMED", market("13:54"), Double.NaN, 100);
+        quotes("13:54:01", 42.00, 42.20, 40.30, 40.50);
+        clock.set(at("15:30:05"));
+        oms.settleAtExpiry(7, 75.0);                                     // the call 75 points in the money
+        assertThat(oms.closedPositions()).filteredOn(p -> p.leg().equals("CE")).singleElement()
+                .satisfies(p -> assertThat(p.realised())
+                        .isEqualTo((75.0 - p.averageCost()) * p.boughtQuantity(), org.assertj.core.data.Offset.offset(1e-6)));
+        assertThat(oms.livePositions()).singleElement().satisfies(leg -> assertThat(leg.leg()).isEqualTo("PE"));
+    }
+
     private void quotes(String time, double callBid, double callAsk, double putBid, double putAsk) {
         quote(time, 7, "NIFTY 23300 CE", callBid, callAsk);
         quote(time, 8, "NIFTY 23300 PE", putBid, putAsk);
