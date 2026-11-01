@@ -1,0 +1,31 @@
+# els-v26 = els-v24 (NIFTY expiry day: the first level cross in 14:00-15:00 buys the closest-ask call / put pair of ATM - 50
+# / ATM / ATM + 50, held to 15:29, no target, no stop) with Rs 50,000 of premium instead of Rs 2.5 L: the forward PAPER
+# shadow of ledger A-295 (user, 1 Nov 2026: "yes set up the v24 paper shadow"). On candles the rule was positive in both
+# years but a lottery (median trade -93 %, five days carry it); sized so a normal losing expiry costs ~Rs 45 K.
+version: els-v26
+strategy: expiry-level-straddle
+status: UNCALIBRATED
+source: "user-request-2026-11-01 (ledger A-295, forward PAPER shadow)"
+
+scope:
+  underlying: NIFTY
+  entry_from: "14:00"
+  entry_until: "15:00"
+  flat_by: "15:29"                     # user 30 Oct: sell at 3.30 PM (the last minute check)
+
+setup:
+  round_step: 100
+  box_break: false                     # level crosses only, as A-285 to A-287 actually traded
+
+compression:                           # as ebs-v2 (egb-v1)
+  range_vs_session_max: 0.66
+  ema_gap_atr_max: 0.30
+  volume_rate_ratio_max: 1.0
+  memory_min: 30
+
+position:
+  premium_budget: 50000                # A-295: lottery-ticket size (els-v24 used 250000)
+  intended_lots: 1
+
+exits:
+  premium_stop_pct: 100                # no stop

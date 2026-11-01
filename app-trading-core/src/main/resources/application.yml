@@ -154,6 +154,10 @@ autotrade:
       # exit at the previous-close fill; 2 years of bars +Rs 1.00 L PF 1.03 (A-277), so near break-even; own session, read
       # once at 30 forward trades.
       - config/strategy/gap-fade.v4b.yaml
+      # 2026-11-01 (A-295, user: "yes set up the v24 paper shadow"): els-v26, NIFTY expiry day, the first level cross in
+      # 14:00-15:00 buys the closest-ask call / put pair, held to 15:29 (unsold legs settle at intrinsic); Rs 50,000 of
+      # premium, lottery-sized (candles: positive both years, median trade -93 %); own session, read once at 20 expiries.
+      - config/strategy/expiry-level-straddle.v26.yaml
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"
