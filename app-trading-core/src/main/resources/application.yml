@@ -73,7 +73,10 @@ autotrade:
       # unseen days; removing it measured +Rs 76,835 over 22 tick days with every other strategy's trades unchanged (A-074).
       # Its file and code stay; it returns only through a new registered test.
       - config/strategy/ma-cross.v1.yaml                   # mac-v1 forward test in PAPER (A-067, user 2026-10-09 20:40: "run it in paper"); A-066 test PASS, held-out FAIL on one trade; never the expiring index; Rs 2.5L budget; last, so the others take the capital first
-      - config/strategy/opening-drive-momentum.v4.yaml     # odm-v4 live from 14 Oct (A-093) = odm-v3 (A-089) + peak trail (arm +50 %, exit 15 % off the peak; A-091 PASS, thin): never worse than v3 on 23 tick days (+Rs 1.55L), 13 Oct +Rs 35K; last, so the others take the capital first
+      # odm-v4 removed 2026-11-01 (A-297 REMOVE, user: "do it"): on the 23 own-capture tick days the live set without it made
+      # +Rs 51.09 L vs +Rs 49.17 L with it (+Rs 14.87 L vs +12.93 L from 14 Oct; odm-v9 in its place +46.32 L); thin, but
+      # with A-231 (2 years of bars PF 0.99) and live PAPER-1 -Rs 5.23 L to 27 Oct. Live 14 Oct - 2 Nov (A-093); it now runs
+      # as a shadow (below) to keep its forward record. Its file and code stay; it returns only through a new registered test.
       # 2026-10-29 (A-267, user: "make one on PAPER mode other one in shadow choose which one and deploy"): obc-v13 = obc-v11
       # (ATM +- 2 OI burst, one entry 09:21-11:00, flat 15:15) + A-266's gap rule (no entry in the direction of an opening
       # gap >= 0.4 %); 29 tick days +Rs 36.7 L alone, held-out unchanged. Inside the set A-262 measured obc-v11 at +Rs 16.3 L
@@ -158,6 +161,9 @@ autotrade:
       # 14:00-15:00 buys the closest-ask call / put pair, held to 15:29 (unsold legs settle at intrinsic); Rs 50,000 of
       # premium, lottery-sized (candles: positive both years, median trade -93 %); own session, read once at 20 expiries.
       - config/strategy/expiry-level-straddle.v26.yaml
+      # 2026-11-01 (A-297, user: "do it"): odm-v4 out of the live set (see strategy-files); its own session keeps its
+      # forward record next to odm-v1/v2/v3/v5/v9.
+      - config/strategy/opening-drive-momentum.v4.yaml
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"
