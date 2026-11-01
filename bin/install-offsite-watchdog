@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Installs the off-site watchdog (bin/offsite-watchdog) as a launchd agent on this Mac: it runs every 60 s (it does
+# nothing outside 08:55-15:50 IST on trading days) and alerts by Telegram when the GCP execution host cannot be reached
+# or its worker, accounts or trading-core are unhealthy. The script is copied to ~/.autotrade-watchdog, so a checkout or
+# worktree can be removed without breaking it; run this again after the script changes.
+#   bin/install-offsite-watchdog --account <gcloud account for IAP SSH> --telegram-file <bot.env> [--uninstall]
+# launchd does not run jobs while the Mac sleeps: keep the Mac awake in market hours (or the watchdog is blind then).
+set -euo pipefail
+LABEL=com.autotrade.offsite-watchdog
+DIR="$HOME/.autotrade-watchdog"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+ACCOUNT="" TELEGRAM=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --account) ACCOUNT="$2"; shift 2;;
+    --telegram-file) TELEGRAM="$2"; shift 2;;
+    --uninstall) launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true; rm -f "$PLIST"; echo "removed $LABEL"; exit 0;;
+    *) echo "unknown argument $1" >&2; exit 2;;
+  esac
+done
+[ -n "$ACCOUNT" ] && [ -n "$TELEGRAM" ] || { echo "usage: $0 --account <gcloud account> --telegram-file <bot.env>" >&2; exit 2; }
+[ -r "$TELEGRAM" ] || { echo "not readable: $TELEGRAM" >&2; exit 2; }
+mkdir -p "$DIR"
+cp "$HERE/offsite-watchdog" "$DIR/offsite-watchdog"
+cp "$HERE/../config/exchange/nse-bse-sessions.v3.yaml" "$DIR/exchange.yaml"
+chmod 700 "$DIR" "$DIR/offsite-watchdog"
+cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Off-site watchdog of the GCP execution host (auto-trade multi-broker plan 3.8). Installed by
+     bin/install-offsite-watchdog; remove with bin/install-offsite-watchdog --uninstall. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string><string>$DIR/offsite-watchdog</string>
+    <string>--telegram-file</string><string>$TELEGRAM</string>
+    <string>--exchange-file</string><string>$DIR/exchange.yaml</string>
+    <string>--state-dir</string><string>$DIR</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>AUTOTRADE_GCP_ACCOUNT</key><string>$ACCOUNT</string>
+  </dict>
+  <key>StartInterval</key><integer>60</integer>
+  <key>StandardOutPath</key><string>$DIR/watchdog.log</string>
+  <key>StandardErrorPath</key><string>$DIR/watchdog.log</string>
+</dict>
+</plist>
+EOF
+launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" "$PLIST"
+echo "installed $LABEL: every 60 s, log $DIR/watchdog.log"

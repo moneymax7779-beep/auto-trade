@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+"""Off-site watchdog (multi-broker plan section 3.8): run on the Mac every minute by launchd, it checks the GCP execution
+host from outside GCP, so a stopped VM, a billing shutdown or a dead worker is noticed even when nothing on GCP can say so.
+
+One IAP SSH call per run reads, on the VM's loopback only (no new port, no new credential):
+  - the execution worker's /api/execution/status (heartbeat, each account's state) and /api/execution/login-board;
+  - trading-core's health and whether the live PAPER session is running;
+  - open follower positions per account (exec.position), so an alert says what is exposed.
+Only on trading days (the exchange file's holidays), 08:55-15:50 IST, unless --force. A problem is sent to Telegram when
+it starts, again every 15 minutes while it lasts (an account without today's broker login only once: that is a choice
+you may have made), and once when it clears; the first all-clear check of a day sends a short "watchdog running" line, so
+silence from the watchdog itself is noticeable. The bot token is never printed.
+
+  bin/offsite-watchdog [--force] [--dry-run] [--telegram-file F] [--state-dir D]
+  bin/offsite-watchdog --pause-until YYYY-MM-DD   # VMs stopped on purpose: no checks through that day
+  bin/offsite-watchdog --resume
+Environment: AUTOTRADE_GCP_ACCOUNT (the gcloud account for IAP SSH; default gcloud's own), AUTOTRADE_GCP_PROJECT,
+AUTOTRADE_GCP_ZONE, AUTOTRADE_GCP_VM.
+"""
+import argparse
+import datetime as dt
+import json
+import os
+import re
+import subprocess
+import sys
+import urllib.parse
+import urllib.request
+
+IST = dt.timezone(dt.timedelta(hours=5, minutes=30))
+HERE = os.path.dirname(os.path.abspath(__file__))
+OK_STATES = {"RUNNING", "REFUSED", "LEASE_HELD_ELSEWHERE"}
+REPEAT = dt.timedelta(minutes=15)
+
+REMOTE = r"""
+S=$(curl -s -m 5 http://127.0.0.1:8096/api/execution/status || true); echo "@@STATUS ${S:-DOWN}"
+B=$(curl -s -m 5 -f http://127.0.0.1:8096/api/execution/login-board || true); echo "@@BOARD ${B:-NONE}"
+H=$(curl -s -m 5 -o /dev/null -w '%{http_code}' http://127.0.0.1:8095/actuator/health || true); echo "@@CORE ${H:-000}"
+P=$(sudo docker exec autotrade-postgres psql -U autotrade -d autotrade -X -At -F'|' -c "select a.display_name, a.trade_mode, count(*) from exec.position p join acct.broker_account a on a.id = p.broker_account_id where p.status = 'OPEN' and p.quantity_open > 0 group by 1, 2 order by 1" 2>/dev/null | tr '\n' ';'); echo "@@POS ${P}"
+L=$(sudo docker exec autotrade-postgres psql -U autotrade -d autotrade -X -At -c "select count(*) from trade.session where status = 'RUNNING' and mode = 'PAPER_LIVE'" 2>/dev/null); echo "@@LIVE ${L:-?}"
+"""
+
+
+def holidays(path):
+    days = set()
+    try:
+        inside = False
+        for line in open(path):
+            if line.startswith("holidays:"):
+                inside = True
+                continue
+            if inside:
+                m = re.match(r'\s+-\s+"?(\d{4}-\d{2}-\d{2})"?', line)
+                if m:
+                    days.add(dt.date.fromisoformat(m.group(1)))
+                elif line.strip() and not line.startswith(" "):
+                    break
+    except OSError:
+        pass                                    # unknown holidays: every weekday is watched
+    return days
+
+
+def in_window(now, holiday_set):
+    if now.weekday() >= 5 or now.date() in holiday_set:
+        return False
+    return dt.time(8, 55) <= now.time() <= dt.time(15, 50)
+
+
+def check(args):
+    """Runs the remote probe; returns (problems: {key: text}, facts: dict)."""
+    cmd = ["gcloud", "compute", "ssh", args.vm, "--zone=" + args.zone, "--project=" + args.project,
+           "--tunnel-through-iap", "--quiet", "--command", REMOTE]
+    if args.account:
+        cmd.insert(4, "--account=" + args.account)
+    if args.probe_output:                      # tests: a recorded probe instead of the SSH call
+        out = open(args.probe_output).read()
+    else:
+        try:
+            out = subprocess.run(cmd, capture_output=True, text=True, timeout=75).stdout
+        except subprocess.TimeoutExpired:
+            out = ""
+    parts = {}
+    for line in out.splitlines():
+        m = re.match(r"@@(\w+) ?(.*)", line)
+        if m:
+            parts[m.group(1)] = m.group(2)
+    problems, facts = {}, {"positions": [], "board": None}
+    if "STATUS" not in parts:
+        problems["SSH"] = ("cannot reach the GCP execution host %s over IAP SSH: the VM is stopped, GCP is down "
+                           "(billing, network) or IAP failed" % args.vm)
+        return problems, facts
+    for row in filter(None, parts.get("POS", "").split(";")):
+        f = row.split("|")
+        if len(f) == 3:
+            facts["positions"].append("%s (%s) %s open" % (f[0], f[1], f[2]))
+    try:
+        status = json.loads(parts["STATUS"])
+    except ValueError:
+        status = None
+    if status is None:
+        problems["WORKER_DOWN"] = "the execution worker does not answer (container down or crashed)"
+    else:
+        if status.get("stale"):
+            problems["WORKER_STALE"] = "the execution worker's loop is stuck (last tick %s)" % status.get("lastTick")
+        for a in status.get("accounts", []):
+            if a.get("state") == "BROKER_SESSION":
+                problems["SESSION_" + a.get("account", "?")] = ("account %s has no broker session today: its entries are "
+                                                               "refused until a login" % a.get("account"))
+            elif a.get("state") not in OK_STATES:
+                problems["ACCOUNT_" + a.get("account", "?")] = "account %s: %s (%s)" % (
+                    a.get("account"), a.get("state"), (a.get("lastResult") or "")[:160])
+    if parts.get("CORE") != "200":
+        problems["CORE_DOWN"] = "trading-core health is %s (market data and the signal source)" % parts.get("CORE")
+    now = dt.datetime.now(IST).time()
+    if dt.time(9, 16) <= now <= dt.time(15, 29) and parts.get("LIVE", "?").strip() == "0":
+        problems["NO_LIVE_SESSION"] = "no live PAPER session is running in trading-core"
+    try:
+        facts["board"] = json.loads(parts.get("BOARD", "NONE"))
+    except ValueError:
+        facts["board"] = None                   # an older worker without the board
+    return problems, facts
+
+
+def telegram(args, text):
+    if args.dry_run:
+        print("TELEGRAM (dry run):\n" + text)
+        return
+    settings = {}
+    try:
+        for line in open(args.telegram_file):
+            if "=" in line and not line.strip().startswith("#"):
+                k, v = line.split("=", 1)
+                settings[k.strip()] = v.strip()
+    except OSError:
+        pass
+    token, chat = settings.get("TELEGRAM_BOT_TOKEN"), settings.get("TELEGRAM_CHAT_ID")
+    if not token or not chat:
+        print("no Telegram settings; message: " + text)
+        return
+    body = urllib.parse.urlencode({"chat_id": chat, "text": text, "disable_web_page_preview": "true"}).encode()
+    try:
+        urllib.request.urlopen("https://api.telegram.org/bot%s/sendMessage" % token, body, timeout=15).read()
+    except Exception as e:                      # never the URL: it holds the token
+        print("Telegram not delivered: %s" % type(e).__name__)
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--force", action="store_true", help="check outside the market window too")
+    p.add_argument("--dry-run", action="store_true", help="print the messages instead of sending them")
+    p.add_argument("--telegram-file", default=os.path.join(HERE, "..", ".local", "telegram", "bot.env"))
+    p.add_argument("--exchange-file", default=os.path.join(HERE, "..", "config", "exchange", "nse-bse-sessions.v3.yaml"))
+    p.add_argument("--state-dir", default=os.path.expanduser("~/.autotrade-watchdog"))
+    p.add_argument("--probe-output", help=argparse.SUPPRESS)
+    p.add_argument("--pause-until", help="no checks through this date (YYYY-MM-DD): the VMs are stopped on purpose")
+    p.add_argument("--resume", action="store_true", help="end a pause")
+    args = p.parse_args()
+    args.account = os.environ.get("AUTOTRADE_GCP_ACCOUNT")
+    args.project = os.environ.get("AUTOTRADE_GCP_PROJECT", "zt-tiger-v2-prod")
+    args.zone = os.environ.get("AUTOTRADE_GCP_ZONE", "asia-south1-a")
+    args.vm = os.environ.get("AUTOTRADE_GCP_VM", "zt-autotrade")
+
+    now = dt.datetime.now(IST)
+    os.makedirs(args.state_dir, exist_ok=True)
+    pause_file = os.path.join(args.state_dir, "pause-until")
+    if args.pause_until:
+        dt.date.fromisoformat(args.pause_until)
+        open(pause_file, "w").write(args.pause_until + "\n")
+        print("paused through %s" % args.pause_until)
+        return 0
+    if args.resume:
+        if os.path.exists(pause_file):
+            os.remove(pause_file)
+        print("resumed")
+        return 0
+    try:
+        if now.date() <= dt.date.fromisoformat(open(pause_file).read().strip()):
+            return 0                            # paused on purpose
+    except (OSError, ValueError):
+        pass
+    if not args.force and not in_window(now, holidays(args.exchange_file)):
+        return 0
+    state_file = os.path.join(args.state_dir, "state.json")
+    try:
+        state = json.load(open(state_file))
+    except (OSError, ValueError):
+        state = {}
+    active = state.get("active", {})
+    today = now.date().isoformat()
+
+    problems, facts = check(args)
+    exposure = ("\nOpen follower positions: " + ", ".join(facts["positions"]) +
+                " (LIVE ones are protected only by their broker stops while this lasts)") if facts["positions"] else ""
+    messages = []
+    for key, text in problems.items():
+        seen = active.get(key)
+        if seen is None:
+            messages.append("WATCHDOG ALERT %s IST: %s" % (now.strftime("%H:%M"), text))
+            active[key] = {"since": now.isoformat(), "last": now.isoformat()}
+        elif not key.startswith("SESSION_") and now - dt.datetime.fromisoformat(seen["last"]) >= REPEAT:
+            messages.append("WATCHDOG STILL (since %s IST): %s" % (
+                dt.datetime.fromisoformat(seen["since"]).strftime("%H:%M"), text))
+            seen["last"] = now.isoformat()
+    for key in [k for k in active if k not in problems]:
+        messages.append("WATCHDOG CLEARED %s IST: %s (since %s IST)" % (
+            now.strftime("%H:%M"), key, dt.datetime.fromisoformat(active[key]["since"]).strftime("%H:%M")))
+        del active[key]
+    if not problems and state.get("heartbeat") != today:
+        board = facts.get("board") or {}
+        out = [a["account"] for a in board.get("accounts", []) if not a.get("ready")]
+        messages.append("Watchdog running %s IST: execution host OK%s" % (
+            now.strftime("%H:%M"), "; not logged in: " + ", ".join(out) if out else ""))
+        state["heartbeat"] = today
+    if messages:                                # one message a run; the exposure once, under any alert
+        alerting = any(m.startswith("WATCHDOG ALERT") or m.startswith("WATCHDOG STILL") for m in messages)
+        telegram(args, "\n".join(messages) + (exposure if alerting else ""))
+    state["active"] = active
+    state["lastCheck"] = now.isoformat()
+    state["lastProblems"] = sorted(problems)
+    tmp = state_file + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=1)
+    os.replace(tmp, state_file)
+    print("%s %s" % (now.strftime("%Y-%m-%d %H:%M:%S"), "problems: " + ", ".join(sorted(problems)) if problems else "OK"))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

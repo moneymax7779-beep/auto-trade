@@ -37,6 +37,9 @@ autotrade:
     copy-group: LIVE-SET
     poll-ms: 1000
     costs-file: config/costs/india-index-options-costs.v2.yaml
+    # Holidays for the 08:30 login links and the 09:10 login board. Keep equal to trading-core's
+    # autotrade.trading.exchange-file: a new exchange file version is changed in both places.
+    exchange-file: config/exchange/nse-bse-sessions.v3.yaml
     broker-funds: 1000000000         # DRY_RUN in L1: simulated broker funds (L2 reads the broker)
     # The daily Kite login (live L3, user go-ahead 24 Oct 2026): the app's key and secret as files in secrets-dir (read
     # only; the credential profile names them file:<name>), the day's access token per account in sessions-dir (owner

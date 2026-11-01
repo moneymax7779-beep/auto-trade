@@ -1,12 +1,6 @@
 package com.autotrade.exec.app;
 
 import java.net.URI;
-import java.net.URLEncoder;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.sql.Timestamp;
@@ -88,9 +82,13 @@ class KiteLogin {
     private final Map<String, Pending> pending = new ConcurrentHashMap<>();
     private final Map<Long, Object> accountLocks = new ConcurrentHashMap<>();
     private final SecureRandom random = new SecureRandom();
-    private final HttpClient telegram = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+    private final TelegramNotifier telegram;
+    private final TradingDays tradingDays;
 
-    KiteLogin(DataSource dataSource, TransactionTemplate tx, KiteLoginProperties props) {
+    KiteLogin(DataSource dataSource, TransactionTemplate tx, KiteLoginProperties props, TelegramNotifier telegram,
+              TradingDays tradingDays) {
+        this.telegram = telegram;
+        this.tradingDays = tradingDays;
         this.accounts = new AccountStore(dataSource);
         this.jdbc = new JdbcTemplate(dataSource);
         this.tx = tx;
@@ -229,9 +227,12 @@ class KiteLogin {
         }
     }
 
-    /** 08:30 IST, weekdays: the login link of every enabled ZERODHA DRY_RUN / LIVE account without a session. */
+    /** 08:30 IST, trading days: the login link of every enabled ZERODHA DRY_RUN / LIVE account without a session. */
     @Scheduled(cron = "0 30 8 * * MON-FRI", zone = "Asia/Kolkata")
     void morningLinks() {
+        if (!tradingDays.isTradingDay(java.time.LocalDate.now(IST))) {
+            return;                                         // an exchange holiday: no session, no login needed
+        }
         for (Map<String, Object> row : jdbc.queryForList("select a.id, a.display_name from acct.broker_account a "
                 + "where a.broker_type = 'ZERODHA' and a.enabled and a.trade_mode in ('DRY_RUN', 'LIVE') "
                 + "and a.credential_profile_id is not null and not exists (select 1 from acct.broker_session s "
@@ -242,7 +243,7 @@ class KiteLogin {
                 log.warn("account {} ({}) needs today's Kite login; no public-base-url set for a link", id, name);
                 continue;
             }
-            telegram("Kite login for " + name + " (today's session): " + props.publicBaseUrl()
+            telegram.send("Kite login for " + name + " (today's session): " + props.publicBaseUrl()
                     + "/api/execution/accounts/" + id + "/kite/login");
         }
     }
@@ -288,36 +289,5 @@ class KiteLogin {
     private void sweepPending() {
         Instant cutoff = Instant.now().minus(STATE_LIFETIME);
         pending.values().removeIf(p -> p.created().isBefore(cutoff));
-    }
-
-    private void telegram(String text) {
-        Map<String, String> settings = new HashMap<>();
-        try {
-            Path file = Path.of(props.telegramFile());
-            if (Files.isRegularFile(file)) {
-                for (String line : Files.readAllLines(file)) {
-                    int eq = line.indexOf('=');
-                    if (eq > 0 && !line.trim().startsWith("#")) {
-                        settings.put(line.substring(0, eq).trim(), line.substring(eq + 1).trim());
-                    }
-                }
-            }
-            String token = settings.get("TELEGRAM_BOT_TOKEN"), chat = settings.get("TELEGRAM_CHAT_ID");
-            if (token == null || chat == null) {
-                log.info("no Telegram settings in {}: {}", file, text);
-                return;
-            }
-            String body = "chat_id=" + URLEncoder.encode(chat, StandardCharsets.UTF_8) + "&text="
-                    + URLEncoder.encode(text, StandardCharsets.UTF_8) + "&disable_web_page_preview=true";
-            HttpResponse<String> r = telegram.send(HttpRequest.newBuilder(URI.create("https://api.telegram.org/bot" + token
-                    + "/sendMessage")).timeout(Duration.ofSeconds(15)).header("Content-Type",
-                    "application/x-www-form-urlencoded").POST(HttpRequest.BodyPublishers.ofString(body)).build(),
-                    HttpResponse.BodyHandlers.ofString());
-            if (r.statusCode() != 200) {
-                log.warn("Telegram login link not delivered: HTTP {}", r.statusCode());
-            }
-        } catch (Exception e) {
-            log.warn("Telegram login link not delivered: {}", e.getClass().getSimpleName());
-        }
     }
 }

@@ -163,3 +163,38 @@ only until Keycloak.
 - The daily loss limit in rupees is `acct.broker_account.daily_loss_limit` (V25); when set it replaces the risk file's
   `daily_loss_pct` for that account.
 
+
+## Login board and off-site watchdog (multi-broker plan K1, 1 Nov 2026)
+
+**Login board.** Every enabled DRY_RUN / LIVE broker account, whether today's broker session is ACTIVE, until when, and
+how many strategies it follows: `GET /api/execution/login-board` (through the UI: your tenants only; on the host
+without the user header: all). At **09:10 IST on trading days** the board goes to Telegram after the 08:30 login
+links: "N of M broker accounts ready", then **OUT FOR TODAY** for every account without a session (its entries are
+refused `BROKER_SESSION` until a login). The 08:30 links and the 09:10 board skip the exchange file's holidays.
+
+**Off-site watchdog.** `bin/offsite-watchdog` runs on the Mac (outside GCP) every minute from 08:55 to 15:50 IST on
+trading days. One IAP SSH call reads the worker's status and login board, trading-core's health, whether the live PAPER
+session runs, and the open follower positions, on the VM's loopback only. Telegram:
+- **WATCHDOG ALERT**: the VM cannot be reached (stopped, GCP billing or network, IAP), the worker is down or stuck, an
+  account is in error, trading-core is unhealthy, or no live session runs in market hours; with the open follower
+  positions (LIVE ones are protected only by their broker stops while it lasts);
+- **WATCHDOG STILL** every 15 minutes while it lasts; **WATCHDOG CLEARED** when it ends;
+- **Watchdog running** once a day at the first healthy check (no such line by about 09:00 = the watchdog itself is not
+  running: the Mac asleep, launchd, gcloud).
+
+Install (copies the script to `~/.autotrade-watchdog`, writes the launchd agent, starts it):
+
+```bash
+bin/install-offsite-watchdog --account <gcloud account for IAP SSH> --telegram-file <path to bot.env>
+```
+
+Check by hand: `bin/offsite-watchdog --force --dry-run` (prints instead of sending). Remove:
+`bin/install-offsite-watchdog --uninstall`. launchd does not run while the Mac sleeps.
+
+**When it alerts with LIVE positions open:** open the broker's own app and look at the positions and the resting stops;
+if the host stays unreachable, flatten there (section "Flatten" above lists what a flatten does; by hand in the broker
+app it is: sell each open position, after cancelling its stop order).
+
+Days you stop the VMs on purpose: `bin/offsite-watchdog --state-dir ~/.autotrade-watchdog --pause-until YYYY-MM-DD`
+(no checks through that day), `--resume` to end it early. An account without today's broker login is reported once
+(you may have chosen to sit the day out), not every 15 minutes.
