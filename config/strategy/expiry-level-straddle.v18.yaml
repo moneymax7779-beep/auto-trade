@@ -1,0 +1,37 @@
+# els-v18 = els-v16 (the THETA exit only) with the A-287 code-review fixes (1 Nov 2026; user: "why these are not fixed"): THETA
+# values the held strikes at the realized volatility instead of comparing it with the ATM IV, the swing trail uses only
+# pivots formed after the entry, and the box break is off explicitly (it never fired: features v12 has no box). Entry and
+# every other exit as els-v16. Not a registered test; tick days only (user, 1 Nov), descriptive.
+version: els-v18
+strategy: expiry-level-straddle
+status: UNCALIBRATED
+source: "user-request-2026-11-01 (ledger A-287 review fixes)"
+
+scope:
+  underlying: NIFTY
+  entry_from: "12:30"
+  entry_until: "14:30"
+  flat_by: "15:29"                     # user 30 Oct: sell at 3.30 PM (the last minute check)
+
+setup:
+  round_step: 100
+  box_break: false                     # level crosses only: what A-285 to A-287 actually traded (features v12 has no box)
+
+compression:                           # as ebs-v2 (egb-v1)
+  range_vs_session_max: 0.66
+  ema_gap_atr_max: 0.30
+  volume_rate_ratio_max: 1.0
+  memory_min: 30
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+
+exits:
+  premium_stop_pct: 100                # no stop; no target_pct = no combined target
+  signals:                             # A-287: market-data exits, checked once a minute; any one sells both legs
+    theta:                             # the held legs priced at the last 15 minutes' realized vol < 1.0 x their bids
+      basis: HELD_FAIR_VALUE
+      rv_minutes: 15
+      rv_vs_iv_min: 1.0
+      min_age_min: 10

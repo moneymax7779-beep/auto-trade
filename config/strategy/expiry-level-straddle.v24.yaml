@@ -1,0 +1,30 @@
+# els-v24 = els-v20 (NIFTY) entered at the first level cross in 14:00-15:00 and held to 15:29 (no target, no time
+# stop): A-294's after-2-pm HOLD (user, 1 Nov: "later you can also trying after 2 pm for both NIFTY and SENSEX"). Descriptive,
+# tick days; on candles NIFTY was +1,059 % (PF 1.42) on the test year, SENSEX -1,229 %.
+version: els-v24
+strategy: expiry-level-straddle
+status: UNCALIBRATED
+source: "user-request-2026-11-01 (ledger A-290, fixed at registration)"
+
+scope:
+  underlying: NIFTY
+  entry_from: "14:00"
+  entry_until: "15:00"
+  flat_by: "15:29"                     # user 30 Oct: sell at 3.30 PM (the last minute check)
+
+setup:
+  round_step: 100
+  box_break: false                     # level crosses only, as A-285 to A-287 actually traded
+
+compression:                           # as ebs-v2 (egb-v1)
+  range_vs_session_max: 0.66
+  ema_gap_atr_max: 0.30
+  volume_rate_ratio_max: 1.0
+  memory_min: 30
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+
+exits:
+  premium_stop_pct: 100                # no stop

@@ -1,0 +1,31 @@
+# els-v23 = els-v21 (els-v20 on SENSEX) with a 60-minute time stop instead of 30 (user, 1 Nov: "run the 10 and 60 minute
+# versions on SENSEX too"). Every other threshold as els-v21. Descriptive, tick days.
+version: els-v23
+strategy: expiry-level-straddle
+status: UNCALIBRATED
+source: "user-request-2026-11-01 (SENSEX run of els-v20, tick days only)"
+
+scope:
+  underlying: SENSEX                   # the only change from els-v20
+  entry_from: "12:30"
+  entry_until: "14:30"
+  flat_by: "15:29"                     # user 30 Oct: sell at 3.30 PM (the last minute check)
+
+setup:
+  round_step: 100
+  box_break: false                     # level crosses only, as A-285 to A-287 actually traded
+
+compression:                           # as ebs-v2 (egb-v1)
+  range_vs_session_max: 0.66
+  ema_gap_atr_max: 0.30
+  volume_rate_ratio_max: 1.0
+  memory_min: 30
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+
+exits:
+  target_pct: 90                       # combined bid >= (1 + 90 %) x the combined premium paid
+  premium_stop_pct: 100                # no stop
+  time_stop_min: 60                    # sell both 60 minutes after entry if the target has not hit

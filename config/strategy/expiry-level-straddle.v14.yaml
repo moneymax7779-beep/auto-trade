@@ -1,0 +1,44 @@
+# els-v14 = the A-285 entry (els-v10: NIFTY expiry day, first level cross or compression box break in 12:30-14:30, the
+# call / put pair with the closest asks of ATM - 50 / ATM / ATM + 50) with market-data exits instead of a premium target or a
+# time stop (ledger A-287, registered 1 Nov 2026 before any computation; user 1 Nov: "the exit should be based on the data OI
+# changes, future volume and other S&R if needed level break outs and false breakouts, shouldn't be 10% or 30 minutes
+# holding"; "premiums evaporate on late exit"). primary: all six exits. No combined target, no stop, flat at 15:29.
+version: els-v14
+strategy: expiry-level-straddle
+status: UNCALIBRATED
+source: "user-request-2026-11-01 (ledger A-287, fixed at registration)"
+
+scope:
+  underlying: NIFTY
+  entry_from: "12:30"
+  entry_until: "14:30"
+  flat_by: "15:29"                     # user 30 Oct: sell at 3.30 PM (the last minute check)
+
+setup:
+  round_step: 100
+
+compression:                           # as ebs-v2 (egb-v1)
+  range_vs_session_max: 0.66
+  ema_gap_atr_max: 0.30
+  volume_rate_ratio_max: 1.0
+  memory_min: 30
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+
+exits:
+  premium_stop_pct: 100                # no stop; no target_pct = no combined target
+  signals:                             # A-287: market-data exits, checked once a minute; any one sells both legs
+    theta:                             # realized vol of the last 15 one-minute returns < 1.0 x ATM IV (theta winning)
+      rv_minutes: 15
+      rv_vs_iv_min: 1.0
+      min_age_min: 10
+    false_break:                       # 2 closes in a row back across the trigger level, each on <= median futures volume
+      closes: 2
+    rejection: true                    # in profit: reached a level / OI wall beyond the trigger, closed back, writers building
+    climax:                            # in profit: futures minute volume >= 3 x session median, close in the third against
+      volume_x_median: 3.0
+    fut_oi:                            # in profit: futures price/OI state against the move on 2 minute checks in a row
+      minutes: 2
+    swing_trail: true                  # in profit: a close beyond the last swing formed beyond the trigger

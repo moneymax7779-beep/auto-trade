@@ -1,0 +1,32 @@
+# els-v21 = els-v20 on SENSEX (user, 1 Nov: "I want to run this on SENSEX on tick days"): on SENSEX's own expiry day, the
+# first level cross (incl. a multiple of 100) in 12:30-14:30 buys the closest-ask call / put pair of ATM - 1 / ATM / ATM + 1,
+# both sold at +90 % of the combined premium or 30 minutes after entry. Every threshold as els-v20. Descriptive, tick days.
+version: els-v21
+strategy: expiry-level-straddle
+status: UNCALIBRATED
+source: "user-request-2026-11-01 (SENSEX run of els-v20, tick days only)"
+
+scope:
+  underlying: SENSEX                   # the only change from els-v20
+  entry_from: "12:30"
+  entry_until: "14:30"
+  flat_by: "15:29"                     # user 30 Oct: sell at 3.30 PM (the last minute check)
+
+setup:
+  round_step: 100
+  box_break: false                     # level crosses only, as A-285 to A-287 actually traded
+
+compression:                           # as ebs-v2 (egb-v1)
+  range_vs_session_max: 0.66
+  ema_gap_atr_max: 0.30
+  volume_rate_ratio_max: 1.0
+  memory_min: 30
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+
+exits:
+  target_pct: 90                       # combined bid >= (1 + 90 %) x the combined premium paid
+  premium_stop_pct: 100                # no stop
+  time_stop_min: 30                    # A-290: sell both 30 minutes after entry if the target has not hit
