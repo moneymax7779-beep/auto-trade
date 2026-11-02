@@ -55,6 +55,8 @@ class ReadLiveIT {
     private static final String SYMBOL = "NIFTY 23100 PE";
     private static final String OTHER = "NSE_FO|47169";
     private static final String OTHER_SYMBOL = "NIFTY 23150 PE";
+    /** Listed at Kite but not in our contract master: it cannot be checked, so it is never tradable. */
+    private static final String UNCHECKED = "NSE_FO|47170";
     private static final int LOT = 65;
     private static final long FREEZE = 1755;                  // 27 lots
     private static final String V6 = "../config/risk/follower-risk.v6.yaml";
@@ -106,6 +108,7 @@ class ReadLiveIT {
         String expiry = DAY.plusDays(2).toString();
         kite.list(new KiteSimulator.Listing(47168, "NFO", "NIFTY26X0323100PE", "NIFTY", expiry, 23100, "PE", LOT, 0.05));
         kite.list(new KiteSimulator.Listing(47169, "NFO", "NIFTY26X0323150PE", "NIFTY", expiry, 23150, "PE", LOT, 0.05));
+        kite.list(new KiteSimulator.Listing(47170, "NFO", "NIFTY26X0323200PE", "NIFTY", expiry, 23200, "PE", LOT, 0.05));
         kite.funds(800_000);
         session.set(Optional.of(new BrokerSessions.Access("real-key", "day-token")));
     }
@@ -258,6 +261,18 @@ class ReadLiveIT {
                 s.broker().id())).isZero();
         assertThat(jdbc.queryForObject("select detail::text from exec.audit_log where broker_account_id = ? and action = "
                 + "'INSTRUMENT_MAPPING_MISMATCH'", String.class, s.broker().id())).contains("lot 65 at Kite, 75 ours");
+        assertThat(orderCalls()).isZero();
+    }
+
+    @Test
+    void aKiteContractOurMasterDoesNotHaveIsNotTradable() throws Exception {
+        Setup s = setup();
+        kite.depth(UNCHECKED, List.of(new Quote.Level(99.5, 6500)), List.of(new Quote.Level(100.0, 65_000)), 99.8);
+        enter(s, UNCHECKED, "NIFTY 23200 PE");
+        follower(s.broker()).run(s.broker(), s.group(), DAY);
+        assertThat(intentState(s.broker())).startsWith("REJECTED");
+        assertThat(jdbc.queryForObject("select count(*) from exec.position where broker_account_id = ?", Integer.class,
+                s.broker().id())).isZero();
         assertThat(orderCalls()).isZero();
     }
 
