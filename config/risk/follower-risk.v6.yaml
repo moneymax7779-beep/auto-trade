@@ -1,0 +1,42 @@
+# follower-risk v6 (multi-broker plan step K1, 1 Nov 2026, user: "commit the plan and start working in a new branch"):
+# v5 unchanged except orders.dry_run_market: BROKER. A DRY_RUN account on this file reads its real broker session
+# (funds, quotes with five levels of depth, the instrument list checked each morning against our contract master) and
+# its orders still go only to the local simulator, filled against the broker's book of that moment. Before this, a
+# DRY_RUN account's simulator book was our own stored bid and ask with unlimited depth. Attached to no account until the
+# user chooses it. No order can reach a broker from this file: LIVE stays refused by the broker registry.
+version: follower-risk-v6
+name: follower-risk
+status: UNCALIBRATED
+
+capital:
+  daily_loss_pct: 10                   # v5: Rs 20,000 on Rs 2,00,000 (user's limit); v3 had 22 as paper-risk v17
+  max_premium_per_trade_pct: 100
+  max_open_premium_pct: 100            # premium in use + this entry <= equity (paper-risk v17's capital check)
+  broker_funds_buffer_pct: 10          # the broker's available funds must exceed the entry premium by 10 %
+
+positions:                             # as paper-risk v17
+  max_open_positions: 4
+  max_lots_per_underlying: 400
+
+sizing:                                # as paper-risk v17
+  rvol_boost_threshold: 1.5
+  rvol_boost_factor: 1.5
+
+simulation:                            # PAPER followers (simulated fills) only
+  adverse_bps: 0
+
+orders:                                # as paper-risk v17 orders (PAPER-1's OMS)
+  entry_buffer_ticks: 4                # marketable limit: the broker's ask + 4 ticks
+  entry_timeout_sec: 10                # what is unfilled after this is cancelled; the position is what filled
+  exit_buffer_ticks: 4                 # sell limit: bid − max(4 ticks, exit_buffer_pct of the bid)
+  exit_buffer_pct: 1.0
+  exit_chase_sec: 2                    # an unfilled exit is re-priced at the new touch after this
+  exit_chase_max: 6                    # re-pricings before the exit crosses exit_cross_pct through the touch
+  exit_cross_pct: 5
+  tick: 0.05                           # index option price step
+  poll_ms: 250                         # how often the order book is pulled while an order works
+  dry_run_market: BROKER               # v6: DRY_RUN reads the broker (funds, quotes + depth, instruments); orders simulated
+
+broker_stop:                           # plan section 3: catastrophic stop resting at the broker after every entry fill
+  default_stop_pct: 25                 # when the signal carries no stop_pct (the strategies publish theirs)
+  limit_offset_pct: 5                  # its limit this far below the trigger (paper-risk v17 stop_limit_offset_pct)

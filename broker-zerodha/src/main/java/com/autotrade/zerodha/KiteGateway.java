@@ -41,7 +41,7 @@ import tools.jackson.databind.JsonNode;
  *       {@code placeLookupWait} (three tries), adopted when found, and placed again only when it is not there. A 429 or
  *       a refused connection did not reach the broker and is retried after a short wait.</li>
  *   <li><b>Rate</b>: places, modifies and cancels go through a limiter below Kite's 10 a second; quote calls through
- *       one of a call a second (Kite's quote limit).</li>
+ *       one of a call a second, shared by every gateway on the same app (Kite counts the quote limit per API key).</li>
  *   <li><b>State</b>: {@link #poll()} pulls the order book (the truth) and emits an {@link OrderUpdate} for each change
  *       of status or filled quantity; a repeated or reordered report changes nothing. A WebSocket or postback can call
  *       {@code poll()} sooner; it is never the only source.</li>
@@ -57,7 +57,9 @@ public final class KiteGateway implements BrokerConnection {
     private final KiteHttp http;
     private final KiteInstruments instruments;
     private final RateLimiter limiter;
-    private final RateLimiter quotes = new RateLimiter(1);          // Kite's quote API: one call a second
+    /** Kite's quote API: one call a second per app (API key and base), whichever account or route asks. */
+    private static final Map<String, RateLimiter> QUOTE_LIMITS = new ConcurrentHashMap<>();
+    private final RateLimiter quotes;
     private final List<Consumer<OrderUpdate>> listeners = new CopyOnWriteArrayList<>();
     private final Map<String, String> brokerIdByTag = new ConcurrentHashMap<>();
     private final Map<String, BrokerOrder> lastSeen = new ConcurrentHashMap<>();
@@ -67,6 +69,7 @@ public final class KiteGateway implements BrokerConnection {
         this.http = http;
         this.instruments = instruments;
         this.limiter = new RateLimiter(config.maxOrdersPerSecond());
+        this.quotes = QUOTE_LIMITS.computeIfAbsent(config.apiKey() + "@" + config.apiBase(), k -> new RateLimiter(1));
     }
 
     @Override
@@ -216,7 +219,22 @@ public final class KiteGateway implements BrokerConnection {
         Instant time = KiteHttp.time(q.path("timestamp").asString(""));
         return new Quote(instrumentKey, buy.path("price").asDouble(0), buy.path("quantity").asLong(0),
                 sell.path("price").asDouble(0), sell.path("quantity").asLong(0), q.path("last_price").asDouble(0),
-                time == null ? Instant.now() : time);
+                time == null ? Instant.now() : time, levels(q.path("depth").path("buy")),
+                levels(q.path("depth").path("sell")));
+    }
+
+    /** Kite's five depth levels, best first; an empty level (price or quantity 0) ends the list. */
+    private static List<Quote.Level> levels(JsonNode side) {
+        List<Quote.Level> levels = new ArrayList<>();
+        for (JsonNode level : side) {
+            double price = level.path("price").asDouble(0);
+            long quantity = level.path("quantity").asLong(0);
+            if (!(price > 0) || quantity <= 0) {
+                break;
+            }
+            levels.add(new Quote.Level(price, quantity));
+        }
+        return levels;
     }
 
     @Override

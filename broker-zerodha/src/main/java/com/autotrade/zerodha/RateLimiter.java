@@ -1,8 +1,9 @@
 package com.autotrade.zerodha;
 
 /**
- * At most {@code perSecond} permits in any rolling second (orders, modifies and cancels count; reads do not). Callers
- * wait for a permit; the account's lane is the only caller, so waiting delays only that account.
+ * At most {@code perSecond} permits in any rolling second. Callers wait for a permit, one at a time (a waiting caller
+ * holds the lock, so callers sharing a limiter queue): an account's order limiter has one caller, its lane; the quote
+ * limiter of an app is shared by every account and route on that app.
  */
 final class RateLimiter {
 

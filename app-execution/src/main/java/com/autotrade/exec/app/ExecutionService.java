@@ -34,12 +34,23 @@ class ExecutionService implements DisposableBean {
 
     private final DataSource dataSource;
     private final ExecutionProperties properties;
+    private final KiteSessionSource kiteSessions;
+    private final KiteLoginProperties kite;
     private volatile ExecutionLoop loop;
     private volatile java.time.Instant lastTick;
 
+    /** Tests: no real broker sessions. */
     ExecutionService(DataSource dataSource, ExecutionProperties properties) {
+        this(dataSource, properties, null, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    ExecutionService(DataSource dataSource, ExecutionProperties properties, KiteSessionSource kiteSessions,
+                     KiteLoginProperties kite) {
         this.dataSource = dataSource;
         this.properties = properties;
+        this.kiteSessions = kiteSessions;
+        this.kite = kite;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -52,7 +63,9 @@ class ExecutionService implements DisposableBean {
         }
         CostModel costs = CostModel.from(ThresholdConfig.load(Path.of(properties.costsFile())));
         loop = new ExecutionLoop(dataSource, properties.tenant(), properties.copyGroup(), properties.workerId(), costs,
-                new StoredQuotes(dataSource, null), properties.brokerFunds());
+                new StoredQuotes(dataSource, null), properties.brokerFunds(),
+                kiteSessions == null ? com.autotrade.execution.BrokerSessions.NONE : kiteSessions,
+                kite == null ? com.autotrade.zerodha.KiteConfig.REAL_API : java.net.URI.create(kite.apiBase()));
         log.info("execution worker {} serving copy group {} (tenant {}), every {} ms", properties.workerId(),
                 properties.copyGroup(), properties.tenant(), properties.pollMs());
         if (properties.day() != null) {

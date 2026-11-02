@@ -73,6 +73,17 @@ public final class ExecutionLoop implements AutoCloseable {
 
     public ExecutionLoop(DataSource dataSource, String tenant, String copyGroups, String workerId, CostModel costs,
                          QuoteSource quotes, double brokerFunds) {
+        this(dataSource, tenant, copyGroups, workerId, costs, quotes, brokerFunds, BrokerSessions.NONE,
+                com.autotrade.zerodha.KiteConfig.REAL_API);
+    }
+
+    /**
+     * @param sessions    the accounts' real broker sessions, read by DRY_RUN accounts whose risk file reads the broker's
+     *                    market ({@code orders.dry_run_market: BROKER})
+     * @param kiteApiBase Kite's API for those reads
+     */
+    public ExecutionLoop(DataSource dataSource, String tenant, String copyGroups, String workerId, CostModel costs,
+                         QuoteSource quotes, double brokerFunds, BrokerSessions sessions, java.net.URI kiteApiBase) {
         this.dataSource = dataSource;
         this.jdbc = new JdbcTemplate(dataSource);
         this.transactions = new TransactionTemplate(new org.springframework.jdbc.datasource.DataSourceTransactionManager(
@@ -84,7 +95,8 @@ public final class ExecutionLoop implements AutoCloseable {
         this.workerId = workerId;
         this.costs = costs;
         this.quotes = quotes;
-        this.connections = new BrokerConnections(dataSource, brokerFunds);
+        this.connections = new BrokerConnections(dataSource, brokerFunds,
+                List.of(new ZerodhaDryRunAdapter(dataSource, brokerFunds, sessions, kiteApiBase)));
         this.reconciler = new BrokerReconciler(dataSource, costs);
     }
 
@@ -159,6 +171,13 @@ public final class ExecutionLoop implements AutoCloseable {
                         signature);
             }
             FollowerRisk risk = risks.computeIfAbsent(account.id(), id -> FollowerRisk.load(Path.of(account.riskFile())));
+            if (risk.orders() != null && risk.orders().brokerMarket()
+                    && !day.equals(LocalDate.now(java.time.ZoneId.of("Asia/Kolkata")))) {
+                // the broker's market is today's: a drill replaying another day would price its decisions at today's book
+                record(account, null, null, "REFUSED", "reads the broker's live market, so it serves only today's session, "
+                        + "not " + day + "; nothing sent");
+                return;
+            }
             BrokerConnections.Route route = connections.route(account, risk);
             if (route.venue() == null) {
                 record(account, route, null, "REFUSED", route.description() + "; nothing sent");

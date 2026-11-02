@@ -22,8 +22,8 @@ public final class KiteInstruments {
                            LocalDate expiry, double strike, String type, int lotSize, double tickSize) {
     }
 
-    private final Map<String, Contract> byExchangeToken = new java.util.concurrent.ConcurrentHashMap<>();
-    private final Map<String, Contract> bySymbol = new java.util.concurrent.ConcurrentHashMap<>();
+    private volatile Map<String, Contract> byExchangeToken = new java.util.concurrent.ConcurrentHashMap<>();
+    private volatile Map<String, Contract> bySymbol = new java.util.concurrent.ConcurrentHashMap<>();
 
     public KiteInstruments(List<Contract> contracts) {
         contracts.forEach(this::add);
@@ -33,6 +33,28 @@ public final class KiteInstruments {
     public synchronized void add(Contract c) {
         byExchangeToken.put(c.exchange() + ":" + c.exchangeToken(), c);
         bySymbol.put(c.exchange() + ":" + c.tradingSymbol(), c);
+    }
+
+    /**
+     * Today's list in place of the old one, all at once (an exchange token can be reused after its contract expires, so a
+     * previous day's entry must never survive a reload).
+     */
+    public synchronized void replaceWith(KiteInstruments today) {
+        Map<String, Contract> tokens = new java.util.concurrent.ConcurrentHashMap<>(today.byExchangeToken);
+        Map<String, Contract> symbols = new java.util.concurrent.ConcurrentHashMap<>(today.bySymbol);
+        byExchangeToken = tokens;
+        bySymbol = symbols;
+    }
+
+    /** Takes a contract out of the map (a failed mapping check): orders in it are then refused as not listed. */
+    public synchronized void remove(Contract c) {
+        byExchangeToken.remove(c.exchange() + ":" + c.exchangeToken());
+        bySymbol.remove(c.exchange() + ":" + c.tradingSymbol());
+    }
+
+    /** Every listed contract. */
+    public List<Contract> contracts() {
+        return List.copyOf(byExchangeToken.values());
     }
 
     /**

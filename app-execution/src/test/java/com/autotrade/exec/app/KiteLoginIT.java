@@ -10,6 +10,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -55,6 +56,9 @@ class KiteLoginIT {
     private static long account, wrongClientAccount, unpinnedAccount;
     private static Access.User owner, viewer;
     private static KiteLogin login;
+    private static KiteLoginProperties props;
+    private static LoginBoard board;
+    private static final String EXCHANGE = "../config/exchange/nse-bse-sessions.v3.yaml";
 
     @BeforeAll
     static void start() throws Exception {
@@ -91,9 +95,11 @@ class KiteLoginIT {
         kite = new KiteSimulator(0, "sim-api-key", "sim-secret", 3_000);
         kite.strictTokens();
         kite.funds(250_000);
-        KiteLoginProperties props = new KiteLoginProperties(secrets.toString(), dir.resolve("sessions").toString(),
+        props = new KiteLoginProperties(secrets.toString(), dir.resolve("sessions").toString(),
                 "https://example.test", kite.baseUri().toString(), kite.baseUri().toString(), dir.resolve("none.env").toString());
-        login = new KiteLogin(dataSource, new TransactionTemplate(new DataSourceTransactionManager(dataSource)), props);
+        board = new LoginBoard(dataSource, new TelegramNotifier(props), new TradingDays(EXCHANGE));
+        login = new KiteLogin(dataSource, new TransactionTemplate(new DataSourceTransactionManager(dataSource)), props,
+                new TelegramNotifier(props), new TradingDays(EXCHANGE));
         Access access = new Access(dataSource);
         owner = access.user("local-owner");
         viewer = access.user("kc-viewer");
@@ -135,6 +141,23 @@ class KiteLoginIT {
 
         assertThat(login.callback("req-2", "success", state).ok()).as("a state is single-use").isFalse();
 
+        // the worker's reads find the day's session (key from the secret store, token from the file); none elsewhere
+        KiteSessionSource sessions = new KiteSessionSource(dataSource, props);
+        AccountStore store = new AccountStore(dataSource);
+        assertThat(sessions.access(store.byId(account).orElseThrow())).hasValueSatisfying(a -> {
+            assertThat(a.apiKey()).isEqualTo("sim-api-key");
+            assertThat(a.accessToken()).startsWith("sim-");
+            assertThat(a.toString()).doesNotContain(a.accessToken());
+        });
+        assertThat(sessions.access(store.byId(unpinnedAccount).orElseThrow())).isEmpty();
+        // the board: ZERODHA-1 ready, the other two out for today
+        List<LoginBoard.Row> rows = board.rows();
+        assertThat(rows).filteredOn(LoginBoard.Row::ready).extracting(LoginBoard.Row::account).containsExactly("ZERODHA-1");
+        String text = LoginBoard.message(rows, java.time.ZonedDateTime.now(java.time.ZoneId.of("Asia/Kolkata")));
+        assertThat(text).contains("1 of 3 broker accounts ready").contains("OUT FOR TODAY")
+                .contains("ZERODHA-2 (owner, ZERODHA DRY_RUN, 0 strategies, no login today)")
+                .contains("ZERODHA-1 (owner, ZERODHA DRY_RUN, 0 strategies, session until");
+
         // a second login replaces the session: one ACTIVE row
         assertThat(login.callback("req-3", "success", state(login.start(owner, account))).ok()).isTrue();
         assertThat(jdbc.queryForList("select status from acct.broker_session where broker_account_id = ? order by id",
@@ -147,6 +170,18 @@ class KiteLoginIT {
         assertThat(Files.exists(token)).isFalse();
         assertThat(jdbc.queryForObject("select connection_status from acct.broker_account where id = ?", String.class,
                 account)).isEqualTo("TOKEN_EXPIRED");
+        assertThat(sessions.access(store.byId(account).orElseThrow())).as("no session after the expiry").isEmpty();
+        assertThat(board.rows()).noneMatch(LoginBoard.Row::ready);
+    }
+
+    @Test
+    void holidaysAndWeekendsAreNotTradingDays() {
+        TradingDays days = new TradingDays(EXCHANGE);
+        assertThat(days.isTradingDay(LocalDate.of(2026, 11, 2))).isTrue();          // Monday
+        assertThat(days.isTradingDay(LocalDate.of(2026, 11, 1))).isFalse();         // Sunday
+        assertThat(days.isTradingDay(LocalDate.of(2026, 11, 10))).isFalse();        // Diwali Balipratipada
+        assertThat(new TradingDays("no-such-file.yaml").isTradingDay(LocalDate.of(2026, 11, 10))).as("unknown: weekday")
+                .isTrue();
     }
 
     @Test
