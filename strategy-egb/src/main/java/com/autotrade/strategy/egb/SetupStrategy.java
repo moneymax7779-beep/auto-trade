@@ -183,8 +183,11 @@ abstract class SetupStrategy implements Strategy {
             profitLockArmed = false;
             trailPeak = Double.NaN;
             if (entry != null) {
+                // A-298: the index points to the entry's stop go with the order; a risk file with
+                // sizing.delta_risk_per_trade sizes the entry so that this stop loses at most that much (v17: no effect)
+                double stopPoints = Double.isFinite(entry.stop()) ? Math.abs(s.spot() - entry.stop()) : Double.NaN;
                 orders.add(new OrderIntent(OrderIntent.Action.ENTER, entry.side(), 1, Stage.CONFIRMED, entry.reason(),
-                        premiumStopPct, strikeOffset(entry, s), premiumTargetPct, Double.NaN));
+                        premiumStopPct, strikeOffset(entry, s), premiumTargetPct, Double.NaN).withStopPoints(stopPoints));
                 plan = entry;
                 enteredAt = now;
             }
