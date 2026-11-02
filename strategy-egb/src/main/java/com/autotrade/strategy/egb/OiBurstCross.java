@@ -70,6 +70,10 @@ final class OiBurstCross extends SetupStrategy {
     private final int burstMemoryMin;
     private final double share1Min;
     private final double share5Min;
+    /** A-300: the 3-minute burst counts only when the 5-minute ATM +- 2 share has its sign. */
+    private final boolean share5Agree;
+    /** A-301: veto a PE when the put wall share near spot is at least this, a CE when at most 1 - this (NaN: off). */
+    private final double wallVetoShare;
     private final double atrStopMult;
     private final double trailArmAtr;
     private final double trailAtr;
@@ -132,6 +136,8 @@ final class OiBurstCross extends SetupStrategy {
         earlyMemoryMin = rolling ? c.getInt("setup.early_memory_min") : 0;
         share1Min = burstMemoryMin > 0 ? c.getDouble("setup.share1_min_" + ix) : Double.NaN;
         share5Min = burstMemoryMin > 0 ? c.getDouble("setup.share5_min_" + ix) : Double.NaN;
+        share5Agree = c.has("setup.share5_agree") && c.getBoolean("setup.share5_agree");
+        wallVetoShare = c.has("setup.wall_veto_share") ? c.getDouble("setup.wall_veto_share") : Double.NaN;
     }
 
     @Override
@@ -183,6 +189,11 @@ final class OiBurstCross extends SetupStrategy {
             double need = minute < earlyUntil ? earlyShare3Min : share3Min;   // A-256: an extreme burst before early_until
             burst = crossed != 0 && Double.isFinite(s3) && Double.isFinite(s1) && s3 * crossed >= need
                     && (nifty ? s1 * crossed > 0 : s1 * crossed >= 0);
+            if (share5Agree) {                                // A-300: the 5-minute flow must agree
+                double s5 = o.atmBandShare5m();
+                c.put("share5_agree", burst && Double.isFinite(s5) && s5 * crossed > 0);
+                burst = burst && Double.isFinite(s5) && s5 * crossed > 0;
+            }
         }
         c.put("ema_cross", crossed != 0);
         c.put("oi_burst", burst);
@@ -224,6 +235,15 @@ final class OiBurstCross extends SetupStrategy {
             boolean gapChase = crossed * (st.dayOpen() - st.prevClose()) / st.prevClose() * 100 >= skipGapPct;
             c.put("gap_veto", gapChase);
             if (gapChase) {
+                vetoedBurst = burstStart;
+                return null;
+            }
+        }
+        if (Double.isFinite(wallVetoShare)) {                // A-301: an entry against the standing OI walls near spot
+            double w = o.wallPutShare();
+            boolean against = Double.isFinite(w) && (crossed < 0 ? w >= wallVetoShare : w <= 1 - wallVetoShare);
+            c.put("wall_veto", against);
+            if (against) {
                 vetoedBurst = burstStart;
                 return null;
             }

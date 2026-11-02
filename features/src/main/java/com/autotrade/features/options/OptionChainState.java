@@ -241,7 +241,24 @@ public final class OptionChainState {
                 bandSide(time, atm, step, true), bandSide(time, atm, step, false), bandChange(time, atm, step, 2, 0),
                 bandDelta(time, atm, step, 5, 2, true), bandDelta(time, atm, step, 5, 2, false),
                 bandDelta(time, atm, step, 5, 5, true), bandDelta(time, atm, step, 5, 5, false),
-                syntheticSpot(time, atm));
+                syntheticSpot(time, atm), wallPutShare(spot, atm, step));
+    }
+
+    /** A-301: put OI from spot down to ATM - 5 strikes / (that + call OI from spot up to ATM + 5), latest OI. */
+    private double wallPutShare(double spot, double atm, double step) {
+        double puts = 0, calls = 0;
+        for (int i = -5; i <= 5; i++) {
+            double strike = atm + i * step;
+            Contract pe = strike <= spot ? find(strike, false) : null;
+            Contract ce = strike >= spot ? find(strike, true) : null;
+            if (pe != null && !pe.oi.isEmpty() && Double.isFinite(pe.oi.latest())) {
+                puts += pe.oi.latest();
+            }
+            if (ce != null && !ce.oi.isEmpty() && Double.isFinite(ce.oi.latest())) {
+                calls += ce.oi.latest();
+            }
+        }
+        return puts > 0 && calls > 0 ? puts / (puts + calls) : Double.NaN;
     }
 
     /** A-283: strike + call mid - put mid at the strike nearest the last value (first: ATM), both sides quoted in 60 s. */
@@ -665,7 +682,7 @@ public final class OptionChainState {
         double n = Double.NaN;
         return new OptionsFeatures(expiry == null ? null : expiry.toString(), n, n, contracts.size(), n, n, n, n, n, n, n,
                 n, "UNKNOWN", "UNKNOWN", n, n, n, n, false, false, n, n, n, n, n, n, n, n, n, "NONE", n, n, n, n, n, n,
-                n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n);
+                n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n);
     }
 
     static double midPrice(OptionTick tick) {

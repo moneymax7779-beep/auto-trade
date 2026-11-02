@@ -84,5 +84,11 @@ public record OptionsFeatures(
          * (first: nearest ATM) with both sides quoted (bid and ask > 0) in the last 60 s; NaN when none. The index feed
          * freezes 15:15-15:28 on the exchange's closing session, the options do not.
          */
-        double syntheticSpot) {
+        double syntheticSpot,
+        /**
+         * A-301: the standing OI walls near spot: the put OI of the strikes from spot down to ATM - 5 strikes, divided by
+         * that plus the call OI of the strikes from spot up to ATM + 5 (latest OI); above 0.5 the put wall below outweighs
+         * the call wall above. NaN when either side has no OI.
+         */
+        double wallPutShare) {
 }
