@@ -24,8 +24,10 @@ import com.autotrade.zerodha.KiteSimulator;
  *   <li>DRY_RUN with order rules (v3+): the account's broker adapter ({@link BrokerAdapter}; this build has
  *       {@link ZerodhaDryRunAdapter}: the Kite adapter against a local simulator of its own) under a
  *       {@link BrokerVenue}. A broker without an adapter is refused.</li>
- *   <li>LIVE: refused. A LIVE route needs a real session (the daily login and the secret store), the registered static
- *       IP and the user's explicit go-ahead; no code path here sends an order to a real broker.</li>
+ *   <li>LIVE (the Kite pilot, user 2 Nov 2026): only an account the user switched LIVE ({@code live_trading_enabled}),
+ *       on a risk file with {@code live} limits (v7+) and order rules, through an adapter that offers LIVE (Zerodha):
+ *       its real broker connection behind a {@link LiveGuard}, under the same {@link BrokerVenue}. Anything else LIVE is
+ *       refused, so nothing is sent. The day's login and the registered static IP are the user's.</li>
  * </ul>
  */
 public final class BrokerConnections implements AutoCloseable {
@@ -61,7 +63,7 @@ public final class BrokerConnections implements AutoCloseable {
 
     private Route open(BrokerAccount account, FollowerRisk risk) {
         if (account.tradeMode() == TradeMode.LIVE) {
-            return new Route(null, null, "LIVE refused: no live broker session in this build (needs the user's go-ahead)");
+            return live(account, risk);
         }
         if (account.tradeMode() == TradeMode.PAPER || risk.orders() == null) {
             return new Route(new SimulatedVenue(dataSource, simulatedBrokerFunds), null, "simulated fills");
@@ -80,6 +82,23 @@ public final class BrokerConnections implements AutoCloseable {
         } catch (IOException e) {
             throw new UncheckedIOException(e);
         }
+    }
+
+    private Route live(BrokerAccount account, FollowerRisk risk) {
+        if (!account.liveTradingEnabled()) {
+            return new Route(null, null, "LIVE refused: the account's LIVE switch is off");
+        }
+        if (risk.live() == null || risk.orders() == null) {
+            return new Route(null, null, "LIVE refused: risk file " + risk.version() + " has no live limits");
+        }
+        BrokerAdapter adapter = adapters.get(account.brokerType());
+        BrokerAdapter.Live live = adapter == null ? null : adapter.live(account, risk.live());
+        if (live == null) {
+            return new Route(null, null, "LIVE refused: no LIVE adapter for " + account.brokerType());
+        }
+        BrokerVenue venue = new BrokerVenue(dataSource, live.connection(), risk.orders(), freeze::of, o -> { });
+        log.warn("account {} ({}): LIVE orders go to {}", account.id(), account.displayName(), live.description());
+        return new Route(venue, live.connection(), live.description());
     }
 
     /** The Kite simulator of a ZERODHA DRY_RUN account (tests, fault drills); null when it has none. */

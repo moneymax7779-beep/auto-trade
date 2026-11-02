@@ -307,6 +307,8 @@ export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDo
         </div>
         )}
 
+        {kite && canManage && <LiveSwitch account={a} onDone={onDone} />}
+
         <div>
           <div className="mb-2 flex items-center gap-2">
             <span className="text-xs font-semibold uppercase tracking-wide text-muted">Positions</span>
@@ -355,5 +357,49 @@ export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDo
         </div>
       </div>
     </Panel>
+  );
+}
+
+/**
+ * The account owner's LIVE switch (the Kite pilot, user 2 Nov 2026): real orders at Zerodha. The server checks every
+ * condition again (risk file with live limits, one lot an entry, today's Kite session, no open position); typing the
+ * account's name confirms. Back to DRY_RUN only with no position open.
+ */
+function LiveSwitch({ account, onDone }: { account: AccountDetails; onDone: (text: string, ok: boolean) => void }) {
+  const client = useQueryClient();
+  const [confirm, setConfirm] = useState("");
+  const live = account.mode === "LIVE";
+  const flip = useMutation({
+    mutationFn: () => postJson<{ mode: string }>(`/api/execution/accounts/${account.id}/live`,
+      { on: !live, confirm: live ? "" : confirm }),
+    onSuccess: (r) => {
+      onDone(`${account.name} is now ${r.mode}`, true);
+      setConfirm("");
+      ["exec-details", "exec-accounts", "exec-audit"].forEach((k) => client.invalidateQueries({ queryKey: [k] }));
+    },
+    onError: (e) => onDone(e instanceof Error ? e.message : String(e), false),
+  });
+  return (
+    <div className={`rounded border p-3 text-sm ${live ? "border-down" : "border-line"}`}>
+      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
+        LIVE trading · <span className={live ? "text-down" : ""}>{live ? "ON: real orders at Zerodha" : "off"}</span>
+      </div>
+      {live ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <button className={button} disabled={flip.isPending} onClick={() => flip.mutate()}>Back to DRY_RUN</button>
+          <span className="text-xs text-muted">Only with no position open. To stop new entries while positions are open, use
+            the account's kill switch; exits always run.</span>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          <input className={input} placeholder={`type ${account.name} to confirm`} value={confirm}
+            onChange={(e) => setConfirm(e.target.value)} />
+          <button className={primary} disabled={flip.isPending || confirm !== account.name} onClick={() => flip.mutate()}>
+            {flip.isPending ? "Switching…" : "Switch to LIVE"}</button>
+          <span className="text-xs text-muted">Needs: risk file with live limits ({account.riskFile.replace("config/risk/", "")}),
+            size step 0 (now {account.sizeStepPct}), today's Kite login, no open position.</span>
+        </div>
+      )}
+    </div>
   );
 }

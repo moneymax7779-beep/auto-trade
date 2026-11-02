@@ -8,11 +8,26 @@ import com.autotrade.config.ThresholdConfig;
 /**
  * A follower's risk file (config/risk/follower-risk.vN.yaml): capital limits, position and lot limits, the RVOL boost
  * (v2), the simulated fill model and, from v3, the broker order rules ({@code orders}: null before v3, when only
- * simulated fills are possible). Limits a file does not set are off (v1: no position, lot or boost rules).
+ * simulated fills are possible). Limits a file does not set are off (v1: no position, lot or boost rules). From v7,
+ * {@code live}: the limits a LIVE account trades under (null: the file cannot be used LIVE).
  */
 public record FollowerRisk(String version, CapitalLimits limits, int maxOpenPositions, int maxLotsPerUnderlying,
                            double rvolBoostThreshold, double rvolBoostFactor, double adverseBps, OrderRules orders,
-                           Combined combined) {
+                           Combined combined, LiveLimits live) {
+
+    /**
+     * v7 (the Kite LIVE pilot, user 2 Nov 2026): a LIVE account's hard limits, checked again in front of the broker
+     * connection ({@link LiveGuard}): lots per buy order, contracts held at once, and the only strategies it may enter.
+     */
+    public record LiveLimits(int maxLotsPerOrder, int maxOpenPositions, java.util.Set<String> strategies) {
+
+        public LiveLimits {
+            if (maxLotsPerOrder < 1 || maxOpenPositions < 1 || strategies == null || strategies.isEmpty()) {
+                throw new IllegalArgumentException("live: max_lots_per_order, max_open_positions >= 1 and strategies");
+            }
+            strategies = java.util.Set.copyOf(strategies);
+        }
+    }
 
     /**
      * v4 (L6): limits across a tenant's broker-routed accounts (DRY_RUN and LIVE; PAPER accounts trade no real book).
@@ -34,7 +49,10 @@ public record FollowerRisk(String version, CapitalLimits limits, int maxOpenPosi
                 c.has("sizing.rvol_boost_factor") ? c.getDouble("sizing.rvol_boost_factor") : 1.0,
                 c.has("simulation.adverse_bps") ? c.getDouble("simulation.adverse_bps") : 0, OrderRules.from(c),
                 c.has("combined.max_open_premium_pct") ? new Combined(c.getDouble("combined.max_open_premium_pct"),
-                        c.getInt("combined.max_lots_per_contract"), c.getBoolean("combined.share_liquidity")) : null);
+                        c.getInt("combined.max_lots_per_contract"), c.getBoolean("combined.share_liquidity")) : null,
+                c.has("live.max_lots_per_order") ? new LiveLimits(c.getInt("live.max_lots_per_order"),
+                        c.getInt("live.max_open_positions"), ((java.util.List<?>) c.get("live.strategies")).stream()
+                        .map(String::valueOf).collect(java.util.stream.Collectors.toSet())) : null);
     }
 
     /** The budget multiplier for an entry at this RVOL (risk v17: the factor at or above the threshold, else 1). */

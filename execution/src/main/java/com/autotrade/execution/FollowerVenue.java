@@ -75,6 +75,14 @@ public interface FollowerVenue {
     /** True when the orders go to a broker: session errors, protective stops and the broker's funds apply. */
     boolean broker();
 
+    /**
+     * True when the orders go to the real broker of a LIVE account (behind its {@link LiveGuard}): such a venue runs
+     * LIVE intents only, and every other venue never runs one.
+     */
+    default boolean live() {
+        return false;
+    }
+
     /** Works one order to its end. Throws a SESSION {@link com.autotrade.broker.BrokerException} when no call works. */
     Fill execute(OrderSpec order);
 

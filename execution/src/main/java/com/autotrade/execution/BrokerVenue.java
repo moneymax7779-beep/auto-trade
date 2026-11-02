@@ -80,6 +80,11 @@ public final class BrokerVenue implements FollowerVenue {
     }
 
     @Override
+    public boolean live() {
+        return broker instanceof LiveGuard;
+    }
+
+    @Override
     public double funds(BrokerAccount account) {
         try {
             return broker.availableFunds();

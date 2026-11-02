@@ -22,6 +22,7 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import com.autotrade.account.AccountStore;
 import com.autotrade.account.BrokerAccount;
+import com.autotrade.account.TradeMode;
 import com.autotrade.broker.BrokerException;
 import com.autotrade.sim.CostModel;
 
@@ -35,7 +36,8 @@ import com.autotrade.sim.CostModel;
  * enabled copy group of every tenant (several users, each with their own tenant, accounts and subscriptions).
  * <p>
  * <b>Routes</b> ({@link BrokerConnections}): PAPER and DRY_RUN-without-order-rules accounts fill in place; a ZERODHA
- * DRY_RUN account with order rules trades through the Kite adapter against its own local simulator; LIVE is refused.
+ * DRY_RUN account with order rules trades through the Kite adapter against its own local simulator; a ZERODHA account the
+ * user switched LIVE, on a risk file with live limits, trades the real Kite behind a {@link LiveGuard}, today only.
  * An account trades only under its {@link AccountLease}. A broker-routed account is reconciled against its broker when
  * the lease is taken and every {@link #RECONCILE_EVERY} (a difference kills its entries).
  */
@@ -171,9 +173,10 @@ public final class ExecutionLoop implements AutoCloseable {
                         signature);
             }
             FollowerRisk risk = risks.computeIfAbsent(account.id(), id -> FollowerRisk.load(Path.of(account.riskFile())));
-            if (risk.orders() != null && risk.orders().brokerMarket()
+            if ((account.tradeMode() == TradeMode.LIVE || risk.orders() != null && risk.orders().brokerMarket())
                     && !day.equals(LocalDate.now(java.time.ZoneId.of("Asia/Kolkata")))) {
                 // the broker's market is today's: a drill replaying another day would price its decisions at today's book
+                // (and a LIVE account would send them)
                 record(account, null, null, "REFUSED", "reads the broker's live market, so it serves only today's session, "
                         + "not " + day + "; nothing sent");
                 return;

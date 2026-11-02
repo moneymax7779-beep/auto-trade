@@ -431,6 +431,10 @@ public final class FollowerSimulator {
         if (killed != null) {
             return reject(p, "KILL_SWITCH", killed);
         }
+        if ((day.account.tradeMode() == TradeMode.LIVE || TradeMode.LIVE.name().equals(p.mode()))
+                && (risk.live() == null || !risk.live().strategies().contains(p.strategyId()))) {
+            return reject(p, "LIVE_STRATEGY", p.strategyId() + " is not one of the risk file's LIVE strategies");
+        }
         if (day.dailyLossLatched) {
             return reject(p, "DAILY_LOSS", "the daily loss limit was reached earlier today");
         }
@@ -989,20 +993,23 @@ public final class FollowerSimulator {
             + "and s.broker_account_id = i.broker_account_id and s.strategy_id = d.strategy_id ";
 
     private List<Pending> pending(long accountId, long copyGroupId, LocalDate day) {
+        // a LIVE venue runs LIVE intents only (not one made while the account was still DRY_RUN); any other venue never
+        // runs a LIVE intent
+        String[] modes = venue.live() ? new String[] {"LIVE"} : new String[] {"PAPER", "DRY_RUN"};
         if (workerId != null) {
             // a worker claims what it runs (the lease already makes it the account's only writer; this is the second lock)
             jdbc.update("update exec.trade_intent set claimed_by = ?, claimed_at = now() where id in (select i.id "
                     + "from exec.trade_intent i where i.broker_account_id = ? and i.state = 'CREATED' "
-                    + "and i.execution_mode in ('PAPER', 'DRY_RUN') and (i.claimed_by is null or i.claimed_by = ? "
+                    + "and i.execution_mode = any(?) and (i.claimed_by is null or i.claimed_by = ? "
                     + "or i.claimed_at < now() - interval '60 seconds') for update skip locked)", workerId, accountId,
-                    workerId);
+                    modes, workerId);
             return query(PENDING + "where i.broker_account_id = ? and d.copy_group_id = ? and d.session_date = ? "
-                    + "and i.state = 'CREATED' and i.claimed_by = ? and i.execution_mode in ('PAPER', 'DRY_RUN') "
-                    + "order by d.decided_at, d.priority, d.id", accountId, copyGroupId, Date.valueOf(day), workerId);
+                    + "and i.state = 'CREATED' and i.claimed_by = ? and i.execution_mode = any(?) "
+                    + "order by d.decided_at, d.priority, d.id", accountId, copyGroupId, Date.valueOf(day), workerId, modes);
         }
         return query(PENDING + "where i.broker_account_id = ? and d.copy_group_id = ? and d.session_date = ? "
-                + "and i.state = 'CREATED' and i.execution_mode in ('PAPER', 'DRY_RUN') order by d.decided_at, d.priority, d.id",
-                accountId, copyGroupId, Date.valueOf(day));
+                + "and i.state = 'CREATED' and i.execution_mode = any(?) order by d.decided_at, d.priority, d.id",
+                accountId, copyGroupId, Date.valueOf(day), modes);
     }
 
     private List<Pending> query(String sql, Object... args) {

@@ -44,6 +44,8 @@ import com.autotrade.zerodha.KiteSimulator;
  *       Kite quote becomes the simulator's book before the order is placed, so fills follow the real book of that
  *       moment. Orders still go only to the simulator: the real connection is read-only ({@link ReadLiveConnection}).</li>
  * </ul>
+ * And LIVE ({@link #live}, the Kite pilot from 4 Nov 2026, switched by the user): the same session reads, and orders go
+ * to the real Kite (product MIS), behind a {@link LiveGuard} with the risk file's {@code live} limits.
  */
 public final class ZerodhaDryRunAdapter implements BrokerAdapter {
 
@@ -110,11 +112,19 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
         KiteGateway simulator = new KiteGateway(config, http, simInstruments);
         SimulatorMarket listings = new SimulatorMarket(sim, simInstruments, dataSource);
         seedHoldings(account, sim, listings);
-        KiteReads reads = new KiteReads(account);
+        KiteReads reads = new KiteReads(account, false);
         ReadLiveConnection connection = new ReadLiveConnection(reads, simulator, q -> book(q, reads, sim, simInstruments),
                 sim::usedMargin);
         return new DryRun(connection, o -> { }, "Kite simulator " + sim.baseUri() + ", book and funds read from Kite "
                 + kiteApiBase.getHost(), sim);
+    }
+
+    @Override
+    public Live live(BrokerAccount account, FollowerRisk.LiveLimits limits) {
+        KiteReads kite = new KiteReads(account, true);
+        return new Live(new LiveGuard(kite, limits, kite::lotSize), "LIVE: Kite " + kiteApiBase.getHost()
+                + ", product MIS, at most " + limits.maxLotsPerOrder() + " lot(s) a buy and "
+                + limits.maxOpenPositions() + " contracts, strategies " + new java.util.TreeSet<>(limits.strategies()));
     }
 
     /** The account's open positions, held by the new simulator (a restart: the broker would still hold them). */
@@ -176,13 +186,17 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
     }
 
     /**
-     * The account's real Kite session, for reads: the app key and token are looked up on every call (a login during the
-     * day takes effect at once; no session = {@link Kind#SESSION}); the instrument list is loaded once a day and checked
-     * against our contract master. Order calls are not offered here (and {@link ReadLiveConnection} refuses them).
+     * The account's real Kite session: the app key and token are looked up on every call (a login during the day takes
+     * effect at once; no session = {@link Kind#SESSION}); the instrument list is loaded once a day and checked against our
+     * contract master. Order calls only when {@code orders} (LIVE, behind its {@link LiveGuard}); for DRY_RUN reads they
+     * are not offered (and {@link ReadLiveConnection} refuses them as well).
      */
     private final class KiteReads implements BrokerConnection {
 
         private final BrokerAccount account;
+        private final boolean orders;
+        private final List<java.util.function.Consumer<OrderUpdate>> listeners =
+                new java.util.concurrent.CopyOnWriteArrayList<>();
         private final KiteInstruments instruments = new KiteInstruments(List.of());
         private String apiKey;
         private KiteHttp http;
@@ -190,8 +204,22 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
         private LocalDate loadedDay;
         private Instant lastAttempt = Instant.EPOCH;
 
-        KiteReads(BrokerAccount account) {
+        KiteReads(BrokerAccount account, boolean orders) {
             this.account = account;
+            this.orders = orders;
+        }
+
+        /** The contract's lot size in today's (checked) Kite list, 0 when it is not there. */
+        int lotSize(String instrumentKey) {
+            gateway();
+            return instruments.byInstrumentKey(instrumentKey).map(KiteInstruments.Contract::lotSize).orElse(0);
+        }
+
+        private KiteGateway orderGateway(String call) {
+            if (!orders) {
+                throw new IllegalStateException(call + " not offered: reads only");
+            }
+            return gateway();
         }
 
         private synchronized KiteGateway gateway() {
@@ -202,6 +230,7 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
                         Duration.ofSeconds(5), 8, null);
                 http = new KiteHttp(config);
                 gateway = new KiteGateway(config, http, instruments);
+                listeners.forEach(gateway::onUpdate);
                 apiKey = access.apiKey();
                 loadedDay = null;
             }
@@ -280,27 +309,35 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
 
         @Override
         public int poll() {
-            throw new IllegalStateException("not offered: reads only");
+            return orderGateway("poll").poll();
         }
 
         @Override
         public void onUpdate(java.util.function.Consumer<OrderUpdate> listener) {
-            throw new IllegalStateException("not offered: reads only");
+            if (!orders) {
+                throw new IllegalStateException("onUpdate not offered: reads only");
+            }
+            listeners.add(listener);
+            synchronized (this) {
+                if (gateway != null) {
+                    gateway.onUpdate(listener);
+                }
+            }
         }
 
         @Override
         public void place(OrderRequest request) {
-            throw new IllegalStateException("not offered: reads only");
+            orderGateway("place").place(request);
         }
 
         @Override
         public void modify(String clientOrderId, long quantity, double limitPrice, double triggerPrice) {
-            throw new IllegalStateException("not offered: reads only");
+            orderGateway("modify").modify(clientOrderId, quantity, limitPrice, triggerPrice);
         }
 
         @Override
         public void cancel(String clientOrderId) {
-            throw new IllegalStateException("not offered: reads only");
+            orderGateway("cancel").cancel(clientOrderId);
         }
     }
 

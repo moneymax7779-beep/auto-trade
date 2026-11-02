@@ -198,3 +198,29 @@ app it is: sell each open position, after cancelling its stop order).
 Days you stop the VMs on purpose: `bin/offsite-watchdog --state-dir ~/.autotrade-watchdog --pause-until YYYY-MM-DD`
 (no checks through that day), `--resume` to end it early. An account without today's broker login is reported once
 (you may have chosen to sit the day out), not every 15 minutes.
+
+## Kite LIVE pilot (user, 2 Nov 2026; first LIVE day Wed 4 Nov)
+
+What a LIVE account is: a Zerodha follower whose orders go to the real Kite (product MIS) from GCP's static IP
+34.14.137.170 (registered by the user in the Kite developer console, 2 Nov). Nothing else is LIVE.
+
+**The pilot's limits, three layers:**
+- the account: `size_step_pct` 0 (one lot an entry, no adds), its own daily loss limit (ZERODHA-1: Rs 20,000);
+- the risk file `follower-risk.v7`: 2 contracts at once, 2 lots in an underlying, and `live:` (1 lot a buy order,
+  2 contracts, strategies early-confirm-runner, ma-cross, oi-burst-cross); an intent of any other strategy is refused
+  `LIVE_STRATEGY`;
+- `LiveGuard`, in front of the Kite connection: no buy over 1 lot, no buy in a third contract, never a sell beyond what
+  the day's order book says is held (no short option). There is no market order type at all.
+
+**Switching (the account's owner only; Claude never switches an account LIVE):**
+1. Before: the account is DRY_RUN on follower-risk v7 with size step 0, today's Kite login is done, and it holds no
+   position.
+2. Accounts page → the account → LIVE trading → type the account's name → Switch to LIVE. The server checks all of the
+   above again and audits `LIVE_ON`. The worker rebuilds the route on its next turn (log: "LIVE orders go to Kite").
+3. Only decisions taken after the switch are sent; intents made while DRY_RUN are never sent LIVE.
+4. Back to DRY_RUN: the same panel, only with no position open (`LIVE_OFF`). To stop new entries with positions open,
+   engage the account's kill switch (or `GLOBAL_LIVE` for every LIVE account); exits always run.
+
+**If something goes wrong:** flatten from the Kite app (positions → exit) is always available and is the fallback for
+everything. The resting SL at Kite protects each position if the worker or GCP is down. A wrong-IP or session error
+refuses entries (`BROKER_SESSION`); log in again from the Accounts page.
