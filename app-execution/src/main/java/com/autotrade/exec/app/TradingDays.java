@@ -45,7 +45,18 @@ class TradingDays {
                 log.warn("no holidays in {}: every weekday is a trading day", file);
                 return Set.of();
             }
-            return days.stream().map(d -> LocalDate.parse(d.toString())).collect(Collectors.toUnmodifiableSet());
+            // each entry on its own: one unreadable date is skipped with a warning, it does not drop every holiday; an
+            // unquoted YAML date arrives as java.util.Date (UTC midnight), a quoted one as text
+            Set<LocalDate> holidays = new java.util.HashSet<>();
+            for (Object d : days) {
+                try {
+                    holidays.add(d instanceof java.util.Date date ? date.toInstant().atZone(java.time.ZoneOffset.UTC)
+                            .toLocalDate() : LocalDate.parse(d.toString().trim()));
+                } catch (RuntimeException e) {
+                    log.warn("exchange file {}: holiday '{}' not a date, skipped", file, d);
+                }
+            }
+            return Set.copyOf(holidays);
         } catch (IOException | RuntimeException e) {
             log.warn("exchange file {} not readable ({}): every weekday is a trading day", file, e.getMessage());
             return Set.of();

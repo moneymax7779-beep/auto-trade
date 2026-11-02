@@ -108,24 +108,26 @@ public final class ReadLiveConnection implements BrokerConnection {
     @Override
     public List<BrokerOrder> orders() {
         List<BrokerOrder> book = simulator.orders();
-        boolean moved = false;
-        for (String key : book.stream().filter(o -> o.type() == OrderType.STOP_LIMIT && !o.status().isTerminal())
-                .map(BrokerOrder::instrumentKey).distinct().toList()) {
-            Instant last = refreshed.get(key);
-            if (last != null && Instant.now().isBefore(last.plus(STOP_REFRESH))) {
-                continue;
-            }
-            refreshed.put(key, Instant.now());
-            try {
-                quote(key);
-                moved = true;
-            } catch (BrokerException e) {
-                if (e.kind() == BrokerException.Kind.SESSION) {
-                    throw e;
-                }                                       // no quote now: the stop waits for the next refresh
-            }
+        // one contract per call, the longest unrefreshed first: each quote waits for the app's one-a-second quote limit
+        // (shared with entries and exits), so refreshing every stop here would hold the account's lane for seconds
+        Instant now = Instant.now();
+        String due = book.stream().filter(o -> o.type() == OrderType.STOP_LIMIT && !o.status().isTerminal())
+                .map(BrokerOrder::instrumentKey).distinct()
+                .filter(k -> refreshed.getOrDefault(k, Instant.EPOCH).plus(STOP_REFRESH).isBefore(now))
+                .min(java.util.Comparator.comparing(k -> refreshed.getOrDefault(k, Instant.EPOCH))).orElse(null);
+        if (due == null) {
+            return book;
         }
-        return moved ? simulator.orders() : book;
+        refreshed.put(due, now);
+        try {
+            quote(due);
+        } catch (BrokerException e) {
+            if (e.kind() == BrokerException.Kind.SESSION) {
+                throw e;
+            }
+            return book;                                // no quote now: the stop waits for the next refresh
+        }
+        return simulator.orders();
     }
 
     @Override
