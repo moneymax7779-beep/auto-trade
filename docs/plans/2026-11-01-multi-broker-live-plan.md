@@ -57,6 +57,8 @@ PAPER only until you switch an account to LIVE yourself.
 8. **Multi-user means family only.**
    - All three brokers allow family members to share a static IP. Kotak allows up to 10 members. Upstox has supported
      it since May 2026. Zerodha does it through one developer account with a key per member.
+   - **We will not rely on that (user, 2 Nov): every broker account gets its own static IP** (section 3.9), so one
+     account's IP, login or registration problem can never touch another, and no broker has to judge a "family".
    - Running the system for unrelated people makes you an algo provider (exchange empanelment through a broker).
      That is out of scope.
 
@@ -105,11 +107,15 @@ API docs before that adapter's code is written.
 | Broker stop | SL (stop-limit), GTT | SL, GTT | SL *verify*; bracket/cover orders reportedly withdrawn on the API, 1 Apr 2026 *verify* |
 
 **What this means for us:**
-- **One egress IP serves all three brokers.** The rules allow one static IP across brokers. Today that is Cloud NAT
-  `34.14.137.170`, which also carries zt-autotrade's traffic.
-- **Register a secondary IP on day one.** It is the only way to fail over to a standby host without waiting a week.
-- **Kotak needs special care with its IP-bound session.** The login must run on the order host, through the same NAT,
-  never from your phone or the Mac.
+- **One static IP per broker account (decision D9, user 2 Nov).** The rules would allow one IP across brokers, and
+  zt-tiger-v2 uses exactly that (one Cloud NAT IP, `34.14.137.170`, for everything; checked 2 Nov in its
+  `ops/gcp/10-network.sh` and the live NAT). We do not: each account sends all its broker calls, logins included,
+  from its own IP (section 3.9). `34.14.137.170` stays for zt and market data and is registered by no trading account.
+- **Each account's IP survives a host change.** The public IP belongs to the account's NAT gateway, not to a VM, so a
+  standby VM that takes over the account's alias range sends from the same IP (3.9). A secondary IP is then only
+  for a NAT or broker-side problem (D4).
+- **Kotak needs special care with its IP-bound session.** The login must run on the order host, through that
+  account's egress, never from your phone or the Mac.
 - **Upstox live trading cannot use your primary Upstox account.** That account's single app is zt-tiger-v2's data app.
   Upstox live means another family member's Upstox account, with their own app.
 - **No market orders anywhere.** We already send marketable limits. Kotak's rule that an option without an LTP is
@@ -190,7 +196,7 @@ Until tested, the stop stays as it is.
 - **Turn on follower-risk v4** (the liquidity allocator and combined limits) for any tenant with more than one live
   account. Add **staggered slices** across accounts: today they all hit the book in the same second.
 - **Each family member is their own tenant**, with their own broker account, own app or API key, own login and own
-  ledger. They share only the static IP and the signal group (V27 share).
+  ledger and own static IP (3.9). They share only the signal group (V27 share).
 - **Daily login board:** a page plus a Telegram list at 08:30 showing who has logged in and who has not. An account
   without a session by 09:10 is out for the day and says so.
 
@@ -209,7 +215,85 @@ Until tested, the stop stays as it is.
   - Telegrams you if a live account holds a position while the worker is down or stale.
 - **A runbook per broker:** how to flatten from that broker's own app, which screen, which product. Rehearse it once
   per broker.
-- **A secondary static IP registered** on all three brokers for a standby host, so failover does not wait a week.
+- **A standby host** that can take over each account's alias range, and so its IP (3.9). A secondary IP per account
+  only if D4 says so.
+
+### 3.9 One static IP per broker account (D9, user 2 Nov)
+
+**How it works on GCP.** A VM network card has one public IP, so per-account IPs come from Cloud NAT, which picks the
+public IP by the packet's *source range*:
+
+```
+execution worker (one container, many accounts)
+  account 7's HttpClient ──bind──▶ 172.31.7.2 (container IP on docker network egress-7)
+        Docker SNAT (bridge option com.docker.network.host_ipv4) ──▶ 10.21.0.56 (alias IP on zt-autotrade, range acct-7)
+        Cloud NAT gateway nat-acct-7 (serves only range acct-7) ──▶ 34.x.x.x = egress-acct-7  ──▶ Kite / Upstox / Kotak
+  account 9's HttpClient ──bind──▶ 172.31.9.2 ──▶ 10.21.0.72 ──▶ nat-acct-9 ──▶ egress-acct-9
+  market data, zt-v2, everything else ──▶ primary range 10.20.0.0/24 ──▶ zt-nat ──▶ 34.14.137.170 (unchanged)
+```
+
+- **Per account in GCP:** a reserved regional static IP `egress-acct-<id>`, a /29 secondary range `acct-<id>` on
+  `zt-subnet` (from a new 10.21.0.0/16 pool), one /32 alias IP from it on the worker VM, and a NAT gateway
+  `nat-acct-<id>` on `zt-router` that serves only that range with only that IP.
+- **Per account in Docker:** a bridge network `egress-<id>` whose outgoing traffic is SNATed to the account's alias IP
+  (`com.docker.network.host_ipv4`; the VM runs Docker 29.8.2). The execution container joins it (`docker network
+  connect`, no restart needed).
+- **Per account in Java:** each account's broker client is built with `HttpClient.Builder.localAddress(<its container
+  IP on egress-<id>>)` (Java 19+; `KiteHttp` today builds one plain client). Every call for that account goes through
+  it: orders, reads, the login or token exchange, order-update WebSockets. **No account ever uses the default
+  client.**
+- **Why not other ways:** Cloud NAT rules choose by *destination*, and broker APIs sit behind CDNs whose addresses
+  move. A proxy VM per account works (the fallback, ~₹850 a month each) but adds a box that can die. One NIC per IP
+  needs one VPC per account and a large VM.
+
+**One-time change to shared infrastructure (D10).** Today `zt-nat` serves `ALL_SUBNETWORKS_ALL_IP_RANGES`, which
+would also claim every new secondary range. It must be narrowed to `zt-subnet`'s primary range. Both VMs live in that
+range, so zt-v2 and auto-trade keep `34.14.137.170`. But it is a change on the path zt-tiger-v2's traffic uses, so it
+is done after hours, on your go-ahead, with zt-v2's egress checked before and after. zt-tiger-v2's own files are not
+edited.
+
+**What happens when you add a broker account:**
+
+| Step | Who | What | Account state |
+|---|---|---|---|
+| 1 | you (UI) | Add the account: broker, owner, PAPER / DRY_RUN | `EGRESS_NONE`: can run PAPER; DRY_RUN reads use the shared IP; **no LIVE** |
+| 2 | you, or Claude at your request, after hours | `bin/egress provision --account <id>`: prints the plan; `--apply` reserves the IP, adds the range, the alias, the NAT gateway and the Docker network, connects the worker, writes `acct.broker_egress`. Idempotent: a re-run finishes a half-done one | `EGRESS_PROVISIONED` |
+| 3 | automatic | The worker fetches its public IP through that account's client (two independent echo services) and compares it with the reserved IP | `EGRESS_VERIFIED`, or `EGRESS_FAILED` + Telegram |
+| 4 | the account owner | The account page shows **"Register 34.x.x.x as the primary static IP"** with a link to the broker's page. The owner registers it at the broker and ticks "registered" | `EGRESS_REGISTERED` |
+| 5 | the broker | First proof that the broker accepts the IP: Kotak's login (1037 if not), Kite's and Upstox's first canary order (K2). Until then the registration is believed, not proven | — |
+| 6 | you | Switch the account to LIVE (refused unless state is `EGRESS_REGISTERED` and today's check passed) | LIVE |
+
+**Every trading day, 09:00–09:05:** each account's public IP is checked again through its own client. A mismatch, a
+timeout or a missing Docker network takes **that account** out for the day (reject code `EGRESS`), shown on the login
+board and sent by Telegram. The other accounts keep trading.
+
+**Removing an account:** `bin/egress retire --account <id>` stops the account first, removes the gateway, alias and
+network, and **keeps the reserved IP for 7 days** (the brokers' change limit) unless the owner confirms they removed
+it at the broker; then releases it. A released IP can go to a stranger, so it must not stay registered.
+
+**Code changes (in `../auto-trade-broker`):**
+- Migration V28 `acct.broker_egress`: account id, alias IP, container IP, Docker network, reserved IP name and
+  address, optional secondary IP, state, `verified_at`, `registered_at` (owner), last check time and result; changes
+  audited in `exec.audit_log`.
+- `BrokerEgress` (execution): builds each account's `HttpClient` from that row; refuses to build one without a row
+  for a LIVE or BROKER-market DRY_RUN account; the daily check; reject code `EGRESS` in `ExecutionLoop`.
+- Every gateway (Kite now; Upstox and Kotak when built) takes its `HttpClient` from `BrokerEgress`. `KiteHttp`
+  stops building its own. The quote limiter stays per app key.
+- Account page and login board: the IP to register, the state, today's check.
+- `bin/egress` (provision / verify / retire / list), run from the Mac with gcloud, dry-run by default. **The
+  application gets no GCP network rights**: a compromised app must not be able to rewire the project's network.
+- Tests: a Linux integration test with two accounts bound to `127.0.0.2` and `127.0.0.3` against a local server that
+  records the source address (every order, read and login of account A from A's address, never B's); a missing or
+  failed egress refuses that account only; a script test of `bin/egress` in dry-run.
+
+**Limits and costs (checked 2 Nov):**
+- Region quota: 8 static external IPs, 1 used (`zt-egress-ip`), so **7 accounts** without a quota request (fewer if
+  each takes a secondary IP). A quota increase is a console request.
+- About ₹250–300 a month per in-use IP, ₹600 per reserved but unused IP, plus Cloud NAT's small per-gateway and per-GB
+  charges. Check the pricing calculator.
+- To prove in E0: that a second NAT gateway on the same router can serve a secondary range of `zt-subnet` while
+  `zt-nat` serves its primary range, that GCP's guest agent makes the alias IP usable as a source, and that Docker's
+  `host_ipv4` SNAT holds. If any fails, the account uses the proxy fallback.
 
 ## 4. Fire-fighting: what happens with real trades
 
@@ -226,6 +310,7 @@ against the simulator only.
 | P5 | Funds below allocation + buffer | funds API | entries refused for funds (built: `CapitalPolicy`) | add funds or lower the allocation |
 | P6 | Broker or exchange outage at the open (it happens to every broker) | canary / 5xx | account out until a canary passes (*new*) | none |
 | P7 | Yesterday's position still open (a missed square-off, an NRML leftover) | reconciliation at takeover | account kill (entries); alert with the broker view (built) | flatten in the broker app or adopt it |
+| P8 | An account's public IP is not its reserved IP (NAT gateway, alias or Docker network missing or changed) | 09:00 egress check through that account's client | that account out for the day, `EGRESS`; others trade (*new*: 3.9) | `bin/egress verify`, then re-provision after hours |
 
 ### Entry
 | # | Scenario | Detection | A | Y |
@@ -282,7 +367,10 @@ against the simulator only.
 | Step | Work | Size | Gate before the next step |
 |---|---|---|---|
 | **K1** | Kite READ_LIVE DRY_RUN: real quotes and depth, funds, order and trade books, instrument file; the 08:30 mapping check; the login board; off-GCP watchdog; follower-risk v4 on for multi-account tenants | 3–4 days build + 5 sessions | 5 sessions: no mapping difference, no session failure, every decision followed or explained, the divergence report clean, the watchdog proven by stopping the worker once |
-| **K2** | Kite LIVE pilot (**your switch**): canary each morning, 1 lot, MIS, 1–2 strategies, max 2 positions | 10 sessions | no unreconciled fill; every order tagged; live slippage per trade measured against PAPER |
+| **E0** | Egress spike, after hours, on your go-ahead (D10): narrow `zt-nat` to the primary range; one test range, alias, NAT gateway and Docker network; a throwaway container proves its calls leave from the test IP and everything else from `34.14.137.170`; then remove the test pieces | 1 evening | the test IP seen by two echo services; zt-v2 and trading-core still on `34.14.137.170` |
+| **E1** | `acct.broker_egress` (V28), `BrokerEgress`, per-account `HttpClient` in the Kite gateway, the 09:00 check, reject `EGRESS`, the two-address IT | 2–3 days | full build green; the live set replays identically |
+| **E2** | `bin/egress` provision / verify / retire, account page + login board fields, runbook | 2 days | ZERODHA-1 provisioned for real: its own IP verified for 5 sessions in DRY_RUN |
+| **K2** | Kite LIVE pilot (**your switch**; ZERODHA-1's own IP registered at Kite): canary each morning, 1 lot, MIS, 1–2 strategies, max 2 positions | 10 sessions | no unreconciled fill; every order tagged; live slippage per trade measured against PAPER |
 | **K3** | Kite ladder 10 → 25 → 50 → 100 % of allocation | 5 sessions a step | live P&L per trade within the measured slippage band |
 | **U1** | Upstox order adapter + simulator + recorded-response tests; READ_LIVE on a **family member's** Upstox account with its own app | 1–1.5 weeks + 5 sessions | the same as K1 |
 | **U2** | Upstox LIVE pilot (that member's own switch, or yours as ADMIN with their consent) | 10 sessions | the same as K2 |
@@ -290,7 +378,7 @@ against the simulator only.
 | **N2** | Kotak LIVE pilot | 10 sessions | the same as K2 |
 | **M1** | Staggered multi-account slicing, contract-note import, tax ledger per person, the secondary IP and standby host drill | about 1 week | one full drill: GCP stopped mid-session in DRY_RUN, positions protected, the watchdog alerts, the standby takes over |
 
-**Calendar:** Kite live at 1 lot in about 3 weeks. Three brokers live at 1 lot in **8–10 weeks**, if nothing goes badly
+**Calendar:** Kite live at 1 lot in about 4 weeks (E0–E2 add about a week). Three brokers live at 1 lot in **8–10 weeks**, if nothing goes badly
 wrong. Steps overlap only where safe: the Upstox and Kotak adapter code can be written during K2/K3, but their LIVE steps
 wait for Kite's ladder to be clean.
 
@@ -307,11 +395,14 @@ wait for Kite's ladder to be clean.
 | D1 | Which strategies go live first | ecr only (the only one positive in both bar years); mac second; not odm (A-297 pending), not etr until its lottery profile is accepted knowingly |
 | D2 | Allocation per account, FIXED or COMPOUNDING | FIXED for the pilot |
 | D3 | Whose Upstox and Kotak accounts (your primary Upstox cannot trade: one app, zt's) | name the family member and the broker account for each |
-| D4 | Secondary static IP and a standby host | yes, before K2 |
+| D4 | Secondary static IP per account, and a standby host | standby host yes, before K2 (it keeps each account's IP by taking over its alias range); a secondary IP per account only if the 7-account quota is raised |
 | D5 | MIS for all live positions; strategies holding past 15:15 not followable live | yes |
 | D6 | Ratcheting broker stop (3.5) as a registered test | test it on tick days, then decide |
 | D7 | Daily loss limit: entries only (today) or entries + flatten (the 24 Oct plan) | entries only + alert; flattening locks in the worst print |
 | D8 | Who logs in each morning for each family account | each member themselves; you as ADMIN can only see the board |
+| D9 | One static IP per broker account, or one shared IP | **decided 2 Nov: one per account** (3.9) |
+| D10 | Narrow `zt-nat` to `zt-subnet`'s primary range (shared infrastructure, zt's IP unchanged) | yes, in E0, after hours, zt-v2 egress checked before and after |
+| D11 | Who runs `bin/egress` | you, or Claude when you ask, after hours only; never the application itself |
 
 ## 7. What I will and won't do
 - I build, test, simulate and deploy (after hours, on your go-ahead). **I never switch an account to LIVE, never
