@@ -28,6 +28,10 @@ case ",$PARTS," in *,own,*)
   for t in session_phase_event index_tick future_tick auction_tick constituent_tick oi_profile candle option_tick; do
     put md.$t "$AT" "select * from md.$t where session_date = '$DAY'"
   done
+  # the next weekly and current monthly expiry (V28, 3 Nov 2026); absent before that deploy: then no dump and no marker
+  if [ "$($AT -c "select to_regclass('md.option_tick_far') is not null")" = t ]; then
+    put md.option_tick_far "$AT" "select * from md.option_tick_far where session_date = '$DAY'"
+  fi
   put ref.instrument_snapshot "$AT" "select * from ref.instrument_snapshot where snapshot_date = '$DAY'"
   put ref.instrument "$AT" "select * from ref.instrument where snapshot_id in (select id from ref.instrument_snapshot where snapshot_date = '$DAY')"
   put ref.index_candle "$AT" "select * from ref.index_candle where session_date = '$DAY'"

@@ -22,6 +22,16 @@ public enum MdTable {
             "ask_qty", "ask_orders", "iv", "delta", "gamma", "theta", "vega", "rho", "analytics_ts",
             "analytics_complete", "depth_complete", "quote_source")),
 
+    /**
+     * The next weekly and the current monthly expiry's options around ATM (multi-expiry OI research, user 3 Nov 2026):
+     * recorded only, in their own table, so no strategy, chart, tracker or replay that reads md.option_tick sees them.
+     */
+    OPTION_TICK_FAR("md.option_tick_far", true, List.of(
+            "manifest_id", "session_date", "underlying", "recv_ts", "exch_ts", "src_seq", "src_hash64",
+            "instrument_token", "symbol", "segment", "expiry", "strike", "option_type", "lot_size", "ltp",
+            "volume", "oi", "total_buy_qty", "total_sell_qty", "bid_px", "bid_qty", "bid_orders", "ask_px",
+            "ask_qty", "ask_orders", "iv", "delta", "gamma", "theta", "vega", "rho", "analytics_ts",
+            "analytics_complete", "depth_complete", "quote_source")),
     CONSTITUENT_TICK("md.constituent_tick", true, List.of(
             "manifest_id", "session_date", "underlying", "recv_ts", "exch_ts", "src_seq", "src_hash64",
             "instrument_token", "symbol", "price", "prev_close", "cum_volume", "session_vwap", "weight_pct")),

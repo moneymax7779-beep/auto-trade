@@ -49,7 +49,13 @@ public record TradingProperties(Trading trading, Source source, Upstox upstox, S
         }
     }
 
-    public record Upstox(String tokenFile, String tokenSource, String instrumentDir, int strikesEachSide, int recenterStrikes) {
+    /** {@code farStrikesEachSide}: the next weekly and current monthly expiry's band, recorded only (null / 0 = off). */
+    public record Upstox(String tokenFile, String tokenSource, String instrumentDir, int strikesEachSide, int recenterStrikes,
+                         Integer farStrikesEachSide) {
+
+        public int farStrikes() {
+            return farStrikesEachSide == null ? 0 : farStrikesEachSide;
+        }
     }
 
     /** {@code strategyFiles} (several strategies side by side) takes precedence over {@code strategyFile}. */

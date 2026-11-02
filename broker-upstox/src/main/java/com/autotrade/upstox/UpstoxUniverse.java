@@ -47,6 +47,7 @@ public final class UpstoxUniverse {
     private final LocalDate session;
     private final Map<String, Meta> byKey = new HashMap<>();
     private final Set<String> base = new LinkedHashSet<>();
+    private final Set<Long> farTokens = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     public UpstoxUniverse(InstrumentMaster master, LocalDate session, List<String> underlyings,
                           Map<String, List<Constituent>> constituents) {
@@ -106,6 +107,72 @@ public final class UpstoxUniverse {
                     keys.add(i.instrumentKey());
                 });
         return keys;
+    }
+
+    /**
+     * The far expiries of an underlying (multi-expiry OI research, user 3 Nov 2026): the next expiry after the nearest,
+     * and the current month's last expiry (the monthly), or next month's when the nearest is itself the monthly.
+     */
+    public java.util.SortedSet<java.time.LocalDate> farExpiries(String underlying) {
+        java.util.List<java.time.LocalDate> all = master.optionExpiries(underlying, session);
+        java.util.SortedSet<java.time.LocalDate> far = new java.util.TreeSet<>();
+        if (all.isEmpty()) {
+            return far;
+        }
+        java.time.LocalDate nearest = all.getFirst();
+        if (all.size() > 1) {
+            far.add(all.get(1));
+        }
+        java.time.LocalDate monthly = lastInMonth(all, java.time.YearMonth.from(nearest));
+        if (nearest.equals(monthly)) {
+            monthly = lastInMonth(all, java.time.YearMonth.from(nearest).plusMonths(1));
+        }
+        if (monthly != null) {
+            far.add(monthly);
+        }
+        return far;
+    }
+
+    private static java.time.LocalDate lastInMonth(java.util.List<java.time.LocalDate> expiries, java.time.YearMonth month) {
+        java.time.LocalDate last = null;
+        for (java.time.LocalDate e : expiries) {
+            if (java.time.YearMonth.from(e).equals(month)) {
+                last = e;
+            }
+        }
+        return last;
+    }
+
+    /**
+     * The far expiries' options (CE and PE) within {@code strikesEachSide} strikes of the ATM strike; recorded only, never
+     * fed to the engine ({@link #far}).
+     */
+    public Set<String> farOptionKeys(String underlying, double spot, int strikesEachSide) {
+        Set<String> keys = new LinkedHashSet<>();
+        if (strikesEachSide <= 0) {
+            return keys;
+        }
+        for (java.time.LocalDate expiry : farExpiries(underlying)) {
+            double step = master.strikeStep(underlying, expiry);
+            double atm = Math.round(spot / step) * step;
+            master.instruments(underlying).stream()
+                    .filter(i -> i.isOption() && expiry.equals(i.expiry())
+                            && Math.abs(i.strike() - atm) <= strikesEachSide * step + 1e-6)
+                    .sorted(Comparator.comparingDouble(Instrument::strike))
+                    .forEach(i -> {
+                        Meta m = byKey.computeIfAbsent(i.instrumentKey(), k -> new Meta(i.instrumentKey(),
+                                token(i.instrumentKey(), i.exchangeToken()), Kind.OPTION, underlying, i.tradingSymbol(),
+                                i.expiry(), i.strike(), i.type(), i.lotSize(), null));
+                        farTokens.add(m.token());
+                        keys.add(i.instrumentKey());
+                    });
+        }
+        return keys;
+    }
+
+    /** True for a far-expiry option's token: such ticks go to the capture only, never to the engine. */
+    public boolean far(long token) {
+        return farTokens.contains(token);
     }
 
     public double strikeStep(String underlying) {

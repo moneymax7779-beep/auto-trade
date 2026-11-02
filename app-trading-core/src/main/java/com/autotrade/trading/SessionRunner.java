@@ -156,7 +156,7 @@ class SessionRunner implements ApplicationRunner {
             }
             case "fetch-bars" -> {
                 // historical one-minute bars from Upstox into hist.candle: --from=YYYY-MM-DD --to=YYYY-MM-DD
-                // [--underlyings=NIFTY,SENSEX] [--parts=index,equities,futures,options]
+                // [--underlyings=NIFTY,SENSEX] [--parts=index,equities,futures,options] [--option-days-before=8]
                 LocalDate from = LocalDate.parse(first(args, "from", LocalDate.now(MarketTime.IST).minusDays(7).toString()));
                 LocalDate to = LocalDate.parse(first(args, "to", LocalDate.now(MarketTime.IST).minusDays(1).toString()));
                 List<String> underlyings = List.of(first(args, "underlyings", String.join(",", properties.trading().tradeUnderlyingList())).split(","));
@@ -179,7 +179,10 @@ class SessionRunner implements ApplicationRunner {
                 }
                 InstrumentMaster master = new InstrumentStore(target).latest(to);
                 BarFetcher.Summary summary = new BarFetcher(target, Path.of(properties.upstox().instrumentDir()),
-                        Path.of("config", "reference", "weights")).fetch(from, to, underlyings, parts, token, master);
+                        Path.of("config", "reference", "weights"))
+                        .optionDaysBefore(Integer.parseInt(first(args, "option-days-before",
+                                String.valueOf(BarFetcher.OPTION_DAYS_BEFORE_EXPIRY))))
+                        .fetch(from, to, underlyings, parts, token, master);
                 summary.candles().forEach((what, n) -> log.info("fetched {}: {} candles", what, n));
                 summary.problems().forEach(problem -> log.warn("fetch: {}", problem));
                 log.info("fetch-bars {}..{} done: {} candles, {} problems", from, to,
@@ -521,6 +524,7 @@ class SessionRunner implements ApplicationRunner {
         LiveCapture capture = null;
         if (upstoxFeed != null) {
             capture = new LiveCapture(target, session, "UPSTOX_V3_LIVE", CodeVersion.current());
+            upstoxFeed.onFarOption(capture::acceptFar);        // far expiries: recorded only, never in the event stream
             feed = new CapturingFeed(feed, capture);
         }
         // live execution L1: the signal source's branch of this feed (this session first, the branch never blocks it live)
@@ -781,7 +785,7 @@ class SessionRunner implements ApplicationRunner {
                 underlying -> {
                     Map<String, Double> weights = official.weights(underlying, session);
                     return weights.isEmpty() ? history.constituentWeights(underlying, session) : weights;
-                }, upstox.strikesEachSide(), upstox.recenterStrikes());
+                }, upstox.strikesEachSide(), upstox.recenterStrikes(), upstox.farStrikes());
     }
 
     private void exit(int code) {

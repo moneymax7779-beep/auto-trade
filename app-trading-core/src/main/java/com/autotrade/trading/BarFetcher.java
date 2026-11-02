@@ -42,6 +42,11 @@ final class BarFetcher {
     static final int STRIKES_BEYOND_RANGE = 10;
     /** Each expiry's options are fetched for its last days only (the strategies trade the nearest expiry). */
     static final int OPTION_DAYS_BEFORE_EXPIRY = 8;
+    /**
+     * The window actually used: {@link #OPTION_DAYS_BEFORE_EXPIRY} unless set (fetch-bars --option-days-before, 3 Nov 2026:
+     * the next weekly and the monthly expiry's OI on past days, for the cross-expiry OI test, need up to ~5 weeks).
+     */
+    private int optionDaysBefore = OPTION_DAYS_BEFORE_EXPIRY;
     static final int FUTURE_DAYS_BEFORE_EXPIRY = 40;
 
     enum Part { INDEX, EQUITIES, FUTURES, OPTIONS }
@@ -58,6 +63,15 @@ final class BarFetcher {
         this.jdbc = new JdbcTemplate(target);
         this.instrumentDir = instrumentDir;
         this.weightsDir = weightsDir;
+    }
+
+    /** Each expiry's options from this many days before it (default {@link #OPTION_DAYS_BEFORE_EXPIRY}). */
+    BarFetcher optionDaysBefore(int days) {
+        if (days < 1 || days > 60) {
+            throw new IllegalArgumentException("option-days-before must be 1-60, got " + days);
+        }
+        this.optionDaysBefore = days;
+        return this;
     }
 
     Summary fetch(LocalDate from, LocalDate to, List<String> underlyings, Set<Part> parts, Optional<UpstoxToken> token,
@@ -127,13 +141,13 @@ final class BarFetcher {
     private int options(UpstoxExpired expired, String u, List<LocalDate> expiries, LocalDate from, LocalDate to,
                         List<String> problems) throws Exception {
         int total = 0;
-        for (LocalDate expiry : expiriesCovering(expiries, from, to, OPTION_DAYS_BEFORE_EXPIRY)) {
+        for (LocalDate expiry : expiriesCovering(expiries, from, to, optionDaysBefore)) {
             List<UpstoxExpired.Contract> contracts = expired.optionContracts(UpstoxCandles.indexKey(u), expiry);
             if (contracts.isEmpty()) {
                 problems.add(u + " " + expiry + ": no expired option contracts listed (not expired yet, or not served)");
                 continue;
             }
-            LocalDate start = expiry.minusDays(OPTION_DAYS_BEFORE_EXPIRY);
+            LocalDate start = expiry.minusDays(optionDaysBefore);
             double[] range = indexRange(u, start, expiry);
             if (range == null) {
                 // the strike window needs the index bars of that week: fetch them first (the public endpoint)
@@ -173,7 +187,7 @@ final class BarFetcher {
 
     /**
      * Options of expiries the expired-instruments API does not list yet (today's expiry, and the ones still to come)
-     * whose last {@link #OPTION_DAYS_BEFORE_EXPIRY} days reach into [from, to] up to today: the live instrument master
+     * whose last {@code optionDaysBefore} days reach into [from, to] up to today: the live instrument master
      * gives the contracts, the public endpoint (intraday for today) the bars.
      */
     private int liveOptions(String u, List<LocalDate> expiredExpiries, LocalDate from, LocalDate to, InstrumentMaster master,
@@ -184,10 +198,10 @@ final class BarFetcher {
         }
         int total = 0;
         for (LocalDate expiry : master.optionExpiries(u, today)) {
-            if (expiredExpiries.contains(expiry) || expiry.minusDays(OPTION_DAYS_BEFORE_EXPIRY).isAfter(to)) {
+            if (expiredExpiries.contains(expiry) || expiry.minusDays(optionDaysBefore).isAfter(to)) {
                 continue;
             }
-            LocalDate start = expiry.minusDays(OPTION_DAYS_BEFORE_EXPIRY);
+            LocalDate start = expiry.minusDays(optionDaysBefore);
             LocalDate end = expiry.isAfter(to) ? to : expiry;
             double[] range = indexRange(u, start, end);
             if (range == null) {

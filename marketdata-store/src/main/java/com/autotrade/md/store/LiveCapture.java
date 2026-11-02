@@ -58,6 +58,23 @@ public final class LiveCapture implements AutoCloseable {
         this.toolVersion = toolVersion;
     }
 
+    /**
+     * Buffers one far-expiry option tick into md.option_tick_far (the next weekly and the current monthly expiry; never
+     * part of the event stream the engine sees). Called on the feed thread. Never throws.
+     */
+    public synchronized void acceptFar(OptionTick tick) {
+        try {
+            long manifest = manifest(tick.underlying());
+            buffers.computeIfAbsent(MdTable.OPTION_TICK_FAR, t -> new ByteArrayOutputStream(1 << 16))
+                    .writeBytes(encoder.option(tick, meta(manifest, tick.underlying(), "FO")));
+            counts.merge(MdTable.OPTION_TICK_FAR.name(), 1L, Long::sum);
+        } catch (Exception e) {
+            if (failures++ % 1000 == 0) {
+                log.warn("live capture could not buffer a far-expiry option tick ({} so far): {}", failures, e.getMessage());
+            }
+        }
+    }
+
     /** Buffers one event (called on the feed thread). Never throws. */
     public synchronized void accept(MarketEvent event) {
         try {

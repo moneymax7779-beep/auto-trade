@@ -32,6 +32,14 @@ public final class UpstoxFeeds {
                                    List<String> underlyings, Path instrumentDir,
                                    Function<String, Map<String, Double>> weights, int strikesEachSide,
                                    int recenterStrikes) throws IOException {
+        return build(token, instruments, session, underlyings, instrumentDir, weights, strikesEachSide, recenterStrikes, 0);
+    }
+
+    /** @param farStrikesEachSide the next weekly and current monthly expiry's band, recorded only; 0 = off */
+    public static UpstoxFeed build(UpstoxToken token, InstrumentMaster instruments, LocalDate session,
+                                   List<String> underlyings, Path instrumentDir,
+                                   Function<String, Map<String, Double>> weights, int strikesEachSide,
+                                   int recenterStrikes, int farStrikesEachSide) throws IOException {
         if (instruments.size() == 0) {
             throw new IllegalStateException("the Upstox feed needs a contract master: bin/autotrade instruments --file ...");
         }
@@ -51,7 +59,7 @@ public final class UpstoxFeeds {
             constituents.put(underlying, list);
         }
         UpstoxUniverse universe = new UpstoxUniverse(instruments, session, underlyings, constituents);
-        return new UpstoxFeed(token, universe, underlyings, strikesEachSide, recenterStrikes);
+        return new UpstoxFeed(token, universe, underlyings, strikesEachSide, recenterStrikes, farStrikesEachSide);
     }
 
     private static Path newest(Path directory, String prefix) throws IOException {

@@ -16,6 +16,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.autotrade.core.event.MarketEvent;
+import com.autotrade.core.event.OptionTick;
 import com.autotrade.md.live.LiveFeed;
 import com.upstox.ApiClient;
 import com.upstox.feeder.MarketDataStreamerV3;
@@ -40,6 +41,19 @@ public final class UpstoxFeed implements LiveFeed {
     private final List<String> underlyings;
     private final int strikesEachSide;
     private final int recenterStrikes;
+    /** The far expiries' band (next weekly and current monthly), recorded only; 0 = off. */
+    private final int farStrikesEachSide;
+    private volatile Consumer<OptionTick> farSink = t -> { };
+    /** The far band is recorded for the traded indices only (user, 3 Nov 2026: NIFTY and SENSEX). */
+    private static final Set<String> FAR_UNDERLYINGS = Set.of("NIFTY", "SENSEX");
+    /**
+     * Far contracts are added only while this feed's subscriptions stay at or below this. Upstox counts its limits per
+     * user, not per connection (full mode 2,000 instruments, 1,500 when modes are combined; checked 3 Nov 2026), and
+     * zt-tiger-v2 subscribes on the same login: the nearest expiry's band, which the strategies trade, and zt's own feed
+     * must never be crowded out by recording.
+     */
+    static final int FAR_SUBSCRIPTION_CEILING = 800;
+    private boolean farCeilingLogged;
     private final UpstoxEventMapper mapper;
     private final BlockingQueue<Received> queue = new LinkedBlockingQueue<>();
     private final Map<String, Double> bandCentre = new HashMap<>();
@@ -53,11 +67,18 @@ public final class UpstoxFeed implements LiveFeed {
 
     public UpstoxFeed(UpstoxToken token, UpstoxUniverse universe, List<String> underlyings, int strikesEachSide,
                       int recenterStrikes) {
+        this(token, universe, underlyings, strikesEachSide, recenterStrikes, 0);
+    }
+
+    /** @param farStrikesEachSide the far expiries' band (next weekly and current monthly), recorded only; 0 = off */
+    public UpstoxFeed(UpstoxToken token, UpstoxUniverse universe, List<String> underlyings, int strikesEachSide,
+                      int recenterStrikes, int farStrikesEachSide) {
         this.token = token;
         this.universe = universe;
         this.underlyings = underlyings;
         this.strikesEachSide = strikesEachSide;
         this.recenterStrikes = recenterStrikes;
+        this.farStrikesEachSide = farStrikesEachSide;
         this.mapper = new UpstoxEventMapper(universe);
     }
 
@@ -99,7 +120,7 @@ public final class UpstoxFeed implements LiveFeed {
                 }
                 for (MarketEvent event : mapper.map(received.update(), received.at())) {
                     last = event.receivedAt();
-                    sink.accept(event);
+                    route(event, universe, sink, farSink);
                 }
                 recentreOptions();
             }
@@ -109,6 +130,20 @@ public final class UpstoxFeed implements LiveFeed {
         if (failure != null) {
             throw new IllegalStateException("Upstox feed failed: " + failure);
         }
+    }
+
+    /** A far-expiry option tick goes to {@code farSink} only (recorded, never seen by the engine); all else to {@code sink}. */
+    static void route(MarketEvent event, UpstoxUniverse universe, Consumer<MarketEvent> sink, Consumer<OptionTick> farSink) {
+        if (event instanceof OptionTick tick && universe.far(tick.instrumentToken())) {
+            farSink.accept(tick);
+        } else {
+            sink.accept(event);
+        }
+    }
+
+    /** Where far-expiry option ticks go (the capture); they never reach {@code run}'s sink. */
+    public void onFarOption(Consumer<OptionTick> sink) {
+        this.farSink = sink == null ? t -> { } : sink;
     }
 
     /** Stops the feed as a failure (the session ends FAILED, so the scheduler can fall back). */
@@ -131,6 +166,17 @@ public final class UpstoxFeed implements LiveFeed {
             }
             Set<String> keys = new HashSet<>(universe.optionKeys(underlying, spot, strikesEachSide));
             keys.removeAll(subscribed);
+            if (FAR_UNDERLYINGS.contains(underlying)) {
+                Set<String> far = new HashSet<>(universe.farOptionKeys(underlying, spot, farStrikesEachSide));
+                far.removeAll(subscribed);
+                if (subscribed.size() + keys.size() + far.size() <= FAR_SUBSCRIPTION_CEILING) {
+                    keys.addAll(far);
+                } else if (!far.isEmpty() && !farCeilingLogged) {
+                    farCeilingLogged = true;
+                    log.warn("{}: far-expiry contracts not added ({} subscribed, {} new nearest, {} far; ceiling {})",
+                            underlying, subscribed.size(), keys.size(), far.size(), FAR_SUBSCRIPTION_CEILING);
+                }
+            }
             bandCentre.put(underlying, spot);
             if (!keys.isEmpty()) {
                 streamer.subscribe(keys, Mode.FULL);
