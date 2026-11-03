@@ -52,7 +52,8 @@ import com.autotrade.sim.Side;
  * follower's own broker book decides its fills.
  * Fills are simulated at the signal's price moved against the account by the risk file's adverse bps; charges from the
  * cost model. DRY_RUN records the order it would have sent; broker funds are {@code simulatedBrokerFunds} (a real broker
- * read in L2). LIVE intents are left untouched. Known difference from PAPER-1: the day net is realised only.
+ * read in L2). LIVE intents run only on a LIVE venue ({@link FollowerVenue#live()}), and a LIVE venue runs nothing else.
+ * Known difference from PAPER-1: the day net is realised only.
  */
 public final class FollowerSimulator {
 

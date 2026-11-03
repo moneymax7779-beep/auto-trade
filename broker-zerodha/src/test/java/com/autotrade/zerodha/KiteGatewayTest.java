@@ -257,6 +257,8 @@ class KiteGatewayTest {
         });
         assertThat(list.byInstrumentKey("NSE_EQ|2885")).isEmpty();
         assertThat(KiteInstruments.instrumentKey("BFO", 1125704)).isEqualTo(SENSEX);
+        assertThat(KiteInstruments.instrumentKey("NFO", 47168)).isEqualTo("NSE_FO|47168");
+        assertThat(KiteInstruments.instrumentKey("NSE", 2885)).isEqualTo("NSE|2885");   // a share is never an option key
         assertThat(new KiteGateway(KiteConfig.simulator(sim.baseUri()), http, list).capabilities().tagMaxLength())
                 .isEqualTo(20);
         assertThat(KiteConfig.simulator(sim.baseUri()).isRealBroker()).isFalse();

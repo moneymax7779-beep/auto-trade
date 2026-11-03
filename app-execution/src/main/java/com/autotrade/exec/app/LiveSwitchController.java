@@ -36,6 +36,9 @@ class LiveSwitchController {
     record Switch(boolean on, String confirm) {
     }
 
+    private static final String NO_POSITION = " and not exists (select 1 from exec.position p where p.broker_account_id = ? "
+            + "and p.status <> 'CLOSED')";
+
     private final Access access;
     private final AccountStore accounts;
     private final JdbcTemplate jdbc;
@@ -77,9 +80,11 @@ class LiveSwitchController {
             Integer session = jdbc.queryForObject("select count(*) from acct.broker_session where broker_account_id = ? "
                     + "and status = 'ACTIVE' and expires_at > now()", Integer.class, id);
             require(session != null && session > 0, "no Kite session today: log in first");
+            // the no-position check again in the same statement: an entry the worker opened since the check above
             int changed = jdbc.update("update acct.broker_account set trade_mode = 'LIVE', live_trading_enabled = true, "
-                    + "updated_at = now() where id = ? and trade_mode = 'DRY_RUN' and not live_trading_enabled", id);
-            require(changed == 1, a.displayName() + " changed meanwhile; reload and try again");
+                    + "updated_at = now() where id = ? and trade_mode = 'DRY_RUN' and not live_trading_enabled" + NO_POSITION,
+                    id, id);
+            require(changed == 1, a.displayName() + " changed or opened a position meanwhile; reload and try again");
             detail.put("riskFile", a.riskFile());
             detail.put("maxLotsPerOrder", risk.live().maxLotsPerOrder());
             detail.put("maxOpenPositions", risk.live().maxOpenPositions());
@@ -87,8 +92,8 @@ class LiveSwitchController {
             audit.audit(accounts.byId(id).orElseThrow(), user.subject(), "LIVE_ON", detail);
         } else {
             int changed = jdbc.update("update acct.broker_account set trade_mode = 'DRY_RUN', live_trading_enabled = false, "
-                    + "updated_at = now() where id = ? and trade_mode = 'LIVE'", id);
-            require(changed == 1, a.displayName() + " is not LIVE");
+                    + "updated_at = now() where id = ? and trade_mode = 'LIVE'" + NO_POSITION, id, id);
+            require(changed == 1, a.displayName() + " is not LIVE, or opened a position meanwhile");
             audit.audit(accounts.byId(id).orElseThrow(), user.subject(), "LIVE_OFF", detail);
         }
         BrokerAccount now = accounts.byId(id).orElseThrow();

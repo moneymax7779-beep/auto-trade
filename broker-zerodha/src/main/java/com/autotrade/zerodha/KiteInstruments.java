@@ -122,9 +122,18 @@ public final class KiteInstruments {
         return Optional.ofNullable(bySymbol.get(exchange + ":" + tradingSymbol));
     }
 
-    /** Kite's exchange and token back to our key (for orders and positions the broker reports). */
+    /**
+     * Kite's exchange and token back to our key (for orders and positions the broker reports). Only NFO and BFO are our
+     * derivatives keys; an order the owner placed by hand on another segment (an NSE share, say) keeps its own exchange
+     * ({@code NSE|2885}), so it can never be taken for an option with the same exchange token.
+     */
     public static String instrumentKey(String exchange, long exchangeToken) {
-        return (exchange.equals("BFO") ? "BSE_FO" : "NSE_FO") + "|" + exchangeToken;
+        String segment = switch (exchange) {
+            case "BFO" -> "BSE_FO";
+            case "NFO", "" -> "NSE_FO";
+            default -> exchange;
+        };
+        return segment + "|" + exchangeToken;
     }
 
     public int size() {

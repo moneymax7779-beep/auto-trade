@@ -2,6 +2,7 @@ package com.autotrade.execution;
 
 import java.util.HashSet;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.ToIntFunction;
@@ -54,8 +55,8 @@ public final class LiveGuard implements BrokerConnection {
             }
             checkBuyQuantity(r.instrumentKey(), r.quantity());
             Set<String> held = new HashSet<>();
-            for (BrokerOrder o : book) {
-                if (o.instrumentKey() != null && (held(book, o.instrumentKey()) > 0
+            for (BrokerOrder o : book) {                       // derivatives only: a share bought by hand is no contract
+                if (derivative(o.instrumentKey()) && (held(book, o.instrumentKey()) > 0
                         || (o.side() == OrderSide.BUY && !o.status().isTerminal()))) {
                     held.add(o.instrumentKey());
                 }
@@ -118,11 +119,15 @@ public final class LiveGuard implements BrokerConnection {
         long working = 0;
         for (BrokerOrder o : book) {
             if (instrumentKey.equals(o.instrumentKey()) && o.side() == OrderSide.SELL && !o.status().isTerminal()
-                    && !o.clientTag().equals(except)) {
+                    && !Objects.equals(o.clientTag(), except)) {               // a hand-placed order has no tag
                 working += o.quantity() - o.filledQuantity();
             }
         }
         return working;
+    }
+
+    private static boolean derivative(String instrumentKey) {
+        return instrumentKey != null && (instrumentKey.startsWith("NSE_FO|") || instrumentKey.startsWith("BSE_FO|"));
     }
 
     private static BrokerException refused(String why) {
