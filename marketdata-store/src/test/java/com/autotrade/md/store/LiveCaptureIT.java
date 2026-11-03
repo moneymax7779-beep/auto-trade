@@ -133,6 +133,43 @@ class LiveCaptureIT {
                 .satisfies(e -> assertThat(((OptionTick) e).instrumentToken()).isEqualTo(101L));
     }
 
+    @Test
+    void aFailedFarExpiryWriteNeverCostsTheNearestExpirysRows() throws Exception {
+        LocalDate day = LocalDate.of(2026, 10, 28);
+        var jdbc = new org.springframework.jdbc.core.JdbcTemplate(dataSource);
+        jdbc.execute("alter table md.option_tick_far rename to option_tick_far_away");      // the far COPY fails
+        try {
+            LiveCapture capture = new LiveCapture(dataSource, day, "UPSTOX_V3_LIVE", "test");
+            Instant t = at(day, LocalTime.of(9, 20));
+            capture.accept(option(t, 1, 111L, day));
+            capture.acceptFar(option(t, 2, 222L, LocalDate.of(2026, 11, 3)));
+            capture.close();
+        } finally {
+            jdbc.execute("alter table md.option_tick_far_away rename to option_tick_far");
+        }
+        assertThat(jdbc.queryForList("select instrument_token from md.option_tick where session_date = ?", Long.class, day))
+                .containsExactly(111L);
+    }
+
+    @Test
+    void aSupersededManifestKeepsItsFarExpiryRows() throws Exception {
+        LocalDate day = LocalDate.of(2026, 10, 29);
+        LiveCapture capture = new LiveCapture(dataSource, day, "UPSTOX_V3_LIVE", "test");
+        Instant t = at(day, LocalTime.of(9, 20));
+        capture.accept(option(t, 1, 131L, day));
+        capture.acceptFar(option(t, 2, 232L, LocalDate.of(2026, 11, 3)));
+        capture.close();
+        LoadManifest active = new LoadManifests(dataSource).active(day, "NIFTY").orElseThrow();
+        try (java.sql.Connection connection = dataSource.getConnection()) {
+            new LoadManifests(dataSource).deleteRows(connection, active.id());               // as a zt clone does
+        }
+        var jdbc = new org.springframework.jdbc.core.JdbcTemplate(dataSource);
+        assertThat(jdbc.queryForObject("select count(*) from md.option_tick where session_date = ?", Long.class, day))
+                .isZero();
+        assertThat(jdbc.queryForList("select instrument_token from md.option_tick_far where session_date = ?", Long.class,
+                day)).as("zt has no far expiries to replace them").containsExactly(232L);
+    }
+
     private static OptionTick option(Instant t, long seq, long token, LocalDate expiry) {
         return new OptionTick(t, t, "NIFTY", seq, token, "NIFTY 22650 PE " + expiry, expiry, 22650.0,
                 OptionTick.OptionType.PE, 65, 100.0, 1000L, 5e6, 2000.0, 1500.0,

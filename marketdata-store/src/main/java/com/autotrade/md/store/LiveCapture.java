@@ -118,7 +118,7 @@ public final class LiveCapture implements AutoCloseable {
         }
     }
 
-    /** Writes the buffered rows (one transaction). Never throws; a failed batch is logged and dropped. */
+    /** Writes the buffered rows (one transaction, the far expiries in a second). Never throws; a failed batch is logged and dropped. */
     public void flush() {
         Map<MdTable, ByteArrayOutputStream> batch;
         synchronized (this) {
@@ -127,6 +127,19 @@ public final class LiveCapture implements AutoCloseable {
             }
             batch = buffers;
             buffers = new EnumMap<>(MdTable.class);
+        }
+        // the far expiries in a transaction of their own: a failure there (the table missing, say) never costs the
+        // nearest expiry's rows, which the strategies, charts and replays read
+        ByteArrayOutputStream far = batch.remove(MdTable.OPTION_TICK_FAR);
+        write(batch, "live capture batch lost");
+        if (far != null) {
+            write(Map.of(MdTable.OPTION_TICK_FAR, far), "live capture far-expiry batch lost");
+        }
+    }
+
+    private void write(Map<MdTable, ByteArrayOutputStream> batch, String lost) {
+        if (batch.isEmpty()) {
+            return;
         }
         try (Connection connection = dataSource.getConnection()) {
             connection.setAutoCommit(false);
@@ -137,7 +150,7 @@ public final class LiveCapture implements AutoCloseable {
             connection.commit();
             written += rows;
         } catch (Exception e) {
-            log.error("live capture batch lost: {}", e.getMessage());
+            log.error("{}: {}", lost, e.getMessage());
         }
     }
 

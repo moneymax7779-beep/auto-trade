@@ -19,15 +19,24 @@ class UpstoxUniverseFarTest {
     private static final List<LocalDate> EXPIRIES = List.of(LocalDate.of(2026, 10, 27), LocalDate.of(2026, 11, 3),
             LocalDate.of(2026, 11, 10), LocalDate.of(2026, 11, 17), LocalDate.of(2026, 11, 24), LocalDate.of(2026, 12, 29));
 
+    /** The monthlies of {@link #EXPIRIES}, as Upstox flags them ({@code weekly} false). */
+    private static final Set<LocalDate> MONTHLIES = Set.of(LocalDate.of(2026, 10, 27), LocalDate.of(2026, 11, 24),
+            LocalDate.of(2026, 12, 29));
+
     private static UpstoxUniverse universe(LocalDate session) {
+        return universe(session, EXPIRIES, MONTHLIES::contains);
+    }
+
+    private static UpstoxUniverse universe(LocalDate session, List<LocalDate> expiries,
+                                           java.util.function.Predicate<LocalDate> monthly) {
         List<Instrument> instruments = new ArrayList<>();
         int token = 1;
-        for (LocalDate expiry : EXPIRIES) {
+        for (LocalDate expiry : expiries) {
             for (double strike = 22_550; strike <= 22_850; strike += 50) {
                 for (String type : new String[] {"CE", "PE"}) {
                     instruments.add(new Instrument("NSE_FO|" + token, String.valueOf(token), "NSE_FO", "NSE", type, "NIFTY",
                             "NSE_INDEX|Nifty 50", "NIFTY " + expiry + " " + (int) strike + " " + type, expiry, strike, 65,
-                            0.05, 1755, true));
+                            0.05, 1755, !monthly.test(expiry)));
                     token++;
                 }
             }
@@ -48,6 +57,22 @@ class UpstoxUniverseFarTest {
         assertThat(universe(LocalDate.of(2026, 11, 11)).farExpiries("NIFTY"))
                 .as("the week before the monthly: the next expiry is the monthly itself")
                 .containsExactly(LocalDate.of(2026, 11, 24));
+    }
+
+    @Test
+    void aWeeklyAHolidayMovedToTheMonthsEndIsNotTheMonthly() {
+        // 24 Nov is the monthly; the weekly of Tue 1 Dec moved to Mon 30 Nov (a holiday): on 18 Nov the nearest is the
+        // monthly itself, so the monthly recorded is December's, not the weekly at the end of November
+        List<LocalDate> expiries = List.of(LocalDate.of(2026, 11, 24), LocalDate.of(2026, 11, 30), LocalDate.of(2026, 12, 8),
+                LocalDate.of(2026, 12, 29));
+        assertThat(universe(LocalDate.of(2026, 11, 18), expiries, MONTHLIES::contains).farExpiries("NIFTY"))
+                .containsExactly(LocalDate.of(2026, 11, 30), LocalDate.of(2026, 12, 29));
+    }
+
+    @Test
+    void withoutWeeklyFlagsTheMonthlyIsTheMonthsLastExpiry() {
+        assertThat(universe(LocalDate.of(2026, 11, 2), EXPIRIES, e -> true).farExpiries("NIFTY"))
+                .containsExactly(LocalDate.of(2026, 11, 10), LocalDate.of(2026, 11, 24));
     }
 
     @Test

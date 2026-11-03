@@ -98,6 +98,9 @@ public final class LoadManifests {
     public long deleteRows(Connection connection, long manifestId) throws SQLException {
         long deleted = 0;
         for (MdTable table : MdTable.values()) {
+            if (table == MdTable.OPTION_TICK_FAR) {
+                continue;               // own capture only: a zt clone that supersedes the day has no far rows to replace them
+            }
             try (PreparedStatement statement = connection.prepareStatement(
                     "delete from " + table.qualifiedName() + " where manifest_id = ?")) {
                 statement.setLong(1, manifestId);

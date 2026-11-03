@@ -123,14 +123,36 @@ public final class UpstoxUniverse {
         if (all.size() > 1) {
             far.add(all.get(1));
         }
-        java.time.LocalDate monthly = lastInMonth(all, java.time.YearMonth.from(nearest));
-        if (nearest.equals(monthly)) {
-            monthly = lastInMonth(all, java.time.YearMonth.from(nearest).plusMonths(1));
+        java.time.LocalDate monthly = nextMonthly(underlying, nearest);
+        if (monthly == null) {                                          // no weekly flags: the month's last expiry
+            monthly = lastInMonth(all, java.time.YearMonth.from(nearest));
+            if (nearest.equals(monthly)) {
+                monthly = lastInMonth(all, java.time.YearMonth.from(nearest).plusMonths(1));
+            }
         }
         if (monthly != null) {
             far.add(monthly);
         }
         return far;
+    }
+
+    /**
+     * The first monthly (Upstox's {@code weekly} flag false) after the nearest expiry: this month's, or next month's when
+     * the nearest is the monthly. A weekly a holiday moved into the month's last days is not taken for the monthly. Null
+     * when the flags tell nothing (every expiry or none flagged weekly).
+     */
+    private java.time.LocalDate nextMonthly(String underlying, java.time.LocalDate nearest) {
+        java.util.Map<java.time.LocalDate, Boolean> weekly = new java.util.TreeMap<>();
+        for (Instrument i : master.instruments(underlying)) {
+            if (i.isOption() && i.expiry() != null && !i.expiry().isBefore(nearest)) {
+                weekly.merge(i.expiry(), i.weekly(), Boolean::logicalAnd);
+            }
+        }
+        if (!weekly.containsValue(true) || !weekly.containsValue(false)) {
+            return null;
+        }
+        return weekly.entrySet().stream().filter(e -> e.getKey().isAfter(nearest) && !e.getValue())
+                .map(java.util.Map.Entry::getKey).findFirst().orElse(null);
     }
 
     private static java.time.LocalDate lastInMonth(java.util.List<java.time.LocalDate> expiries, java.time.YearMonth month) {

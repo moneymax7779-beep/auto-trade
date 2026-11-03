@@ -54,6 +54,10 @@ public final class UpstoxFeed implements LiveFeed {
      */
     static final int FAR_SUBSCRIPTION_CEILING = 800;
     private boolean farCeilingLogged;
+    /** The far band follows the spot every this many strikes (the nearest band's {@code recenterStrikes} is wider). */
+    static final int FAR_RECENTER_STRIKES = 2;
+    private final Map<String, Double> farCentre = new HashMap<>();
+    private boolean farOff;
     private final UpstoxEventMapper mapper;
     private final BlockingQueue<Received> queue = new LinkedBlockingQueue<>();
     private final Map<String, Double> bandCentre = new HashMap<>();
@@ -159,31 +163,57 @@ public final class UpstoxFeed implements LiveFeed {
             if (spot == null) {
                 continue;
             }
-            Double centre = bandCentre.get(underlying);
             double step = universe.strikeStep(underlying);
-            if (centre != null && Math.abs(spot - centre) < recenterStrikes * step) {
-                continue;
-            }
-            Set<String> keys = new HashSet<>(universe.optionKeys(underlying, spot, strikesEachSide));
-            keys.removeAll(subscribed);
-            if (FAR_UNDERLYINGS.contains(underlying)) {
-                Set<String> far = new HashSet<>(universe.farOptionKeys(underlying, spot, farStrikesEachSide));
-                far.removeAll(subscribed);
-                if (subscribed.size() + keys.size() + far.size() <= FAR_SUBSCRIPTION_CEILING) {
-                    keys.addAll(far);
-                } else if (!far.isEmpty() && !farCeilingLogged) {
-                    farCeilingLogged = true;
-                    log.warn("{}: far-expiry contracts not added ({} subscribed, {} new nearest, {} far; ceiling {})",
-                            underlying, subscribed.size(), keys.size(), far.size(), FAR_SUBSCRIPTION_CEILING);
+            Double centre = bandCentre.get(underlying);
+            if (centre == null || Math.abs(spot - centre) >= recenterStrikes * step) {
+                bandCentre.put(underlying, spot);
+                Set<String> keys = new HashSet<>(universe.optionKeys(underlying, spot, strikesEachSide));
+                keys.removeAll(subscribed);
+                if (!keys.isEmpty()) {
+                    streamer.subscribe(keys, Mode.FULL);
+                    subscribed.addAll(keys);
+                    log.info("{} option band centred at {}: +{} contracts ({} subscribed in total)", underlying, spot,
+                            keys.size(), subscribed.size());
                 }
             }
-            bandCentre.put(underlying, spot);
-            if (!keys.isEmpty()) {
-                streamer.subscribe(keys, Mode.FULL);
-                subscribed.addAll(keys);
-                log.info("{} option band centred at {}: +{} contracts ({} subscribed in total)", underlying, spot,
-                        keys.size(), subscribed.size());
+            if (FAR_UNDERLYINGS.contains(underlying) && farStrikesEachSide > 0 && !farOff) {
+                recentreFar(underlying, spot, step);
             }
+        }
+    }
+
+    /**
+     * The far band: centred on its own (it is only {@code farStrikesEachSide} wide, so it follows the spot every
+     * {@link #FAR_RECENTER_STRIKES} strikes) and subscribed in its own call after the nearest band's, so a refusal of the
+     * recording never takes the traded band with it; a refused far subscription turns far recording off for the session.
+     */
+    private void recentreFar(String underlying, double spot, double step) {
+        Double centre = farCentre.get(underlying);
+        if (centre != null && Math.abs(spot - centre) < FAR_RECENTER_STRIKES * step) {
+            return;
+        }
+        farCentre.put(underlying, spot);
+        Set<String> far = new HashSet<>(universe.farOptionKeys(underlying, spot, farStrikesEachSide));
+        far.removeAll(subscribed);
+        if (far.isEmpty()) {
+            return;
+        }
+        if (subscribed.size() + far.size() > FAR_SUBSCRIPTION_CEILING) {
+            if (!farCeilingLogged) {
+                farCeilingLogged = true;
+                log.warn("{}: far-expiry contracts not added ({} subscribed, {} far; ceiling {})", underlying,
+                        subscribed.size(), far.size(), FAR_SUBSCRIPTION_CEILING);
+            }
+            return;
+        }
+        try {
+            streamer.subscribe(far, Mode.FULL);
+            subscribed.addAll(far);
+            log.info("{} far-expiry band centred at {}: +{} contracts ({} subscribed in total)", underlying, spot,
+                    far.size(), subscribed.size());
+        } catch (RuntimeException e) {
+            farOff = true;
+            log.warn("far-expiry recording off for this session: the subscription was refused ({})", e.getMessage());
         }
     }
 

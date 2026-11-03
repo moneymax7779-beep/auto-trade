@@ -92,8 +92,13 @@ case ",$PARTS," in *,own,*)
   for t in session_phase_event index_tick future_tick auction_tick constituent_tick oi_profile candle option_tick; do
     load "$AT" md.$t md.$t "session_date = '$DAY'"
   done
-  # far expiries (V28): exported right after md.option_tick, so its marker is there by now if GCP had the table; the
-  # Mac's table comes with the same image's migration
+  load "$AT" ref.instrument_snapshot ref.instrument_snapshot "snapshot_date = '$DAY'" \
+    "delete from ref.instrument where snapshot_id in (select id from ref.instrument_snapshot where snapshot_date = '$DAY')"
+  load "$AT" ref.instrument ref.instrument "snapshot_id in (select id from ref.instrument_snapshot where snapshot_date = '$DAY')"
+  load "$AT" ref.index_candle ref.index_candle "session_date = '$DAY'"
+  # far expiries (V28): exported before ref.index_candle, whose load above waited for its marker, so the far marker is
+  # there by now if GCP had the table (also on a re-run that skipped md.option_tick); the Mac's table comes with the
+  # same image's migration
   if $STORE ls "$B/md.option_tick_far.done" --account=$ACC >/dev/null 2>&1; then
     if [ "$($AT -c "select to_regclass('md.option_tick_far') is not null")" = t ]; then
       load "$AT" md.option_tick_far md.option_tick_far "session_date = '$DAY'"
@@ -102,10 +107,6 @@ case ",$PARTS," in *,own,*)
       PROBLEMS=$((PROBLEMS+1))
     fi
   fi
-  load "$AT" ref.instrument_snapshot ref.instrument_snapshot "snapshot_date = '$DAY'" \
-    "delete from ref.instrument where snapshot_id in (select id from ref.instrument_snapshot where snapshot_date = '$DAY')"
-  load "$AT" ref.instrument ref.instrument "snapshot_id in (select id from ref.instrument_snapshot where snapshot_date = '$DAY')"
-  load "$AT" ref.index_candle ref.index_candle "session_date = '$DAY'"
   $AT -c "select setval(pg_get_serial_sequence('md.load_manifest','id'), greatest((select max(id) from md.load_manifest), 1))" >/dev/null 2>&1
   $AT -c "select setval(pg_get_serial_sequence('ref.instrument_snapshot','id'), greatest((select max(id) from ref.instrument_snapshot), 1))" >/dev/null 2>&1
 esac
