@@ -216,6 +216,35 @@ class KiteLoginIT {
     }
 
     @Test
+    void remindersGoOnlyToAccountsStillWithoutASessionAndTheOpenAlertOnlyToLiveOnes() {
+        // ZERODHA-2 and ZERODHA-3 never log in here (wrong client, unpinned)
+        assertThat(login.messages(KiteLogin.Stage.REMINDER)).anySatisfy(m -> assertThat(m).startsWith("Reminder: ZERODHA-2 "))
+                .anySatisfy(m -> assertThat(m).startsWith("Reminder: ZERODHA-3 ").endsWith("/accounts/" + unpinnedAccount
+                        + "/kite/login"));
+        assertThat(login.messages(KiteLogin.Stage.OPEN_WITHOUT_LOGIN)).as("no LIVE account").isEmpty();
+        jdbc.update("update acct.broker_account set trade_mode = 'LIVE', live_trading_enabled = true where id = ?",
+                unpinnedAccount);
+        try {
+            assertThat(login.messages(KiteLogin.Stage.OPEN_WITHOUT_LOGIN)).singleElement()
+                    .satisfies(m -> assertThat(m).startsWith("ALERT: ZERODHA-3 (LIVE) has no Kite session at the open"));
+            assertThat(login.messages(KiteLogin.Stage.LAST_REMINDER)).anySatisfy(m -> assertThat(m)
+                    .startsWith("LAST REMINDER before the 09:15 open: ZERODHA-3 (LIVE) is not logged in"));
+        } finally {
+            jdbc.update("update acct.broker_account set trade_mode = 'DRY_RUN', live_trading_enabled = false where id = ?",
+                    unpinnedAccount);
+        }
+        jdbc.update("insert into acct.broker_session (broker_account_id, token_ref, status, acquired_at, expires_at) values (?, "
+                + "'session-file:test', 'ACTIVE', now(), now() + interval '1 hour')", wrongClientAccount);
+        try {
+            assertThat(login.messages(KiteLogin.Stage.REMINDER)).as("logged in: no more reminders")
+                    .noneSatisfy(m -> assertThat(m).contains("ZERODHA-2 "));
+        } finally {
+            jdbc.update("delete from acct.broker_session where broker_account_id = ? and token_ref = 'session-file:test'",
+                    wrongClientAccount);
+        }
+    }
+
+    @Test
     void theSessionEndsAtTheNextSixAmIst() {
         assertThat(KiteLogin.nextFlush(Instant.parse("2026-10-26T03:00:00Z")))        // 08:30 IST
                 .isEqualTo(Instant.parse("2026-10-27T00:30:00Z"));                       // 06:00 IST next day

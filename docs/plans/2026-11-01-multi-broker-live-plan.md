@@ -295,6 +295,32 @@ it at the broker; then releases it. A released IP can go to a stranger, so it mu
   `zt-nat` serves its primary range, that GCP's guest agent makes the alias IP usable as a source, and that Docker's
   `host_ipv4` SNAT holds. If any fails, the account uses the proxy fallback.
 
+### 3.10 The daily login, as close to automatic as the rules allow (user 3 Nov)
+
+Every broker needs a fresh session each trading day. Fully automatic login is not on the table:
+- **Kite:** Zerodha's staff state the exchange requires a manual login at least once a day and advise against
+  automating it ([forum](https://kite.trade/forum/discussion/comment/40680)); TOTP is mandatory. Scripts that log in
+  headlessly need the account's password and TOTP secret stored on the server: against the broker's stated rule, and
+  anyone who gets into the VM could then log in to the account. **Not built, on purpose (D12).**
+- **Upstox:** an official approve-on-the-phone flow exists ([access token request](https://upstox.com/developer/api-documentation/access-token-request)):
+  the server asks, the owner taps Approve in the Upstox app or on WhatsApp, Upstox posts the day's token to our webhook
+  (token valid till 03:30 next morning). No password is typed and none is stored.
+- **Kotak Neo:** TOTP + MPIN on our login page (N1); no approve flow known.
+
+What gets built:
+1. **Kite reminders (built 3 Nov, branch `feature/kite-login-reminders`, deploy after the first LIVE day):** 08:30
+   the login link, 08:50 a reminder, 09:05 the last reminder before the open, each only to an account still without a
+   session; 09:16 an ALERT for a LIVE account with no session at the open (entries refused, exits wait for the login;
+   the broker-side stop still rests at Kite). The 09:10 login board stays.
+2. **Upstox approve flow (U1):** at 08:30 on trading days `POST /v3/login/auth/token/request/{client_id}` for every
+   enabled Upstox follower account without a session; a notifier webhook on our public URL receives the token, checks
+   the client id against the account's pinned user id, stores it like a Kite token (session file, owner-only, never in
+   the database) and marks the session ACTIVE; audited `SESSION_LOGIN` with `via=token-request`. Reminders as for Kite
+   (resend the request at 08:50 and 09:05 while no token arrived). Fallback: the ordinary OAuth link. Risks to prove in
+   U1: webhook delivery (developers report needing Upstox to whitelist the notifier URL), the token's client matching
+   the account, and a request the owner rejects or ignores (= no session, the account is out, as P1). Applies to
+   auto-trade's own Upstox apps only; zt-tiger-v2's login is not touched.
+
 ## 4. Fire-fighting: what happens with real trades
 
 **A** = automatic action, **Y** = your action. Rows marked *new* need building; the rest exist and are tested
@@ -303,7 +329,7 @@ against the simulator only.
 ### Before the open
 | # | Scenario | Detection | A | Y |
 |---|---|---|---|---|
-| P1 | Login not done by 09:10 | session status | account out for the day; listed at 08:30 and 09:10 (*new*: board) | log in or accept the day off |
+| P1 | Login not done by 09:10 | session status | account out for the day; link at 08:30, reminders 08:50 and 09:05, board 09:10, LIVE alert 09:16 (3.10; reminders on a branch) | log in or accept the day off |
 | P2 | Kotak session created from the wrong IP (phone, Mac) | 1037 on the canary | account out; message says "log in through the app page" (*new*) | log in again through our page |
 | P3 | IP changed or de-registered at the broker | 100008 / IP errors on the canary | account out (*new*: canary) | fix the IP registration (a weekly limit applies) |
 | P4 | Instrument master disagrees (lot size changed, new expiry pattern, strike missing) | 08:30 mapping check | that contract blocked for that broker (*new*) | none, or check the exchange circular |
@@ -372,7 +398,7 @@ against the simulator only.
 | **E2** | `bin/egress` provision / verify / retire, account page + login board fields, runbook | 2 days | ZERODHA-1 provisioned for real: its own IP verified for 5 sessions in DRY_RUN |
 | **K2** | Kite LIVE pilot (**your switch**; ZERODHA-1's own IP registered at Kite): canary each morning, 1 lot, MIS, 1–2 strategies, max 2 positions | 10 sessions | no unreconciled fill; every order tagged; live slippage per trade measured against PAPER |
 | **K3** | Kite ladder 10 → 25 → 50 → 100 % of allocation | 5 sessions a step | live P&L per trade within the measured slippage band |
-| **U1** | Upstox order adapter + simulator + recorded-response tests; READ_LIVE on a **family member's** Upstox account with its own app | 1–1.5 weeks + 5 sessions | the same as K1 |
+| **U1** | Upstox order adapter + simulator + recorded-response tests; the approve-on-the-phone login (3.10); READ_LIVE on a **family member's** Upstox account with its own app | 1–1.5 weeks + 5 sessions | the same as K1 |
 | **U2** | Upstox LIVE pilot (that member's own switch, or yours as ADMIN with their consent) | 10 sessions | the same as K2 |
 | **N1** | Kotak Neo: the TOTP + MPIN login page on the order host; tag / idempotency answered; adapter + simulator; READ_LIVE | 1.5–2 weeks + 5 sessions | the same as K1, plus a deliberate wrong-IP login proven to fail cleanly |
 | **N2** | Kotak LIVE pilot | 10 sessions | the same as K2 |
@@ -403,6 +429,7 @@ wait for Kite's ladder to be clean.
 | D9 | One static IP per broker account, or one shared IP | **decided 2 Nov: one per account** (3.9) |
 | D10 | Narrow `zt-nat` to `zt-subnet`'s primary range (shared infrastructure, zt's IP unchanged) | yes, in E0, after hours, zt-v2 egress checked before and after |
 | D11 | Who runs `bin/egress` | you, or Claude when you ask, after hours only; never the application itself |
+| D12 | Fully automatic broker login (password + TOTP secret stored on the server) | **no** (3.10): against Zerodha's stated rule and a single point of account takeover; Kite gets reminders, Upstox the official approve-on-the-phone flow |
 
 ## 7. What I will and won't do
 - I build, test, simulate and deploy (after hours, on your go-ahead). **I never switch an account to LIVE, never

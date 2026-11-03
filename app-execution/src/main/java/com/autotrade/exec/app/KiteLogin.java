@@ -52,7 +52,8 @@ import tools.jackson.databind.json.JsonMapper;
  * One login or expiry at a time per account (an in-process lock; one worker serves an account). Expired sessions are
  * swept every minute, account by account (TOKEN_EXPIRED and the token file deleted only when no ACTIVE session is
  * left). At 08:30 IST on weekdays every enabled ZERODHA DRY_RUN / LIVE account without an ACTIVE session gets its login
- * link by Telegram. Nothing here places an order, and LIVE trading stays refused by the broker registry.
+ * link by Telegram, again at 08:50 and 09:05 while it has none, and a LIVE account still without one at 09:16 an alert
+ * ({@link Stage}). Nothing here places an order.
  */
 @Component
 class KiteLogin {
@@ -227,25 +228,74 @@ class KiteLogin {
         }
     }
 
-    /** 08:30 IST, trading days: the login link of every enabled ZERODHA DRY_RUN / LIVE account without a session. */
+    /**
+     * The login messages of the morning (user, 3 Nov 2026: reminders until it is done): 08:30 the link, 08:50 a reminder,
+     * 09:05 the last one before the open, each only to an account still without a session; 09:16 an alert for a LIVE
+     * account that is not logged in at the open (its entries are refused until it is).
+     */
+    enum Stage {
+        LINK, REMINDER, LAST_REMINDER, OPEN_WITHOUT_LOGIN
+    }
+
     @Scheduled(cron = "0 30 8 * * MON-FRI", zone = "Asia/Kolkata")
     void morningLinks() {
+        send(Stage.LINK);
+    }
+
+    @Scheduled(cron = "0 50 8 * * MON-FRI", zone = "Asia/Kolkata")
+    void reminder() {
+        send(Stage.REMINDER);
+    }
+
+    @Scheduled(cron = "0 5 9 * * MON-FRI", zone = "Asia/Kolkata")
+    void lastReminder() {
+        send(Stage.LAST_REMINDER);
+    }
+
+    @Scheduled(cron = "0 16 9 * * MON-FRI", zone = "Asia/Kolkata")
+    void openWithoutLogin() {
+        send(Stage.OPEN_WITHOUT_LOGIN);
+    }
+
+    private void send(Stage stage) {
         if (!tradingDays.isTradingDay(java.time.LocalDate.now(IST))) {
             return;                                         // an exchange holiday: no session, no login needed
         }
-        for (Map<String, Object> row : jdbc.queryForList("select a.id, a.display_name from acct.broker_account a "
+        messages(stage).forEach(telegram::send);
+    }
+
+    /** The stage's messages: one for each enabled ZERODHA DRY_RUN / LIVE account (LIVE only at the open) without a session. */
+    List<String> messages(Stage stage) {
+        List<String> out = new java.util.ArrayList<>();
+        for (Map<String, Object> row : jdbc.queryForList("select a.id, a.display_name, a.trade_mode from acct.broker_account a "
                 + "where a.broker_type = 'ZERODHA' and a.enabled and a.trade_mode in ('DRY_RUN', 'LIVE') "
                 + "and a.credential_profile_id is not null and not exists (select 1 from acct.broker_session s "
-                + "where s.broker_account_id = a.id and s.status = 'ACTIVE') order by a.id")) {
+                + "where s.broker_account_id = a.id and s.status = 'ACTIVE' and s.expires_at > now()) order by a.id")) {
             long id = ((Number) row.get("id")).longValue();
             String name = (String) row.get("display_name");
+            boolean live = "LIVE".equals(row.get("trade_mode"));
+            if (stage == Stage.OPEN_WITHOUT_LOGIN && !live) {
+                continue;                                   // the 09:10 login board already lists DRY_RUN accounts out
+            }
             if (props.publicBaseUrl() == null) {
                 log.warn("account {} ({}) needs today's Kite login; no public-base-url set for a link", id, name);
                 continue;
             }
-            telegram.send("Kite login for " + name + " (today's session): " + props.publicBaseUrl()
-                    + "/api/execution/accounts/" + id + "/kite/login");
+            out.add(message(stage, name, live, props.publicBaseUrl() + "/api/execution/accounts/" + id + "/kite/login"));
         }
+        return out;
+    }
+
+    static String message(Stage stage, String account, boolean live, String link) {
+        String who = account + (live ? " (LIVE)" : "");
+        return switch (stage) {
+            case LINK -> "Kite login for " + who + " (today's session): " + link;
+            case REMINDER -> "Reminder: " + who + " is not logged in to Kite yet. Log in: " + link;
+            case LAST_REMINDER -> "LAST REMINDER before the 09:15 open: " + who + " is not logged in to Kite; without a "
+                    + "login its entries are refused today. Log in: " + link;
+            case OPEN_WITHOUT_LOGIN -> "ALERT: " + who + " has no Kite session at the open: no entries until you log in "
+                    + "(exits of open positions wait for the login too). Log in: " + link;
+        };
     }
 
     // ---------------------------------------------------------------------------------------------------------------
