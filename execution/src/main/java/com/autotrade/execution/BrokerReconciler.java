@@ -27,9 +27,12 @@ import com.autotrade.sim.Side;
  * Our book against the broker's (live plan section 4, "Reconciliation mismatch"; L2 "EOD broker reconciliation").
  * <ul>
  *   <li>{@link #check}: intraday, at every lease takeover and on a timer. The broker's net quantity per contract (our
- *       product only) against our open positions. Any difference, including a position we do not hold (a manual trade),
- *       engages the account's kill switch (entries stop; exits for our positions continue) and is audited with both
- *       sides. Nothing is flattened automatically.</li>
+ *       product only) against our open positions. A difference, including a position we do not hold (a manual trade),
+ *       that is still there at the next check engages the account's kill switch (entries stop; exits for our positions
+ *       continue) and is audited with both sides. One check alone is not enough (code review 3 Nov 2026): a stop that
+ *       filled since the last turn is booked only after the check, and Kite's positions can lag its order book, so a
+ *       normal stop-out or fill would otherwise stop the account's entries for the day. Nothing is flattened
+ *       automatically.</li>
  *   <li>{@link #endOfDay}: after the close. The broker's trade book against our fills, contract by contract (bought and
  *       sold quantity and value), and the day's ledger row: our gross and charges, the broker's gross from its trades with
  *       charges from the cost model on those trades (until contract notes are read), and the difference. A difference of
@@ -50,6 +53,8 @@ public final class BrokerReconciler {
     private final AccountStore accounts;
     private final KillSwitches kills;
     private final CostModel costs;
+    /** The contracts that differed at each account's last check (a contract must differ twice in a row). */
+    private final Map<Long, java.util.Set<String>> lastDifferences = new java.util.concurrent.ConcurrentHashMap<>();
 
     public BrokerReconciler(DataSource dataSource, CostModel costs) {
         this.jdbc = new JdbcTemplate(dataSource);
@@ -71,13 +76,17 @@ public final class BrokerReconciler {
             }
         }
         List<String> differences = new ArrayList<>();
+        java.util.Set<String> differing = new java.util.TreeSet<>();
         for (String key : union(ours, theirs)) {
             long o = ours.getOrDefault(key, 0L), t = theirs.getOrDefault(key, 0L);
             if (o != t) {
+                differing.add(key);
                 differences.add(key + ": ours " + o + ", broker " + t + (o == 0 ? " (not ours: a manual trade?)" : ""));
             }
         }
-        if (!differences.isEmpty()) {
+        java.util.Set<String> before = differing.isEmpty() ? lastDifferences.remove(account.id())
+                : lastDifferences.put(account.id(), differing);
+        if (before != null && differing.stream().anyMatch(before::contains)) {       // a contract that differed last time too
             kills.engageAccount(account, "RECONCILIATION: " + String.join("; ", differences), "reconciler");
         }
         return new Check(differences.isEmpty(), differences);

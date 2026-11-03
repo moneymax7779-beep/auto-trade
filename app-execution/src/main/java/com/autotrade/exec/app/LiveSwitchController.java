@@ -36,8 +36,16 @@ class LiveSwitchController {
     record Switch(boolean on, String confirm) {
     }
 
-    private static final String NO_POSITION = " and not exists (select 1 from exec.position p where p.broker_account_id = ? "
-            + "and p.status <> 'CLOSED')";
+    /**
+     * No position and no order still working at the broker (code review 3 Nov 2026: an entry is a working order before
+     * its position row exists, and an order of unknown outcome has none; switching the route under either would leave a
+     * real order or position to the wrong venue).
+     */
+    private static final String NO_POSITION = " and not exists (select 1 from exec.position p where p.broker_account_id = "
+            + "acct.broker_account.id and p.status <> 'CLOSED') and not exists (select 1 from exec.order_execution e "
+            + "where e.broker_account_id = acct.broker_account.id and e.status in ('CREATED', 'SUBMITTED', 'ACKNOWLEDGED', "
+            + "'OPEN', 'PARTIALLY_FILLED', 'CANCEL_PENDING', 'UNKNOWN', 'RECONCILIATION_REQUIRED') "
+            + "and e.created_at > now() - interval '1 day')";
 
     private final Access access;
     private final AccountStore accounts;
@@ -83,8 +91,8 @@ class LiveSwitchController {
             // the no-position check again in the same statement: an entry the worker opened since the check above
             int changed = jdbc.update("update acct.broker_account set trade_mode = 'LIVE', live_trading_enabled = true, "
                     + "updated_at = now() where id = ? and trade_mode = 'DRY_RUN' and not live_trading_enabled" + NO_POSITION,
-                    id, id);
-            require(changed == 1, a.displayName() + " changed or opened a position meanwhile; reload and try again");
+                    id);
+            require(changed == 1, a.displayName() + " changed, or has a position or a working order; reload and try again");
             detail.put("riskFile", a.riskFile());
             detail.put("maxLotsPerOrder", risk.live().maxLotsPerOrder());
             detail.put("maxOpenPositions", risk.live().maxOpenPositions());
@@ -92,8 +100,9 @@ class LiveSwitchController {
             audit.audit(accounts.byId(id).orElseThrow(), user.subject(), "LIVE_ON", detail);
         } else {
             int changed = jdbc.update("update acct.broker_account set trade_mode = 'DRY_RUN', live_trading_enabled = false, "
-                    + "updated_at = now() where id = ? and trade_mode = 'LIVE'" + NO_POSITION, id, id);
-            require(changed == 1, a.displayName() + " is not LIVE, or opened a position meanwhile");
+                    + "updated_at = now() where id = ? and trade_mode = 'LIVE'" + NO_POSITION, id);
+            require(changed == 1, a.displayName() + " is not LIVE, or has a position or an order still working at the "
+                    + "broker; wait for it to end (or flatten) and try again");
             audit.audit(accounts.byId(id).orElseThrow(), user.subject(), "LIVE_OFF", detail);
         }
         BrokerAccount now = accounts.byId(id).orElseThrow();

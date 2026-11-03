@@ -352,7 +352,19 @@ class BrokerVenueIT {
         FollowerSimulator kite = brokerFollower();
         kite.run(s.broker(), s.group(), DAY);
         decide(s, "10:00:00", SignalDecision.Action.EXIT, 120);
-        bookOverride.set(new double[] {0, 0, 121, 650, 120});        // no bid at all
+        // no bid at all; code review 3 Nov 2026: tried EXIT_ATTEMPTS times, EXIT_RETRY_AFTER apart, each audited, before giving up
+        for (int attempt = 1; attempt < FollowerSimulator.EXIT_ATTEMPTS; attempt++) {
+            bookOverride.set(new double[] {0, 0, 121, 650, 120});    // still no bid (the override is used once)
+            kite.run(s.broker(), s.group(), DAY);
+            assertThat(intentState(s.broker(), "EXIT")).startsWith("CREATED");
+            assertThat(new KillSwitches(dataSource).engaged(s.broker(), "opening-drive", KEY)).isNull();
+            kite.run(s.broker(), s.group(), DAY);                     // too soon: waits, nothing sent
+            assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? and action = "
+                    + "'EXIT_RETRY'", Integer.class, s.broker().id())).isEqualTo(attempt);
+            jdbc.update("update exec.trade_intent set updated_at = now() - interval '1 minute' where broker_account_id = ? "
+                    + "and action = 'EXIT'", s.broker().id());
+        }
+        bookOverride.set(new double[] {0, 0, 121, 650, 120});
         kite.run(s.broker(), s.group(), DAY);
         assertThat(intentState(s.broker(), "EXIT")).isEqualTo("FAILED_EXIT_NOT_FILLED");
         assertThat(position(s.broker())).satisfies(p -> {
@@ -363,6 +375,27 @@ class BrokerVenueIT {
                 .mapToLong(r -> (Long) r.get("quantity_requested")).sum();
         assertThat(resting).as("re-armed for what is still held").isEqualTo(2600L);
         assertThat(new KillSwitches(dataSource).engaged(s.broker(), "opening-drive", KEY)).contains("EXIT_NOT_FILLED");
+    }
+
+    @Test
+    void anExitThatFailsOnceIsSentAgainAndCloses() throws Exception {
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        FollowerSimulator kite = brokerFollower();
+        kite.run(s.broker(), s.group(), DAY);
+        decide(s, "10:00:00", SignalDecision.Action.EXIT, 120);
+        bookOverride.set(new double[] {0, 0, 121, 650, 120});        // no bid for a moment
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(position(s.broker()).get("status")).isEqualTo("OPEN");
+        bookOverride.set(null);                                       // the book is back
+        jdbc.update("update exec.trade_intent set updated_at = now() - interval '1 minute' where broker_account_id = ? "
+                + "and action = 'EXIT'", s.broker().id());
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(intentState(s.broker(), "EXIT")).isEqualTo("EXECUTED");
+        assertThat(position(s.broker()).get("status")).isEqualTo("CLOSED");
+        assertThat(new KillSwitches(dataSource).engaged(s.broker(), "opening-drive", KEY)).isNull();
+        assertThat(orders(s.broker())).extracting(r -> r.get("role") + ":" + r.get("client_tag").toString().replaceAll("^F\\d+", ""))
+                .contains("EXIT:E2N1").noneMatch(t -> t.startsWith("EXIT:E1"));
     }
 
     @Test
@@ -393,7 +426,25 @@ class BrokerVenueIT {
         BrokerReconciler.Check c = reconciler.check(s.broker(), gateway);
         assertThat(c.matched()).isFalse();
         assertThat(c.differences()).singleElement().asString().contains("ours 2600, broker 2665");
+        assertThat(new KillSwitches(dataSource).engaged(s.broker(), "opening-drive", KEY))
+                .as("one check alone: a stop not yet booked or a lagging position looks the same").isNull();
+        assertThat(reconciler.check(s.broker(), gateway).matched()).isFalse();
         assertThat(new KillSwitches(dataSource).engaged(s.broker(), "opening-drive", KEY)).startsWith("ACCOUNT: RECONCILIATION");
+    }
+
+    @Test
+    void aDifferenceGoneByTheNextCheckEngagesNothing() throws Exception {
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        FollowerSimulator kite = brokerFollower();
+        kite.run(s.broker(), s.group(), DAY);
+        BrokerReconciler reconciler = new BrokerReconciler(dataSource, costs);
+        // the broker stop sold everything, not yet booked (the next turn books it): one check sees ours open, broker flat
+        jdbc.update("update exec.position set quantity_open = quantity_open + 65 where broker_account_id = ?", s.broker().id());
+        assertThat(reconciler.check(s.broker(), gateway).matched()).isFalse();
+        jdbc.update("update exec.position set quantity_open = quantity_open - 65 where broker_account_id = ?", s.broker().id());
+        assertThat(reconciler.check(s.broker(), gateway).matched()).isTrue();
+        assertThat(new KillSwitches(dataSource).engaged(s.broker(), "opening-drive", KEY)).isNull();
     }
 
     @Test

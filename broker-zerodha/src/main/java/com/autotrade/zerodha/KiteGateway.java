@@ -37,9 +37,9 @@ import tools.jackson.databind.JsonNode;
  *       OMS's tag (at most 20 alphanumerics) on every order; prices rounded to the tick, a buy up and a sell down (so a
  *       marketable limit stays marketable). The broker's autoslice is not used: the caller slices.</li>
  *   <li><b>Idempotent place</b>: a tag already placed by this gateway is ignored. A place whose outcome is unknown
- *       (timeout, dropped connection, 5xx) is never retried blindly: the order is looked up by tag after
- *       {@code placeLookupWait} (three tries), adopted when found, and placed again only when it is not there. A 429 or
- *       a refused connection did not reach the broker and is retried after a short wait.</li>
+ *       (timeout, dropped connection, 5xx) is never retried: the order is looked up by tag after
+ *       {@code placeLookupWait} (three tries), adopted when found, else reported {@link Kind#UNKNOWN}. A 429 or a refused
+ *       connection did not reach the broker and is retried after a short wait.</li>
  *   <li><b>Rate</b>: places, modifies and cancels go through a limiter below Kite's 10 a second; quote calls through
  *       one of a call a second, shared by every gateway on the same app (Kite counts the quote limit per API key).</li>
  *   <li><b>State</b>: {@link #poll()} pulls the order book (the truth) and emits an {@link OrderUpdate} for each change
@@ -132,12 +132,12 @@ public final class KiteGateway implements BrokerConnection {
                                 found.get().brokerOrderId());
                         return;
                     }
-                    if (attempt < 2) {
-                        log.warn("place {} had an unknown outcome and is not at the broker; placing once more", tag);
-                        continue;
-                    }
-                    throw new BrokerException(Kind.UNKNOWN, "place " + tag + ": outcome unknown after " + attempt
-                            + " attempts", e);
+                    // code review 3 Nov 2026: never placed again here. Kite's book can show a processed order late, and a
+                    // second place below the LIVE guard could double a buy or turn an exit into a short. The caller
+                    // records the order as unknown; a later attempt with the same tag goes through the guard, which
+                    // reads the book first.
+                    throw new BrokerException(Kind.UNKNOWN, "place " + tag + ": outcome unknown, not found at the broker "
+                            + "by tag", e);
                 }
                 throw e;
             }
@@ -187,9 +187,13 @@ public final class KiteGateway implements BrokerConnection {
 
     @Override
     public void cancel(String clientOrderId) {
-        BrokerOrder order = known(clientOrderId);
+        // the id the place returned, when the book does not show the order yet (code review 3 Nov 2026)
+        String id = brokerIdByTag.get(clientOrderId);
+        if (id == null || id.isEmpty()) {
+            id = known(clientOrderId).brokerOrderId();
+        }
         limiter.acquire();
-        http.delete("/orders/regular/" + order.brokerOrderId());
+        http.delete("/orders/regular/" + id);
     }
 
     private BrokerOrder known(String tag) {

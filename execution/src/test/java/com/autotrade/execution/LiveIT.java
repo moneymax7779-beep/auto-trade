@@ -172,12 +172,50 @@ class LiveIT {
         BrokerConnections.Route route = registry.route(account, risk);
         assertThat(route.venue()).as(route.description()).isNotNull();
         BrokerVenue venue = new BrokerVenue(dataSource, route.connection(), risk.orders().fast(), (k, u) -> 1755L, o -> { });
-        return new FollowerSimulator(dataSource, costs, risk, venue, null);
+        return new FollowerSimulator(dataSource, costs, risk, venue, null).withClock(MORNING);
     }
 
     private static String intentState(BrokerAccount a) {
         return jdbc.queryForObject("select i.state || coalesce('_' || i.reject_code, '') from exec.trade_intent i "
                 + "where i.broker_account_id = ? order by i.id desc limit 1", String.class, a.id());
+    }
+
+    /** The LIVE checks' clock: 10:00 IST, decisions made "now" are never stale or late (code review 3 Nov 2026). */
+    private static final java.time.Clock MORNING = java.time.Clock.fixed(java.time.LocalDate.now(java.time.ZoneId.of(
+            "Asia/Kolkata")).atTime(10, 0).atZone(java.time.ZoneId.of("Asia/Kolkata")).toInstant(), java.time.ZoneId.of("Asia/Kolkata"));
+
+    @Test
+    void aLiveEntryFollowsItsSignalAtOnceOrNotAtAll() {
+        long group = group();
+        BrokerAccount a = account(group, true, "ma-cross");
+        enter(group, signalSession(group), "ma-cross", 0);
+        java.time.Instant ten = MORNING.instant();                                  // decided 10:00, run at 10:02
+        jdbc.update("update exec.signal_decision set decided_at = ? where copy_group_id = ?", java.sql.Timestamp.from(ten),
+                group);
+        try (BrokerConnections registry = registry()) {
+            follower(registry, a).withClock(java.time.Clock.fixed(ten.plusSeconds(120), java.time.ZoneId.of("UTC")))
+                    .run(a, group, DAY);
+        }
+        assertThat(intentState(a)).isEqualTo("REJECTED_STALE_SIGNAL");
+        assertThat(kite.requests("place")).as("nothing sent").isZero();
+    }
+
+    @Test
+    void noLiveEntryJustBeforeTheSquareOff() {
+        long group = group();
+        BrokerAccount a = account(group, true, "ma-cross");
+        enter(group, signalSession(group), "ma-cross", 0);
+        java.time.Instant at1512 = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Kolkata")).atTime(15, 12)
+                .atZone(java.time.ZoneId.of("Asia/Kolkata")).toInstant();
+        java.time.Instant decided = jdbc.queryForObject("select max(decided_at) from exec.signal_decision where copy_group_id = ?",
+                java.sql.Timestamp.class, group).toInstant();
+        java.time.Instant clockAt = decided.isAfter(at1512) ? decided.plusSeconds(1)  // run late in the day: the same day
+                : at1512;                                                              // decided earlier: 15:12 today
+        try (BrokerConnections registry = registry()) {
+            follower(registry, a).withClock(java.time.Clock.fixed(clockAt, java.time.ZoneId.of("UTC"))).run(a, group, DAY);
+        }
+        assertThat(intentState(a)).isEqualTo("REJECTED_LATE_ENTRY");
+        assertThat(kite.requests("place")).as("nothing sent").isZero();
     }
 
     @Test

@@ -49,6 +49,8 @@ import com.autotrade.broker.Quote;
 public final class BrokerVenue implements FollowerVenue {
 
     private static final Logger log = LoggerFactory.getLogger(BrokerVenue.class);
+    /** How long a placed order may be missing from the broker's book before it is cancelled and reported unknown. */
+    static final double NOT_SEEN_SEC = 5;
     private static final List<String> ACTIVE = List.of("CREATED", "SUBMITTED", "ACKNOWLEDGED", "OPEN", "PARTIALLY_FILLED",
             "CANCEL_PENDING", "UNKNOWN");
 
@@ -246,7 +248,11 @@ public final class BrokerVenue implements FollowerVenue {
                 if (last.status().isTerminal()) {
                     return last;
                 }
-            } else if (polls > 3 && last == null) {
+            } else if (last == null && (System.nanoTime() - start) / 1e9 >= NOT_SEEN_SEC) {
+                // code review 3 Nov 2026: was 4 polls (~1 s at 250 ms), too short for Kite's book at the open. Still not
+                // in the book: cancelled by the order id the place returned, so a late fill cannot become a position
+                // nobody manages; then reported unknown (the account is reconciled)
+                cancel(tag);
                 return null;
             }
             double elapsed = (System.nanoTime() - start) / 1e9;

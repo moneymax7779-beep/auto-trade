@@ -169,6 +169,7 @@ public final class ExecutionLoop implements AutoCloseable {
                 risks.remove(account.id());
                 simulators.remove(account.id());
                 connections.drop(account.id());
+                reconciled.remove(account.id());                     // the new route is reconciled before it trades
                 log.info("account {} ({}) changed ({} -> {}): route rebuilt", account.id(), account.displayName(), before,
                         signature);
             }

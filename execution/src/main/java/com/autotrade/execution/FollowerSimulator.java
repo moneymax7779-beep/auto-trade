@@ -69,6 +69,15 @@ public final class FollowerSimulator {
                            double rvol, double callAsk, double putAsk, double bookQuantity, double stopPct) {
     }
 
+    /** A broker exit is sent this many times at most, this far apart (code review 3 Nov 2026). */
+    static final int EXIT_ATTEMPTS = 5;
+    static final java.time.Duration EXIT_RETRY_AFTER = java.time.Duration.ofSeconds(10);
+    /** A LIVE entry older than this, or from this time of day, is refused (code review 3 Nov 2026). */
+    static final java.time.Duration LIVE_ENTRY_MAX_AGE = java.time.Duration.ofSeconds(60);
+    static final java.time.LocalTime LIVE_LAST_ENTRY = java.time.LocalTime.of(15, 10);
+    /** The wall clock of the LIVE entry checks (tests set their own). */
+    private java.time.Clock clock = java.time.Clock.systemUTC();
+
     private final JdbcTemplate jdbc;
     private final AccountStore accounts;
     private final CostModel costs;
@@ -108,6 +117,12 @@ public final class FollowerSimulator {
     public FollowerSimulator asWorker(String id, long epoch) {
         this.workerId = id;
         this.leaseEpoch = epoch;
+        return this;
+    }
+
+    /** Tests: the clock the LIVE entry checks read (signal age, last entry time). */
+    FollowerSimulator withClock(java.time.Clock clock) {
+        this.clock = clock;
         return this;
     }
 
@@ -436,6 +451,18 @@ public final class FollowerSimulator {
                 && (risk.live() == null || !risk.live().strategies().contains(p.strategyId()))) {
             return reject(p, "LIVE_STRATEGY", p.strategyId() + " is not one of the risk file's LIVE strategies");
         }
+        if (venue.live()) {
+            // code review 3 Nov 2026: a LIVE entry follows its signal at once or not at all (a worker that was down, a lease
+            // taken over late: the decision's moment has passed), and none is opened just before the square-off
+            if (!java.time.LocalTime.now(clock.withZone(java.time.ZoneId.of("Asia/Kolkata"))).isBefore(LIVE_LAST_ENTRY)) {
+                return reject(p, "LATE_ENTRY", "no LIVE entry from " + LIVE_LAST_ENTRY + " IST (square-off 15:20)");
+            }
+            java.time.Duration age = java.time.Duration.between(p.at(), clock.instant());
+            if (age.compareTo(LIVE_ENTRY_MAX_AGE) > 0) {
+                return reject(p, "STALE_SIGNAL", "decided " + age.toSeconds() + " s ago (LIVE entries follow within "
+                        + LIVE_ENTRY_MAX_AGE.toSeconds() + " s)");
+            }
+        }
         if (day.dailyLossLatched) {
             return reject(p, "DAILY_LOSS", "the daily loss limit was reached earlier today");
         }
@@ -557,6 +584,12 @@ public final class FollowerSimulator {
         }
         long positionId = ((Number) position.get("id")).longValue();
         long quantity = ((Number) position.get("quantity_open")).longValue();
+        Map<String, Object> tries = jdbc.queryForMap("select attempts, updated_at > now() - interval '"
+                + EXIT_RETRY_AFTER.toSeconds() + " seconds' recent from exec.trade_intent where id = ?", p.intentId());
+        int attempts = ((Number) tries.get("attempts")).intValue();
+        if (venue.broker() && attempts > 0 && Boolean.TRUE.equals(tries.get("recent"))) {
+            return "PENDING_EXIT_RETRY";                               // the last attempt failed moments ago: wait
+        }
         // plan section 3, exit sequencing: the broker stop comes off first; if it already sold, nothing more is sent
         FollowerVenue.Release release = venue.release(day.account, positionId);
         if (release.retryLater()) {
@@ -570,15 +603,27 @@ public final class FollowerSimulator {
         if (quantity <= 0) {
             outcome = skip(p, "STOPPED_AT_BROKER", "the broker stop sold the position before this exit");
         } else {
-            FollowerVenue.Fill fill = order(day.account, p, "EXIT", "SELL", quantity, sellPrice(p.price()), 1);
+            FollowerVenue.Fill fill = order(day.account, p, "EXIT", "SELL", quantity, sellPrice(p.price()), 1 + attempts);
             if (fill.quantity() > 0) {
                 book(day, positionId, fill.parts(), fill.at(), p.reason());
             }
             if (fill.quantity() < quantity) {
-                // the chase ran out: the rest keeps a broker stop, the account takes no new entries, an alert goes out
+                // the rest keeps a broker stop. Code review 3 Nov 2026: a broker exit is tried again (a quote that failed
+                // once, a refused place, a chase that ran out), EXIT_ATTEMPTS times in all, EXIT_RETRY_AFTER apart, each
+                // audited (an alert); only then is it given up and the account's entries stopped. An order of unknown
+                // outcome is not retried (a second sell could be a short): the account is reconciled.
                 protect(day, p, positionId);
-                kills.engageAccount(day.account, "EXIT_NOT_FILLED: " + (quantity - fill.quantity()) + " of " + p.symbol()
-                        + " still held after the exit chase (" + fill.reason() + ")", "execution");
+                String left = (quantity - fill.quantity()) + " of " + p.symbol() + " still held (" + fill.code() + ": "
+                        + fill.reason() + ")";
+                if (venue.broker() && !fill.unknown() && attempts + 1 < EXIT_ATTEMPTS) {
+                    jdbc.update("update exec.trade_intent set attempts = attempts + 1, reject_code = ?, reject_reason = ?, "
+                            + "updated_at = now() where id = ?", fill.code(), "retrying: " + left, p.intentId());
+                    kills.audit(day.account, "execution", "EXIT_RETRY", Map.of("attempt", attempts + 1, "of", EXIT_ATTEMPTS,
+                            "left", left));
+                    return "PENDING_EXIT_RETRY";
+                }
+                kills.engageAccount(day.account, "EXIT_NOT_FILLED: " + left + " after " + (attempts + 1) + " attempt(s)",
+                        "execution");
                 return fail(p, fill.unknown() ? "ORDER_UNKNOWN" : "EXIT_NOT_FILLED", fill.reason());
             }
             outcome = done(p, quantity);
@@ -895,7 +940,7 @@ public final class FollowerSimulator {
 
     private String done(Pending p, long quantity) {
         jdbc.update("update exec.trade_intent set state = 'EXECUTED', quantity = ?, attempts = attempts + 1, "
-                + "updated_at = now() where id = ?", quantity, p.intentId());
+                + "reject_code = null, updated_at = now() where id = ?", quantity, p.intentId());   // a retried exit's code goes
         return "EXECUTED";
     }
 

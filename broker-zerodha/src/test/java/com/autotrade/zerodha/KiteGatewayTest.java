@@ -135,14 +135,15 @@ class KiteGatewayTest {
         gateway.place(buy("F3E1", 65, 100.2));
         assertThat(sim.orderCount()).isEqualTo(2);
 
-        sim.failNext("place", Fault.TIMEOUT);                       // never reached: not found, placed once more
-        gateway.place(buy("F4E1", 65, 100.2));
-        assertThat(sim.orderCount()).isEqualTo(3);
+        sim.failNext("place", Fault.TIMEOUT);                       // never reached: not found, reported, not re-sent
+        assertThatThrownBy(() -> gateway.place(buy("F4E1", 65, 100.2)))
+                .satisfies(e -> assertThat(((BrokerException) e).kind()).isEqualTo(Kind.UNKNOWN));
+        assertThat(sim.orderCount()).isEqualTo(2);
 
         sim.failNext("place", Fault.HTTP_429);                      // dropped before processing: retried
         gateway.place(buy("F5E1", 65, 100.2));
-        assertThat(sim.orderCount()).isEqualTo(4);
-        assertThat(gateway.orders()).extracting(BrokerOrder::clientTag).containsExactly("F2E1", "F3E1", "F4E1", "F5E1");
+        assertThat(sim.orderCount()).isEqualTo(3);
+        assertThat(gateway.orders()).extracting(BrokerOrder::clientTag).containsExactly("F2E1", "F3E1", "F5E1");
     }
 
     @Test

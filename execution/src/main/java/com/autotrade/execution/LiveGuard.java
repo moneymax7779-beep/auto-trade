@@ -31,7 +31,8 @@ import com.autotrade.broker.Quote;
  *       anything else); a modify that would raise a quantity past these is refused the same way.</li>
  * </ul>
  * What is held is read from the broker's own order book (the truth the venue also polls), not from its positions, which
- * can lag a fill by a moment. Reads, cancels, polls and updates pass through unchanged: cancelling only ever reduces risk.
+ * can lag a fill by a moment. An order whose tag is already in that book is not sent again. Reads, cancels, polls and
+ * updates pass through unchanged: cancelling only ever reduces risk.
  */
 public final class LiveGuard implements BrokerConnection {
 
@@ -49,6 +50,9 @@ public final class LiveGuard implements BrokerConnection {
     @Override
     public void place(OrderRequest r) {
         List<BrokerOrder> book = broker.orders();
+        if (book.stream().anyMatch(o -> r.clientOrderId().equals(o.clientTag()))) {
+            return;                 // code review 3 Nov 2026: this tag is already at the broker (a place that timed out
+        }                           // and showed up late, a restart): never a second order with the same tag
         if (r.side() == OrderSide.BUY) {
             if (r.type() != OrderType.LIMIT) {
                 throw refused("a buy is a limit order only, got " + r.type());

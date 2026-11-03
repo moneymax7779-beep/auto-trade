@@ -62,6 +62,15 @@ class LiveGuardTest {
         assertThat(sent).isEmpty();
     }
 
+    @Test
+    void aTagAlreadyAtTheBrokerIsNeverSentAgain() {
+        book.add(order("F1", CE, OrderSide.BUY, OrderStatus.FILLED, LOT, LOT));
+        book.add(order("F1X", CE, OrderSide.SELL, OrderStatus.OPEN, LOT, 0));   // an exit that timed out, then showed up
+        guard.place(sell("F1X", CE, LOT));                                        // the retry with the same tag
+        guard.place(buy("F1", CE, LOT));
+        assertThat(sent).isEmpty();
+    }
+
     private static BrokerOrder order(String tag, String key, OrderSide side, OrderStatus status, long quantity, long filled) {
         return new BrokerOrder(tag, "B" + key + side + quantity, key, "SYM", side, OrderType.LIMIT, quantity, filled, 100,
                 100, 0, status, status.name(), null, Instant.now());

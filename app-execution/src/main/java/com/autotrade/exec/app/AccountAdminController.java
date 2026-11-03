@@ -285,6 +285,12 @@ class AccountAdminController {
         return Map.of("id", id, "name", name);
     }
 
+    private int openPositions(long accountId, String strategy) {
+        Integer n = jdbc.queryForObject("select count(*) from exec.position where broker_account_id = ? and status <> 'CLOSED' "
+                + "and (?::text is null or strategy_id = ?)", Integer.class, accountId, strategy, strategy);
+        return n == null ? 0 : n;
+    }
+
     record Settings(Double allocation, String equityMode, Double dailyLossLimit, Boolean clearDailyLossLimit, String mode,
                     Boolean enabled, String clientId, List<String> strategies) {
     }
@@ -322,11 +328,16 @@ class AccountAdminController {
                 TradeMode m = parse(TradeMode.class, body.mode(), "mode");
                 require(m != TradeMode.LIVE, "LIVE is not switched here (a separate, explicit step)");
                 require(a.brokerType() != BrokerType.PAPER || m == TradeMode.PAPER, "a PAPER broker account trades PAPER only");
-                jdbc.update("update acct.broker_account set trade_mode = ?, updated_at = now() where id = ? "
+                int rows = jdbc.update("update acct.broker_account set trade_mode = ?, updated_at = now() where id = ? "
                         + "and not live_trading_enabled", m.name(), id);
+                require(rows == 1, a.displayName() + " is LIVE: use its LIVE switch to leave LIVE");   // code review 3 Nov
                 changed.put("mode", m.name());
             }
             if (body.enabled() != null) {
+                // code review 3 Nov 2026: a disabled account gets no turns, so its open positions would get no exits,
+                // stop bookings or reconciliation (only the broker stop and MIS square-off would be left)
+                require(body.enabled() || openPositions(id, null) == 0, a.displayName() + " holds open positions: flatten "
+                        + "them first, or engage its kill switch to stop new entries");
                 jdbc.update("update acct.broker_account set enabled = ?, updated_at = now() where id = ?", body.enabled(), id);
                 if (body.enabled() && !a.enabled()) {
                     // switched back on: it follows from now, not the entries it missed while off (code review 29 Oct)
@@ -348,6 +359,12 @@ class AccountAdminController {
             }
             if (body.strategies() != null) {
                 List<String> wanted = strategyList(body.strategies());
+                for (String held : jdbc.queryForList("select distinct strategy_id from exec.position where "
+                        + "broker_account_id = ? and status <> 'CLOSED'", String.class, id)) {
+                    // an unsubscribed strategy's EXIT is no longer fanned out to this account (code review 3 Nov 2026)
+                    require(wanted.contains(held), a.displayName() + " holds an open " + held + " position: keep the "
+                            + "strategy until it is closed");
+                }
                 long group = copyGroup(a.tenantId());
                 jdbc.update("update acct.strategy_subscription set enabled = false where broker_account_id = ? "
                         + "and copy_group_id = ? and not (strategy_id = any(?))", id, group, wanted.toArray(new String[0]));
