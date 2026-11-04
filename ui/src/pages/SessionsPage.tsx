@@ -458,15 +458,17 @@ export function SessionDetailPage() {
               {structure.data && structure.data.trades.length > 0 && structureToggles.stops && (
                 <p className="mt-1 text-xs text-muted">
                   Stop / target: the last 3-minute swing low (call) or high (put) confirmed at the entry minute and
-                  {" "}{structure.data.trades[0].rewardToRisk}× that distance, recomputed here from the {structure.data.source === "bars" ? "stored one-minute bars" : "tick capture"} as ma-cross sets them
+                  {" "}{structure.data.trades[0].rewardToRisk}× that distance{structure.data.trades[0].rewardToRiskAssumed ? " (assumed: the config file is not on this server)" : ""},
+                  recomputed here from the {structure.data.source === "bars" ? "stored one-minute bars" : "tick capture"} as ma-cross sets them.
+                  The engine checks them on its one-minute snapshot, not on every tick: a tick can pierce a line without an exit
                   {structure.data.trades.map((t, i) => t.stop != null
                     ? <span key={i} className="num"> · {t.side} {t.at}: stop {fixed(t.stop)} ({fixed(Math.abs(t.entry - t.stop))} pts), target {fixed(t.target)}</span>
                     : <span key={i}> · {t.side} {t.at}: no swing found</span>)}
                 </p>
               )}
               {session && id && (
-                <TradePremiumPanel sessionId={id} date={session.session_date} positions={indexPositions}
-                  picked={pickedPosition} onPick={setPickedPosition} />
+                <TradePremiumPanel sessionId={id} date={session.session_date} positions={positions.data ?? []}
+                  underlying={underlying} picked={pickedPosition} onPick={setPickedPosition} />
               )}
               {session && <VolatilityStrip date={session.session_date} underlying={underlying} view={view} onView={setView} />}
               {session && (

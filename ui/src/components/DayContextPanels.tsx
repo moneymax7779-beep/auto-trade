@@ -52,7 +52,7 @@ export function DayContextCard({ date, underlying }: { date: string | undefined;
       <Tile label="Gap at the open" value={signed(c.index?.gapPct, 2, " %")}
         sub={c.index?.prevClose != null ? `prev close ${points(c.index.prevClose)} → open ${points(c.index.open)}` : "no previous close"} />
       <Tile label="India VIX" value={c.vixDay.open != null ? `${plain(c.vixDay.open)} → ${plain(c.vixDay.last)}` : "–"}
-        sub={c.vixDay.percentile1y != null ? `${plain(c.vixDay.percentile1y, 0)}th pct of the past year at the open`
+        sub={c.vixDay.percentile1y != null ? `at the open: above ${plain(c.vixDay.percentile1y, 0)} % of the past year's closes`
           : c.vixDay.prevClose != null ? `prev close ${plain(c.vixDay.prevClose)}` : "no VIX for this day"}
         title={`previous close ${plain(c.vixDay.prevClose)} (${c.vixDay.prevDay ?? "–"}); day ${plain(c.vixDay.low)}–${plain(c.vixDay.high)}; ${c.vixDay.historyDays} days of history`} />
       <Tile label="Expected move (VIX ÷ √252)" value={c.expectedMoveVix != null ? `±${points(c.expectedMoveVix)} pts` : "–"}
@@ -101,11 +101,15 @@ export function VolatilityStrip({ date, underlying, view, onView }: {
  * One traded option through the day: its minute bars, the entry and exit, and the best and worst premium while held.
  * Answers whether a loss was the entry (never went our way) or the exit (went our way and was given back).
  */
-export function TradePremiumPanel({ sessionId, date, positions, picked, onPick }: {
-  sessionId: string; date: string; positions: TradePositionRow[]; picked: number | null; onPick: (id: number) => void;
+export function TradePremiumPanel({ sessionId, date, positions, underlying, picked, onPick }: {
+  /** every position of the session (numbered as the trades table numbers them); the panel shows this index's */
+  sessionId: string; date: string; positions: TradePositionRow[]; underlying: string; picked: number | null;
+  onPick: (id: number) => void;
 }) {
-  const own = positions.filter((p) => p.id != null);
-  const id = picked ?? own[0]?.id ?? null;
+  const number = new Map(positions.map((p, i) => [p.id, i + 1]));
+  const own = positions.filter((p) => p.id != null && p.underlying === underlying);
+  const pickedHere = own.some((p) => p.id === picked) ? picked : null;
+  const id = pickedHere ?? own[0]?.id ?? null;
   const premium = useQuery({
     queryKey: ["trade-premium", sessionId, id],
     enabled: id != null,
@@ -135,10 +139,10 @@ export function TradePremiumPanel({ sessionId, date, positions, picked, onPick }
     <div className="mt-3 rounded border border-line p-3">
       <div className="mb-2 flex flex-wrap items-center gap-1.5 text-xs">
         <span className="font-semibold">Traded option</span>
-        {own.map((pos, i) => (
+        {own.map((pos) => (
           <button key={pos.id} type="button" onClick={() => onPick(pos.id!)}
             className={`rounded border px-2 py-0.5 ${pos.id === id ? "border-accent bg-accent/10" : "border-line"}`}>
-            #{i + 1} {pos.symbol} {pos.opened_at.slice(11, 16)}
+            #{number.get(pos.id)} {pos.symbol} {pos.opened_at.slice(11, 16)}
           </button>
         ))}
       </div>

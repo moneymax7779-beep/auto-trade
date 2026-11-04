@@ -83,14 +83,17 @@ class LevelsService {
     record MinuteBars(List<Bar> bars, boolean fromBars) {
     }
 
-    /** The own tick capture's minute bars, else the stored one-minute bars (bar days, archive days). */
-    MinuteBars minuteBars(LocalDate day, String underlying) {
-        List<Bar> ticks = bars(day, underlying);
-        return ticks.isEmpty() ? new MinuteBars(candleBars(day, underlying), true) : new MinuteBars(ticks, false);
+    /**
+     * The own tick capture's minute bars, else the stored one-minute bars (bar days, archive days), read with the given
+     * connection pool (the session panels pass the charts pool).
+     */
+    static MinuteBars minuteBars(JdbcTemplate jdbc, LocalDate day, String underlying) {
+        List<Bar> ticks = bars(jdbc, day, underlying);
+        return ticks.isEmpty() ? new MinuteBars(candleBars(jdbc, day, underlying), true) : new MinuteBars(ticks, false);
     }
 
     private Map<String, Object> compute(LocalDate day, String underlying) {
-        MinuteBars minutes = minuteBars(day, underlying);
+        MinuteBars minutes = minuteBars(jdbc, day, underlying);
         List<Bar> bars = minutes.bars();
         boolean fromBars = minutes.fromBars();
         List<Level> levels = new ArrayList<>();
@@ -150,7 +153,7 @@ class LevelsService {
 
     // ------------------------------------------------------------------------------------------ inputs
 
-    private List<Bar> bars(LocalDate day, String underlying) {
+    private static List<Bar> bars(JdbcTemplate jdbc, LocalDate day, String underlying) {
         Instant from = day.atTime(9, 15).atZone(MarketTime.IST).toInstant();
         Instant to = day.atTime(15, 30).atZone(MarketTime.IST).toInstant();
         return jdbc.query("select (date_trunc('minute', recv_ts) at time zone '" + IST + "')::time m, "
@@ -163,7 +166,7 @@ class LevelsService {
     }
 
     /** Index minute bars from the stored one-minute history (bar days, archive days): 09:15-15:29. */
-    private List<Bar> candleBars(LocalDate day, String underlying) {
+    private static List<Bar> candleBars(JdbcTemplate jdbc, LocalDate day, String underlying) {
         return jdbc.query("select (bar_start at time zone '" + IST + "')::time, open, high, low, close from hist.candle "
                         + "where underlying = ? and kind = 'INDEX' and bar_start >= ? and bar_start < ? order by bar_start",
                 (rs, i) -> new Bar(rs.getObject(1, LocalTime.class), rs.getDouble(2), rs.getDouble(3), rs.getDouble(4),

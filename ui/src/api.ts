@@ -495,7 +495,7 @@ export interface SessionStructure {
   ema20: [string, number][];
   swings: { t: string; at: string; price: number; high: boolean }[];
   trades: { position: number; side: string; at: string; exit: string | null; entry: number; stop: number | null;
-    target: number | null; rewardToRisk: number }[];
+    target: number | null; rewardToRisk: number; rewardToRiskAssumed: boolean }[];
 }
 
 /** One traded option's minute bars, entry, exit and best / worst premium while held. */

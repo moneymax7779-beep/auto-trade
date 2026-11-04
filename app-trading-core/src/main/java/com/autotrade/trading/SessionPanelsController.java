@@ -19,12 +19,14 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.server.ResponseStatusException;
 
 import com.autotrade.config.ThresholdConfig;
 import com.autotrade.core.time.MarketTime;
@@ -43,7 +45,8 @@ import com.autotrade.features.indicators.SwingTracker;
  *       the gap, the nearest expiry, the participants' index positions as published the evening before, and the day's
  *       shape (known only at the close).</li>
  * </ul>
- * Tick days read the own capture (md.*), other days the stored one-minute bars (hist.candle).
+ * Tick days read the own capture (md.*), other days the stored one-minute bars (hist.candle). Every query runs on the
+ * charts pool, never the engine's. A session's answers are kept once it has ended; a running one's for 30 seconds.
  */
 @RestController
 @RequestMapping("/api")
@@ -57,18 +60,17 @@ class SessionPanelsController {
     static final double DEFAULT_REWARD_TO_RISK = 2.0;                       // every ma-cross version so far
     static final Map<String, Double> STRIKE_STEP = Map.of("NIFTY", 50.0, "SENSEX", 100.0, "BANKNIFTY", 100.0);
 
-    private record Cached(long at, Map<String, Object> value) {
+    /** {@code kept}: computed once nothing could change it any more (an ended session, a finished day). */
+    private record Cached(long at, boolean kept, Map<String, Object> value) {
     }
 
     private final ChartDb db;
     private final JdbcTemplate jdbc;
-    private final LevelsService levels;
     private final Map<String, Cached> cache = new ConcurrentHashMap<>();
 
-    SessionPanelsController(ChartDb db, LevelsService levels) {
+    SessionPanelsController(ChartDb db) {
         this.db = db;
         this.jdbc = db.jdbc();                               // the charts pool, never the engine's
-        this.levels = levels;
     }
 
     // ------------------------------------------------------------------------------------------ structure
@@ -76,9 +78,10 @@ class SessionPanelsController {
     @GetMapping("/sessions/{id}/structure")
     Map<String, Object> structure(@PathVariable long id, @RequestParam String underlying) {
         String u = underlying.toUpperCase(Locale.ROOT);
-        return cached("structure|" + id + "|" + u, sessionDay(id), () -> {
-            LocalDate day = sessionDay(id);
-            LevelsService.MinuteBars minutes = levels.minuteBars(day, u);
+        SessionInfo session = session(id);
+        return cached("structure|" + id + "|" + u, session.done(), SESSION_TTL_MS, () -> {
+            LocalDate day = session.day();
+            LevelsService.MinuteBars minutes = LevelsService.minuteBars(jdbc, day, u);
             List<LevelsService.Bar> three = threeMinute(minutes.bars(), ChartDb.finished(day));
             Structure s = structure(day, three);
             Map<String, Object> out = new LinkedHashMap<>();
@@ -175,7 +178,8 @@ class SessionPanelsController {
             boolean call = "CE".equals(row.get("option_side"));
             double entry = number(row.get("spot"));
             String at = (String) row.get("at");
-            double r = rewardToRisk.computeIfAbsent((String) row.get("strategy_id"), k -> rewardToRisk(sessionId, k));
+            Double configured = rewardToRisk.computeIfAbsent((String) row.get("strategy_id"), k -> rewardToRisk(sessionId, k));
+            double r = Double.isNaN(configured) ? DEFAULT_REWARD_TO_RISK : configured;
             Double stop = stopAt(s.swings(), at, call);
             Map<String, Object> t = new LinkedHashMap<>();
             t.put("position", row.get("id"));
@@ -186,6 +190,7 @@ class SessionPanelsController {
             t.put("stop", stop);
             t.put("target", stop == null ? null : LevelsService.round(entry + r * (entry - stop)));
             t.put("rewardToRisk", r);
+            t.put("rewardToRiskAssumed", Double.isNaN(configured));        // the config file is not on this server
             out.add(t);
         }
         return out;
@@ -202,6 +207,7 @@ class SessionPanelsController {
         return stop;
     }
 
+    /** The session's config value, or NaN when its file cannot be read here (the caller then assumes the default). */
     private double rewardToRisk(long sessionId, String strategyId) {
         try {
             String configs = jdbc.queryForObject("select configs::text from trade.session where id = ?", String.class, sessionId);
@@ -213,21 +219,26 @@ class SessionPanelsController {
                 }
             }
         } catch (RuntimeException e) {
-            // the config file is not on this server: the value every version has used
+            // the config file is not on this server
         }
-        return DEFAULT_REWARD_TO_RISK;
+        return Double.NaN;
     }
 
     // ------------------------------------------------------------------------------------------ premium
 
     @GetMapping("/sessions/{id}/premium")
     Map<String, Object> premium(@PathVariable long id, @RequestParam long position) {
-        return cached("premium|" + id + "|" + position, sessionDay(id), () -> {
-            Map<String, Object> p = jdbc.queryForMap("select p.underlying, p.symbol, p.quantity, p.average_cost, p.average_exit, "
+        SessionInfo session = session(id);
+        return cached("premium|" + id + "|" + position, session.done(), SESSION_TTL_MS, () -> {
+            List<Map<String, Object>> found = jdbc.queryForList("select p.underlying, p.symbol, p.quantity, p.average_cost, p.average_exit, "
                     + "to_char(p.opened_at at time zone '" + IST + "', 'HH24:MI') o, "
                     + "to_char(p.closed_at at time zone '" + IST + "', 'HH24:MI') c, s.session_date, s.feed "
                     + "from trade.position p join trade.session s on s.id = p.session_id where p.id = ? and p.session_id = ?",
                     position, id);
+            if (found.isEmpty()) {
+                throw new ResponseStatusException(HttpStatus.NOT_FOUND, "no position " + position + " in session " + id);
+            }
+            Map<String, Object> p = found.getFirst();
             Map<String, Object> out = new LinkedHashMap<>();
             String symbol = (String) p.get("symbol");
             out.put("symbol", symbol);
@@ -352,20 +363,26 @@ class SessionPanelsController {
                 return kept;
             }
         }
-        return cached("context|" + day + "|" + u, day, () -> {
+        return cached("context|" + day + "|" + u, finished, CONTEXT_TTL_MS, () -> {
             Map<String, Object> value = computeContext(day, u);
-            if (finished && value.get("index") != null) {
+            if (finished && complete(value)) {                // a day whose bars arrive later is computed again
                 db.saveJson(kind, day, u, value);
             }
             return value;
         });
     }
 
+    /** Index, VIX and straddle all present: nothing a later bar fetch could still add. */
+    static boolean complete(Map<String, Object> context) {
+        return context.get("index") != null && !((List<?>) context.get("vix")).isEmpty()
+                && context.get("straddle") instanceof List<?> s && !s.isEmpty();
+    }
+
     private Map<String, Object> computeContext(LocalDate day, String u) {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("date", day.toString());
         out.put("underlying", u);
-        List<LevelsService.Bar> index = levels.minuteBars(day, u).bars();
+        List<LevelsService.Bar> index = LevelsService.minuteBars(jdbc, day, u).bars();
         // VIX by minute and its daily history
         List<List<Object>> vix = vixMinutes(day);
         out.put("vix", vix);
@@ -468,13 +485,17 @@ class SessionPanelsController {
         return LevelsService.round(100.0 * below / history.size());
     }
 
+    /** The previous session's close: as the feed sent it with the day's first index tick, else the last stored bar. */
     private Double prevClose(LocalDate day, String u) {
-        for (Object o : (List<?>) levels.levels(day, u).get("levels")) {
-            if (o instanceof LevelsService.Level l && l.name().equals("Prev close")) {
-                return l.price();
-            }
+        List<Double> fromTicks = jdbc.queryForList("select prev_close from md.index_tick where underlying = ? and recv_ts >= ? "
+                + "and recv_ts < ? and prev_close > 0 order by recv_ts limit 1", Double.class, u, ts(day, OPEN), ts(day, CLOSE));
+        if (!fromTicks.isEmpty()) {
+            return fromTicks.getFirst();
         }
-        return null;
+        List<Double> fromBars = jdbc.queryForList("select close from hist.candle where underlying = ? and kind = 'INDEX' "
+                + "and bar_start >= ? and bar_start < ? order by bar_start desc limit 1", Double.class, u,
+                ts(day.minusDays(10), LocalTime.MIN), ts(day, LocalTime.MIN));
+        return fromBars.isEmpty() ? null : fromBars.getFirst();
     }
 
     /**
@@ -605,22 +626,35 @@ class SessionPanelsController {
 
     // ------------------------------------------------------------------------------------------ helpers
 
-    private LocalDate sessionDay(long id) {
-        return jdbc.queryForObject("select session_date from trade.session where id = ?", LocalDate.class, id);
+    /** A session's day and whether it has ended (a replay of a past day may still be adding trades). */
+    record SessionInfo(LocalDate day, boolean done) {
     }
 
-    /** A finished day's answer is kept (bounded); today's for 30 seconds. */
-    private Map<String, Object> cached(String key, LocalDate day, java.util.function.Supplier<Map<String, Object>> compute) {
+    private SessionInfo session(long id) {
+        List<SessionInfo> found = jdbc.query("select session_date, ended_at is not null from trade.session where id = ?",
+                (rs, i) -> new SessionInfo(rs.getObject(1, LocalDate.class), rs.getBoolean(2)), id);
+        if (found.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "no session " + id);
+        }
+        return found.getFirst();
+    }
+
+    static final long SESSION_TTL_MS = 30_000;
+    /** Today's context reads the whole day's option ticks so far (seconds on a tick day): at most once a minute. */
+    static final long CONTEXT_TTL_MS = 60_000;
+
+    /** A finished answer is kept (bounded); one still changing for {@code ttlMs}. */
+    private Map<String, Object> cached(String key, boolean keep, long ttlMs, java.util.function.Supplier<Map<String, Object>> compute) {
         long now = System.currentTimeMillis();
         Cached hit = cache.get(key);
-        if (hit != null && (ChartDb.finished(day) || now - hit.at() < 30_000)) {
+        if (hit != null && (hit.kept() || now - hit.at() < ttlMs)) {
             return hit.value();
         }
         Map<String, Object> value = compute.get();
         if (cache.size() > 500) {
             cache.clear();
         }
-        cache.put(key, new Cached(now, value));
+        cache.put(key, new Cached(now, keep, value));
         return value;
     }
 
