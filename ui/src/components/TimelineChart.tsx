@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { getMoment, setMoment, subscribeMoments } from "./chartView";
 import {
+  CandlestickSeries,
   ColorType,
   createChart,
   createSeriesMarkers,
@@ -46,7 +47,12 @@ const toTimeOn = (date: string, t: string, plusMinutes = 0) =>
 /** {@code color} may be a CSS colour or a theme token name such as "--color-text". */
 export interface ChartLine { name: string; color: string; points: LinePoint[]; width?: number; dashed?: boolean;
   /** show the line's name and value on the price axis (levels) */
-  label?: boolean }
+  label?: boolean;
+  /** drawn invisibly: it still carries the trade markers and the shared crosshair (under candles) */
+  hidden?: boolean }
+
+/** One bar of candles drawn under the lines (3-minute index bars, an option's minute bars). */
+export interface Candle { t: string; open: number; high: number; low: number; close: number }
 
 /**
  * Minute series for one session. Times are IST "HH:mm"; they are placed on the session date as if
@@ -59,16 +65,19 @@ export interface VolumeBar { t: string; value: number; color: string }
 const NO_MARKERS: ChartMarker[] = [];
 const NO_TRADES: ChartTrade[] = [];
 const NO_VOLUME: VolumeBar[] = [];
+const NO_CANDLES: Candle[] = [];
 
 /** A visible time window in minutes since midnight IST (the shared chart window, see chartView.ts). */
 export interface MinuteView { a: number; b: number }
 
-export function TimelineChart({ date, lines, markers = NO_MARKERS, trades = NO_TRADES, volume = NO_VOLUME, focus = null, height = 280,
-  view, onView, onLayout, momentsOf }: {
+export function TimelineChart({ date, lines, markers = NO_MARKERS, trades = NO_TRADES, volume = NO_VOLUME, candles = NO_CANDLES,
+  focus = null, height = 280, view, onView, onLayout, momentsOf }: {
   date: string; lines: ChartLine[]; markers?: ChartMarker[]; height?: number;
   trades?: ChartTrade[];
   /** futures volume per minute, drawn as bars in the bottom fifth of the chart */
   volume?: VolumeBar[];
+  /** candles on the price scale, under the lines */
+  candles?: Candle[];
   /** zoom to this window (IST "HH:mm"); null = the whole day */
   focus?: { from: string; to: string } | null;
   /** a shared time window: shown when it changes, and reported (onView) when the chart is zoomed or panned */
@@ -117,14 +126,22 @@ export function TimelineChart({ date, lines, markers = NO_MARKERS, trades = NO_T
     const toTime = (t: string) => (Date.parse(`${date}T${t}:00Z`) / 1000) as UTCTimestamp;
     const resolve = (color: string) => (color.startsWith("--") ? style.getPropertyValue(color).trim() || "#888" : color);
     let mainSeries: ISeriesApi<"Line"> | null = null;
+    if (candles.length > 0) {
+      const bars = instance.addSeries(CandlestickSeries, {
+        upColor: GREEN, downColor: RED, borderUpColor: GREEN, borderDownColor: RED, wickUpColor: GREEN, wickDownColor: RED,
+        priceLineVisible: false, lastValueVisible: true,
+      });
+      bars.setData(candles.map((c) => ({ time: toTime(c.t), open: c.open, high: c.high, low: c.low, close: c.close })));
+    }
     lines.forEach((line, index) => {
       const series = instance.addSeries(LineSeries, {
-        color: resolve(line.color),
+        color: line.hidden ? "rgba(0,0,0,0)" : resolve(line.color),
         lineWidth: (line.width ?? 2) as 1 | 2 | 3 | 4,
         lineStyle: line.dashed ? 2 : 0,
         priceLineVisible: false,
-        lastValueVisible: index === 0 || !!line.label,
-        title: line.name,
+        lastValueVisible: !line.hidden && (index === 0 || !!line.label),
+        crosshairMarkerVisible: !line.hidden,
+        title: line.hidden ? "" : line.name,
       });
       series.setData(line.points.filter((p) => p.value != null).map((p) => ({ time: toTime(p.t), value: p.value as number })));
       if (index === 0) mainSeries = series;
@@ -257,7 +274,7 @@ export function TimelineChart({ date, lines, markers = NO_MARKERS, trades = NO_T
       instance.remove();
       chart.current = null;
     };
-  }, [date, lines, markers, trades, volume, height, momentsOf]);
+  }, [date, lines, markers, trades, volume, candles, height, momentsOf]);
 
   // zoom to one trade (15 minutes either side) or back to the shared window / the whole day
   useEffect(() => {

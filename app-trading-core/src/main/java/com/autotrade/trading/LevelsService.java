@@ -79,12 +79,20 @@ class LevelsService {
         return value;
     }
 
+    /** The day's index minute bars as the charts draw them; {@code fromBars}: the stored one-minute bars, not ticks. */
+    record MinuteBars(List<Bar> bars, boolean fromBars) {
+    }
+
+    /** The own tick capture's minute bars, else the stored one-minute bars (bar days, archive days). */
+    MinuteBars minuteBars(LocalDate day, String underlying) {
+        List<Bar> ticks = bars(day, underlying);
+        return ticks.isEmpty() ? new MinuteBars(candleBars(day, underlying), true) : new MinuteBars(ticks, false);
+    }
+
     private Map<String, Object> compute(LocalDate day, String underlying) {
-        List<Bar> bars = bars(day, underlying);
-        boolean fromBars = bars.isEmpty();
-        if (fromBars) {
-            bars = candleBars(day, underlying);
-        }
+        MinuteBars minutes = minuteBars(day, underlying);
+        List<Bar> bars = minutes.bars();
+        boolean fromBars = minutes.fromBars();
         List<Level> levels = new ArrayList<>();
         Map<String, Double> open = openingFeatures(day, underlying);
         List<DailyRange> prior = List.of();

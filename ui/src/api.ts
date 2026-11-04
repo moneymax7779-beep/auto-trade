@@ -180,6 +180,7 @@ export interface OrderRow {
 }
 
 export interface TradePositionRow {
+  id?: number;
   strategy_id?: string | null;
   quantity?: number | null;
   lot_size?: number | null;
@@ -484,4 +485,50 @@ export interface CredentialProfile {
   redirect_uri: string | null;
   ips: string;
   status: string;
+}
+
+/** A session's index in 3-minute bars with ma-cross's EMA9 / EMA20 and swings, and each ma-cross trade's stop / target. */
+export interface SessionStructure {
+  source: "ticks" | "bars";
+  candles: [string, number, number, number, number][];
+  ema9: [string, number][];
+  ema20: [string, number][];
+  swings: { t: string; at: string; price: number; high: boolean }[];
+  trades: { position: number; side: string; at: string; exit: string | null; entry: number; stop: number | null;
+    target: number | null; rewardToRisk: number }[];
+}
+
+/** One traded option's minute bars, entry, exit and best / worst premium while held. */
+export interface TradePremium {
+  symbol: string;
+  error?: string;
+  source?: "ticks" | "bars";
+  expiry?: string;
+  strike?: number;
+  side?: string;
+  quantity?: number;
+  entry?: { t: string; price: number };
+  exit?: { t: string; price: number } | null;
+  bars?: [string, number, number, number, number][];
+  iv?: [string, number][];
+  excursion?: { bestPrice?: number; bestAt?: string; mfe?: number; mfeRupees?: number; worstPrice?: number;
+    worstAt?: string; mae?: number; maeRupees?: number };
+}
+
+/** The day around a session: VIX, the ATM straddle and its implied volatility, gap, expiry, participants, shape. */
+export interface DayContext {
+  date: string;
+  underlying: string;
+  vix: [string, number][];
+  vixDay: { open?: number; last?: number; high?: number; low?: number; percentile1y?: number | null; prevClose?: number;
+    prevDay?: string; historyDays: number };
+  index?: { open: number; high: number; low: number; last: number; lastAt: string; prevClose: number | null;
+    gapPct: number | null };
+  expectedMoveVix?: number | null;
+  shape?: { range: number; bodyPct: number; rangeVsExpected: number | null; direction: string; type: string; final: boolean };
+  expiry?: { expiry: string; calendarDays: number; expiryDay: boolean };
+  /** minute, straddle (points), strike, implied volatility % (null near the expiry close) */
+  straddle?: [string, number, number, number | null][];
+  participants?: { who: string; asOf: string; indexFutLongPct: number; indexFutLongPctChange: number | null;
+    indexCallNet: number; indexPutNet: number }[];
 }

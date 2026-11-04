@@ -148,7 +148,7 @@ class HistoryController {
 
     @GetMapping("/sessions/{id}/positions")
     List<Map<String, Object>> positions(@PathVariable long id) {
-        return query("select strategy_id, underlying, option_side, symbol, " + ist("opened_at") + ", " + ist("closed_at")
+        return query("select id, strategy_id, underlying, option_side, symbol, " + ist("opened_at") + ", " + ist("closed_at")
                 + ", stages, exit_reason, realised, costs, net, quantity, lot_size, average_cost, average_exit "
                 + "from trade.position where session_id = ? order by opened_at", id);
     }

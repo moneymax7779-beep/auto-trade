@@ -4,8 +4,9 @@ import { OiTapePanel, type TapeInsets } from "../components/OiTapePanel";
 import { useChartView } from "../components/chartView";
 import { LEVEL_COLORS, LevelTogglesBar, levelColor, mergeLevels, useLevels, useLevelToggles, visibleLevels, visibleZones } from "../components/levels";
 import { Link, useParams, useSearchParams } from "react-router";
-import { fixed, get, type DecisionRow, type OrderRow, type SessionRow, type SessionRunRow, type TradePositionRow } from "../api";
-import { TimelineChart } from "../components/TimelineChart";
+import { fixed, get, type DecisionRow, type OrderRow, type SessionRow, type SessionRunRow, type SessionStructure, type TradePositionRow } from "../api";
+import { DayContextCard, TradePremiumPanel, VolatilityStrip } from "../components/DayContextPanels";
+import { type ChartLine, TimelineChart } from "../components/TimelineChart";
 import { ErrorNote, Loading, Panel, Pnl, StageBadge, Table } from "../components/ui";
 import { chartTrades, TradesTable } from "../components/TradesTable";
 import { compactRupees } from "../components/TimelineChart";
@@ -216,6 +217,27 @@ export function SessionsPage() {
 
 const WHOLE_DAY = { a: 9 * 60 + 15, b: 15 * 60 + 30 };
 
+/** ma-cross's own view of the index (4 Nov 2026): its EMAs of 3-minute closes, 3-minute candles, each trade's stop / target. */
+interface StructureToggles { emas: boolean; candles: boolean; stops: boolean }
+const STRUCTURE_KEY = "chart-structure-toggles";
+const STRUCTURE_DEFAULT: StructureToggles = { emas: true, candles: false, stops: true };
+const EMA9_COLOR = "#0ea5e9", EMA20_3M_COLOR = "#6d28d9";
+
+function useStructureToggles(): [StructureToggles, (t: StructureToggles) => void] {
+  const [t, setT] = useState<StructureToggles>(() => {
+    try {
+      const raw = localStorage.getItem(STRUCTURE_KEY);
+      if (raw) return { ...STRUCTURE_DEFAULT, ...(JSON.parse(raw) as Partial<StructureToggles>) };
+    } catch { /* storage unavailable: defaults */ }
+    return STRUCTURE_DEFAULT;
+  });
+  const update = (next: StructureToggles) => {
+    setT(next);
+    try { localStorage.setItem(STRUCTURE_KEY, JSON.stringify(next)); } catch { /* not persisted */ }
+  };
+  return [t, update];
+}
+
 export function SessionDetailPage() {
   const { id } = useParams();
   const [underlying, setUnderlying] = useState("NIFTY");
@@ -238,14 +260,39 @@ export function SessionDetailPage() {
   });
   const session = sessionRow;
   const rows = decisions.data ?? [];
+  const structure = useQuery({
+    queryKey: ["structure", id, underlying],
+    enabled: !!session,
+    queryFn: () => get<SessionStructure>(`/api/sessions/${id}/structure?underlying=${underlying}`),
+  });
+  const [structureToggles, setStructureToggles] = useStructureToggles();
+  const [pickedPosition, setPickedPosition] = useState<number | null>(null);
+  const indexPositions = useMemo(() => (positions.data ?? []).filter((p) => p.underlying === underlying), [positions.data, underlying]);
 
   const levels = useLevels(session?.session_date, underlying);
   const [toggles, setToggles] = useLevelToggles();
   const price = useMemo(() => {
-    const main = { name: underlying, color: "--color-text", points: rows.map((r) => ({ t: r.t, value: r.spot })) };
+    const candles = structureToggles.candles && (structure.data?.candles.length ?? 0) > 0;
+    const main = { name: underlying, color: "--color-text", hidden: candles, points: rows.map((r) => ({ t: r.t, value: r.spot })) };
+    const st = structure.data;
+    const strategyLines: ChartLine[] = [];
+    if (st && structureToggles.emas) {
+      strategyLines.push({ name: "EMA9 3m", color: EMA9_COLOR, width: 2, points: st.ema9.map(([t, v]) => ({ t, value: v })) });
+      strategyLines.push({ name: "EMA20 3m", color: EMA20_3M_COLOR, width: 2, points: st.ema20.map(([t, v]) => ({ t, value: v })) });
+    }
+    if (st && structureToggles.stops) {
+      const lastMinute = rows.length > 0 ? rows[rows.length - 1].t : "15:30";
+      for (const tr of st.trades) {
+        const until = tr.exit ?? lastMinute;
+        if (tr.stop != null) strategyLines.push({ name: "", color: "#dc2626", width: 2, dashed: true,
+          points: [{ t: tr.at, value: tr.stop }, { t: until, value: tr.stop }] });
+        if (tr.target != null) strategyLines.push({ name: "", color: "#16a34a", width: 2, dashed: true,
+          points: [{ t: tr.at, value: tr.target }, { t: until, value: tr.target }] });
+      }
+    }
     const lv = levels.data;
     const spots = rows.map((r) => r.spot).filter((v): v is number => v != null);
-    if (!lv || spots.length === 0) return [main];
+    if (!lv || spots.length === 0) return [main, ...strategyLines];
     const lo = Math.min(...spots), hi = Math.max(...spots), near = (hi - lo) * 0.15;
     const inRange = (v: number) => v >= lo - near && v <= hi + near;
     const end = rows[rows.length - 1].t;
@@ -273,10 +320,12 @@ export function SessionDetailPage() {
     });
     const lines = toggles.lines ? [
       { name: "VWAP", color: LEVEL_COLORS.vwap, width: 1 as const, points: lv.lines.vwap.filter(([t]) => t <= end).map(([t, v]) => ({ t, value: v })) },
-      { name: "EMA20", color: LEVEL_COLORS.ema20, width: 1 as const, points: lv.lines.ema20.filter(([t]) => t <= end).map(([t, v]) => ({ t, value: v })) },
+      { name: "EMA20 1m", color: LEVEL_COLORS.ema20, width: 1 as const, points: lv.lines.ema20.filter(([t]) => t <= end).map(([t, v]) => ({ t, value: v })) },
     ] : [];
-    return [main, ...zones, ...flat, ...lines];
-  }, [rows, underlying, levels.data, toggles]);
+    return [main, ...zones, ...flat, ...lines, ...strategyLines];
+  }, [rows, underlying, levels.data, toggles, structure.data, structureToggles]);
+  const structureCandles = useMemo(() => (structureToggles.candles ? structure.data?.candles ?? [] : [])
+    .map(([t, open, high, low, close]) => ({ t, open, high, low, close })), [structure.data, structureToggles.candles]);
   // Stored scores use −1 for "not computed" (e.g. the straddle has none): a gap, not a value.
   const score = (v: number | undefined) => (v == null || v < 0 ? null : v);
   const scores = useMemo(() => [
@@ -315,7 +364,10 @@ export function SessionDetailPage() {
   const trades = useMemo(() => chartTrades(positions.data ?? [], underlying,
     markerScope === "all" || strategyIds.length <= 1 ? null : strategy, strategyShort, spotAt),
   [positions.data, underlying, strategy, markerScope, strategyIds.length, spotAt]);
-  const pickIndex = (u: string) => { setUnderlying(u); wholeDay(); };
+  const pickIndex = (u: string) => { setUnderlying(u); setPickedPosition(null); wholeDay(); };
+  // a chart trade's position (same index, side and entry minute), for the premium panel
+  const positionOf = (from: string, side: string) => indexPositions.find((p) => p.opened_at.slice(11, 16) === from
+    && (side === "STRADDLE" || p.option_side === side))?.id ?? null;
   const changes = useMemo(() => rows.filter((r, i) => i === 0 || r.ce_stage !== rows[i - 1].ce_stage || r.pe_stage !== rows[i - 1].pe_stage), [rows]);
 
   return (
@@ -341,8 +393,22 @@ export function SessionDetailPage() {
         {decisions.isLoading ? <Loading what="decisions" /> : decisions.error ? <ErrorNote error={decisions.error} /> :
           rows.length === 0 ? <p className="text-sm text-muted">No decisions for {underlying}.</p> : (
             <>
+              {session && <DayContextCard date={session.session_date} underlying={underlying} />}
               <div className="mb-2 flex flex-wrap items-center gap-3">
                 <LevelTogglesBar toggles={toggles} onChange={setToggles} />
+                <div className="flex flex-wrap items-center gap-1 text-xs" role="group" aria-label="Strategy view">
+                  <span className="text-muted">ma-cross</span>
+                  {([["emas", <><i className="mr-1.5 inline-block h-0.5 w-3 align-middle" style={{ background: EMA9_COLOR }} />EMA9
+                    <i className="mx-1.5 inline-block h-0.5 w-3 align-middle" style={{ background: EMA20_3M_COLOR }} />EMA20 3m</>],
+                    ["candles", "3-min candles"], ["stops", <><span style={{ color: "#dc2626" }}>stop</span> / <span style={{ color: "#16a34a" }}>target</span></>]] as const)
+                    .map(([key, label]) => (
+                      <button key={key} type="button" aria-pressed={structureToggles[key]}
+                        onClick={() => setStructureToggles({ ...structureToggles, [key]: !structureToggles[key] })}
+                        className={`rounded-full border px-2.5 py-1 ${structureToggles[key] ? "border-line bg-panel-2" : "border-transparent text-muted opacity-60"}`}>
+                        {label}
+                      </button>
+                    ))}
+                </div>
                 {strategyIds.length > 1 && (
                   <div className="flex items-center gap-1 text-xs" role="group" aria-label="Trades on the chart">
                     <span className="text-muted">trades on chart</span>
@@ -357,7 +423,8 @@ export function SessionDetailPage() {
               </div>
               <div id="session-chart">
                 <TimelineChart date={session?.session_date ?? "2026-01-01"} lines={price} trades={trades} volume={volume}
-                  focus={focus} height={420} view={view} onView={setView} onLayout={setAxisWidth} momentsOf={underlying} />
+                  candles={structureCandles} focus={focus} height={420} view={view} onView={setView} onLayout={setAxisWidth}
+                  momentsOf={underlying} />
               </div>
               <div className="mt-2 flex flex-wrap items-center gap-1.5 text-xs">
                 <span className="text-muted">
@@ -373,7 +440,10 @@ export function SessionDetailPage() {
                 {trades.map((tr) => {
                   const active = focus != null && focus.from === tr.from && focus.to === (tr.to ?? tr.from);
                   return (
-                    <button key={tr.n} type="button" onClick={() => setFocus({ from: tr.from, to: tr.to ?? tr.from })}
+                    <button key={tr.n} type="button" onClick={() => {
+                      setFocus({ from: tr.from, to: tr.to ?? tr.from });
+                      setPickedPosition(positionOf(tr.from, tr.side));
+                    }}
                       className={`rounded border px-2 py-0.5 ${active ? "border-accent bg-accent/10" : "border-line"}`}>
                       <span className="font-semibold">#{tr.n} {tr.who}</span>{" "}
                       <span className="text-muted">{tr.side === "STRADDLE" ? "straddle" : tr.side} {tr.from}→{tr.to ?? "open"}</span>{" "}
@@ -385,6 +455,20 @@ export function SessionDetailPage() {
                   <button type="button" onClick={wholeDay} className="rounded border border-accent px-2 py-0.5 text-accent">whole day</button>
                 )}
               </div>
+              {structure.data && structure.data.trades.length > 0 && structureToggles.stops && (
+                <p className="mt-1 text-xs text-muted">
+                  Stop / target: the last 3-minute swing low (call) or high (put) confirmed at the entry minute and
+                  {" "}{structure.data.trades[0].rewardToRisk}× that distance, recomputed here from the {structure.data.source === "bars" ? "stored one-minute bars" : "tick capture"} as ma-cross sets them
+                  {structure.data.trades.map((t, i) => t.stop != null
+                    ? <span key={i} className="num"> · {t.side} {t.at}: stop {fixed(t.stop)} ({fixed(Math.abs(t.entry - t.stop))} pts), target {fixed(t.target)}</span>
+                    : <span key={i}> · {t.side} {t.at}: no swing found</span>)}
+                </p>
+              )}
+              {session && id && (
+                <TradePremiumPanel sessionId={id} date={session.session_date} positions={indexPositions}
+                  picked={pickedPosition} onPick={setPickedPosition} />
+              )}
+              {session && <VolatilityStrip date={session.session_date} underlying={underlying} view={view} onView={setView} />}
               {session && (
                 <OiTapePanel bare underlying={underlying} date={session.session_date} insets={tapeInsets}
                   title={`${underlying} · OI under the chart · this session's trades`}
@@ -407,6 +491,7 @@ export function SessionDetailPage() {
         <TradesTable rows={positions.data ?? []} showStrategy={strategyIds.length > 1} empty="No trades." numbered
           onPick={(t) => {
             setUnderlying(t.underlying);
+            setPickedPosition(t.legs[0]?.id ?? null);
             setFocus({ from: t.opened.slice(11, 16), to: (t.closed ?? t.opened).slice(11, 16) });
             document.getElementById("session-chart")?.scrollIntoView({ behavior: "smooth", block: "center" });
           }} />
