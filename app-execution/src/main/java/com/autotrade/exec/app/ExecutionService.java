@@ -104,8 +104,11 @@ class ExecutionService implements DisposableBean {
     void endOfDay() {
         ExecutionLoop current = loop;
         if (current != null) {
-            current.endOfDay(day()).forEach(d -> log.info("end of day account {}: difference {}, {} contracts "
-                    + "differ", d.ledger().brokerAccountId(), d.ledger().difference(), d.differences().size()));
+            current.endOfDay(day()).forEach(d -> {
+                log.info("end of day account {}: difference {}, {} contracts differ", d.ledger().brokerAccountId(),
+                        d.ledger().difference(), d.differences().size());
+                d.differences().forEach(line -> log.warn("end of day account {}: {}", d.ledger().brokerAccountId(), line));
+            });
         }
     }
 

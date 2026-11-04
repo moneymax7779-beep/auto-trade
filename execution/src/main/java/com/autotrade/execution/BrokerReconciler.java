@@ -142,8 +142,9 @@ public final class BrokerReconciler {
                 ((Number) own.get("charges")).doubleValue(), ((Number) own.get("trades")).intValue())
                 .reconciled(brokerGross - brokerCharges, brokerCharges);
         accounts.writeLedgerDay(ledger);
+        // each differing contract is kept with the day, so a gap can be traced after the worker's log has gone
         kills.audit(account, "reconciler", "END_OF_DAY", Map.of("day", day.toString(), "difference",
-                String.valueOf(ledger.difference()), "contracts_different", differences.size()));
+                String.valueOf(ledger.difference()), "contracts_different", differences.size(), "differences", differences));
         return new EndOfDay(ledger, differences);
     }
 

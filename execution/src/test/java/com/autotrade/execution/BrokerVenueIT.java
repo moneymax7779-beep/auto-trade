@@ -430,6 +430,12 @@ class BrokerVenueIT {
                 .as("one check alone: a stop not yet booked or a lagging position looks the same").isNull();
         assertThat(reconciler.check(s.broker(), gateway).matched()).isFalse();
         assertThat(new KillSwitches(dataSource).engaged(s.broker(), "opening-drive", KEY)).startsWith("ACCOUNT: RECONCILIATION");
+
+        // the end-of-day check names the contract, in its result and in the day's audit row
+        BrokerReconciler.EndOfDay eod = reconciler.endOfDay(s.broker(), gateway, DAY);
+        assertThat(eod.differences()).singleElement().asString().startsWith(KEY + ": ours bought 2600");
+        assertThat(jdbc.queryForObject("select detail -> 'differences' ->> 0 from exec.audit_log where broker_account_id = ? "
+                + "and action = 'END_OF_DAY'", String.class, s.broker().id())).isEqualTo(eod.differences().get(0));
     }
 
     @Test
