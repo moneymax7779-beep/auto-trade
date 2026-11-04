@@ -12,7 +12,7 @@ spring:
     username: ${AUTOTRADE_DB_USER:autotrade}
     password: ${AUTOTRADE_DB_PASSWORD:autotrade}
     hikari:
-      maximum-pool-size: 12           # one held connection per leased account + the loop's own
+      maximum-pool-size: 13           # one held connection per leased account + the loop's own + SignalWakeup's LISTEN
       pool-name: execution
   flyway:
     enabled: false
@@ -36,6 +36,7 @@ autotrade:
     tenant: owner
     copy-group: LIVE-SET
     poll-ms: 1000
+    wake-on-signal: true            # a stored signal decision runs the tick at once (Postgres LISTEN); the poll is the fallback
     costs-file: config/costs/india-index-options-costs.v2.yaml
     # Holidays for the 08:30 login links and the 09:10 login board. Keep equal to trading-core's
     # autotrade.trading.exchange-file: a new exchange file version is changed in both places.

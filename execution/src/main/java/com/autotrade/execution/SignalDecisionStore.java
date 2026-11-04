@@ -13,10 +13,22 @@ import java.util.regex.Pattern;
 
 import javax.sql.DataSource;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.ResultSetExtractor;
 
-/** exec.signal_decision: written once per idempotency key (a repeated key is ignored), read in decision order. */
+/**
+ * exec.signal_decision: written once per idempotency key (a repeated key is ignored), read in decision order. A new
+ * decision is announced on {@link #CHANNEL} (payload: the copy group id) so the execution workers act on it at once
+ * instead of at their next poll (4 Nov 2026, first LIVE day: the 1 s poll was 0.7-1.0 s of every LIVE order).
+ */
 public final class SignalDecisionStore {
+
+    /** The Postgres NOTIFY channel a stored decision is announced on. */
+    public static final String CHANNEL = "exec_signal_decision";
+
+    private static final Logger log = LoggerFactory.getLogger(SignalDecisionStore.class);
 
     private final JdbcTemplate jdbc;
 
@@ -26,6 +38,21 @@ public final class SignalDecisionStore {
 
     /** Inserts the decision; returns false when its idempotency key was already stored. */
     public boolean insert(SignalDecision d) {
+        boolean inserted = insertRow(d);
+        if (inserted) {
+            try {
+                // delivered when the insert's transaction commits; the workers' poll stays the fallback, so a lost
+                // notification only costs the old delay
+                jdbc.query("select pg_notify(?, ?)", (ResultSetExtractor<Object>) rs -> null, CHANNEL,
+                        String.valueOf(d.copyGroupId()));
+            } catch (RuntimeException e) {
+                log.warn("decision {} stored, its notification failed: {}", d.idempotencyKey(), e.getMessage());
+            }
+        }
+        return inserted;
+    }
+
+    private boolean insertRow(SignalDecision d) {
         return jdbc.update("insert into exec.signal_decision (copy_group_id, signal_session_id, session_date, decided_at, "
                         + "strategy_id, priority, underlying, action, option_side, leg_group, stage, reason, instrument_token, "
                         + "instrument_key, symbol, lot_size, reference_price, premium_budget, reference_capital, lots, "

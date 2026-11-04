@@ -279,6 +279,43 @@ class BrokerVenueIT {
     }
 
     @Test
+    void anExitWaitsInTheSameTurnForItsStopCancelToShow() throws Exception {
+        // 4 Nov 2026, first LIVE day: one book read right after the cancel still showed the stop, so the exit went out a
+        // turn later (about 1.15 s); now the book is read again until the cancel shows (up to STOP_RELEASE_WAIT_SEC)
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        FollowerSimulator kite = brokerFollower();
+        kite.run(s.broker(), s.group(), DAY);
+        sim.quote(KEY, 74.0, 1_000_000, 74.5, 1_000_000, 76.0);        // above the trigger: still resting
+        sim.cancelLag(3);
+        decide(s, "10:00:00", SignalDecision.Action.EXIT, 74);
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(intentState(s.broker(), "EXIT")).as("exited in one turn").isEqualTo("EXECUTED");
+        assertThat(position(s.broker()).get("status")).isEqualTo("CLOSED");
+        assertThat(orders(s.broker())).filteredOn(r -> r.get("role").equals("STOP"))
+                .allSatisfy(r -> assertThat(r.get("status")).isEqualTo("CANCELLED"));
+        assertThat(sim.netQuantities()).as("flat, never short").containsEntry("NIFTY26O2023100PE", 0L);
+    }
+
+    @Test
+    void aStopCancelThatNeverShowsSendsNoExitThisTurn() throws Exception {
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        FollowerSimulator kite = brokerFollower();
+        kite.run(s.broker(), s.group(), DAY);
+        sim.quote(KEY, 74.0, 1_000_000, 74.5, 1_000_000, 76.0);
+        sim.cancelLag(1_000_000);                                       // longer than the wait
+        decide(s, "10:00:00", SignalDecision.Action.EXIT, 74);
+        long start = System.nanoTime();
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat((System.nanoTime() - start) / 1e9).as("the wait is bounded")
+                .isLessThan(BrokerVenue.STOP_RELEASE_WAIT_SEC + 3);
+        assertThat(intentState(s.broker(), "EXIT")).as("left for the next turn").isEqualTo("CREATED");
+        assertThat(orders(s.broker())).noneMatch(r -> r.get("role").equals("EXIT"));
+        assertThat(sim.netQuantities()).as("still long, no exit beside a stop").containsEntry("NIFTY26O2023100PE", 2600L);
+    }
+
+    @Test
     void aStopThatSellsWhileHeldIsBookedAndTheSignalsExitFindsNothing() throws Exception {
         Setup s = setup(false);
         decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);

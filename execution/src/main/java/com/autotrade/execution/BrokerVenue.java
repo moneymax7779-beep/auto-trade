@@ -51,6 +51,12 @@ public final class BrokerVenue implements FollowerVenue {
     private static final Logger log = LoggerFactory.getLogger(BrokerVenue.class);
     /** How long a placed order may be missing from the broker's book before it is cancelled and reported unknown. */
     static final double NOT_SEEN_SEC = 5;
+    /**
+     * How long an exit waits in the same turn for its stops' cancels to show as ended in the broker's book (read every
+     * poll interval) before it is left for the next turn. 4 Nov 2026, first LIVE day: one read straight after the cancel
+     * still showed the stop working, so both exits went out a turn (about 1.15 s) later.
+     */
+    static final double STOP_RELEASE_WAIT_SEC = 2;
     private static final List<String> ACTIVE = List.of("CREATED", "SUBMITTED", "ACKNOWLEDGED", "OPEN", "PARTIALLY_FILLED",
             "CANCEL_PENDING", "UNKNOWN");
 
@@ -437,6 +443,11 @@ public final class BrokerVenue implements FollowerVenue {
         }
     }
 
+    private static boolean allEnded(List<Map<String, Object>> stops, List<BrokerOrder> book) {
+        return stops.stream().allMatch(s -> book.stream().anyMatch(o -> s.get("client_tag").equals(o.clientTag())
+                && o.status().isTerminal()));
+    }
+
     /** The position's stop rows still working or with a fill not yet booked. */
     private List<Map<String, Object>> stops(long accountId, long intent) {
         return new ArrayList<>(jdbc.queryForList("select client_tag, status, quantity_filled, booked_quantity from "
@@ -488,7 +499,8 @@ public final class BrokerVenue implements FollowerVenue {
         }
         List<Part> sold = new ArrayList<>();
         Instant at = null;
-        if (!working.isEmpty()) {
+        long deadline = System.nanoTime() + (long) (STOP_RELEASE_WAIT_SEC * 1e9);
+        while (!working.isEmpty()) {
             try {
                 book = broker.orders();
             } catch (BrokerException e) {
@@ -497,6 +509,10 @@ public final class BrokerVenue implements FollowerVenue {
                 }
                 return new Release(List.of(), null, true, "order book unreadable after the cancel: " + e.getMessage());
             }
+            if (allEnded(working, book) || System.nanoTime() >= deadline) {
+                break;
+            }
+            sleep((long) rules.pollMs());
         }
         for (Map<String, Object> s : working) {                  // every stop must have ended before anything is booked
             String tag = (String) s.get("client_tag");

@@ -25,7 +25,7 @@
         <dependency>
             <groupId>org.postgresql</groupId>
             <artifactId>postgresql</artifactId>
-            <scope>runtime</scope>
+            <!-- compile: SignalWakeup listens with PGConnection.getNotifications -->
         </dependency>
     </dependencies>
     <build>

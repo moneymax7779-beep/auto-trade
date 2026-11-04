@@ -22,7 +22,8 @@ import com.autotrade.execution.StoredQuotes;
 import com.autotrade.sim.CostModel;
 
 /**
- * Runs the {@link ExecutionLoop} every poll interval. Refuses to start unless the schema is at least V23 (this service
+ * Runs the {@link ExecutionLoop} every poll interval and whenever {@link SignalWakeup} hears a new signal decision.
+ * Refuses to start unless the schema is at least V23 (this service
  * never migrates: trading-core owns the schema). Retry quotes come from today's own capture (md.option_tick).
  */
 @Service
@@ -73,8 +74,9 @@ class ExecutionService implements DisposableBean {
         }
     }
 
+    /** Every poll interval, and at once when a signal decision is stored ({@link SignalWakeup}); one tick at a time. */
     @Scheduled(fixedDelayString = "${autotrade.execution.poll-ms:1000}", initialDelay = 5000)
-    void tick() {
+    synchronized void tick() {
         ExecutionLoop current = loop;
         if (current != null) {
             current.tick(day(), properties.pollMs() * 5);

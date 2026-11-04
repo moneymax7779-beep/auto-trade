@@ -44,7 +44,8 @@ import tools.jackson.databind.node.ObjectNode;
  * <b>Faults</b> ({@link #failNext}): 429, a 500 that was not processed, a 500 or a timeout after the order <i>was</i>
  * processed, a timeout before processing, an expired token, an InputException (price band), a rejected order (funds);
  * {@link #partialFills} (an entry fills only part of its quantity), {@link #fillStopOnCancel} (a stop fills just as its
- * cancel arrives), {@link #staleOrderBookOnce} (the next order book is the previous one: a late, reordered report),
+ * cancel arrives), {@link #cancelLag} (a cancel shows in the book only some reads later),
+ * {@link #staleOrderBookOnce} (the next order book is the previous one: a late, reordered report),
  * {@link #expireToken}.
  */
 public final class KiteSimulator implements AutoCloseable {
@@ -95,6 +96,8 @@ public final class KiteSimulator implements AutoCloseable {
         Instant placedAt, updatedAt;
         int lot;
         boolean entry;
+        String shownBeforeCancel;                // cancelLag: the status the book still shows ...
+        int cancelHiddenReads;                   // ... for this many more order-book reads
 
         double value() {
             return average * filled;
@@ -126,6 +129,7 @@ public final class KiteSimulator implements AutoCloseable {
     private double funds = 1e9;
     private double partialFraction = 1.0;
     private boolean fillStopOnCancel;
+    private int cancelLagReads;
     private boolean staleOnce;
     private List<Order> previousBook = List.of();
     private int requests;
@@ -233,6 +237,14 @@ public final class KiteSimulator implements AutoCloseable {
 
     public synchronized void fillStopOnCancel(boolean on) {
         this.fillStopOnCancel = on;
+    }
+
+    /**
+     * A cancelled order still shows its old status in the next {@code reads} order books (Kite confirms a cancel a moment
+     * after accepting it); 0 = at once (the default).
+     */
+    public synchronized void cancelLag(int reads) {
+        this.cancelLagReads = reads;
     }
 
     public synchronized void staleOrderBookOnce() {
@@ -543,6 +555,8 @@ public final class KiteSimulator implements AutoCloseable {
             return status(400, error("InputException", "Order cannot be cancelled as it is " + o.status.toLowerCase()
                     + "."));
         }
+        o.shownBeforeCancel = o.status;
+        o.cancelHiddenReads = cancelLagReads;
         o.status = "CANCELLED";
         o.updatedAt = clock.get();
         return success(json.createObjectNode().put("order_id", o.id));
@@ -622,7 +636,14 @@ public final class KiteSimulator implements AutoCloseable {
     // ------------------------------------------------------------------ books
 
     private ArrayNode orderBook() {
-        List<Order> now = orders.values().stream().map(KiteSimulator::copy).toList();
+        List<Order> now = orders.values().stream().map(o -> {
+            Order c = copy(o);
+            if (o.cancelHiddenReads > 0) {                     // cancelLag: not confirmed yet
+                o.cancelHiddenReads--;
+                c.status = o.shownBeforeCancel;
+            }
+            return c;
+        }).toList();
         List<Order> shown = staleOnce ? previousBook : now;
         staleOnce = false;
         previousBook = now;
