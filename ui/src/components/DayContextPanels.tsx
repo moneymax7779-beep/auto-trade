@@ -107,7 +107,8 @@ export function TradePremiumPanel({ sessionId, date, positions, underlying, pick
   onPick: (id: number) => void;
 }) {
   const number = new Map(positions.map((p, i) => [p.id, i + 1]));
-  const own = positions.filter((p) => p.id != null && p.underlying === underlying);
+  // filled positions only: an entry that never filled (ENTRY_NOT_FILLED, quantity 0) has no premium to show
+  const own = positions.filter((p) => p.id != null && p.underlying === underlying && (p.quantity ?? 0) > 0);
   const pickedHere = own.some((p) => p.id === picked) ? picked : null;
   const id = pickedHere ?? own[0]?.id ?? null;
   const premium = useQuery({
@@ -180,7 +181,7 @@ export function TradePremiumPanel({ sessionId, date, positions, underlying, pick
  */
 function premiumVerdict(p: TradePremium | undefined): string {
   const x = p?.excursion;
-  if (!p?.entry || !p.exit || x?.mfe == null) return "";
+  if (!p?.entry || !p.exit || x?.mfe == null || !(p.entry.price > 0)) return "";
   const gained = p.exit.price - p.entry.price;
   if (x.mfe < 0.02 * p.entry.price) {
     return `It barely went our way (best +${plain(x.mfe)}): the entry, not the exit, lost this one.`;
