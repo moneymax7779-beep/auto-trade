@@ -12,7 +12,8 @@ import { splitDecisionKey, storedScores, StrategyMatrix, type MatrixCell } from 
 import { AlertBanner } from "../components/AlertBanner";
 import { CuesPanel } from "../components/CuesPanel";
 
-export function LivePage() {
+/** canAct false (signed in without the operator role): the same page without the kill, exit-all and stop controls. */
+export function LivePage({ canAct = true }: { canAct?: boolean }) {
   const queryClient = useQueryClient();
   const status = useQuery({ queryKey: ["status"], queryFn: () => get<Status>("/api/status"), refetchInterval: 2000 });
   const action = useMutation({
@@ -43,11 +44,11 @@ export function LivePage() {
           </p>
         )}
         <p className="mt-2 text-sm text-muted">
-          Every past session is under <Link to="/sessions" className="text-accent underline">Sessions</Link>; the
-          most recent one is below.
+          {canAct ? <>Every past session is under <Link to="/sessions" className="text-accent underline">Sessions</Link>; the
+          most recent one is below.</> : <>The most recent session is below.</>}
         </p>
       </Panel>
-      <LastSession />
+      <LastSession canAct={canAct} />
       </div>
     );
   }
@@ -59,7 +60,7 @@ export function LivePage() {
       <AlertBanner />
       <Panel
         title={<>Session {s.session} · {s.date} · <span className="text-warn">{s.mode}</span></>}
-        right={
+        right={canAct &&
           <div className="flex flex-wrap gap-2">
             {killed ? (
               <ConfirmButton tone="neutral" label="Release kill switch" confirmLabel="Confirm release"
@@ -168,7 +169,7 @@ const SESSION_KINDS = [
  * database: how it ended (P&L, trades, the last stage of every index and strategy), never mistaken for
  * a running session.
  */
-function LastSession() {
+function LastSession({ canAct }: { canAct: boolean }) {
   const [mode, setMode] = useState<string>("PAPER_LIVE");
   const [picked, setPicked] = useState<number | null>(null);
   const sessions = useQuery({ queryKey: ["sessions"], queryFn: () => get<SessionRow[]>("/api/sessions") });
@@ -248,9 +249,9 @@ function LastSession() {
           <div className="flex gap-2"><dt className="text-muted">Code</dt><dd className="num">{session.code_version}</dd></div>
         </dl>
         {session.error && <p className="mt-3 text-xs text-warn">{session.error}</p>}
-        <p className="mt-3 text-xs">
+        {canAct && <p className="mt-3 text-xs">
           <Link to={`/sessions/${session.id}`} className="text-accent underline">Charts, every decision and orders →</Link>
-        </p>
+        </p>}
       </Panel>
 
       {last.isLoading ? <Loading what="final stages" /> : last.error ? <ErrorNote error={last.error} /> : (

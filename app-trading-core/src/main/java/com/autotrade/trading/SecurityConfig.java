@@ -85,12 +85,14 @@ class SecurityConfig {
     /**
      * And, read-only, what the NIFTY / SENSEX / BANKNIFTY chart pages read (user, 29 Oct 2026: "I just the demo user to
      * see the chart that admin sees exactly"): the live status, the session list and one session's last decisions and
-     * positions, the surge / premium / OI tape / PCR / levels charts, alerts and cues. A session's full decisions, orders
-     * and rejections, research, replay and config stay the operator's, and so does every POST.
+     * positions, the surge / premium / OI tape / PCR / levels charts, alerts and cues; and what the Overview page reads
+     * (user, 5 Nov 2026: "Viewer account should see Overview too ... should n't act on it, just viewing"): the PAPER
+     * account's equity and a finished session's refusals. A session's full decisions and orders, research, replay and
+     * config stay the operator's, and so does every POST.
      */
     static final String[] MEMBER_CHART_GETS = {"/api/status", "/api/sessions", "/api/sessions/*/last-decisions",
-            "/api/sessions/*/positions", "/api/surges", "/api/premium", "/api/oi-tape", "/api/oi-tape/**", "/api/pcr",
-            "/api/levels", "/api/alerts", "/api/cues"};
+            "/api/sessions/*/positions", "/api/sessions/*/rejections", "/api/surges", "/api/premium", "/api/oi-tape",
+            "/api/oi-tape/**", "/api/pcr", "/api/levels", "/api/alerts", "/api/cues", "/api/equity"};
 
     @Bean
     SecurityFilterChain securityChain(HttpSecurity http, AuthProperties auth) throws Exception {
