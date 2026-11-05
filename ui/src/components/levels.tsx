@@ -153,7 +153,7 @@ export function LevelTogglesBar({ toggles, onChange }: { toggles: LevelToggles; 
       <button type="button" aria-pressed={toggles.lines} className={chip(toggles.lines)}
         onClick={() => onChange({ ...toggles, lines: !toggles.lines })}>
         <i className="mr-1.5 inline-block h-0.5 w-3 align-middle" style={{ background: LEVEL_COLORS.vwap }} />VWAP
-        <i className="mx-1.5 inline-block h-0.5 w-3 align-middle" style={{ background: LEVEL_COLORS.ema20 }} />EMA20
+        <i className="mx-1.5 inline-block h-0.5 w-3 align-middle" style={{ background: LEVEL_COLORS.ema20 }} />EMA20 1m
       </button>
       <button type="button" aria-pressed={toggles.maxPain} className={chip(toggles.maxPain)}
         onClick={() => onChange({ ...toggles, maxPain: !toggles.maxPain })}
