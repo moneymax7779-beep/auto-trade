@@ -138,7 +138,7 @@ class SessionHistoryIT {
         store.decision(id, "expiry-gamma-breakout", decision("NIFTY", "09:44", Stage.COMPRESSION), 23050);
         store.decision(id, "early-confirm-runner", decision("SENSEX", "09:40", Stage.IDLE), 74000);
 
-        List<Map<String, Object>> rows = new HistoryController(dataSource).lastDecisions(id);
+        List<Map<String, Object>> rows = new HistoryController(dataSource, null).lastDecisions(id);
 
         assertThat(rows).extracting(r -> r.get("underlying") + "/" + r.get("strategy_id") + "/" + r.get("t") + "/"
                 + r.get("ce_stage")).containsExactly(
@@ -166,7 +166,7 @@ class SessionHistoryIT {
     @Test
     void sessionRunsGroupABatchAcrossTickFeedsAndTheFilterReturnsItsSessions() {
         TradeStore store = new TradeStore(dataSource);
-        HistoryController history = new HistoryController(dataSource);
+        HistoryController history = new HistoryController(dataSource, null);
         Map<String, String> v1 = Map.of("runs-test.v1.yaml", "sha256:a", "paper-risk.v17.yaml", "sha256:r");
         Map<String, String> v2 = Map.of("runs-test.v2.yaml", "sha256:b", "paper-risk.v17.yaml", "sha256:r");
         long zt = store.startSession("PAPER-1", "PAPER_REPLAY", LocalDate.of(2026, 9, 2), "replay-as-live:zt-tiger-v2",
@@ -208,5 +208,47 @@ class SessionHistoryIT {
         // all blank = the unfiltered list (live sessions + the newest 200), as before
         assertThat(history.sessions(new HistoryController.SessionFilter("", null, " ", null, null)))
                 .extracting(r -> ((Number) r.get("id")).longValue()).contains(zt, ztAgain, own, bars, other);
+    }
+
+    /**
+     * A trade's context comes from the session's own snapshot run, not another replay of the same date started right
+     * after it (code review 5 Nov 2026); an approved entry with no stored position is a trade still open only in the
+     * running session, never in a finished one.
+     */
+    @Test
+    void tradeContextUsesTheSessionsOwnSnapshotRunAndNoPhantomOpenTrades() throws Exception {
+        TradeStore store = new TradeStore(dataSource);
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        com.autotrade.md.store.Runs runs = new com.autotrade.md.store.Runs(dataSource);
+        long id = session(store, "PAPER-7", "PAPER_REPLAY");
+        long mine = runs.start("REPLAY_FEATURES", "test", "test", List.of(DAY), List.of("NIFTY"), "{}");
+        long other = runs.start("REPLAY_FEATURES", "test", "test", List.of(DAY), List.of("NIFTY"), "{}");
+        store.snapshotRun(id, mine);
+        java.sql.Timestamp snap = java.sql.Timestamp.from(Instant.parse("2026-09-25T04:00:00Z"));     // 09:30 IST
+        for (long run : List.of(mine, other)) {
+            jdbc.update("insert into feat.snapshot (run_id, session_date, underlying, snap_time, phase, spot, features) "
+                    + "values (?,?,?,?,?,?,?::jsonb)", run, DAY, "NIFTY", snap, "MORNING", 23000.0, "{\"run\": " + run + "}");
+        }
+        jdbc.update("insert into trade.position (session_id, underlying, option_side, symbol, opened_at, closed_at, stages, "
+                        + "exit_reason, realised, costs, net, strategy_id, quantity, lot_size, average_cost, average_exit) "
+                        + "values (?,?,?,?,?,?,'{}'::text[],?,?,?,?,?,?,?,?,?)", id, "NIFTY", "CE", "NIFTY 23000 CE",
+                java.sql.Timestamp.from(Instant.parse("2026-09-25T04:00:30Z")), java.sql.Timestamp.from(Instant.parse("2026-09-25T04:30:30Z")),
+                "TARGET", 3250.0, 120.0, 3130.0, "early-confirm-runner", 65, 65, 100.0, 150.0);
+        store.candidate(id, "early-confirm-runner", "NIFTY", Instant.parse("2026-09-25T04:00:25Z"), "ENTER", "CE", "BREAKOUT",
+                true, null, 23000, Map.of("near_level", true));
+        // approved but never stored as a position: in a finished session, not a trade
+        store.candidate(id, "early-confirm-runner", "NIFTY", Instant.parse("2026-09-25T06:00:00Z"), "ENTER", "PE", "BREAKDOWN",
+                true, null, 23100, Map.of());
+
+        HistoryController history = new HistoryController(dataSource, null);
+        List<Map<String, Object>> trades = history.tradeContext(id);
+        assertThat(trades).singleElement().satisfies(t -> {
+            assertThat(t.get("entry_reason")).isEqualTo("BREAKOUT");
+            assertThat(t.get("entry_features").toString().replace(" ", "")).isEqualTo("{\"run\":" + mine + "}");
+        });
+        Map<String, Object> at = history.at(id, "NIFTY", "09:31:00");
+        assertThat(((Map<?, ?>) at.get("snapshot")).get("features").toString().replace(" ", "")).isEqualTo("{\"run\":" + mine + "}");
+        assertThat(at.get("open")).asList().singleElement().satisfies(o -> assertThat(((Map<?, ?>) o).get("quantity")).isEqualTo(65L));
+        assertThat(history.badTime(new java.time.format.DateTimeParseException("x", "9:61", 0)).getStatusCode().value()).isEqualTo(400);
     }
 }

@@ -74,7 +74,8 @@ class SecurityConfig {
     static final String SIGN_IN_HEADER = "X-Autotrade-Sign-In";
 
     /** The PAPER system controls on trading-core's own API. */
-    private static final String[] OPERATOR_POSTS = {"/api/kill", "/api/kill/release", "/api/stop", "/api/exit-all"};
+    private static final String[] OPERATOR_POSTS = {"/api/kill", "/api/kill/release", "/api/stop", "/api/exit-all",
+            "/api/replay-control"};
 
     /**
      * What a signed-in user without the operator role reaches (29 Oct 2026, family members): who they are, and the
@@ -90,7 +91,7 @@ class SecurityConfig {
      */
     static final String[] MEMBER_CHART_GETS = {"/api/status", "/api/sessions", "/api/sessions/*/last-decisions",
             "/api/sessions/*/positions", "/api/surges", "/api/premium", "/api/oi-tape", "/api/oi-tape/**", "/api/pcr",
-            "/api/levels", "/api/alerts", "/api/cues"};
+            "/api/levels", "/api/close-auction", "/api/live/ticks", "/api/alerts", "/api/cues"};
 
     @Bean
     SecurityFilterChain securityChain(HttpSecurity http, AuthProperties auth) throws Exception {

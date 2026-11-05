@@ -102,6 +102,8 @@ class SessionRunner implements ApplicationRunner {
     private volatile Instant shadowRetryAt;
 
     private volatile Thread signalWorker;                 // live execution L1: the signal source alongside, if any
+    /** A paced replay's pause / speed controls (one replay runs at a time in this service). */
+    private final com.autotrade.md.live.ReplayControl replayControl = new com.autotrade.md.live.ReplayControl();
 
     SessionRunner(TradingProperties properties, DataSource target, ConfigurableApplicationContext context,
                   AlertService alerts) {
@@ -118,6 +120,10 @@ class SessionRunner implements ApplicationRunner {
 
     TradingSession current() {
         return current;
+    }
+
+    com.autotrade.md.live.ReplayControl replayControl() {
+        return replayControl;
     }
 
     /** Scheduler state for the UI when no session is running. */
@@ -493,7 +499,10 @@ class SessionRunner implements ApplicationRunner {
                     ? new BarReplaySource(target, new IndexWeightFiles(Path.of("config", "reference", "weights")),
                             t.barOptionsWithoutExtremes())
                     : t.replayFromOwnCapture() ? new OwnCaptureSource(target) : new ZtSessionSource(source, false);
-            feed = new ReplayAsLiveFeed(events, session, t.underlyings(), t.replaySpeed());
+            replayControl.reset(t.replaySpeed());
+            feed = t.replaySpeed() > 0
+                    ? new ReplayAsLiveFeed(events, session, t.underlyings(), t.replaySpeed(), replayControl)
+                    : new ReplayAsLiveFeed(events, session, t.underlyings(), t.replaySpeed());
         } else if ("upstox".equals(t.feed()) && !upstoxFailed.contains(session)) {
             // Upstox feed (auction data, futures book, VIX) with the token zt-tiger-v2 holds; anything
             // missing or failing falls back to tailing zt-tiger-v2's capture.
@@ -555,6 +564,14 @@ class SessionRunner implements ApplicationRunner {
                 risk, CostModel.from(costsFile), FillModel.from(costsFile, t.fillModel()),
                 instruments, hashes, CodeVersion.current());
         TradingSession trading = new TradingSession(settings, feed, new TradeStore(target));
+        if (replay && t.replaySpeed() > 0) {
+            trading.replayControl(replayControl);
+        }
+        // the charts' live push: a live session's index ticks, and a paced replay's (an unpaced one runs ahead of any page)
+        if (!replay || t.replaySpeed() > 0) {
+            String mode = replay ? "PAPER_REPLAY" : "PAPER_LIVE";
+            context.getBeanProvider(LiveTicks.class).ifAvailable(ticks -> trading.indexTap(tick -> ticks.accept(tick, session, mode)));
+        }
         if (signalSource) {
             com.autotrade.account.AccountStore accounts = new com.autotrade.account.AccountStore(target);
             long tenant = accounts.ensureTenant(signal.tenantName());
@@ -619,12 +636,14 @@ class SessionRunner implements ApplicationRunner {
                     t.underlyings(), new tools.jackson.databind.json.JsonMapper().writeValueAsString(hashes));
             snapshots = new SnapshotWriter(target, snapshotRun);
             trading.recordSnapshots(snapshots);
+            replayControl.onPause(replay ? safe(snapshots::flush) : null);
             timer.scheduleAtFixedRate(safe(snapshots::flush), 60, 60, TimeUnit.SECONDS);
         }
         SnapshotWriter snapshotWriter = snapshots;
         Long snapshotRunId = snapshotRun;
         Thread worker = Thread.ofPlatform().name("trading-session-" + session).start(() -> {
             Map<String, Object> summary = trading.run();
+            context.getBeanProvider(LiveTicks.class).ifAvailable(LiveTicks::clear);   // its prices are history now
             if (recorder != null) {
                 recorder.close();
             }

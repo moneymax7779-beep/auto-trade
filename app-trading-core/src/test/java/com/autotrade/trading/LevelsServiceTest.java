@@ -33,6 +33,8 @@ class LevelsServiceTest {
             assertThat(z.until()).isEqualTo("10:17");       // the first close above the zone
             assertThat(z.lo()).isEqualTo(101.0);
             assertThat(z.hi()).isEqualTo(101.02);
+            // its state as known at the forming touch's confirmation: [time, lo, hi, touches]
+            assertThat(z.steps()).containsExactly(List.of("10:14", 101.0, 101.02, 2));
         });
     }
 
@@ -67,5 +69,28 @@ class LevelsServiceTest {
         assertThat(levels).extracting(LevelsService.Level::name, LevelsService.Level::price).containsExactly(
                 org.assertj.core.groups.Tuple.tuple("PWH", 120.0), org.assertj.core.groups.Tuple.tuple("PWL", 80.0),
                 org.assertj.core.groups.Tuple.tuple("PMH", 130.0), org.assertj.core.groups.Tuple.tuple("PML", 80.0));
+    }
+
+    @Test
+    void monthLevelsNameEachMonthAndTheRangeOverTheMonthsStored() {
+        // NIFTY's real monthly ranges (stored bars): July above today's 24,400, October far below
+        List<LevelsService.MonthRange> months = List.of(
+                new LevelsService.MonthRange(java.time.LocalDate.of(2026, 7, 1), 24_530.9, 23_606.3),
+                new LevelsService.MonthRange(java.time.LocalDate.of(2026, 9, 1), 24_143.2, 22_569.7),
+                new LevelsService.MonthRange(java.time.LocalDate.of(2026, 10, 1), 23_174.5, 22_180.5));
+        List<LevelsService.Level> levels = new ArrayList<>();
+        LevelsService.monthLevels(months, levels);
+        assertThat(levels).extracting(LevelsService.Level::name, LevelsService.Level::price).containsExactly(
+                org.assertj.core.groups.Tuple.tuple("Jul high", 24_530.9), org.assertj.core.groups.Tuple.tuple("Jul low", 23_606.3),
+                org.assertj.core.groups.Tuple.tuple("Sep high", 24_143.2), org.assertj.core.groups.Tuple.tuple("Sep low", 22_569.7),
+                org.assertj.core.groups.Tuple.tuple("Oct high", 23_174.5), org.assertj.core.groups.Tuple.tuple("Oct low", 22_180.5),
+                org.assertj.core.groups.Tuple.tuple("3M high", 24_530.9), org.assertj.core.groups.Tuple.tuple("3M low", 22_180.5));
+        assertThat(levels).allSatisfy(l -> {
+            assertThat(l.group()).isEqualTo("months");
+            assertThat(l.from()).isEqualTo("09:15");
+        });
+        List<LevelsService.Level> none = new ArrayList<>();
+        LevelsService.monthLevels(List.of(), none);
+        assertThat(none).isEmpty();
     }
 }

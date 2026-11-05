@@ -621,6 +621,9 @@ public final class OrderManager implements Consumer<OrderUpdate> {
                 }
             }
         }
+        if (role.role().equals("ENTRY")) {
+            maybeEntryComplete(position);
+        }
         if (position.quantity == 0 && position.boughtQuantity > 0 && !anyWorking(position)
                 && position.state != ManagedPosition.State.OPENING) {
             close(position);
@@ -796,6 +799,7 @@ public final class OrderManager implements Consumer<OrderUpdate> {
             }
             position.committedPremium -= position.pendingEntryQuantity * position.sliceStartAsk;
             position.pendingEntryQuantity = 0;
+            maybeEntryComplete(position);
             if (position.boughtQuantity == 0 && !anyWorking(position)) {
                 position.exitReason = position.exitReason == null ? "ENTRY_NOT_FILLED" : position.exitReason;
                 close(position);
@@ -960,6 +964,35 @@ public final class OrderManager implements Consumer<OrderUpdate> {
             }
         }
         return working;
+    }
+
+    /**
+     * Tells the listener once that an entry is complete: the position is open and holds what it bought, with no entry
+     * order working and no slice pending. Not for a position already exiting (a stop that filled mid-entry cancels the
+     * rest, which arrives as an entry update). A straddle tells once, when every leg is in. A listener cannot disturb
+     * the OMS: what it throws is logged.
+     */
+    private void maybeEntryComplete(ManagedPosition position) {
+        if (position.entryCompleteSignalled || !entryDone(position)) {
+            return;
+        }
+        List<ManagedPosition> group = position.leg.isEmpty() ? List.of(position) : live.values().stream()
+                .filter(p -> !p.leg.isEmpty() && p.strategy.equals(position.strategy) && p.underlying.equals(position.underlying))
+                .toList();
+        if (!group.stream().allMatch(this::entryDone)) {
+            return;
+        }
+        group.forEach(p -> p.entryCompleteSignalled = true);
+        try {
+            listener.entryComplete(position);
+        } catch (RuntimeException e) {
+            log.log(System.Logger.Level.WARNING, "entry-complete listener failed: {0}", e.toString());
+        }
+    }
+
+    private boolean entryDone(ManagedPosition p) {
+        return p.state == ManagedPosition.State.OPEN && p.quantity > 0 && p.pendingEntryQuantity <= 0
+                && working(p.entryOrders).isEmpty();
     }
 
     private boolean anyWorking(ManagedPosition position) {

@@ -39,6 +39,11 @@ import com.autotrade.core.time.MarketTime;
  *   <li>{@code /api/oi-tape/strikes}: every strike within ATM ± {@value #STRIKES} at a step ({@code at}: the step's
  *       start, as the tape labels it; the values are those at its end), its call and put OI then and {@code back} seconds
  *       earlier (null where the capture had none yet).</li>
+ *   <li>{@code /api/oi-tape/max-pain} (user, 5 Nov 2026): the nearest expiry's max pain as the day goes, the strike
+ *       at which the option buyers' payout at expiry (calls' and puts' OI times their intrinsic value) is smallest,
+ *       over every strike the capture has OI for by then. The capture holds about ATM ± 16 strikes (re-centred as the
+ *       market moves), so far out-of-the-money OI is left out. Context only: OI floors and ceilings held no better than
+ *       chance at expiry (A-154).</li>
  * </ul>
  * Each value is the last one the exchange had published by the end of its step, carried forward (NIFTY publishes OI
  * about once a minute, BSE every 2½-3 minutes). Before 09:15 the last pre-open OI is the starting point.
@@ -78,6 +83,11 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
         final double[] spot = nan(), futPx = nan(), futOi = nan();
         final Map<Double, double[]> calls = new TreeMap<>(), puts = new TreeMap<>();
         final Map<Double, Double> seedCalls = new HashMap<>(), seedPuts = new HashMap<>();   // last pre-open OI
+        /** Per contract and step: the last traded price, the feed's implied volatility and the day's volume so far. */
+        final Map<Double, float[]> callPx = new TreeMap<>(), putPx = new TreeMap<>(), callIv = new TreeMap<>(),
+                putIv = new TreeMap<>(), callVol = new TreeMap<>(), putVol = new TreeMap<>();
+        /** False for a day kept before prices, IV and volume were (format 1): rebuilt from the ticks outside market hours. */
+        boolean extras = true;
         String futExpiry;
         Instant readUntil;
         int steps;                           // steps read so far (complete 30 s buckets)
@@ -87,6 +97,10 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
             this.date = date;
             this.expiry = expiry;
             this.readUntil = date.atTime(PREOPEN).atZone(MarketTime.IST).toInstant();
+        }
+
+        List<Map<Double, float[]>> extraSides() {
+            return List.of(callPx, putPx, callIv, putIv, callVol, putVol);
         }
 
         double strikeStep() {
@@ -155,6 +169,11 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
     public void destroy() {
         if (warmer != null) {
             warmer.shutdownNow();
+        }
+        synchronized (this) {
+            if (rebuilder != null) {
+                rebuilder.shutdownNow();
+            }
         }
     }
 
@@ -231,22 +250,374 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
             out.put("from", j < 0 ? "pre-open" : time(j));
             out.put("spot", Double.isNaN(spot) ? null : spot);
             out.put("atm", Double.isNaN(atm) ? null : atm);
-            List<Object> rows = new ArrayList<>();
-            TreeSet<Double> ks = new TreeSet<>(d.calls.keySet());
-            ks.addAll(d.puts.keySet());
-            for (double k : ks.descendingSet()) {
-                if (!Double.isNaN(atm) && Math.abs(k - atm) > STRIKES * step + 1e-6) {
-                    continue;
-                }
-                rows.add(Arrays.asList(k, num(value(d.calls, d.seedCalls, k, i)), num(value(d.calls, d.seedCalls, k, j)),
-                        num(value(d.puts, d.seedPuts, k, i)), num(value(d.puts, d.seedPuts, k, j))));
-            }
-            out.put("rows", rows);
+            out.putAll(ladder(d, i, j, step, market::tradingDay));
+            out.put("rebuilding", rebuilding(day, u));
         }
         return out;
     }
 
+    @GetMapping("/max-pain")
+    Map<String, Object> maxPain(@RequestParam(required = false) String date, @RequestParam String underlying) {
+        LocalDate day = date == null ? LocalDate.now(MarketTime.IST) : LocalDate.parse(date);
+        String u = known(underlying);
+        Map<String, Object> out = header(day, u);
+        if (deferred(day, u)) {
+            out.put("deferred", true);
+            out.put("series", List.of());
+            return out;
+        }
+        Day d = day(day, u);
+        if (d == null) {
+            out.put("series", List.of());
+            return out;
+        }
+        synchronized (d) {
+            out.put("expiry", d.expiry.toString());
+            out.put("stepSeconds", STEP);
+            out.put("series", maxPainSeries(d));
+        }
+        return out;
+    }
+
+    /** [time, max-pain strike, strikes with OI] at the first step, each step where it changes, and the last step. */
+    static List<Object> maxPainSeries(Day d) {
+        Map<Double, double[]> calls = carriedAll(d.calls, d.seedCalls, d.steps);
+        Map<Double, double[]> puts = carriedAll(d.puts, d.seedPuts, d.steps);
+        TreeSet<Double> strikes = new TreeSet<>(calls.keySet());
+        strikes.addAll(puts.keySet());
+        List<Object> rows = new ArrayList<>();
+        double last = Double.NaN;
+        for (int i = 0; i < d.steps; i++) {
+            double best = Double.NaN, least = Double.POSITIVE_INFINITY;
+            int counted = 0;
+            boolean anyCall = false, anyPut = false;
+            for (double k : strikes) {
+                double c = calls.containsKey(k) ? calls.get(k)[i + 1] : Double.NaN;
+                double p = puts.containsKey(k) ? puts.get(k)[i + 1] : Double.NaN;
+                anyCall |= !Double.isNaN(c);
+                anyPut |= !Double.isNaN(p);
+                counted += Double.isNaN(c) && Double.isNaN(p) ? 0 : 1;
+            }
+            if (!anyCall || !anyPut) {
+                continue;
+            }
+            for (double settle : strikes) {
+                double pain = 0;
+                for (double k : strikes) {
+                    double c = calls.containsKey(k) ? nz(calls.get(k)[i + 1]) : 0;
+                    double p = puts.containsKey(k) ? nz(puts.get(k)[i + 1]) : 0;
+                    pain += c * Math.max(0, settle - k) + p * Math.max(0, k - settle);
+                }
+                if (pain < least) {
+                    least = pain;
+                    best = settle;
+                }
+            }
+            if (best != last || i == d.steps - 1) {
+                rows.add(Arrays.asList(time(i), best, counted));
+                last = best;
+            }
+        }
+        return rows;
+    }
+
     // ------------------------------------------------------------------ the day in memory
+
+    // ------------------------------------------------------------------ the strike ladder and its structure
+
+    /** Strikes either side of spot the near ceiling and near floor look at (user, 5 Nov 2026: the writers' nearest walls). */
+    static final int NEAR = 6;
+    /** A wall moves to another strike only when that strike's OI is this much larger (no flicker between near-equal strikes). */
+    static final double WALL_MARGIN = 1.05;
+    /** An OI change smaller than this share of the strike's earlier OI gets no who-traded reading. */
+    static final double MIN_OI_SHARE = 0.005;
+    /** An IV change smaller than this (0.1 volatility point) is too small to say who traded. */
+    static final double MIN_IV_CHANGE = 0.001;
+    private static final double TRADING_MINUTES = 375;
+    /** The windows the ladder's "changes 1-30 min" column shows side by side (user, 5 Nov 2026), in seconds. */
+    static final int[] WINDOWS = {60, 300, 900, 1800};
+
+    /**
+     * The ladder at step {@code i} against step {@code j} (-1 = pre-open): per strike within ATM ± {@value #STRIKES}
+     * [strike, call OI, call OI then, put OI, put OI then, call IV, call IV then, put IV, put IV then, call price, call
+     * price then, put price, put price then, call volume in the window, put volume in the window, who traded the calls
+     * (by IV), who traded the puts, the calls' gamma × OI, the puts' gamma × OI (each side from its own IV, else the
+     * other side's), [the call OI change over each of
+     * {@link #WINDOWS} then the put OI change over each] (null where the earlier OI is not known)]; the OI prints in the
+     * window; and the
+     * structure: the call wall, near ceiling, near floor and put wall (each with the step it took its strike and the
+     * strike before), the ATM IV and one standard deviation of the index to the close.
+     */
+    static Map<String, Object> ladder(Day d, int i, int j, double step, java.util.function.Predicate<LocalDate> tradingDay) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        Map<Double, double[]> calls = carriedAll(d.calls, d.seedCalls, d.steps), puts = carriedAll(d.puts, d.seedPuts, d.steps);
+        double[] spots = carry(d.spot, d.steps);
+        double spot = spots[i];
+        double atm = Double.isNaN(spot) ? Double.NaN : Math.round(spot / step) * step;
+        double years = yearsToExpiry(d.date, d.expiry, i);
+        List<Object> rows = new ArrayList<>();
+        TreeSet<Double> ks = new TreeSet<>(calls.keySet());
+        ks.addAll(puts.keySet());
+        for (double k : ks.descendingSet()) {
+            if (!Double.isNaN(atm) && Math.abs(k - atm) > STRIKES * step + 1e-6) {
+                continue;
+            }
+            double c = oiAt(calls, k, i), c0 = oiAt(calls, k, j), p = oiAt(puts, k, i), p0 = oiAt(puts, k, j);
+            double cIv = at(d.callIv, k, i), cIv0 = at(d.callIv, k, j), pIv = at(d.putIv, k, i), pIv0 = at(d.putIv, k, j);
+            double cPx = at(d.callPx, k, i), cPx0 = at(d.callPx, k, j), pPx = at(d.putPx, k, i), pPx0 = at(d.putPx, k, j);
+            // each side's gamma from its own IV (a side with none recorded borrows the other's: the two are close)
+            double cG = gamma(spot, k, Double.isNaN(cIv) ? pIv : cIv, years) * nz(c);
+            double pG = gamma(spot, k, Double.isNaN(pIv) ? cIv : pIv, years) * nz(p);
+            rows.add(Arrays.asList(k, num(c), num(c0), num(p), num(p0), num(cIv), num(cIv0), num(pIv), num(pIv0),
+                    num(cPx), num(cPx0), num(pPx), num(pPx0), num(windowVolume(d.callVol, k, i, j)),
+                    num(windowVolume(d.putVol, k, i, j)),
+                    who(c, c0, cIv, cIv0, MIN_IV_CHANGE), who(p, p0, pIv, pIv0, MIN_IV_CHANGE), num(cG), num(pG),
+                    windowChanges(calls, puts, k, i)));
+        }
+        out.put("rows", rows);
+        out.put("extras", d.extras);
+        int[] pr = prints(calls, puts, spots, step, j, i);
+        out.put("prints", pr[0]);
+        out.put("lastPrint", pr[1] < 0 ? null : time(pr[1]));
+        Map<String, Object> structure = new LinkedHashMap<>();
+        structure.put("callWall", wall(calls, spots, step, i, j, true, false));
+        structure.put("nearCeiling", wall(calls, spots, step, i, j, true, true));
+        structure.put("nearFloor", wall(puts, spots, step, i, j, false, true));
+        structure.put("putWall", wall(puts, spots, step, i, j, false, false));
+        double cAtm = at(d.callIv, atm, i), pAtm = at(d.putIv, atm, i);
+        double atmIv = Double.isNaN(cAtm) ? pAtm : Double.isNaN(pAtm) ? cAtm : (cAtm + pAtm) / 2;
+        structure.put("atmIv", num(atmIv));
+        structure.put("sigmaClose", num(sigmaToClose(spot, atmIv, d.date, d.expiry, i, tradingDay)));
+        out.put("structure", structure);
+        return out;
+    }
+
+    /**
+     * Who most likely traded a contract between two steps, from its OI change and the change in its IV (not its premium,
+     * which mostly follows the index: OI rising in a rally would read as call buying and put writing whoever traded):
+     * OI up as IV falls = writers opening ("WRITING"), OI up as IV rises = buyers opening ("BUYING"), OI down as IV rises
+     * = writers buying back ("COVERING"), OI down as IV falls = buyers selling out ("CLOSING"). Null when either change
+     * is too small to read or a value is missing. An inference from prices, not a record of who traded.
+     */
+    static String who(double oi, double oi0, double x, double x0, double xMin) {
+        if (Double.isNaN(oi) || Double.isNaN(oi0) || Double.isNaN(x) || Double.isNaN(x0) || oi0 <= 0) {
+            return null;
+        }
+        double dOi = oi - oi0, dx = x - x0;
+        if (Math.abs(dOi) < MIN_OI_SHARE * oi0 || Math.abs(dx) < xMin) {
+            return null;
+        }
+        return dOi > 0 ? (dx < 0 ? "WRITING" : "BUYING") : (dx > 0 ? "COVERING" : "CLOSING");
+    }
+
+    /**
+     * A wall at step {@code i}: the strike with the largest OI on its side of spot, the call wall and put wall within ATM ±
+     * {@value #STRIKES}, the near ceiling and near floor within {@value #NEAR} strikes of spot. Followed from the open so
+     * the step it took its strike is known; it moves only when another strike's OI is {@value #WALL_MARGIN} times its own
+     * or it leaves the zone. Null when no strike qualifies.
+     */
+    static Map<String, Object> wall(Map<Double, double[]> side, double[] spots, double step, int i, int j, boolean above,
+                                    boolean near) {
+        Double cur = null, from = null;
+        int since = -1;
+        Double gone = null, goneFrom = null;            // a wall that left its zone with none to replace it, and its own past
+        int goneSince = -1;
+        for (int s = 0; s <= i; s++) {
+            double sp = spots[s];
+            if (Double.isNaN(sp)) {
+                continue;
+            }
+            double atm = Math.round(sp / step) * step;
+            Double best = null;
+            double bestOi = 0;
+            for (Map.Entry<Double, double[]> e : side.entrySet()) {
+                double k = e.getKey(), oi = e.getValue()[s + 1];
+                if (inZone(k, sp, atm, step, above, near) && !Double.isNaN(oi) && oi > bestOi) {
+                    best = k;
+                    bestOi = oi;
+                }
+            }
+            if (best == null) {
+                if (cur != null && !inZone(cur, sp, atm, step, above, near)) {   // nothing on that side any more
+                    gone = cur;
+                    goneFrom = from;
+                    goneSince = since;
+                    cur = null;
+                }
+                continue;
+            }
+            if (cur == null && gone != null) {
+                if (best.equals(gone)) {                       // back on the same strike after the gap: no move
+                    cur = gone;
+                    from = goneFrom;
+                    since = goneSince;
+                } else {                                       // a new strike: moved from the one before the gap
+                    from = gone;
+                    cur = best;
+                    since = s;
+                }
+                gone = null;
+                continue;
+            }
+            if (best.equals(cur)) {
+                continue;
+            }
+            double curOi = cur == null ? Double.NaN : side.get(cur)[s + 1];
+            if (cur == null || !inZone(cur, sp, atm, step, above, near) || Double.isNaN(curOi) || bestOi > WALL_MARGIN * curOi) {
+                from = cur;
+                cur = best;
+                since = s;
+            }
+        }
+        if (cur == null) {
+            return null;
+        }
+        Map<String, Object> w = new LinkedHashMap<>();
+        double oi = side.get(cur)[i + 1], oi0 = oiAt(side, cur, j);
+        w.put("strike", cur);
+        w.put("oi", num(oi));
+        w.put("change", Double.isNaN(oi0) ? null : oi - oi0);
+        w.put("since", time(since));
+        w.put("from", from);
+        return w;
+    }
+
+    private static boolean inZone(double k, double spot, double atm, double step, boolean above, boolean near) {
+        double reach = (near ? NEAR : STRIKES) * step + 1e-6;
+        return above ? k > spot && k - (near ? spot : atm) <= reach : k < spot && (near ? spot : atm) - k <= reach;
+    }
+
+    /**
+     * [the exchange's OI prints in ({@code j}, {@code i}], the last step up to {@code i} in which near-the-money OI
+     * changed, or -1], read per contract within ATM ± {@value #BAND} of step {@code i}: a contract's OI changes once per
+     * print, so the window held as many prints as the most-changed contract changed. A print's ticks arrive over several
+     * seconds (NIFTY about :25-:32 past each minute), so a window that starts inside one can count its tail as one more.
+     * NIFTY prints about once a minute, BSE every 2½-3 minutes, so a short window can hold none.
+     */
+    static int[] prints(Map<Double, double[]> calls, Map<Double, double[]> puts, double[] spots, double step, int j, int i) {
+        double sp = spots[i];
+        if (Double.isNaN(sp)) {
+            return new int[] {0, -1};
+        }
+        double atm = Math.round(sp / step) * step;
+        List<double[]> band = new ArrayList<>();
+        for (Map<Double, double[]> side : List.of(calls, puts)) {
+            side.forEach((k, v) -> {
+                if (Math.abs(k - atm) <= BAND * step + 1e-6) {
+                    band.add(v);
+                }
+            });
+        }
+        int n = 0, last = -1;
+        for (double[] v : band) {
+            int count = 0, lastChange = -1;
+            for (int s = i; s >= 0; s--) {
+                if (changed(v, s)) {
+                    if (lastChange < 0) {
+                        lastChange = s;
+                    }
+                    if (s > j) {
+                        count++;
+                    }
+                }
+                if (s <= j + 1 && lastChange >= 0) {
+                    break;
+                }
+            }
+            n = Math.max(n, count);
+            last = Math.max(last, lastChange);
+        }
+        return new int[] {n, last};
+    }
+
+    private static boolean changed(double[] carried, int s) {
+        return !Double.isNaN(carried[s]) && !Double.isNaN(carried[s + 1]) && carried[s + 1] != carried[s];
+    }
+
+    /**
+     * One standard deviation of the index from the end of step {@code i} to 15:30, from the ATM IV: the option's variance
+     * to expiry (IV² × calendar years, as the market prices it) shared over the trading minutes left to expiry, so the
+     * nights and holidays carry none of it (an upper estimate for the rest of today).
+     */
+    static double sigmaToClose(double spot, double iv, LocalDate date, LocalDate expiry, int i,
+                               java.util.function.Predicate<LocalDate> tradingDay) {
+        if (Double.isNaN(spot) || Double.isNaN(iv) || iv <= 0 || expiry.isBefore(date)) {
+            return Double.NaN;
+        }
+        double left = minutesLeft(i);
+        if (left <= 0) {
+            return 0;
+        }
+        double trading = left;
+        for (LocalDate t = date.plusDays(1); !t.isAfter(expiry); t = t.plusDays(1)) {
+            if (tradingDay.test(t)) {
+                trading += TRADING_MINUTES;
+            }
+        }
+        return spot * iv * Math.sqrt(yearsToExpiry(date, expiry, i) * left / trading);
+    }
+
+    private static double minutesLeft(int i) {
+        return java.time.Duration.between(OPEN.plusSeconds((long) (i + 1) * STEP), CLOSE).toSeconds() / 60.0;
+    }
+
+    /** Calendar years from the end of step {@code i} to 15:30 on the expiry day. */
+    static double yearsToExpiry(LocalDate date, LocalDate expiry, int i) {
+        long secs = java.time.Duration.between(date.atTime(OPEN.plusSeconds((long) (i + 1) * STEP)), expiry.atTime(CLOSE)).toSeconds();
+        return secs / (365.0 * 86_400);
+    }
+
+    /** Black-Scholes gamma per point of the index (rates left out: days to a weekly expiry). NaN when it cannot be had. */
+    static double gamma(double spot, double strike, double iv, double years) {
+        if (Double.isNaN(spot) || Double.isNaN(iv) || iv <= 0 || years <= 0) {
+            return Double.NaN;
+        }
+        double sd = iv * Math.sqrt(years), d1 = (Math.log(spot / strike) + 0.5 * sd * sd) / sd;
+        return Math.exp(-0.5 * d1 * d1) / Math.sqrt(2 * Math.PI) / (spot * sd);
+    }
+
+    /** [call OI change over each of {@link #WINDOWS}, then put OI change over each] up to step {@code i}. */
+    private static List<Double> windowChanges(Map<Double, double[]> calls, Map<Double, double[]> puts, double k, int i) {
+        List<Double> out = new ArrayList<>(2 * WINDOWS.length);
+        for (Map<Double, double[]> side : List.of(calls, puts)) {
+            double now = oiAt(side, k, i);
+            for (int w : WINDOWS) {
+                double then = oiAt(side, k, Math.max(-1, i - w / STEP));
+                out.add(Double.isNaN(now) || Double.isNaN(then) ? null : now - then);
+            }
+        }
+        return out;
+    }
+
+    /** A carried contract's OI at step {@code s} (-1 = pre-open), NaN when none. */
+    private static double oiAt(Map<Double, double[]> side, double k, int s) {
+        double[] v = side.get(k);
+        return v == null ? Double.NaN : v[s + 1];
+    }
+
+    /** The last value of a contract up to step {@code s}, NaN when none (or {@code s} < 0: nothing kept before the open). */
+    private static double at(Map<Double, float[]> side, double k, int s) {
+        float[] v = side.get(k);
+        if (v == null) {
+            return Double.NaN;
+        }
+        for (int t = s; t >= 0; t--) {
+            if (!Float.isNaN(v[t])) {
+                return v[t];
+            }
+        }
+        return Double.NaN;
+    }
+
+    /** Contracts traded between the ends of steps {@code j} and {@code i} (from the open when {@code j} < 0). */
+    private static double windowVolume(Map<Double, float[]> side, double k, int i, int j) {
+        double now = at(side, k, i);
+        if (Double.isNaN(now)) {
+            return Double.NaN;
+        }
+        double then = j < 0 ? 0 : at(side, k, j);
+        return Double.isNaN(then) ? Double.NaN : Math.max(0, now - then);
+    }
 
     private Map<String, Object> header(LocalDate day, String u) {
         Map<String, Object> out = new LinkedHashMap<>();
@@ -271,6 +642,9 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
         if (d == null) {
             d = kept(day, u);
         }
+        if (d != null && !d.extras && !market.busy(ZonedDateTime.now(MarketTime.IST)) && rebuildTried.add(key)) {
+            rebuild(key, d, u);
+        }
         if (d == null) {
             List<LocalDate> expiries = jdbc.query("select min(expiry) from md.option_tick where session_date = ? and "
                             + "underlying = ? and expiry >= ? and recv_ts >= ? and recv_ts < ?",
@@ -294,8 +668,57 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
         return d;
     }
 
+    /** Days and indices whose format-1 rebuild has been started (once each, whatever the outcome), and those running. */
+    private final java.util.Set<String> rebuildTried = java.util.concurrent.ConcurrentHashMap.newKeySet(),
+            rebuilding = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private java.util.concurrent.ExecutorService rebuilder;
+
+    /**
+     * A day kept in format 1 (no prices, IV or volume) read again from its ticks, outside market hours, on a background
+     * thread (the request that finds it is answered from the old day at once); kept as it is when the ticks are gone.
+     * Re-checked for market hours when it runs, so one queued just before 09:00 does not read a whole day after it.
+     */
+    private void rebuild(String key, Day old, String u) {
+        synchronized (this) {
+            if (rebuilder == null) {
+                rebuilder = java.util.concurrent.Executors.newSingleThreadExecutor(
+                        Thread.ofPlatform().name("oi-tape-rebuild").daemon(true).factory());
+            }
+        }
+        rebuilding.add(key);
+        rebuilder.execute(() -> {
+            try {
+                if (market.busy(ZonedDateTime.now(MarketTime.IST))) {   // queued before 09:00, run after it: not now
+                    rebuildTried.remove(key);
+                    return;
+                }
+                Day fresh = new Day(old.date, old.expiry);
+                synchronized (fresh) {
+                    read(fresh, u, ts(old.date, CLOSE).toInstant());
+                    fresh.complete = true;
+                }
+                // kept when the ticks gave anything new (prices, IV or volume); the IV alone may be missing on old days
+                if (fresh.extraSides().stream().anyMatch(m -> !m.isEmpty())) {
+                    db.save(KIND, old.date, u, encode(fresh));
+                    days.put(key, fresh);
+                    log.info("oi tape: {} rebuilt with prices, IV and volume", key);
+                }
+            } catch (Throwable e) {
+                log.warn("oi tape: rebuilding {} failed: {}", key, e.toString());
+            } finally {
+                rebuilding.remove(key);
+            }
+        });
+    }
+
+    /** Whether the day's prices, IV and volume are being read again now (the page can wait for them). */
+    boolean rebuilding(LocalDate day, String u) {
+        return rebuilding.contains(day + "|" + u);
+    }
+
     static final String KIND = "oi-tape";
-    private static final int FORMAT = 1;
+    /** 2 (5 Nov 2026): with each contract's price, IV and volume per step; a format-1 day still reads, without them. */
+    private static final int FORMAT = 2;
 
     /** The kept complete day, now in memory; null when none is kept. */
     private Day kept(LocalDate day, String u) {
@@ -332,12 +755,22 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
                     out.writeDouble(e.getValue());
                 }
             }
+            for (Map<Double, float[]> side : d.extraSides()) {
+                out.writeInt(side.size());
+                for (Map.Entry<Double, float[]> e : side.entrySet()) {
+                    out.writeDouble(e.getKey());
+                    for (float v : e.getValue()) {
+                        out.writeFloat(v);
+                    }
+                }
+            }
         });
     }
 
     static Day decode(byte[] payload) {
         return ChartDb.decode(payload, in -> {
-            if (in.readInt() != FORMAT) {
+            int format = in.readInt();
+            if (format != 1 && format != FORMAT) {
                 return null;
             }
             Day d = new Day(LocalDate.ofEpochDay(in.readLong()), LocalDate.ofEpochDay(in.readLong()));
@@ -356,6 +789,21 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
                 int n = in.readInt();
                 for (int i = 0; i < n; i++) {
                     seed.put(in.readDouble(), in.readDouble());
+                }
+            }
+            if (format == 1) {
+                d.extras = false;
+            } else {
+                for (Map<Double, float[]> side : d.extraSides()) {
+                    int n = in.readInt();
+                    for (int i = 0; i < n; i++) {
+                        double k = in.readDouble();
+                        float[] v = new float[STEPS];
+                        for (int s = 0; s < STEPS; s++) {
+                            v[s] = in.readFloat();
+                        }
+                        side.put(k, v);
+                    }
                 }
             }
             d.readUntil = ts(d.date, CLOSE).toInstant();
@@ -409,7 +857,9 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
         // written by index, so reading them twice is harmless
         Instant overlap = d.readUntil.minus(REREAD);
         Timestamp from = Timestamp.from(overlap.isAfter(open) ? overlap : d.readUntil), to = Timestamp.from(until);
-        jdbc.query("select time_bucket('30 seconds', recv_ts) b, strike, option_type, last(oi, recv_ts) from md.option_tick "
+        // volume is the day's running total, so the bucket's largest is its last
+        jdbc.query("select time_bucket('30 seconds', recv_ts) b, strike, option_type, last(oi, recv_ts), last(ltp, recv_ts), "
+                        + "last(iv, recv_ts) filter (where iv > 0), max(volume) from md.option_tick "
                         + "where session_date = ? and underlying = ? and expiry = ? and recv_ts >= ? and recv_ts < ? and oi > 0 "
                         + "group by 1, 2, 3 order by 1",                // in time order: the last pre-open bucket seeds
                 rs -> {
@@ -423,6 +873,19 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
                     int i = (int) ((b.getEpochSecond() - open.getEpochSecond()) / STEP);
                     if (i >= 0 && i < STEPS) {
                         (put ? d.puts : d.calls).computeIfAbsent(k, x -> nan())[i] = oi;
+                        double px = rs.getDouble(5), iv = rs.getDouble(6);
+                        boolean ivKnown = !rs.wasNull();
+                        long vol = rs.getLong(7);
+                        boolean volKnown = !rs.wasNull();
+                        if (px > 0) {
+                            (put ? d.putPx : d.callPx).computeIfAbsent(k, x -> fnan())[i] = (float) px;
+                        }
+                        if (ivKnown) {
+                            (put ? d.putIv : d.callIv).computeIfAbsent(k, x -> fnan())[i] = (float) iv;
+                        }
+                        if (volKnown) {
+                            (put ? d.putVol : d.callVol).computeIfAbsent(k, x -> fnan())[i] = (float) vol;
+                        }
                     }
                 }, d.date, u, d.expiry, from, to);
         jdbc.query("select time_bucket('30 seconds', recv_ts) b, last(price, recv_ts) from md.index_tick where session_date = ? "
@@ -529,20 +992,6 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
         return out;
     }
 
-    /** A contract's last OI by the end of step {@code i} (-1 = the pre-open value), NaN when none yet. */
-    private static double value(Map<Double, double[]> steps, Map<Double, Double> seed, double k, int i) {
-        double v = seed.getOrDefault(k, Double.NaN);
-        double[] raw = steps.get(k);
-        if (raw != null) {
-            for (int s = 0; s <= i && s < raw.length; s++) {
-                if (!Double.isNaN(raw[s])) {
-                    v = raw[s];
-                }
-            }
-        }
-        return v;
-    }
-
     private static double[] carry(double[] raw, int n) {
         double[] v = new double[n];
         double last = Double.NaN;
@@ -576,6 +1025,12 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
     private static double[] nan() {
         double[] a = new double[STEPS];
         Arrays.fill(a, Double.NaN);
+        return a;
+    }
+
+    private static float[] fnan() {
+        float[] a = new float[STEPS];
+        Arrays.fill(a, Float.NaN);
         return a;
     }
 

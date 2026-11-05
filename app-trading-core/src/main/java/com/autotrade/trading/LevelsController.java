@@ -42,5 +42,10 @@ class LevelsController {
         });
     }
 
-    private static final String KIND = "levels";
+    /**
+     * v3 (5 Nov 2026): the monthly levels were added, and the prior-day levels of a day without live features come from the
+     * own capture when the stored bars end earlier; days kept before are computed again once. v4 (5 Nov 2026): zones carry
+     * their steps, so a replay shows each zone as it stood by its clock.
+     */
+    private static final String KIND = "levels-v4";
 }

@@ -39,7 +39,8 @@ export const strategyShort = (id: string) => STRATEGY_INFO[id]?.short ?? id;
 /** One strategy's latest decision on one index. */
 export interface MatrixCell { strategy: string; underlying: string; time?: string; ce: Scores; pe: Scores }
 
-const QUIET = new Set(["WATCH", "IDLE", "DONE", "?"]);
+/** Stages with nothing happening: not shown as activity. */
+export const QUIET = new Set(["WATCH", "IDLE", "DONE", "?"]);
 
 /**
  * Strategies (rows) by index (columns): each side's stage, the ECR scores where a strategy has them, and the

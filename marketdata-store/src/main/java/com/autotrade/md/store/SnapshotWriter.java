@@ -29,6 +29,11 @@ public final class SnapshotWriter implements AutoCloseable {
     private final ByteArrayOutputStream buffer = new ByteArrayOutputStream();
     private long written;
 
+    /** The research.run the snapshots are stored under. */
+    public long runId() {
+        return runId;
+    }
+
     public SnapshotWriter(DataSource dataSource, long runId) {
         this.dataSource = dataSource;
         this.runId = runId;

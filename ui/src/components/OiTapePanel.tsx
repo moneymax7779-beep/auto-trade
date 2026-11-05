@@ -1,7 +1,9 @@
-import { useEffect, useId, useMemo, useRef, useState, type PointerEvent, type ReactNode, type RefObject } from "react";
+import { useId, useMemo, useState, type PointerEvent, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { get } from "../api";
 import { useChartView, useMoment, type View } from "./chartView";
+import { CALL, PUT, big, px, useWidth } from "./oiShared";
+import { Strikes } from "./StrikeLadder";
 import { layout as surgeLayout } from "./SurgePanel";
 import { ErrorNote, Panel } from "./ui";
 
@@ -10,11 +12,6 @@ type TapeRow = [string, number, number | null, number | null, number, number, nu
 interface TapeData {
   date: string; underlying: string; expiry?: string; futuresExpiry?: string | null; strikeStep?: number; band?: number;
   stepSeconds?: number; complete?: boolean; deferred?: boolean; series: TapeRow[];
-}
-/** /api/oi-tape/strikes rows: [strike, call OI now, call OI then, put OI now, put OI then] (null = none recorded yet). */
-interface StrikesData {
-  date: string; underlying: string; at?: string; from?: string; spot?: number | null; atm?: number | null; strikeStep?: number;
-  deferred?: boolean; rows: [number, number | null, number | null, number | null, number | null][];
 }
 /** /api/surges: per index the futures volume of each minute and its normal ([IST "HH:mm", volume, normal or null]). */
 interface SurgeVolume { underlyings: { underlying: string; volume?: [string, number, number | null][] }[] }
@@ -25,7 +22,7 @@ export type TapeInsets = (width: number) => { L: number; R: number };
 
 const DAY0 = 9 * 60 + 15, DAY1 = 15 * 60 + 30;
 const FULL: View = { a: DAY0, b: DAY1 };
-const CALL = "var(--color-accent)", PUT = "var(--color-warn)", SURGE = "rgba(245,158,11,0.9)", VOL = "rgba(148,163,184,0.55)";
+const SURGE = "rgba(245,158,11,0.9)", VOL = "rgba(148,163,184,0.55)";
 /** The surge chart's margins in pixels at a width (its drawing is W units wide, scaled to the panel). */
 export const surgeInsets: TapeInsets = (w) => {
   const { W, L, R } = surgeLayout(w);
@@ -34,24 +31,6 @@ export const surgeInsets: TapeInsets = (w) => {
 const secs = (t: string) => { const [h, m, s] = t.split(":").map(Number); return h * 3600 + m * 60 + (s || 0); };
 const istMin = (t: string) => { const m = t.match(/(\d{2}):(\d{2})(?::(\d{2}))?(?!.*\d{2}:\d{2})/); return m ? Number(m[1]) * 60 + Number(m[2]) + Number(m[3] ?? 0) / 60 : NaN; };
 const hm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(Math.floor(m % 60)).padStart(2, "0")}`;
-const big = (v: number | null | undefined, signed = false) => {
-  if (v == null || !Number.isFinite(v)) return "–";
-  const a = Math.abs(v), s = signed ? (v > 0 ? "+" : v < 0 ? "−" : "") : v < 0 ? "−" : "";
-  return a >= 1e6 ? `${s}${(a / 1e6).toFixed(a >= 1e8 ? 0 : 1)}M` : a >= 1e3 ? `${s}${(a / 1e3).toFixed(0)}k` : `${s}${a.toFixed(0)}`;
-};
-const px = (v: number | null | undefined) => (v == null ? "–" : v.toLocaleString("en-IN", { maximumFractionDigits: 2 }));
-
-function useWidth<T extends HTMLElement>(): [RefObject<T | null>, number] {
-  const ref = useRef<T>(null);
-  const [w, setW] = useState(800);
-  useEffect(() => {
-    const el = ref.current; if (!el) return;
-    const ro = new ResizeObserver(() => setW(el.clientWidth || 800)); ro.observe(el); setW(el.clientWidth || 800);
-    return () => ro.disconnect();
-  }, []);
-  return [ref, w];
-}
-
 /**
  * The OI tape of one index and day (display only), drawn under the page's price chart and sharing its time window
  * (zoom either one and the other follows): the call and put OI added or removed near the money since 09:15, the flow
@@ -59,10 +38,12 @@ function useWidth<T extends HTMLElement>(): [RefObject<T | null>, number] {
  * amber), every 30 seconds from the own capture, with the day's trades as bands; and, under it, every strike's OI at
  * any moment you click. Live, it refreshes every 30 seconds. The index itself is the chart above.
  */
-export function OiTapePanel({ underlying, date, live, trades = [], title, insets = surgeInsets, bare }:
+export function OiTapePanel({ underlying, date, live, trades = [], title, insets = surgeInsets, bare, until }:
   { underlying: string; date: string; live?: boolean; trades?: TapeTrade[]; title?: string; insets?: TapeInsets;
     /** drawn inside the price chart's card (no card of its own), right under the chart */
-    bare?: boolean }) {
+    bare?: boolean;
+    /** a running replay's clock ("HH:mm:ss"): the steps that had ended by then */
+    until?: string }) {
   // the strikes around the money the OI lines and flow bars count (an experiment, 23 Oct: ATM ± 3 against the usual ± 5)
   const [band, setBand] = useState<3 | 5>(5);
   const q = useQuery({
@@ -81,9 +62,12 @@ export function OiTapePanel({ underlying, date, live, trades = [], title, insets
   // the moment clicked here or on the price chart above (shared): the strike ladder shows it
   const [bucket, setBucket] = useState<"auto" | 30 | 60 | 300>("auto");
   const [pinM, setPinM] = useMoment("pin", date, underlying);
-  const volume = useMemo(() => surges.data?.underlyings.find((u) => u.underlying === underlying)?.volume ?? [], [surges.data, underlying]);
+  const volume = useMemo(() => (surges.data?.underlyings.find((u) => u.underlying === underlying)?.volume ?? [])
+    .filter(([t]) => !until || secs(t) + 60 <= secs(until)), [surges.data, underlying, until]);
   const head = title ?? `${underlying} · OI tape · ${date}`;
-  const d = q.data;
+  const d = useMemo(() => (q.data && until
+    ? { ...q.data, complete: false, series: q.data.series.filter((r) => secs(r[0]) + (q.data!.stepSeconds ?? 30) <= secs(until)) }
+    : q.data), [q.data, until]);
   const right = d?.expiry ? <span className="text-xs text-muted">expiry {d.expiry} · ATM ± {d.band} strikes · every {d.stepSeconds} s{d.complete ? "" : " · live"}</span> : null;
   const frame = (body: ReactNode) => bare ? (
     <div className="mt-4 border-t border-line pt-3">
@@ -308,89 +292,3 @@ function Tape({ d, date, underlying, volume, view, setView, trades, pinned, setP
   );
 }
 
-function Strikes({ underlying, date, at, pinned, live }: { underlying: string; date: string; at: string; pinned: boolean; live?: boolean }) {
-  const [back, setBack] = useState(300);
-  // live and unpinned, "at" follows the tape's latest step, so a new step is a new query: no timer of its own
-  const q = useQuery({
-    queryKey: ["oi-strikes", underlying, date, at, back],
-    queryFn: () => get<StrikesData>(`/api/oi-tape/strikes?underlying=${underlying}&date=${date}&at=${at}&back=${back}`),
-    placeholderData: (prev) => prev,          // keep the last ladder while the next loads (no 700 px collapse every 30 s)
-  });
-  const [ref, W] = useWidth<HTMLDivElement>();
-  const d = q.data;
-  const rows = (d?.rows ?? []).map(([k, c, c0, p, p0]) => ({ k, c, c0, p, p0, dc: c != null && c0 != null ? c - c0 : null, dp: p != null && p0 != null ? p - p0 : null }));
-  const mx = Math.max(1, ...rows.flatMap((r) => [r.c ?? 0, r.p ?? 0, r.c0 ?? 0, r.p0 ?? 0]));
-  const rowH = 22, labW = 64, deltaW = 112, top = 6;
-  const barW = Math.max(120, W - labW - deltaW - 8);
-  const H = top + rows.length * rowH + 6;
-  const xs = (v: number) => labW + (v / mx) * barW;
-  const spotY = (() => {
-    if (!d?.spot || !d.strikeStep || rows.length < 2) return null;
-    const i = (rows[0].k - d.spot) / d.strikeStep;
-    return top + (i + 0.5) * rowH;
-  })();
-  const movers = (key: "dc" | "dp", sign: 1 | -1) => rows.filter((r) => r[key] != null && sign * (r[key] as number) > 0)
-    .sort((a, b) => sign * ((b[key] as number) - (a[key] as number))).slice(0, 2);
-  const mv = (key: "dc" | "dp", sign: 1 | -1) => movers(key, sign).map((r) => `${r.k.toLocaleString("en-IN")} ${big(r[key], true)}`).join(", ") || "–";
-  return (
-    <div ref={ref} className="mt-4 border-t border-line pt-3">
-      <div className="flex flex-wrap items-center gap-2 text-xs">
-        <span className="font-semibold">Strikes at {d?.at ?? at}{pinned ? "" : live ? " (latest)" : " (close)"}</span>
-        <span className="text-muted">· change since {d?.from ?? "…"}</span>
-        <span className="ml-2 text-muted">over</span>
-        {[30, 60, 300, 900, 1800].map((b) => (
-          <button key={b} type="button" onClick={() => setBack(b)}
-            className={`rounded border px-2 py-0.5 ${back === b ? "border-accent bg-accent/10" : "border-line text-muted hover:text-text"}`}>{b < 60 ? `${b} s` : `${b / 60} min`}</button>
-        ))}
-        {d?.spot != null && <span className="ml-auto num text-muted">spot {px(d.spot)} · ATM {px(d.atm)}</span>}
-      </div>
-      {q.error ? <ErrorNote error={q.error} /> : d?.deferred ? <p className="mt-2 text-sm text-muted">Built after the close.</p> : (
-        <>
-        {/* a short window often holds no OI print at all: the exchange publishes NIFTY option OI once a minute, BSE every ~2.7 min */}
-        {/* judged near the money (ATM ± 5): deep in-the-money strikes also tick off the exchange's clock */}
-        {d && rows.length > 0 && rows.filter((r) => d.atm == null || !d.strikeStep || Math.abs(r.k - d.atm) <= 5 * d.strikeStep + 1e-6)
-          .every((r) => (r.dc ?? 0) === 0 && (r.dp ?? 0) === 0) && (
-          <p className="mt-2 text-xs text-warn">No OI print between {d.from} and {d.at}: the exchange publishes {underlying === "NIFTY" || underlying === "BANKNIFTY"
-            ? "NSE option OI about once a minute" : "BSE option OI every 2½–3 minutes"}, so a {back < 60 ? `${back}-second` : `${back / 60}-minute`} window can fall between two prints. Try a longer window or another moment.</p>
-        )}
-          <div className="mt-2 grid gap-x-6 gap-y-1 text-xs sm:grid-cols-2 num">
-            <span><span style={{ color: CALL }}>Calls built</span> {mv("dc", 1)}</span>
-            <span><span style={{ color: PUT }}>Puts built</span> {mv("dp", 1)}</span>
-            <span><span style={{ color: CALL }}>Calls unwound</span> {mv("dc", -1)}</span>
-            <span><span style={{ color: PUT }}>Puts unwound</span> {mv("dp", -1)}</span>
-          </div>
-          <div className="mt-2">
-            <svg viewBox={`0 0 ${W} ${H}`} width="100%" role="img" aria-label={`${underlying} OI by strike at ${d?.at ?? at}`}>
-              {rows.map((r, i) => {
-                const y0 = top + i * rowH, atm = d?.atm === r.k, bh = (rowH - 6) / 2;
-                return (
-                  <g key={r.k}>
-                    {atm && <rect x={0} y={y0} width={W} height={rowH} fill="var(--color-accent)" opacity={0.08} />}
-                    <text x={labW - 8} y={y0 + rowH / 2 + 4} textAnchor="end" className={`fill-current text-[11px] num ${atm ? "font-semibold" : "opacity-70"}`}>
-                      {r.k.toLocaleString("en-IN")}</text>
-                    {r.c != null && <rect x={labW} y={y0 + 2} width={Math.max(0, xs(r.c) - labW)} height={bh} rx={2} fill={CALL} opacity={0.85} />}
-                    {r.c0 != null && <line x1={xs(r.c0)} x2={xs(r.c0)} y1={y0 + 1} y2={y0 + 3 + bh} stroke="var(--color-text)" strokeWidth={1.5} />}
-                    {r.p != null && <rect x={labW} y={y0 + 4 + bh} width={Math.max(0, xs(r.p) - labW)} height={bh} rx={2} fill={PUT} opacity={0.85} />}
-                    {r.p0 != null && <line x1={xs(r.p0)} x2={xs(r.p0)} y1={y0 + 3 + bh} y2={y0 + 5 + 2 * bh} stroke="var(--color-text)" strokeWidth={1.5} />}
-                    <text x={W - deltaW / 2 - 4} y={y0 + rowH / 2 + 4} textAnchor="end" className="fill-current text-[10px] num" style={{ fill: CALL }}>
-                      {r.dc != null ? big(r.dc, true) : "–"}</text>
-                    <text x={W - 4} y={y0 + rowH / 2 + 4} textAnchor="end" className="fill-current text-[10px] num" style={{ fill: PUT }}>
-                      {r.dp != null ? big(r.dp, true) : "–"}</text>
-                    <title>{`${r.k.toLocaleString("en-IN")}: calls ${big(r.c)} (${big(r.dc, true)}), puts ${big(r.p)} (${big(r.dp, true)})`}</title>
-                  </g>
-                );
-              })}
-              {spotY != null && spotY > 0 && spotY < H && (
-                <g>
-                  <line x1={labW} x2={W - deltaW} y1={spotY} y2={spotY} stroke="var(--color-text)" strokeDasharray="5 4" strokeWidth={1.2} />
-                  <text x={W - deltaW - 4} y={spotY - 3} textAnchor="end" className="fill-current text-[10px] opacity-70">spot {px(d?.spot)}</text>
-                </g>
-              )}
-            </svg>
-          </div>
-          <p className="text-xs text-muted">Bars: call (top) and put (bottom) OI at {d?.at ?? at}; the black tick is where it stood at {d?.from ?? "…"}. Right: the change in calls and puts (hover a row for the totals). The highlighted row is the ATM strike.</p>
-        </>
-      )}
-    </div>
-  );
-}

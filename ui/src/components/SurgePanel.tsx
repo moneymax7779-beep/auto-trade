@@ -3,11 +3,14 @@ import { useQuery } from "@tanstack/react-query";
 import { get } from "../api";
 import { ErrorNote, Loading, Panel } from "./ui";
 import {
-  LEVEL_COLORS, LevelTogglesBar, levelColor, mergeLevels, tagName, useLevels, useLevelToggles, visibleLevels, visibleZones,
-  type LevelToggles, type LevelsData,
+  LEVEL_COLORS, LevelTogglesBar, levelColor, mergeLevels, tagName, useCloseAuction, useLevels, useLevelToggles, useMaxPain, visibleLevels,
+  visibleZones, type LevelToggles, type LevelsData,
 } from "./levels";
 import { presetView, useChartView, useLinkedTime, type View, useMoment } from "./chartView";
 import { compactRupees, type ChartTrade } from "./TimelineChart";
+import { MomentInspector, TradeDetail, useTradeContext, type TradeContext } from "./TradeInspector";
+import { useLiveBars, withLiveCloses } from "./liveTicks";
+import { strategyShort } from "./strategies";
 
 /** One option side's flow around a surge: ATM ± 2 total OI change and the ATM mid before / after. */
 interface SideFlow { oi: number; pct: number; mid0: number; mid1: number; bid: number; ask: number; label: string; score: number }
@@ -39,6 +42,8 @@ const signed = (n: number | null | undefined, d = 1) =>
   n == null ? "–" : `${n > 0 ? "+" : n < 0 ? "−" : ""}${nf(Math.abs(n), d)}`;
 const tone = (n: number | null | undefined) => (n == null || n === 0 ? "" : n > 0 ? "text-up" : "text-down");
 const minutes = (t: string) => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
+/** Seconds of an IST "HH:mm[:ss]" time. */
+const secsOf = (t: string) => { const [h, m, s] = t.split(":").map(Number); return h * 3600 + m * 60 + (s || 0); };
 const hhmm = (m: number) => `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
 const flowColor = (f: Flow) => (f === "bullish" ? "var(--color-up)" : f === "bearish" ? "var(--color-down)" : "var(--color-muted)");
 /** Short labels so one minute fits one table row. */
@@ -101,9 +106,51 @@ const dominant = (b: Burst): Flow =>
 export interface DayNav { prev?: string; next?: string; go: (day: string) => void }
 const shortDay = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString("en-IN", { day: "numeric", month: "short", timeZone: "UTC" });
 
-export function SurgePanel({ live, date, underlying, nav, trades = NO_TRADES }: { live?: boolean; date?: string; underlying?: string; nav?: DayNav;
+/**
+ * A replay's chart as of its own clock (user, 5 Nov 2026: "see the replay moving on the chart as well like live"): the
+ * day's data cut at {@code until} ("HH:mm:ss", the replay's last event), so the chart grows as the replay runs. A minute
+ * bar (price, volume, surge) shows once its minute has closed, as live: its close is not known before.
+ */
+function cutDay(u: UnderlyingSurges, until: string): UnderlyingSurges {
+  const end = secsOf(until);
+  const closed = (t: string) => secsOf(t) + 60 <= end;
+  // a minute later than t, closed by the replay's clock
+  const done = (t: string, minutes: number) => secsOf(t) + minutes * 60 + 60 <= end;
+  return { ...u, index: u.index.filter(([t]) => closed(t)), volume: u.volume?.filter(([t]) => closed(t)),
+    // as live: a surge shows once minute t + 1 has closed (its flow is read then), and each outcome once its horizon has
+    // (code review 5 Nov 2026: the finished day's outcomes showed the moment the surge did)
+    surges: u.surges.filter((s) => done(s.t, 1)).map((s) => (s.from ? {
+      ...s, move5: done(s.from, 5) ? s.move5 : null, move15: done(s.from, 15) ? s.move15 : null,
+      move30: done(s.from, 30) ? s.move30 : null, best15: done(s.from, 15) ? s.best15 : null, worst15: done(s.from, 15) ? s.worst15 : null,
+    } : s)) };
+}
+
+/**
+ * The day's levels known by {@code until}: a level or zone from the moment it is known ("from"), the VWAP / EMA20
+ * lines up to the last closed minute.
+ */
+function cutLevels(l: LevelsData | undefined, until: string): LevelsData | undefined {
+  if (!l) return l;
+  const end = secsOf(until), known = (t: string) => secsOf(t) <= end, closed = (t: string) => secsOf(t) + 60 <= end;
+  return { ...l, levels: l.levels.filter((x) => known(x.from)),
+    // a zone as it stood by the clock: its band and touches after the last touch confirmed by then (a step's minute
+    // has closed), not the day's final ones
+    zones: l.zones.flatMap((z) => {
+      if (!z.steps) return known(z.from) ? [z.until && !known(z.until) ? { ...z, until: null } : z] : [];
+      const step = [...z.steps].reverse().find(([t]) => closed(t));
+      if (!step) return [];
+      return [{ ...z, lo: step[1], hi: step[2], touches: step[3], until: z.until && closed(z.until) ? z.until : null }];
+    }),
+    lines: { vwap: l.lines.vwap.filter(([t]) => closed(t)), ema20: l.lines.ema20.filter(([t]) => closed(t)) } };
+}
+
+export function SurgePanel({ live, date, underlying, nav, trades = NO_TRADES, until, sessionId }: { live?: boolean; date?: string; underlying?: string; nav?: DayNav;
   /** the day's trades on this index, drawn on the price chart (entry arrow, exit square, the index from entry to exit) */
-  trades?: ChartTrade[] }) {
+  trades?: ChartTrade[];
+  /** a running replay's clock: the chart shows the day up to it */
+  until?: string;
+  /** the session whose trades are drawn: a trade's marker opens its entry / exit data, a pinned minute the session then */
+  sessionId?: number }) {
   const q = useQuery({
     queryKey: ["surges", date ?? "latest"],
     queryFn: () => get<SurgeReport>(`/api/surges${date ? `?date=${date}` : ""}`),
@@ -121,15 +168,32 @@ export function SurgePanel({ live, date, underlying, nav, trades = NO_TRADES }: 
   return (
     <div className="space-y-4">
       {r.underlyings.filter((u) => !underlying || u.underlying === underlying).map((u) => (
-        <UnderlyingSurgesPanel key={u.underlying} date={r.date!} data={u} live={live} filters={filters} onFilters={update} nav={nav}
+        <UnderlyingSurgesPanel key={u.underlying} date={r.date!} data={until ? cutDay(u, until) : u} live={live} until={until} sessionId={sessionId}
+          filters={filters} onFilters={update} nav={nav}
           trades={u.underlying === underlying ? trades : NO_TRADES} />
       ))}
     </div>
   );
 }
 
-function UnderlyingSurgesPanel({ date, data, live, filters, onFilters, nav, trades }:
-  { date: string; data: UnderlyingSurges; live?: boolean; filters: Filters; onFilters: (f: Filters) => void; nav?: DayNav; trades: ChartTrade[] }) {
+function UnderlyingSurgesPanel({ date, data: polled, live, until, sessionId, filters, onFilters, nav, trades }:
+  { date: string; data: UnderlyingSurges; live?: boolean; until?: string; sessionId?: number; filters: Filters; onFilters: (f: Filters) => void;
+    nav?: DayNav; trades: ChartTrade[] }) {
+  // the pushed price (live and paced replays): the last minute moves as the index does, between the 30-second refreshes
+  const pushed = useLiveBars(polled.underlying, date, !!live);
+  const data = useMemo(() => (pushed.bars ? { ...polled, index: withLiveCloses(polled.index, pushed.bars, until) } : polled),
+    [polled, pushed.bars, pushed.version]);
+  const [picked, setPicked] = useState<ChartTrade | null>(null);
+  const contexts = useTradeContext(sessionId, !!live, picked != null);
+  // a chart trade is the stored trade of the same strategy and side that opened in the same minute
+  // the trade's row: same index, side and strategy, opened within a minute of the marker (an open trade's row carries the
+  // decision's time, its marker the fill's, a second or two later and possibly in the next minute); the closest wins
+  const pickedContext: TradeContext | undefined = picked ? (contexts.data ?? [])
+    .filter((c) => c.underlying === data.underlying && (picked.side === "STRADDLE" || c.option_side === picked.side)
+      && (!c.strategy_id || strategyShort(c.strategy_id) === picked.who)
+      && Math.abs(secsOf(c.opened_at.slice(11, 19)) - secsOf(picked.from)) <= 90)
+    .sort((x, y) => Math.abs(secsOf(x.opened_at.slice(11, 19)) - secsOf(picked.from)) - Math.abs(secsOf(y.opened_at.slice(11, 19)) - secsOf(picked.from)))[0]
+    : undefined;
   const shown = useMemo(
     () => data.surges.filter((s) => filters.flows.includes(s.flow) && s.x >= filters.minX),
     [data.surges, filters],
@@ -142,13 +206,17 @@ function UnderlyingSurgesPanel({ date, data, live, filters, onFilters, nav, trad
     if (!open) setSelected(null);                         // a selected surge keeps the table open
     try { localStorage.setItem(TABLE_KEY, open ? "open" : "closed"); } catch { /* not kept */ }
   };
-  const levels = useLevels(date, data.underlying, live);
+  const fetched = useLevels(date, data.underlying, live);
+  const levels = { ...fetched, data: until ? cutLevels(fetched.data, until) : fetched.data };
   const [toggles, setToggles] = useLevelToggles();
   const count = (f: Flow) => data.surges.filter((s) => s.flow === f).length;
   return (
     <Panel
       title={<>{data.underlying} · futures surges and OI flow · {date}
-        {live && <span className="ml-2 text-xs font-normal text-muted">updates every 30 s; a surge shows once the next minute closes</span>}</>}
+        {live && <span className="ml-2 text-xs font-normal text-muted">
+          {pushed.streaming
+            ? <><span className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-up align-middle" />price live (pushed); volume and surges every 30 s</>
+            : "updates every 30 s; a surge shows once the next minute closes"}</span>}</>}
       right={<span className="text-xs text-muted num">{data.surges.length} surges · {count("bullish")} bullish · {count("bearish")} bearish · {count("mixed")} mixed</span>}
     >
       {!data.historyAvailable && <p className="mb-2 text-xs text-warn">Volume history from zt-tiger-v2 is unavailable, so surges cannot be ranked.</p>}
@@ -158,8 +226,17 @@ function UnderlyingSurgesPanel({ date, data, live, filters, onFilters, nav, trad
       {data.underlying === "SENSEX" && (
         <p className="mb-2 text-xs text-warn">SENSEX futures trade thinly (hundreds to a few thousand contracts a minute), so its surges rest on small volumes.</p>
       )}
-      <SurgeChart date={date} live={live} nav={nav} data={data} shown={shown} groups={groups} selected={selected} onSelect={setSelected}
-        levels={levels.data} toggles={toggles} trades={trades} />
+      <SurgeChart date={date} live={live} until={until} nav={nav} data={data} shown={shown} groups={groups} selected={selected}
+        onSelect={setSelected} levels={levels.data} toggles={toggles} trades={trades} onPickTrade={sessionId != null ? setPicked : undefined} />
+      {picked && sessionId != null && (
+        <div className="mt-3">
+          {pickedContext
+            ? <TradeDetail trade={pickedContext} all={contexts.data ?? []} sessionId={sessionId} onClose={() => setPicked(null)} />
+            : <p className="text-xs text-muted">{contexts.isLoading ? "Loading the trade's data…" : contexts.error
+              ? `The trade's data is not available here (${String(contexts.error)}).` : "No stored data for this trade yet."}</p>}
+        </div>
+      )}
+      {sessionId != null && <div className="mt-3"><MomentInspector sessionId={sessionId} date={date} underlying={data.underlying} replayTime={until} /></div>}
       <button type="button" aria-expanded={tableOpen || selected != null} onClick={() => setTableOpen(!(tableOpen || selected != null))}
         className="mt-3 flex items-center gap-1.5 text-sm font-semibold hover:text-accent">
         <span className="inline-block w-3 text-xs">{tableOpen || selected != null ? "▾" : "▸"}</span>
@@ -279,9 +356,11 @@ function loadSize(): Size {
   return "S";
 }
 
-function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, levels, toggles, trades }:
-  { date: string; live?: boolean; nav?: DayNav; data: UnderlyingSurges; shown: Surge[]; groups: Burst[]; selected: string | null;
-    onSelect: (t: string | null) => void; levels?: LevelsData; toggles: LevelToggles; trades: ChartTrade[] }) {
+function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onSelect, levels, toggles, trades, onPickTrade }:
+  { date: string; live?: boolean; until?: string; nav?: DayNav; data: UnderlyingSurges; shown: Surge[]; groups: Burst[]; selected: string | null;
+    onSelect: (t: string | null) => void; levels?: LevelsData; toggles: LevelToggles; trades: ChartTrade[];
+    /** a click on a trade's entry arrow or exit square (its data opens under the chart) */
+    onPickTrade?: (t: ChartTrade) => void }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const clipId = `plot-${useId().replace(/:/g, "")}`;
   const [hover, setHover] = useState<{ m: number; y: number } | null>(null);
@@ -312,6 +391,20 @@ function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, 
     vwap: new Map((levels?.lines.vwap ?? []).map(([t, v]) => [minutes(t), v])),
     ema20: new Map((levels?.lines.ema20 ?? []).map(([t, v]) => [minutes(t), v])),
   }), [levels]);
+  // the nearest expiry's max pain as the day went: [time, strike, strikes with OI] where it changed
+  const maxPain = useMaxPain(date, data.underlying, live, toggles.maxPain);
+  // a max-pain step is known at its end (30 s after its label)
+  const mpRows = toggles.maxPain ? (maxPain.data?.series ?? []).filter(([t]) => !until || secsOf(t) + 30 <= secsOf(until)) : [];
+  const mpAt = (m: number) => { let v: number | undefined; for (const r of mpRows) { if (minutes(r[0]) <= m) v = r[1]; else break; } return v; };
+  // the closing auction (15:10-15:30): the options' synthetic index, and from 15:27 the auction's indicative close; a
+  // 15-second step is known at its end
+  const auction = useCloseAuction(date, data.underlying, live, toggles.auction, until);
+  const auRows = toggles.auction ? (auction.data?.series ?? []).filter(([t]) => !until || secsOf(t) + 15 <= secsOf(until)) : [];
+  const synthRows = auRows.filter((r) => r[1] != null) as [string, number, number | null, number | null][];
+  const iepRows = auRows.filter((r) => r[2] != null && r[0] >= "15:27:00") as [string, number | null, number, number | null][];
+  const closePrint = auction.data?.close != null && auction.data.closeAt && (!until || secsOf(auction.data.closeAt) <= secsOf(until))
+    ? { m: secsOf(auction.data.closeAt) / 60, v: auction.data.close } : null;
+  const auAt = (m: number) => { let r: (typeof auRows)[number] | undefined; for (const x of auRows) { if (secsOf(x[0]) / 60 <= m) r = x; else break; } return r; };
   const lastMinute = pts.length ? minutes(pts[pts.length - 1][0]) : X1;
   const hasChart = pts.length >= 2;
   // the premium pane's strike: picked, else the selected surge's ATM, else the latest ATM
@@ -326,7 +419,9 @@ function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, 
     refetchInterval: live ? 30_000 : false,
     placeholderData: (prev) => prev,
   });
-  const prem = showPremium ? premium.data : undefined;
+  const prem = !showPremium || !premium.data ? undefined : until
+    ? { ...premium.data, CE: premium.data.CE.filter(([t]) => secsOf(t) + 60 <= secsOf(until)), PE: premium.data.PE.filter(([t]) => secsOf(t) + 60 <= secsOf(until)) }
+    : premium.data;
   const premMaps = useMemo(() => ({
     CE: new Map((prem?.CE ?? []).map(([t, mid]) => [minutes(t), mid])),
     PE: new Map((prem?.PE ?? []).map(([t, mid]) => [minutes(t), mid])),
@@ -408,7 +503,14 @@ function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, 
   const zs = levels ? visibleZones(levels.zones, toggles).filter((z) => minutes(z.from) <= b && (!z.until || minutes(z.until) >= a)) : [];
   // auto-fit: the visible prices, widened a little for levels just outside them
   const inBand = (v: number) => v >= pLo - near && v <= pHi + near;
-  const fitted = [pLo, pHi, ...lv.filter((l) => inBand(l.price)).map((l) => l.price),
+  const mpNow = mpAt(b);
+  // the auction lines in view are part of the picture: the range always holds them
+  // (only when zoomed into the close: on a whole day an off auction estimate would flatten the day's line)
+  const auInView = a < minutes("15:00") ? [] : [...synthRows.map((r) => [r[0], r[1]] as const), ...iepRows.map((r) => [r[0], r[2]] as const)]
+    .filter(([t]) => secsOf(t) / 60 >= a && secsOf(t) / 60 <= b).map(([, v]) => v);
+  const fitted = [pLo, pHi, ...auInView, ...(closePrint && closePrint.m >= a && closePrint.m <= b ? [closePrint.v] : []),
+    ...lv.filter((l) => inBand(l.price)).map((l) => l.price),
+    ...(mpNow != null && inBand(mpNow) ? [mpNow] : []),
     ...zs.filter((z) => inBand(z.lo) || inBand(z.hi)).flatMap((z) => [z.lo, z.hi])];
   const fLo = Math.min(...fitted), fHi = Math.max(...fitted), pad = Math.max((fHi - fLo) * 0.06, 1);
   const y0 = manualY?.lo ?? fLo - pad, y1 = manualY?.hi ?? fHi + pad;
@@ -417,8 +519,19 @@ function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, 
   const inY = (v: number) => v >= y0 && v <= y1;
   const drawnLevels = lv.filter((l) => inY(l.price));
   const drawnZones = zs.filter((z) => z.hi >= y0 && z.lo <= y1);
-  const above = lv.filter((l) => l.price > y1).sort((p, q) => p.price - q.price).slice(0, narrow ? 1 : 2);
-  const below = lv.filter((l) => l.price < y0).sort((p, q) => q.price - p.price).slice(0, narrow ? 1 : 2);
+  // off the chart: the nearest levels (and max pain) above and below, named in a note
+  const off = mpNow != null ? [...lv, { name: "Max pain", price: mpNow }] : lv;
+  const above = off.filter((l) => l.price > y1).sort((p, q) => p.price - q.price).slice(0, narrow ? 1 : 2);
+  const below = off.filter((l) => l.price < y0).sort((p, q) => q.price - p.price).slice(0, narrow ? 1 : 2);
+  // max pain as a step line: flat until it moves
+  const mpPoints = mpRows.flatMap((r, i) => {
+    const next = mpRows[i + 1];
+    const x0 = X(minutes(r[0])), y = Y(r[1]);
+    // the last value holds to the replay's clock (the series lists only the steps where it moved, and the day's last)
+    const end = until ? X(secsOf(until) / 60) : x0;
+    return next ? [`${x0.toFixed(1)},${y.toFixed(1)}`, `${X(minutes(next[0])).toFixed(1)},${y.toFixed(1)}`]
+      : [`${x0.toFixed(1)},${y.toFixed(1)}`, `${Math.max(x0, end).toFixed(1)},${y.toFixed(1)}`];
+  }).join(" ");
   const VY = (x: number) => VY0 + VOL_H - (Math.min(x, X_CAP) / X_CAP) * VOL_H;
   const gridStep = niceStep(y1 - y0, PRICE_H / 40);
   const grid: number[] = [];
@@ -526,7 +639,8 @@ function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, 
     const burstSplit = whole && split && split.b + split.s > 0
       ? { start: whole.start, end: whole.end, pct: Math.round((100 * split.b) / (split.b + split.s)) } : null;
     return { m: hover.m, price, vol: vols.get(hover.m), surge: byMinute.get(hover.m), inside, up, down, flips: burst?.flips ?? [], burstSplit,
-      vwap: lineMaps.vwap.get(hover.m), ema: lineMaps.ema20.get(hover.m),
+      vwap: lineMaps.vwap.get(hover.m), ema: lineMaps.ema20.get(hover.m), maxPain: mpAt(hover.m),
+      auction: hover.m >= minutes("15:10") ? auAt(hover.m + 59 / 60) : undefined,
       ce: prem ? premAt("CE", hover.m) : null, pe: prem ? premAt("PE", hover.m) : null };
   })();
   const tipLeft = hover == null ? 0 : (X(hover.m) / W) * 100;
@@ -658,6 +772,27 @@ function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, 
                   points={line.map(([t, v]) => `${X(minutes(t)).toFixed(1)},${Y(v).toFixed(1)}`).join(" ")} />
               );
             })}
+            {mpRows.length > 0 && (
+              <polyline fill="none" stroke={LEVEL_COLORS.maxPain} strokeWidth="1.4" strokeDasharray="2 3" opacity={0.9} points={mpPoints} />
+            )}
+            {synthRows.length > 1 && (
+              <polyline fill="none" stroke={LEVEL_COLORS.synthetic} strokeWidth="1.5" strokeDasharray="5 3" opacity={0.95}
+                points={synthRows.map((r) => `${X(secsOf(r[0]) / 60).toFixed(1)},${Y(r[1]).toFixed(1)}`).join(" ")}>
+                <title>synthetic index from the options (strike + call − put, less the 15:05-15:15 premium): where the options trade, not the close</title>
+              </polyline>
+            )}
+            {iepRows.length > 1 && (
+              <polyline fill="none" stroke={LEVEL_COLORS.auction} strokeWidth="1.8" opacity={0.95}
+                points={iepRows.map((r) => `${X(secsOf(r[0]) / 60).toFixed(1)},${Y(r[2]).toFixed(1)}`).join(" ")}>
+                <title>the closing auction's indicative close (each stock's indicative price, weighted): usually within about 10 NIFTY points of the close at 15:28, far off on some expiry days</title>
+              </polyline>
+            )}
+            {closePrint && closePrint.m >= a && closePrint.m <= b && inY(closePrint.v) && (
+              <g>
+                <circle cx={X(closePrint.m)} cy={Y(closePrint.v)} r={4} fill="var(--color-panel)" stroke="var(--color-text)" strokeWidth={1.5} />
+                <title>official close {nf(closePrint.v, 2)} at {auction.data?.closeAt}</title>
+              </g>
+            )}
             <polyline fill="none" stroke="var(--color-accent)" strokeWidth="1.6"
               points={pts.map((p) => `${X(minutes(p[0])).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(" ")} />
             {shown.filter((s) => s.spot != null && minutes(s.t) >= a - 1 && minutes(s.t) <= b + 1).map((s) => {
@@ -676,6 +811,13 @@ function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, 
             {/* drawn over the surge dots (no pointer events, so the dots stay clickable). The day's trades: entry arrow (a call below the price, a put above, a straddle as a dot), the index from entry to
                 exit (dashed while open, to the latest price), an exit square coloured by the result; display only (no clicks) */}
             {trades.map((tr) => {
+              const pickable = (t: ChartTrade) => onPickTrade ? {
+                pointerEvents: "all" as const, className: "cursor-pointer", role: "button", tabIndex: 0,
+                "aria-label": `trade #${t.n} ${t.who}: show its entry and exit data`,
+                onPointerDown: (e: PointerEvent<SVGElement>) => e.stopPropagation(),
+                onClick: (e: { stopPropagation: () => void }) => { e.stopPropagation(); onPickTrade(t); },
+                onKeyDown: (e: { key: string; preventDefault: () => void }) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onPickTrade(t); } },
+              } : {};
               const m0 = minutes(tr.from), m1 = tr.to ? minutes(tr.to) : lastMinute;
               const p0 = at(m0), p1 = at(m1);
               if (p0 == null || m1 < a || m0 > b) return null;
@@ -687,11 +829,15 @@ function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, 
                 <g key={`${tr.n}-${tr.from}`} pointerEvents="none">
                   <line x1={x0} y1={y0} x2={x1} y2={y1p} stroke={col} strokeWidth={3.5} strokeLinecap="round" opacity={0.85}
                     strokeDasharray={tr.to ? undefined : "6 4"} />
-                  {tr.side === "STRADDLE"
-                    ? <circle cx={x0} cy={y0} r={4.5} fill={entryCol} stroke="var(--color-panel)" />
-                    : <path d={`M${x0 - 5},${ay - 4 * dir} L${x0 + 5},${ay - 4 * dir} L${x0},${ay + 5 * dir} Z`} fill={entryCol} />}
+                  <g {...pickable(tr)}>
+                    {tr.side === "STRADDLE"
+                      ? <circle cx={x0} cy={y0} r={4.5} fill={entryCol} stroke="var(--color-panel)" />
+                      : <path d={`M${x0 - 5},${ay - 4 * dir} L${x0 + 5},${ay - 4 * dir} L${x0},${ay + 5 * dir} Z`} fill={entryCol} />}
+                    <title>#{tr.n} {tr.who} entry {tr.from}: click for the data at entry and exit</title>
+                  </g>
                   <text x={x0 + 6} y={put ? ay - 6 : ay + 13} fontSize="10" fill={entryCol} className="num" {...HALO}>#{tr.n} {tr.who}</text>
-                  {tr.to && <rect x={x1 - 4} y={y1p + (put ? 6 : -14)} width={8} height={8} fill={col} />}
+                  {tr.to && <rect x={x1 - 4} y={y1p + (put ? 6 : -14)} width={8} height={8} fill={col} {...pickable(tr)}>
+                    <title>#{tr.n} {tr.who} exit {tr.to}: click for the data at entry and exit</title></rect>}
                   <text x={x1 + 6} y={y1p + (put ? 15 : -8)} fontSize="10" fill={col} className="num font-semibold" {...HALO}>
                     #{tr.n} {tr.to ? "" : "open "}{compactRupees(tr.net)}</text>
                 </g>
@@ -707,6 +853,19 @@ function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, 
               const v = lineMaps[k].get(minutes(lastShown[0]));
               return v != null && inY(v) ? [{ key: k, y: Y(v), text: `${k === "vwap" ? "VWAP" : "EMA"} ${nf(v, 0)}`, full: k, color: LEVEL_COLORS[k], fill: false }] : [];
             }) : []),
+            ...(mpNow != null && inY(mpNow) ? [{ key: "maxpain", y: Y(mpNow), text: `MaxP ${nf(mpNow, 0)}`,
+              full: `max pain, expiry ${maxPain.data?.expiry ?? ""}`, color: LEVEL_COLORS.maxPain, fill: false }] : []),
+            ...(() => {
+              // the auction lines' last values in view
+              const s = [...synthRows].reverse().find((r) => secsOf(r[0]) / 60 <= b);
+              const i = [...iepRows].reverse().find((r) => secsOf(r[0]) / 60 <= b);
+              return [
+                ...(s && secsOf(s[0]) / 60 >= a && inY(s[1]) ? [{ key: "synth", y: Y(s[1]), text: `Syn ${nf(s[1], 0)}`,
+                  full: `synthetic index from the options at ${s[0]}`, color: LEVEL_COLORS.synthetic, fill: false }] : []),
+                ...(i && secsOf(i[0]) / 60 >= a && inY(i[2]) ? [{ key: "iep", y: Y(i[2]), text: `Auc ${nf(i[2], 0)}`,
+                  full: `the auction's indicative close at ${i[0]}`, color: LEVEL_COLORS.auction, fill: false }] : []),
+              ];
+            })(),
             { key: "last", y: Y(lastShown[1]), text: nf(lastShown[1], 1), full: `${data.underlying} at ${lastShown[0]}`, color: "var(--color-accent)", fill: true },
           ]).map((t) => (
             <g key={t.key}>
@@ -821,6 +980,16 @@ function SurgeChart({ date, live, nav, data, shown, groups, selected, onSelect, 
                 {tip.vwap != null && tip.ema != null && " · "}
                 {tip.ema != null && <>EMA20 {nf(tip.ema, 0)} ({signed(tip.price - tip.ema, 0)})</>}
               </div>
+            )}
+            {tip.auction && (tip.auction[1] != null || tip.auction[2] != null) && (
+              <div className="num text-muted">
+                {tip.auction[0]}{tip.auction[1] != null && <> · synthetic {nf(tip.auction[1], 1)}</>}
+                {tip.auction[2] != null && <> · auction est. {nf(tip.auction[2], 1)} ({tip.auction[3]} % of the weight priced{tip.auction[0] < "15:27:00" ? ", still noisy" : ""})</>}
+                {closePrint && <> · close {nf(closePrint.v, 2)} at {auction.data?.closeAt}</>}
+              </div>
+            )}
+            {tip.maxPain != null && tip.price != null && (
+              <div className="num text-muted">max pain {nf(tip.maxPain, 0)} ({signed(tip.price - tip.maxPain, 0)}) · expiry {maxPain.data?.expiry}</div>
             )}
             {(tip.ce != null || tip.pe != null) && prem && (
               <div className="num text-muted">{nf(prem.strike)} CE {nf(tip.ce, 1)} · PE {nf(tip.pe, 1)}</div>

@@ -29,7 +29,11 @@ import com.autotrade.core.time.MarketTime;
  * <li>tested zones: swing highs (lows) on minute bars, confirmed 3 minutes later, clustered within a tolerance;
  *     a cluster is a zone from its second touch's confirmation, and ends at a minute close beyond it;</li>
  * <li>period: the previous ISO week's and the previous calendar month's high / low (PWH, PWL, PMH, PML; features
- *     v12 at the open, else the stored one-minute bars), known from 09:15.</li>
+ *     v12 at the open, else the stored one-minute bars), known from 09:15;</li>
+ * <li>months (user, 5 Nov 2026: "previous month or previous 2 months next level to assess where market can go up"):
+ *     each of the {@value #MONTHS} calendar months before this one, its high and low, and the high / low over all of
+ *     them ("10M high" when only 10 of them are stored), from the stored one-minute bars and the own capture, known
+ *     from 09:15. After a run beyond last month's range these are the nearest levels above / below.</li>
  * </ul>
  * Days without the own tick capture or live features (bar replays, archive days) fall back to the stored one-minute
  * bars (hist.candle): index bars for the chart, the previous bar session for the prior-day levels, and the nearest
@@ -44,6 +48,7 @@ class LevelsService {
     static final int TOUCH_GAP_MIN = 5;              // touches closer than this are one touch
     static final int BASIS_WINDOW = 15;              // minutes of basis averaged for the chart's VWAP
     static final LocalTime ZONES_UNTIL = LocalTime.of(15, 15);   // no new zones in the closing minutes
+    static final int MONTHS = 12;                    // calendar months of high / low before the day's month
     private static final String IST = "Asia/Kolkata";
 
     record Bar(LocalTime t, double open, double high, double low, double close) {
@@ -52,14 +57,24 @@ class LevelsService {
     record Level(String name, String group, double price, String from) {
     }
 
-    record Zone(String kind, double lo, double hi, int touches, String from, String until) {
+    /**
+     * A tested zone with its final band and touches, and {@code steps}: [time, lo, hi, touches] from its forming touch
+     * and after each later one (the minute each was confirmed), so a replay shows only what was known by its clock.
+     */
+    record Zone(String kind, double lo, double hi, int touches, String from, String until, List<List<Object>> steps) {
     }
 
     private record Cached(long at, Map<String, Object> value) {
     }
 
+    /** A calendar month's range; {@code month} is its first day. */
+    record MonthRange(LocalDate month, double high, double low) {
+    }
+
     private final JdbcTemplate jdbc;
     private final Map<String, Cached> cache = new ConcurrentHashMap<>();
+    /** Months that ended before the current one, by index and month: they never change once read. */
+    private final Map<String, MonthRange> months = new ConcurrentHashMap<>();
 
     LevelsService(DataSource target) {
         this.jdbc = new JdbcTemplate(target);
@@ -111,6 +126,7 @@ class LevelsService {
             add(levels, "2-day low", "prior", Math.min(prior.get(0).low(), prior.get(1).low()), "09:15");
         }
         periodLevels(day, open, prior, levels);
+        monthLevels(monthRanges(day, underlying), levels);
         if (!bars.isEmpty()) {
             add(levels, "Day open", "today", bars.getFirst().open(), bars.getFirst().t().toString());
         }
@@ -167,8 +183,27 @@ class LevelsService {
     record DailyRange(LocalDate day, double high, double low, double close, double orHigh, double orLow) {
     }
 
-    /** Sessions in the stored one-minute bars before {@code day} (up to two months back), newest first. */
+    /**
+     * Sessions before {@code day} (up to two months back), newest first: the stored one-minute bars, then the own capture's
+     * ticks for the days after the newest bar session (5 Nov 2026: where the bars stopped on 6 Oct, 4 Nov's "previous
+     * day" was 6 Oct). The capture's last tick is the official close (the closing auction prints at 15:29).
+     */
     private List<DailyRange> priorCandleSessions(LocalDate day, String underlying) {
+        List<DailyRange> out = new ArrayList<>(candleSessions(day, underlying));
+        LocalDate after = out.isEmpty() ? day.minusMonths(2).withDayOfMonth(1).minusDays(1) : out.getFirst().day();
+        out.addAll(0, jdbc.query("select session_date, max(price), min(price), (array_agg(price order by recv_ts desc))[1], "
+                        + "max(price) filter (where (recv_ts at time zone '" + IST + "')::time < '09:30'), "
+                        + "min(price) filter (where (recv_ts at time zone '" + IST + "')::time < '09:30') "
+                        + "from md.index_tick where underlying = ? and session_date > ? and session_date < ? "
+                        + "and recv_ts >= ? and recv_ts < ? "            // the time bounds prune the hypertable's chunks
+                        + "and (recv_ts at time zone '" + IST + "')::time between '09:15' and '15:30' group by 1 order by 1 desc",
+                (rs, i) -> new DailyRange(rs.getObject(1, LocalDate.class), rs.getDouble(2), rs.getDouble(3),
+                        rs.getDouble(4), rs.getDouble(5), rs.getDouble(6)),
+                underlying, after, day, ts(after.plusDays(1), LocalTime.MIN), ts(day, LocalTime.MIN)));
+        return out;
+    }
+
+    private List<DailyRange> candleSessions(LocalDate day, String underlying) {
         return jdbc.query("select (bar_start at time zone '" + IST + "')::date d, max(high), min(low), "
                         + "(array_agg(close order by bar_start desc))[1], "
                         + "max(high) filter (where (bar_start at time zone '" + IST + "')::time < '09:30'), "
@@ -205,6 +240,70 @@ class LevelsService {
         add(levels, "PWL", "period", pwl, "09:15");
         add(levels, "PMH", "period", pmh, "09:15");
         add(levels, "PML", "period", pml, "09:15");
+    }
+
+    /**
+     * Each month's high / low ("Oct high", "Oct low"; a month name is unique within {@value #MONTHS} months) and the high
+     * / low over all of them, named for the months it covers ("12M high"), all known from 09:15.
+     */
+    static void monthLevels(List<MonthRange> ranges, List<Level> levels) {
+        if (ranges.isEmpty()) {
+            return;
+        }
+        double high = Double.NEGATIVE_INFINITY, low = Double.POSITIVE_INFINITY;
+        for (MonthRange r : ranges) {
+            String name = r.month().getMonth().getDisplayName(java.time.format.TextStyle.SHORT, java.util.Locale.ENGLISH);
+            add(levels, name + " high", "months", r.high(), "09:15");
+            add(levels, name + " low", "months", r.low(), "09:15");
+            high = Math.max(high, r.high());
+            low = Math.min(low, r.low());
+        }
+        add(levels, ranges.size() + "M high", "months", high, "09:15");
+        add(levels, ranges.size() + "M low", "months", low, "09:15");
+    }
+
+    /**
+     * The {@value #MONTHS} calendar months before {@code day}'s month that have data, oldest first: the stored one-minute
+     * index bars, and the own capture's ticks for days the bars do not hold. Each month is over, so it is read once
+     * (a month without data is remembered as empty).
+     */
+    private List<MonthRange> monthRanges(LocalDate day, String underlying) {
+        LocalDate first = day.withDayOfMonth(1).minusMonths(MONTHS), end = day.withDayOfMonth(1);
+        List<LocalDate> missing = new ArrayList<>();
+        for (LocalDate m = first; m.isBefore(end); m = m.plusMonths(1)) {
+            if (!months.containsKey(underlying + "|" + m)) {
+                missing.add(m);
+            }
+        }
+        if (!missing.isEmpty()) {
+            LocalDate from = missing.getFirst(), to = missing.getLast().plusMonths(1);
+            jdbc.query("select date_trunc('month', d)::date, max(h), min(l) from ("
+                            + "select (bar_start at time zone '" + IST + "')::date d, high h, low l from hist.candle "
+                            + "where underlying = ? and kind = 'INDEX' and bar_start >= ? and bar_start < ? "
+                            + "and (bar_start at time zone '" + IST + "')::time between '09:15' and '15:29' "
+                            + "union all select session_date, max(price), min(price) from md.index_tick "
+                            + "where underlying = ? and session_date >= ? and session_date < ? and recv_ts >= ? and recv_ts < ? "
+                            + "and (recv_ts at time zone '" + IST + "')::time between '09:15' and '15:30' group by 1) x "
+                            + "group by 1",
+                    rs -> {
+                        LocalDate m = rs.getObject(1, LocalDate.class);
+                        months.put(underlying + "|" + m, new MonthRange(m, rs.getDouble(2), rs.getDouble(3)));
+                    },
+                    underlying, ts(from, LocalTime.MIN), ts(to, LocalTime.MIN), underlying, from, to,
+                    ts(from, LocalTime.MIN), ts(to, LocalTime.MIN));
+            // a month that has ended and holds no data stays empty: remembered, so it is not read again every 30 s
+            for (LocalDate m : missing) {
+                months.putIfAbsent(underlying + "|" + m, new MonthRange(m, Double.NaN, Double.NaN));
+            }
+        }
+        List<MonthRange> out = new ArrayList<>();
+        for (LocalDate m = first; m.isBefore(end); m = m.plusMonths(1)) {
+            MonthRange r = months.get(underlying + "|" + m);
+            if (r != null && !Double.isNaN(r.high())) {
+                out.add(r);
+            }
+        }
+        return out;
     }
 
     /** The first live feature snapshot of the day: previous-session levels as the strategies saw them. */
@@ -353,6 +452,7 @@ class LevelsService {
         final List<Double> prices = new ArrayList<>();
         final List<LocalTime> touches = new ArrayList<>();
         LocalTime formed;                // confirmation of the second touch: the zone exists from here
+        final List<List<Object>> steps = new ArrayList<>();   // [confirmed, lo, hi, touches] from formation on
         LocalTime broken;                // a minute close beyond it: the zone ends here
 
         Cluster(String kind, double price, LocalTime at) {
@@ -415,7 +515,7 @@ class LevelsService {
         for (Cluster c : clusters) {
             if (c.formed != null) {
                 out.add(new Zone(c.kind, round(c.lo()), round(c.hi()), c.touches.size(), c.formed.toString(),
-                        c.broken == null ? null : c.broken.toString()));
+                        c.broken == null ? null : c.broken.toString(), List.copyOf(c.steps)));
             }
         }
         return out;
@@ -431,6 +531,7 @@ class LevelsService {
                     if (c.formed == null) {
                         c.formed = confirmedAt;
                     }
+                    c.steps.add(List.of(confirmedAt.toString(), round(c.lo()), round(c.hi()), c.touches.size()));
                 }
                 return;
             }

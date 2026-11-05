@@ -11,6 +11,8 @@ import { MarketCard } from "../components/MarketCard";
 import { splitDecisionKey, storedScores, StrategyMatrix, type MatrixCell } from "../components/strategies";
 import { AlertBanner } from "../components/AlertBanner";
 import { CuesPanel } from "../components/CuesPanel";
+import { MarketRead } from "../components/MarketRead";
+import { ReplayControls } from "../components/TradeInspector";
 
 export function LivePage() {
   const queryClient = useQueryClient();
@@ -96,11 +98,13 @@ export function LivePage() {
         {action.error && <div className="mt-3"><ErrorNote error={action.error} /></div>}
       </Panel>
 
+      <ReplayControls s={s} />
+
       <EquityPanel today={s} />
 
       <CuesPanel />
 
-      <LiveOverview views={s.strategy ?? {}} positions={s.openPositions ?? []} />
+      <LiveOverview date={s.date} views={s.strategy ?? {}} positions={s.openPositions ?? []} live={s.status === "RUNNING"} />
 
       <Panel title="Open positions">
         <LivePositions rows={s.openPositions ?? []} closed={false} empty="Flat." />
@@ -124,7 +128,7 @@ const rank = (u: string) => (ORDER.includes(u) ? ORDER.indexOf(u) : ORDER.length
 const byOrder = (a: string, b: string) => rank(a) - rank(b) || a.localeCompare(b);
 
 /** Each index's market (one tile, linked to its dashboard) and every strategy's stage on it. */
-function LiveOverview({ views, positions }: { views: Record<string, StrategyView>; positions: Status["openPositions"] }) {
+function LiveOverview({ date, views, positions, live }: { date?: string; views: Record<string, StrategyView>; positions: Status["openPositions"]; live: boolean }) {
   const entries = Object.entries(views).map(([key, view]) => ({ ...splitDecisionKey(key), view }));
   const underlyings = [...new Set(entries.map((e) => e.underlying))].sort(byOrder);
   const cells: MatrixCell[] = entries.map((e) => ({ strategy: e.strategy, underlying: e.underlying, time: e.view.time,
@@ -135,6 +139,10 @@ function LiveOverview({ views, positions }: { views: Record<string, StrategyView
         const v = entries.find((e) => e.underlying === u)!.view;
         return { underlying: u, spot: v.spot, time: v.time, state: v.state };
       })} />
+      <MarketRead date={date} live={live} positions={positions ?? []} items={underlyings.map((u) => ({
+        underlying: u, view: entries.find((e) => e.underlying === u)!.view,
+        strategies: cells.filter((c) => c.underlying === u).map((c) => ({ strategy: c.strategy, ce: c.ce, pe: c.pe })),
+      }))} />
       <Panel title="Strategies">
         <StrategyMatrix cells={cells} positions={positions ?? []} underlyings={underlyings} />
       </Panel>

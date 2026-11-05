@@ -87,6 +87,73 @@ class TradingController {
         return ResponseEntity.ok(session.status());
     }
 
+    /** A paced replay's pause / speed state (409 when no paced replay runs). */
+    @GetMapping("/replay-control")
+    ResponseEntity<Map<String, Object>> replayControl() {
+        TradingSession session = runner.current();
+        if (session == null || !"PAPER_REPLAY".equals(String.valueOf(session.status().get("mode")))) {
+            return ResponseEntity.status(409).body(Map.of("error", "no replay running"));
+        }
+        if (!runner.replayControl().attached()) {       // an unpaced replay has no clock to pause or re-pace
+            return ResponseEntity.status(409).body(Map.of("error", "this replay runs unpaced (speed 0): start it with a speed to control it"));
+        }
+        return ResponseEntity.ok(runner.replayControl().state());
+    }
+
+    /**
+     * Controls a paced replay (user, 5 Nov 2026): {@code pause}, {@code resume}, {@code speed} ({@code value} market
+     * seconds per second), {@code until} (run on, pause at {@code time} HH:mm[:ss] IST), {@code next-entry},
+     * {@code next-exit} (optionally {@code symbol}: that contract's exit) and {@code next-trade}: run on and pause after
+     * that fill. A pause stops before the next market event, so what is shown is the state at that moment.
+     */
+    @PostMapping("/replay-control")
+    ResponseEntity<Map<String, Object>> replayControl(@RequestParam String action, @RequestParam(required = false) Double value,
+                                                      @RequestParam(required = false) String time,
+                                                      @RequestParam(required = false) String symbol) {
+        TradingSession session = runner.current();
+        if (session == null || !"PAPER_REPLAY".equals(String.valueOf(session.status().get("mode")))) {
+            return ResponseEntity.status(409).body(Map.of("error", "no replay running"));
+        }
+        if (!runner.replayControl().attached()) {       // an unpaced replay has no clock to pause or re-pace
+            return ResponseEntity.status(409).body(Map.of("error", "this replay runs unpaced (speed 0): start it with a speed to control it"));
+        }
+        com.autotrade.md.live.ReplayControl c = runner.replayControl();
+        switch (action) {
+            case "pause" -> c.pause();
+            case "resume" -> c.resume();
+            case "speed" -> {
+                if (value == null || !(value > 0) || value > 1000) {
+                    return ResponseEntity.badRequest().body(Map.of("error", "value: market seconds per second, 0-1000"));
+                }
+                c.speed(value);
+            }
+            case "until" -> {
+                java.time.LocalDate day = java.time.LocalDate.parse(String.valueOf(session.status().get("date")));
+                java.time.LocalTime at;
+                try {
+                    at = java.time.LocalTime.parse(time == null ? "" : time);
+                } catch (java.time.format.DateTimeParseException e) {
+                    return ResponseEntity.badRequest().body(Map.of("error", "time: HH:mm or HH:mm:ss"));
+                }
+                c.pauseAt(day.atTime(at).atZone(com.autotrade.core.time.MarketTime.IST).toInstant());
+                c.resume();
+            }
+            case "next-entry", "next-exit", "next-trade" -> {
+                c.pauseOn(switch (action) {
+                    case "next-entry" -> com.autotrade.md.live.ReplayControl.PauseOn.ENTRY;
+                    case "next-exit" -> com.autotrade.md.live.ReplayControl.PauseOn.EXIT;
+                    default -> com.autotrade.md.live.ReplayControl.PauseOn.TRADE;
+                }, symbol);
+                c.resume();
+            }
+            default -> {
+                return ResponseEntity.badRequest().body(Map.of("error", "action: pause, resume, speed, until, next-entry, "
+                        + "next-exit, next-trade"));
+            }
+        }
+        return ResponseEntity.ok(c.state());
+    }
+
     @PostMapping("/exit-all")
     ResponseEntity<Map<String, Object>> exitAll(@RequestParam(defaultValue = "OPERATOR") String reason) {
         TradingSession session = runner.current();

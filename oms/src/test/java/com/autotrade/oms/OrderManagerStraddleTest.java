@@ -42,6 +42,8 @@ class OrderManagerStraddleTest {
     private final AtomicReference<Instant> clock = new AtomicReference<>(at("13:54:00"));
     private final List<OrderRequest> sent = new ArrayList<>();
     private final List<String> refusals = new ArrayList<>();
+    /** The legs "entry complete" was told for, in order. */
+    private final List<String> entriesComplete = new ArrayList<>();
     private PaperBroker broker;
     private OrderManager oms;
 
@@ -58,6 +60,11 @@ class OrderManagerStraddleTest {
             @Override
             public void rejected(String strategyId, String underlying, String intent, String reason) {
                 refusals.add(strategyId + ": " + reason);
+            }
+
+            @Override
+            public void entryComplete(ManagedPosition position) {
+                entriesComplete.add(position.leg());
             }
         });
     }
@@ -141,11 +148,13 @@ class OrderManagerStraddleTest {
         ManagedPosition put = leg("PE");
         assertThat(put.quantity()).isZero();
         assertThat(leg("CE").quantity()).isPositive();
+        assertThat(entriesComplete).as("one leg in is not the straddle's entry").isEmpty();
         quotes("13:54:02.400", 42.00, 42.20, 40.60, 40.80);            // 2 s: re-priced to 40.80 + 4 ticks
         quotes("13:54:02.700", 42.00, 42.20, 40.60, 40.80);            // the modification is live: fills
         assertThat(put.quantity()).isEqualTo(leg("CE").quantity());
         assertThat(put.averageCost()).isEqualTo(40.80);
         assertThat(put.entryChases).isEqualTo(1);
+        assertThat(entriesComplete).as("once, when the second leg is in").containsExactly("PE");
     }
 
     @Test
@@ -161,6 +170,7 @@ class OrderManagerStraddleTest {
         quotes("13:54:21.000", 42.00, 42.20, 80.60, 80.80);
         quotes("13:54:21.500", 42.00, 42.20, 80.60, 80.80);
         assertThat(oms.livePositions()).as("the call is not kept on its own").isEmpty();
+        assertThat(entriesComplete).as("a straddle that never had both legs never completed its entry").isEmpty();
         assertThat(oms.closedPositions()).extracting(ManagedPosition::leg, ManagedPosition::exitReason)
                 .contains(org.assertj.core.groups.Tuple.tuple("CE", "LEG_NOT_FILLED"));
         assertThat(oms.reconcile()).isTrue();

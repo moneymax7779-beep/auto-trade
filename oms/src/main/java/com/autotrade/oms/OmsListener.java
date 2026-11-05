@@ -19,6 +19,13 @@ public interface OmsListener {
     default void closed(ManagedPosition position) {
     }
 
+    /**
+     * A position's entry is complete: something was bought and no entry order or slice is still working or pending
+     * (risk v12 slices, freeze-quantity splits). Once per position.
+     */
+    default void entryComplete(ManagedPosition position) {
+    }
+
     default void alert(String message) {
     }
 }

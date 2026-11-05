@@ -41,6 +41,8 @@ class OrderManagerTest {
     private final AtomicReference<Instant> clock = new AtomicReference<>(at("10:00:00"));
     private final List<OrderRequest> sent = new ArrayList<>();
     private final List<String> alerts = new ArrayList<>();
+    /** The quantity held each time the OMS said an entry was complete. */
+    private final List<Long> entriesComplete = new ArrayList<>();
     private KillSwitch killSwitch;
     private PaperBroker broker;
     private OrderManager oms;
@@ -286,6 +288,11 @@ class OrderManagerTest {
                     }
 
                     @Override
+                    public void entryComplete(ManagedPosition position) {
+                        entriesComplete.add(position.quantity());
+                    }
+
+                    @Override
                     public void alert(String message) {
                         alerts.add(message);
                     }
@@ -308,6 +315,11 @@ class OrderManagerTest {
                     @Override
                     public void orderSent(ManagedPosition position, String role, OrderRequest request) {
                         sent.add(request);
+                    }
+
+                    @Override
+                    public void entryComplete(ManagedPosition position) {
+                        entriesComplete.add(position.quantity());
                     }
 
                     @Override
@@ -346,6 +358,7 @@ class OrderManagerTest {
         assertThat(sent.stream().filter(r -> r.side() == com.autotrade.broker.OrderSide.BUY)).hasSize(2);
         book("10:00:03", prices, qty, 0);
         assertThat(oms.livePositions()).singleElement().satisfies(p -> assertThat(p.quantity).isEqualTo(2600));
+        assertThat(entriesComplete).containsExactly(2600L);                  // once, after the last slice, not the first
     }
 
     @Test
@@ -358,6 +371,7 @@ class OrderManagerTest {
         book("10:00:03", new double[] {102.50, 102.60}, new long[] {650, 650}, 0);
         assertThat(sent.stream().filter(r -> r.side() == com.autotrade.broker.OrderSide.BUY)).hasSize(1);
         assertThat(oms.livePositions()).singleElement().satisfies(p -> assertThat(p.quantity).isEqualTo(1300));
+        assertThat(entriesComplete).containsExactly(1300L);                  // complete when slicing gives up
     }
 
     @Test

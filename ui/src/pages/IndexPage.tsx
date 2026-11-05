@@ -10,6 +10,7 @@ import { chartTrades, TradesTable } from "../components/TradesTable";
 import { PcrPanel } from "../components/PcrPanel";
 import { OiTapePanel, type TapeTrade } from "../components/OiTapePanel";
 import { ErrorNote, Loading, Panel, Pnl } from "../components/ui";
+import { ReplayControls } from "../components/TradeInspector";
 
 export const INDICES = ["NIFTY", "SENSEX", "BANKNIFTY"] as const;
 /** Indices recorded for context only (charts, volume, PCR); no strategy trades them. */
@@ -28,6 +29,10 @@ export function IndexPage() {
   const sessions = useQuery({ queryKey: ["sessions"], queryFn: () => get<SessionRow[]>("/api/sessions") });
   // the days the own capture holds: a day can be shown (charts, OI tape, PCR) without a live session record of it
   const captured = useQuery({ queryKey: ["oi-tape-days"], queryFn: () => get<string[]>("/api/oi-tape/days") });
+  // a session's trade data, minute inspector and replay controls are the operator's (the API refuses anyone else)
+  const me = useQuery({ queryKey: ["me"], queryFn: () => get<{ mode: string; operator: boolean }>("/api/me"), staleTime: 60_000 });
+  // off until /api/me answers (a viewer never sees operator controls, even for a moment or when the call fails)
+  const inspect = !!me.data && (me.data.mode !== "oidc" || me.data.operator);
   if (status.isLoading) return <Loading what="live status" />;
   if (status.error) return <ErrorNote error={status.error} />;
   const s = status.data!;
@@ -74,8 +79,8 @@ export function IndexPage() {
         <p className="text-xs text-muted">{underlying} is recorded for context (chart, futures volume, PCR, levels); no strategy trades it.</p>
       )}
 
-      {showLive ? <LiveDay underlying={underlying} s={s} nav={nav} /> : day
-        ? <PastDay key={day} underlying={underlying} day={day} nav={nav}
+      {showLive ? <LiveDay underlying={underlying} s={s} nav={nav} inspect={inspect} /> : day
+        ? <PastDay key={day} underlying={underlying} day={day} nav={nav} inspect={inspect}
             sessionId={liveSessions.filter((r) => r.session_date === day).map((r) => r.id).sort((a, b) => b - a)[0]} />
         : <p className="text-sm text-muted">No live session recorded yet.</p>}
     </div>
@@ -83,23 +88,27 @@ export function IndexPage() {
 }
 
 /** The running session on this index. */
-function LiveDay({ underlying, s, nav }: { underlying: string; s: Status; nav: DayNav }) {
+function LiveDay({ underlying, s, nav, inspect }: { underlying: string; s: Status; nav: DayNav; inspect: boolean }) {
   const entries = Object.entries(s.strategy ?? {}).map(([key, view]) => ({ ...splitDecisionKey(key), view }))
     .filter((e) => e.underlying === underlying);
   const market = entries[0]?.view;
   const mine = <T extends { underlying: string }>(rows: T[] | undefined) => (rows ?? []).filter((r) => r.underlying === underlying);
   const open = mine(s.openPositions), closed = mine(s.closedPositions);
   const pnl = [...open, ...closed].reduce((sum, p) => sum + p.net, 0);   // net of costs, as the day P&L
+  // a replay runs on its own clock: its day's charts are cut at its last event, so they move as it runs
+  // "HH:mm:ss" (a whole minute comes from the server as "HH:mm")
+  const until = s.mode === "PAPER_REPLAY" && s.lastEvent ? s.lastEvent.slice(0, 8).padEnd(8, ":00").slice(0, 8) : undefined;
   return (
     <>
+      {inspect && <ReplayControls s={s} />}
       <p className="text-xs text-muted">session {s.session} · {s.date} · {underlying} P&L <Pnl value={Math.round(pnl)} /></p>
       {market && (
         <MarketCard title={underlying} spot={market.spot} time={market.time} state={market.state}
           volatility={market.volatility} cas={market.cas} />
       )}
-      <SurgePanel live date={s.date} underlying={underlying} nav={nav}
+      <SurgePanel live date={s.date} underlying={underlying} nav={nav} until={until} sessionId={inspect ? s.session : undefined}
         trades={chartTrades([...open, ...closed].filter((p) => p.opened).map((p) => liveAsStored(p, s.date!)), underlying, null, strategyShort, noSpot)} />
-      {s.date && <OiTapePanel underlying={underlying} date={s.date} live
+      {s.date && <OiTapePanel underlying={underlying} date={s.date} live until={until}
         trades={[...open, ...closed].filter((p) => p.opened).map((p): TapeTrade => ({ label: `${p.strategy ?? ""} ${p.side}`, opened: p.opened!, closed: p.closed, net: p.net }))} />}
       <PcrPanel underlying={underlying} live />
       {entries.length > 0 && (
@@ -117,7 +126,7 @@ function LiveDay({ underlying, s, nav }: { underlying: string; s: Status; nav: D
 }
 
 /** An earlier live day on this index, from the database: how it closed, the chart, every strategy's end state, the trades. */
-function PastDay({ underlying, day, sessionId, nav }: { underlying: string; day: string; sessionId?: number; nav: DayNav }) {
+function PastDay({ underlying, day, sessionId, nav, inspect }: { underlying: string; day: string; sessionId?: number; nav: DayNav; inspect: boolean }) {
   const last = useQuery({
     queryKey: ["last-decisions", sessionId], enabled: sessionId != null,
     queryFn: () => get<LastDecisionRow[]>(`/api/sessions/${sessionId}/last-decisions`),
@@ -136,7 +145,7 @@ function PastDay({ underlying, day, sessionId, nav }: { underlying: string; day:
           title={<>{underlying} <span className="ml-1 text-xs font-normal text-muted">{day} at close ·{" "}
             <Link to={`/sessions/${sessionId}`} className="hover:underline">session #{sessionId}</Link></span></>} />
       )}
-      <SurgePanel date={day} underlying={underlying} nav={nav} trades={chartTrades(trades, underlying, null, strategyShort, noSpot)} />
+      <SurgePanel date={day} underlying={underlying} nav={nav} sessionId={inspect ? sessionId : undefined} trades={chartTrades(trades, underlying, null, strategyShort, noSpot)} />
       <OiTapePanel underlying={underlying} date={day}
         trades={trades.map((p): TapeTrade => ({ label: `${p.strategy_id ?? ""} ${p.option_side}`, opened: p.opened_at, closed: p.closed_at, net: p.net }))} />
       <PcrPanel underlying={underlying} date={day} />

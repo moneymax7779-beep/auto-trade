@@ -128,6 +128,9 @@ public final class TradingSession {
     private boolean squaredOff;
     private volatile String status = "STARTING";
     private com.autotrade.md.store.SnapshotWriter snapshotWriter;
+    private volatile com.autotrade.md.live.ReplayControl replayControl;
+    /** The charts' live push (LiveTicks): every index tick, handed on as it arrives; null when none. */
+    private volatile java.util.function.Consumer<com.autotrade.core.event.IndexTick> indexTap;
     private final Map<String, FeatureSnapshot> lastSnapshots = new LinkedHashMap<>();
     private SignalRecorder signals;                       // live execution L1: only on the signal-source session
 
@@ -178,6 +181,9 @@ public final class TradingSession {
         String hashes = String.join("+", settings.strategies().stream().map(StrategyFactory::configHash).toList());
         sessionId = store.startSession(settings.account(), settings.mode().name(), settings.session(), feed.name(),
                 ids, hashes, settings.configHashes(), settings.codeVersion());
+        if (snapshotWriter != null) {                           // the session's own snapshots, for its trade context
+            store.snapshotRun(sessionId, snapshotWriter.runId());
+        }
         // Order ids carry the session id so they never repeat across runs of the same day.
         broker = new PaperBroker(settings.account(), settings.fills().latency(), settings.fills().adverseBps(), clock);
         StrategyFactory primary = settings.strategies().getFirst();
@@ -239,6 +245,16 @@ public final class TradingSession {
         }
     }
 
+    /** Hands every index tick to {@code tap} (the charts' live push) as it arrives, before the engines see it. */
+    public void indexTap(java.util.function.Consumer<com.autotrade.core.event.IndexTick> tap) {
+        this.indexTap = tap;
+    }
+
+    /** A paced replay's controls: told of every completely filled order, so it can pause after an entry or exit. */
+    public void replayControl(com.autotrade.md.live.ReplayControl control) {
+        this.replayControl = control;
+    }
+
     /** Saves every feature snapshot (the live decision evidence, and later IV history) through {@code writer}. */
     public void recordSnapshots(com.autotrade.md.store.SnapshotWriter writer) {
         this.snapshotWriter = writer;
@@ -253,6 +269,14 @@ public final class TradingSession {
     }
 
     private void onEvent(MarketEvent event) {
+        java.util.function.Consumer<com.autotrade.core.event.IndexTick> tap = indexTap;
+        if (tap != null && event instanceof com.autotrade.core.event.IndexTick index) {
+            try {
+                tap.accept(index);
+            } catch (RuntimeException e) {                     // the charts never stop the session
+                log.debug("index tap: {}", e.toString());
+            }
+        }
         synchronized (lock) {
             events.incrementAndGet();
             if (settings.mode() == Mode.PAPER_REPLAY) {
@@ -870,6 +894,13 @@ public final class TradingSession {
         }
 
         @Override
+        public void entryComplete(ManagedPosition position) {
+            if (replayControl != null) {                       // a paced replay's "pause after the next entry"
+                replayControl.filled("ENTRY", position.contract().symbol());
+            }
+        }
+
+        @Override
         public void rejected(String strategyId, String underlying, String intent, String reason) {
             TradingSession.this.rejected(strategyId, underlying, intent, reason);
         }
@@ -877,6 +908,9 @@ public final class TradingSession {
         @Override
         public void closed(ManagedPosition position) {
             store.position(sessionId, position);
+            if (replayControl != null && position.boughtQuantity() > 0) {   // "pause after the next exit": the position is flat
+                replayControl.filled("EXIT", position.contract().symbol());
+            }
             if (signals != null) {
                 signals.closed(position);
             }

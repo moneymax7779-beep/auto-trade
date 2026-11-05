@@ -34,8 +34,10 @@ class HistoryController {
 
     private static final JsonMapper JSON = JsonMapper.builder().build();
     private static final Set<String> JSON_COLUMNS = Set.of("summary", "configs", "ce_scores", "pe_scores", "state",
-            "ce_conditions", "pe_conditions", "config", "notes", "features", "legs");
+            "ce_conditions", "pe_conditions", "config", "notes", "features", "legs", "entry_context", "entry_features",
+            "exit_features");
     private static final String IST = "Asia/Kolkata";
+    private final SessionRunner runner;
     private static final String SESSION_COLUMNS = "select id, account, mode, session_date::text, feed, strategy_id, "
             + "left(strategy_hash, 19) strategy_hash, code_version, " + ist("started_at") + ", " + ist("ended_at") + ", status, "
             + "summary::text summary, error, configs::text configs from trade.session ";
@@ -49,8 +51,10 @@ class HistoryController {
 
     private final JdbcTemplate jdbc;
 
-    HistoryController(DataSource dataSource) {
+    /** @param runner the trading service's session runner (null in tests: no running session is consulted) */
+    HistoryController(DataSource dataSource, SessionRunner runner) {
         this.jdbc = new JdbcTemplate(dataSource);
+        this.runner = runner;
     }
 
     /**
@@ -151,6 +155,129 @@ class HistoryController {
         return query("select strategy_id, underlying, option_side, symbol, " + ist("opened_at") + ", " + ist("closed_at")
                 + ", stages, exit_reason, realised, costs, net, quantity, lot_size, average_cost, average_exit "
                 + "from trade.position where session_id = ? order by opened_at", id);
+    }
+
+    /**
+     * The feature snapshot run of a session: LIVE_FEATURES for a live session, REPLAY_FEATURES for a replay started with
+     * replay-snapshots, the run of its day that started nearest the session (none: no snapshots were kept).
+     */
+    /**
+     * The run holding the session's feature snapshots: the one the session recorded (V28, 5 Nov 2026); for a session
+     * before that (or one that kept none), the run of its kind and date started nearest to it within 5 minutes and not
+     * recorded by any other session, so a replay without snapshots never borrows another replay's.
+     */
+    private static final String SNAPSHOT_RUN = "(select coalesce(s.snapshot_run_id, (select r.id from research.run r "
+            + "where r.kind = case when s.mode = 'PAPER_LIVE' then 'LIVE_FEATURES' else 'REPLAY_FEATURES' end "
+            + "and s.session_date = any(r.sessions) and abs(extract(epoch from r.started_at - s.started_at)) < 300 "
+            + "and not exists (select 1 from trade.session o where o.snapshot_run_id = r.id and o.id <> s.id) "
+            + "order by abs(extract(epoch from r.started_at - s.started_at)) limit 1)) from trade.session s where s.id = ?)";
+
+    /**
+     * Each trade of the session with what was known at its entry and its exit (user, 5 Nov 2026: "add entry point and exit
+     * point in the chart to see what data it holds for better tuning on the strategies or deriving new strategy"): the
+     * strategy's own entry context (the features and conditions it decided on, from trade.candidate), and the full feature
+     * snapshot at the entry and exit minutes where the session kept snapshots (live sessions; replays with
+     * replay-snapshots).
+     */
+    @GetMapping("/sessions/{id}/trade-context")
+    List<Map<String, Object>> tradeContext(@PathVariable long id) {
+        return query("select p.strategy_id, p.underlying, p.option_side, p.symbol, " + ist("p.opened_at") + ", "
+                + ist("p.closed_at") + ", p.exit_reason, p.quantity, p.average_cost, p.average_exit, p.net, "
+                + "c.reason entry_reason, c.context::text entry_context, "
+                + "(select f.features::text from feat.snapshot f where f.run_id = " + SNAPSHOT_RUN + " and f.underlying = "
+                + "p.underlying and f.snap_time <= p.opened_at order by f.snap_time desc limit 1) entry_features, "
+                + "(select f.features::text from feat.snapshot f where f.run_id = " + SNAPSHOT_RUN + " and f.underlying = "
+                + "p.underlying and f.snap_time <= p.closed_at order by f.snap_time desc limit 1) exit_features "
+                + "from trade.position p left join lateral (select reason, context from trade.candidate c "
+                + "where c.session_id = p.session_id and c.underlying = p.underlying and c.side = p.option_side "
+                + "and c.approved and c.action = 'ENTER' and c.at <= p.opened_at "
+                + "and (p.strategy_id is null or c.strategy_id = p.strategy_id) order by c.at desc limit 1) c on true "
+                + "where p.session_id = ? and p.quantity > 0 "
+                // a position is stored when it closes: in the running session an approved entry without one is a trade
+                // still open (a finished session has none open: such a candidate never became a trade)
+                + "union all select c.strategy_id, c.underlying, c.side, null, " + ist("c.at")
+                + ", null, null, null, null, null, null, c.reason, c.context::text, "
+                + "(select f.features::text from feat.snapshot f where f.run_id = " + SNAPSHOT_RUN + " and f.underlying = "
+                + "c.underlying and f.snap_time <= c.at order by f.snap_time desc limit 1), null "
+                + "from trade.candidate c where c.session_id = ? and ? and c.approved and c.action = 'ENTER' and not exists "
+                + "(select 1 from trade.position p where p.session_id = c.session_id and p.underlying = c.underlying "
+                + "and p.option_side = c.side and (p.strategy_id is null or p.strategy_id = c.strategy_id) "
+                + "and p.opened_at >= c.at and p.opened_at < c.at + interval '5 minutes') "
+                + "order by 5", id, id, id, id, id, isRunning(id));
+    }
+
+    /** Whether {@code id} is the session running now (its open positions are not stored yet). */
+    private boolean isRunning(long id) {
+        TradingSession running = runner == null ? null : runner.current();
+        return running != null && Long.valueOf(id).equals(((Number) running.status().getOrDefault("session", -1L)).longValue());
+    }
+
+    /** A malformed {@code time} is the caller's error (400), not the server's. */
+    @org.springframework.web.bind.annotation.ExceptionHandler(java.time.format.DateTimeParseException.class)
+    org.springframework.http.ResponseEntity<Map<String, Object>> badTime(java.time.format.DateTimeParseException e) {
+        return org.springframework.http.ResponseEntity.badRequest().body(Map.of("error", "bad time: " + e.getParsedString()));
+    }
+
+    /**
+     * The session as of one moment on one index (the chart's pinned minute; a paused replay's clock): each strategy's
+     * last decision by then, the feature snapshot by then (when kept), the positions open then marked at the option's last
+     * traded price by then (own capture), and the net of those closed by then.
+     */
+    @GetMapping("/sessions/{id}/at")
+    Map<String, Object> at(@PathVariable long id, @RequestParam String underlying, @RequestParam String time) {
+        java.time.LocalTime t = java.time.LocalTime.parse(time);
+        List<Map<String, Object>> session = query("select session_date::text d from trade.session where id = ?", id);
+        if (session.isEmpty()) {
+            throw new org.springframework.web.server.ResponseStatusException(org.springframework.http.HttpStatus.NOT_FOUND);
+        }
+        java.time.LocalDate day = java.time.LocalDate.parse((String) session.getFirst().get("d"));
+        java.sql.Timestamp at = java.sql.Timestamp.from(day.atTime(t).atZone(com.autotrade.core.time.MarketTime.IST).toInstant());
+        java.sql.Timestamp from = java.sql.Timestamp.from(at.toInstant().minusSeconds(900));
+        Map<String, Object> out = new java.util.LinkedHashMap<>();
+        out.put("date", day.toString());
+        out.put("time", t.toString());
+        out.put("underlying", underlying);
+        out.put("decisions", query("select distinct on (strategy_id) strategy_id, to_char(snap_time at time zone '" + IST
+                + "', 'HH24:MI') t, spot, ce_stage, pe_stage, ce_scores::text ce_scores, pe_scores::text pe_scores, "
+                + "state::text state, orders from trade.decision where session_id = ? and underlying = ? and snap_time <= ? "
+                + "order by strategy_id, snap_time desc", id, underlying, at));
+        List<Map<String, Object>> snap = query("select to_char(snap_time at time zone '" + IST + "', 'HH24:MI') t, phase, spot, "
+                + "features::text features from feat.snapshot where run_id = " + SNAPSHOT_RUN + " and underlying = ? "
+                + "and snap_time <= ? order by snap_time desc limit 1", id, underlying, at);
+        out.put("snapshot", snap.isEmpty() ? null : snap.getFirst());
+        String mark = "(select o.ltp from md.option_tick o where o.session_date = ?::date and o.symbol = ? "
+                + "and o.recv_ts > ? and o.recv_ts <= ? order by o.recv_ts desc limit 1)";
+        List<Map<String, Object>> open = query("select p.strategy_id, p.option_side, p.symbol, " + ist("p.opened_at") + ", "
+                + "p.quantity, p.average_cost, " + mark.replace("o.symbol = ?", "o.symbol = p.symbol") + " mark "
+                + "from trade.position p where p.session_id = ? and p.underlying = ? and p.quantity > 0 and p.opened_at <= ? "
+                + "and (p.closed_at is null or p.closed_at > ?) order by p.opened_at", day.toString(), from, at, id, underlying,
+                at, at);
+        // positions the running session holds are stored only when they close: add those opened by then
+        TradingSession running = runner == null ? null : runner.current();
+        if (running != null && isRunning(id)) {
+            Object rows = running.status().get("openPositions");
+            if (rows instanceof List<?> list) {
+                for (Object o : list) {
+                    if (o instanceof Map<?, ?> p && underlying.equals(p.get("underlying")) && p.get("opened") != null
+                            && !java.time.LocalTime.parse(p.get("opened").toString()).isAfter(t)) {
+                        Map<String, Object> row = new java.util.LinkedHashMap<>();
+                        row.put("strategy_id", p.get("strategy"));
+                        row.put("option_side", p.get("side"));
+                        row.put("symbol", p.get("symbol"));
+                        row.put("opened_at", day + " " + p.get("opened"));
+                        row.put("quantity", p.get("boughtQuantity"));        // as the stored rows: the quantity bought
+                        row.put("average_cost", p.get("averageCost"));
+                        row.put("mark", jdbc.queryForList("select " + mark, Double.class, day.toString(), p.get("symbol"), from, at)
+                                .stream().findFirst().orElse(null));
+                        open.add(row);
+                    }
+                }
+            }
+        }
+        out.put("open", open);
+        out.put("closedNet", jdbc.queryForObject("select coalesce(sum(net), 0) from trade.position where session_id = ? "
+                + "and underlying = ? and closed_at <= ?", Double.class, id, underlying, at));
+        return out;
     }
 
     /**

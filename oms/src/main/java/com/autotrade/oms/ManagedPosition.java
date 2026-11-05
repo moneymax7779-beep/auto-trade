@@ -58,6 +58,8 @@ public final class ManagedPosition {
     Instant entryPricedAt;
     /** risk v12: quantity still to buy in slices, the first slice's ask and when slicing began. */
     long pendingEntryQuantity;
+    /** Whether {@link OmsListener#entryComplete} has been told (once per position). */
+    boolean entryCompleteSignalled;
     double sliceStartAsk;
     Instant sliceStartedAt;
 

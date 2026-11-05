@@ -51,6 +51,11 @@ final class TradeStore {
         return keys.getKey().longValue();
     }
 
+    /** The research.run holding the session's feature snapshots (V28). */
+    void snapshotRun(long session, long run) {
+        jdbc.update("update trade.session set snapshot_run_id = ? where id = ?", run, session);
+    }
+
     void endSession(long id, String status, Map<String, Object> summary, String error) {
         jdbc.update("update trade.session set status = ?, ended_at = now(), summary = ?::jsonb, error = ? where id = ?",
                 status, JSON.writeValueAsString(summary), error, id);
