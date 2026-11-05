@@ -24,8 +24,12 @@ const NAV = [
   ["/config", "Config"],
 ] as const;
 
-/** A family member (signed in without the operator role) sees their own accounts and the index chart pages; the rest is the owner's. */
+/**
+ * A family member or viewer (signed in without the operator role) sees the Overview without its controls (user, 5 Nov
+ * 2026), their own accounts and the index chart pages; the rest is the owner's.
+ */
 const MEMBER_NAV = [
+  ["/live", "Overview"],
   ["/accounts", "My accounts"],
   ["/index/NIFTY", "NIFTY"],          // the same index chart pages as the owner's (user, 29 Oct 2026), read-only
   ["/index/SENSEX", "SENSEX"],
@@ -59,6 +63,8 @@ export function App() {
       <main className="mx-auto max-w-7xl px-4 py-4">
         {member ? (
           <Routes>
+            <Route path="/" element={<LivePage canAct={false} />} />
+            <Route path="/live" element={<LivePage canAct={false} />} />
             <Route path="/index/:underlying" element={<IndexPage />} />
             <Route path="*" element={<AccountsPage />} />
           </Routes>

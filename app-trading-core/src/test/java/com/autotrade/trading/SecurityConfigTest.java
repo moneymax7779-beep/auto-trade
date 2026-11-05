@@ -47,7 +47,7 @@ class SecurityConfigTest {
     /** Stand-ins for TradingController's system controls. */
     @RestController
     static class Controls {
-        @PostMapping({"/api/kill", "/api/stop", "/api/exit-all", "/api/kill/release"})
+        @PostMapping({"/api/kill", "/api/stop", "/api/exit-all", "/api/kill/release", "/api/replay-control"})
         String control() {
             return "ok";
         }
@@ -59,7 +59,8 @@ class SecurityConfigTest {
 
         @org.springframework.web.bind.annotation.GetMapping({"/api/sessions", "/api/configs", "/api/execution/accounts",
                 "/api/execution", "/actuator/info", "/api/surges", "/api/sessions/7/positions", "/api/sessions/7/decisions",
-                "/api/oi-tape/strikes", "/api/runs"})
+                "/api/oi-tape/strikes", "/api/runs", "/api/equity", "/api/sessions/7/rejections", "/api/close-auction",
+                "/api/live/ticks", "/api/replay-control", "/api/sessions/7/trade-context", "/api/sessions/7/at"})
         String read() {
             return "ok";
         }
@@ -171,7 +172,7 @@ class SecurityConfigTest {
         @Test
         void systemControlsNeedTheOperatorRole(WebApplicationContext context) throws Exception {
             MockMvc mvc = mvc(context);
-            for (String path : List.of("/api/kill", "/api/kill/release", "/api/stop", "/api/exit-all")) {
+            for (String path : List.of("/api/kill", "/api/kill/release", "/api/stop", "/api/exit-all", "/api/replay-control")) {
                 mvc.perform(post(path).with(user("viewer"))).andExpect(status().isForbidden());
                 mvc.perform(post(path).with(user("satya", "ROLE_OPERATOR"))).andExpect(status().isOk());
             }
@@ -180,21 +181,26 @@ class SecurityConfigTest {
 
         /**
          * 29 Oct 2026, family members: without the operator role, /api/me, the execution API (tenant-scoped) and, read-only,
-         * what the index chart pages read; nothing else, and no POST.
+         * what the index chart pages and (5 Nov 2026) the Overview read; nothing else, and no POST.
          */
         @Test
         void aMemberWithoutTheOperatorRoleReachesTheirAccountsAndTheChartsOnly(WebApplicationContext context) throws Exception {
             MockMvc mvc = mvc(context);
             for (String path : List.of("/api/me", "/api/execution", "/api/execution/accounts", "/api/sessions", "/api/surges",
-                    "/api/sessions/7/positions", "/api/oi-tape/strikes")) {
+                    "/api/sessions/7/positions", "/api/oi-tape/strikes", "/api/equity", "/api/sessions/7/rejections",
+                    "/api/close-auction", "/api/live/ticks")) {
                 mvc.perform(get(path).with(user("member"))).andExpect(status().isOk());
             }
-            for (String path : List.of("/api/configs", "/actuator/info", "/api/sessions/7/decisions", "/api/runs")) {
+            // the replay controls and a session's trade data and minute inspector are the operator's
+            for (String path : List.of("/api/configs", "/actuator/info", "/api/sessions/7/decisions", "/api/runs",
+                    "/api/replay-control", "/api/sessions/7/trade-context", "/api/sessions/7/at")) {
                 mvc.perform(get(path).with(user("member"))).andExpect(status().isForbidden());
                 mvc.perform(get(path).with(user("satya", "ROLE_OPERATOR"))).andExpect(status().isOk());
             }
             mvc.perform(post("/api/replay").with(user("member"))).andExpect(status().isForbidden());
-            mvc.perform(post("/api/kill").with(user("member"))).andExpect(status().isForbidden());
+            for (String path : List.of("/api/kill", "/api/kill/release", "/api/stop", "/api/exit-all", "/api/replay-control")) {
+                mvc.perform(post(path).with(user("member"))).andExpect(status().isForbidden());
+            }
             mvc.perform(get("/accounts").with(user("member"))).andExpect(status().isNotFound());   // a page: signed in is enough
         }
     }
