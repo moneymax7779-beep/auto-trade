@@ -91,6 +91,13 @@ class HistoryController {
         return query(SESSION_COLUMNS + where + " order by id desc limit ?", args.toArray());
     }
 
+    /** One session, for its page: the unfiltered list holds only the newest 200, so an older replay is not in it. */
+    @GetMapping("/sessions/{id:\\d+}")
+    ResponseEntity<Map<String, Object>> session(@PathVariable long id) {
+        List<Map<String, Object>> rows = query(SESSION_COLUMNS + "where id = ?", id);
+        return rows.isEmpty() ? ResponseEntity.notFound().build() : ResponseEntity.ok(rows.get(0));
+    }
+
     /** Appends {@code and <expression> = ?} when the value is given (the expression is a constant, never user input). */
     private static void condition(StringBuilder where, List<Object> args, String expression, String value) {
         if (!SessionFilter.blank(value)) {

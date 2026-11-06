@@ -210,6 +210,25 @@ class SessionHistoryIT {
                 .extracting(r -> ((Number) r.get("id")).longValue()).contains(zt, ztAgain, own, bars, other);
     }
 
+    /** A session's page loads it by id, so a replay older than the newest 200 still has its strategy (and chart). */
+    @Test
+    void oneSessionIsFoundByIdEvenWhenNotAmongTheNewest200() {
+        TradeStore store = new TradeStore(dataSource);
+        HistoryController history = new HistoryController(dataSource, null);
+        long old = store.startSession("PAPER-1", "PAPER_REPLAY", LocalDate.of(2026, 10, 1), "replay-as-live:own-capture",
+                "wall-break-rider", "sha256:x", Map.of(), "old1");
+        for (int i = 0; i < 201; i++) {
+            store.startSession("PAPER-1", "PAPER_REPLAY", DAY, "replay-as-live:bars", "filler", "sha256:x", Map.of(), "old1");
+        }
+        assertThat(history.sessions(null)).extracting(r -> ((Number) r.get("id")).longValue()).doesNotContain(old);
+
+        Map<String, Object> row = history.session(old).getBody();
+        assertThat(row).isNotNull();
+        assertThat(row.get("strategy_id")).isEqualTo("wall-break-rider");
+        assertThat(row.get("session_date")).isEqualTo("2026-10-01");
+        assertThat(history.session(old + 100_000).getStatusCode().value()).isEqualTo(404);
+    }
+
     /**
      * A trade's context comes from the session's own snapshot run, not another replay of the same date started right
      * after it (code review 5 Nov 2026); an approved entry with no stored position is a trade still open only in the
