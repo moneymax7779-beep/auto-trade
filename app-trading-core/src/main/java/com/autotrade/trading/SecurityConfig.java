@@ -88,13 +88,14 @@ class SecurityConfig {
      * see the chart that admin sees exactly"): the live status, the session list and one session's last decisions and
      * positions, the surge / premium / OI tape / PCR / levels charts, alerts and cues; and what the Overview page reads
      * (user, 5 Nov 2026: "Viewer account should see Overview too ... should n't act on it, just viewing"): the PAPER
-     * account's equity and a finished session's refusals. A session's full decisions and orders, research, replay and
-     * config stay the operator's, and so does every POST.
+     * account's equity and a finished session's refusals; the index pages' ma-cross structure and day context (6 Nov
+     * 2026, market data only). A session's full decisions and orders, research, replay and config stay the operator's,
+     * and so does every POST.
      */
     static final String[] MEMBER_CHART_GETS = {"/api/status", "/api/sessions", "/api/sessions/*/last-decisions",
             "/api/sessions/*/positions", "/api/sessions/*/rejections", "/api/surges", "/api/premium", "/api/oi-tape",
             "/api/oi-tape/**", "/api/pcr", "/api/levels", "/api/close-auction", "/api/live/ticks", "/api/alerts", "/api/cues",
-            "/api/equity"};
+            "/api/equity", "/api/structure", "/api/day-context"};
 
     @Bean
     SecurityFilterChain securityChain(HttpSecurity http, AuthProperties auth) throws Exception {

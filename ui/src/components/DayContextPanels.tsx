@@ -5,11 +5,12 @@ import { type ChartLine, TimelineChart, type MinuteView } from "./TimelineChart"
 import { ErrorNote, Loading } from "./ui";
 
 /** The day around a session (VIX, straddle, gap, expiry, participants, shape); finished days are kept server-side. */
-export function useDayContext(date: string | undefined, underlying: string) {
+export function useDayContext(date: string | undefined, underlying: string, live?: boolean) {
   return useQuery({
     queryKey: ["day-context", date ?? "none", underlying],
     enabled: !!date,
     queryFn: () => get<DayContext>(`/api/day-context?date=${date}&underlying=${underlying}`),
+    refetchInterval: live ? 60_000 : false,              // the server recomputes today's at most once a minute
   });
 }
 
@@ -32,8 +33,8 @@ function Tile({ label, value, sub, title }: { label: string; value: ReactNode; s
  * One row of the day's context above the price chart. Everything here was known at the open except the day's shape,
  * which is labelled as known only at the close.
  */
-export function DayContextCard({ date, underlying }: { date: string | undefined; underlying: string }) {
-  const ctx = useDayContext(date, underlying);
+export function DayContextCard({ date, underlying, live }: { date: string | undefined; underlying: string; live?: boolean }) {
+  const ctx = useDayContext(date, underlying, live);
   if (ctx.isLoading) return <Loading what="day context" />;
   if (ctx.error) return <ErrorNote error={ctx.error} />;
   const c = ctx.data;

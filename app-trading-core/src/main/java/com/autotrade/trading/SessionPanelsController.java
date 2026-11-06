@@ -80,19 +80,39 @@ class SessionPanelsController {
         String u = underlying.toUpperCase(Locale.ROOT);
         SessionInfo session = session(id);
         return cached("structure|" + id + "|" + u, session.done(), SESSION_TTL_MS, () -> {
-            LocalDate day = session.day();
-            LevelsService.MinuteBars minutes = LevelsService.minuteBars(jdbc, day, u);
-            List<LevelsService.Bar> three = threeMinute(minutes.bars(), ChartDb.finished(day));
-            Structure s = structure(day, three);
             Map<String, Object> out = new LinkedHashMap<>();
-            out.put("source", minutes.fromBars() ? "bars" : "ticks");
-            out.put("candles", three.stream().map(b -> List.of(b.t().toString(), b.open(), b.high(), b.low(), b.close())).toList());
-            out.put("ema9", s.ema9());
-            out.put("ema20", s.ema20());
-            out.put("swings", s.swings());
-            out.put("trades", maCrossStops(id, u, s));
+            out.put("trades", maCrossStops(id, u, structureOf(session.day(), u, out)));
             return out;
         });
+    }
+
+    /**
+     * One day's structure without a session (6 Nov 2026, the index pages' ma-cross overlay, live and earlier days): the
+     * same candles, EMAs and swings; no trades.
+     */
+    @GetMapping("/structure")
+    Map<String, Object> dayStructure(@RequestParam String date, @RequestParam String underlying) {
+        LocalDate day = LocalDate.parse(date);
+        String u = underlying.toUpperCase(Locale.ROOT);
+        return cached("structure-day|" + day + "|" + u, ChartDb.finished(day), SESSION_TTL_MS, () -> {
+            Map<String, Object> out = new LinkedHashMap<>();
+            structureOf(day, u, out);
+            out.put("trades", List.of());
+            return out;
+        });
+    }
+
+    /** The day's 3-minute candles, EMAs and swings, put into {@code out}; the structure for the trades' stops. */
+    private Structure structureOf(LocalDate day, String u, Map<String, Object> out) {
+        LevelsService.MinuteBars minutes = LevelsService.minuteBars(jdbc, day, u);
+        List<LevelsService.Bar> three = threeMinute(minutes.bars(), ChartDb.finished(day));
+        Structure s = structure(day, three);
+        out.put("source", minutes.fromBars() ? "bars" : "ticks");
+        out.put("candles", three.stream().map(b -> List.of(b.t().toString(), b.open(), b.high(), b.low(), b.close())).toList());
+        out.put("ema9", s.ema9());
+        out.put("ema20", s.ema20());
+        out.put("swings", s.swings());
+        return s;
     }
 
     /** One swing pivot: the bar it formed in ({@code t}), confirmed {@code SWING_STRENGTH} bars later ({@code at}). */

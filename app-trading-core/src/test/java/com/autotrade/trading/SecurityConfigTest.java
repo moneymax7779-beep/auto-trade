@@ -60,7 +60,8 @@ class SecurityConfigTest {
         @org.springframework.web.bind.annotation.GetMapping({"/api/sessions", "/api/configs", "/api/execution/accounts",
                 "/api/execution", "/actuator/info", "/api/surges", "/api/sessions/7/positions", "/api/sessions/7/decisions",
                 "/api/oi-tape/strikes", "/api/runs", "/api/equity", "/api/sessions/7/rejections", "/api/close-auction",
-                "/api/live/ticks", "/api/replay-control", "/api/sessions/7/trade-context", "/api/sessions/7/at"})
+                "/api/live/ticks", "/api/replay-control", "/api/sessions/7/trade-context", "/api/sessions/7/at", "/api/structure",
+                "/api/day-context", "/api/sessions/7/structure"})
         String read() {
             return "ok";
         }
@@ -188,12 +189,12 @@ class SecurityConfigTest {
             MockMvc mvc = mvc(context);
             for (String path : List.of("/api/me", "/api/execution", "/api/execution/accounts", "/api/sessions", "/api/surges",
                     "/api/sessions/7/positions", "/api/oi-tape/strikes", "/api/equity", "/api/sessions/7/rejections",
-                    "/api/close-auction", "/api/live/ticks")) {
+                    "/api/close-auction", "/api/live/ticks", "/api/structure", "/api/day-context")) {
                 mvc.perform(get(path).with(user("member"))).andExpect(status().isOk());
             }
             // the replay controls and a session's trade data and minute inspector are the operator's
             for (String path : List.of("/api/configs", "/actuator/info", "/api/sessions/7/decisions", "/api/runs",
-                    "/api/replay-control", "/api/sessions/7/trade-context", "/api/sessions/7/at")) {
+                    "/api/replay-control", "/api/sessions/7/trade-context", "/api/sessions/7/at", "/api/sessions/7/structure")) {
                 mvc.perform(get(path).with(user("member"))).andExpect(status().isForbidden());
                 mvc.perform(get(path).with(user("satya", "ROLE_OPERATOR"))).andExpect(status().isOk());
             }

@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useId, useMemo, useRef, useState, type PointerEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { get } from "../api";
+import { get, type SessionStructure } from "../api";
 import { ErrorNote, Loading, Panel } from "./ui";
 import {
   LEVEL_COLORS, LevelTogglesBar, levelColor, mergeLevels, tagName, useCloseAuction, useLevels, useLevelToggles, useMaxPain, visibleLevels,
@@ -11,6 +11,9 @@ import { compactRupees, type ChartTrade } from "./TimelineChart";
 import { MomentInspector, TradeDetail, useTradeContext, type TradeContext } from "./TradeInspector";
 import { useLiveBars, withLiveCloses } from "./liveTicks";
 import { strategyShort } from "./strategies";
+import {
+  EMA9_COLOR, EMA20_3M_COLOR, STOP_COLOR, StructureTogglesBar, TARGET_COLOR, useStructure, useStructureToggles, type StructureToggles,
+} from "./structure";
 
 /** One option side's flow around a surge: ATM ± 2 total OI change and the ATM mid before / after. */
 interface SideFlow { oi: number; pct: number; mid0: number; mid1: number; bid: number; ask: number; label: string; score: number }
@@ -144,6 +147,18 @@ function cutLevels(l: LevelsData | undefined, until: string): LevelsData | undef
     lines: { vwap: l.lines.vwap.filter(([t]) => closed(t)), ema20: l.lines.ema20.filter(([t]) => closed(t)) } };
 }
 
+/**
+ * ma-cross's structure known by {@code until}: a 3-minute candle once it has closed, an EMA point at its bar's close (its
+ * stamp), a trade from its entry minute and its exit only once reached.
+ */
+function cutStructure(s: SessionStructure | undefined, until: string): SessionStructure | undefined {
+  if (!s) return s;
+  const end = secsOf(until), known = (t: string) => secsOf(t) <= end;
+  return { ...s, candles: s.candles.filter(([t]) => secsOf(t) + 180 <= end), ema9: s.ema9.filter(([t]) => known(t)),
+    ema20: s.ema20.filter(([t]) => known(t)), swings: s.swings.filter((w) => known(w.at)),
+    trades: s.trades.filter((tr) => known(tr.at)).map((tr) => (tr.exit && !known(tr.exit) ? { ...tr, exit: null } : tr)) };
+}
+
 export function SurgePanel({ live, date, underlying, nav, trades = NO_TRADES, until, sessionId }: { live?: boolean; date?: string; underlying?: string; nav?: DayNav;
   /** the day's trades on this index, drawn on the price chart (entry arrow, exit square, the index from entry to exit) */
   trades?: ChartTrade[];
@@ -209,6 +224,11 @@ function UnderlyingSurgesPanel({ date, data: polled, live, until, sessionId, fil
   const fetched = useLevels(date, data.underlying, live);
   const levels = { ...fetched, data: until ? cutLevels(fetched.data, until) : fetched.data };
   const [toggles, setToggles] = useLevelToggles();
+  // ma-cross's view (6 Nov 2026, as on the session page): the session's structure with its trades' stops for the operator,
+  // the day's alone otherwise
+  const [structureToggles, setStructureToggles] = useStructureToggles();
+  const structureQuery = useStructure(date, data.underlying, sessionId, live);
+  const structure = until ? cutStructure(structureQuery.data, until) : structureQuery.data;
   const count = (f: Flow) => data.surges.filter((s) => s.flow === f).length;
   return (
     <Panel
@@ -221,13 +241,17 @@ function UnderlyingSurgesPanel({ date, data: polled, live, until, sessionId, fil
     >
       {!data.historyAvailable && <p className="mb-2 text-xs text-warn">Volume history from zt-tiger-v2 is unavailable, so surges cannot be ranked.</p>}
       <Toolbar filters={filters} onFilters={onFilters} data={data} />
-      <div className="mb-2"><LevelTogglesBar toggles={toggles} onChange={setToggles} /></div>
+      <div className="mb-2 flex flex-wrap items-center gap-3">
+        <LevelTogglesBar toggles={toggles} onChange={setToggles} />
+        <StructureTogglesBar toggles={structureToggles} onChange={setStructureToggles} stops={sessionId != null} />
+      </div>
       <HitRate surges={data.surges} />
       {data.underlying === "SENSEX" && (
         <p className="mb-2 text-xs text-warn">SENSEX futures trade thinly (hundreds to a few thousand contracts a minute), so its surges rest on small volumes.</p>
       )}
       <SurgeChart date={date} live={live} until={until} nav={nav} data={data} shown={shown} groups={groups} selected={selected}
-        onSelect={setSelected} levels={levels.data} toggles={toggles} trades={trades} onPickTrade={sessionId != null ? setPicked : undefined} />
+        onSelect={setSelected} levels={levels.data} toggles={toggles} trades={trades} onPickTrade={sessionId != null ? setPicked : undefined}
+        structure={structure} structureToggles={structureToggles} />
       {picked && sessionId != null && (
         <div className="mt-3">
           {pickedContext
@@ -356,11 +380,14 @@ function loadSize(): Size {
   return "S";
 }
 
-function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onSelect, levels, toggles, trades, onPickTrade }:
+function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onSelect, levels, toggles, trades, onPickTrade,
+  structure, structureToggles }:
   { date: string; live?: boolean; until?: string; nav?: DayNav; data: UnderlyingSurges; shown: Surge[]; groups: Burst[]; selected: string | null;
     onSelect: (t: string | null) => void; levels?: LevelsData; toggles: LevelToggles; trades: ChartTrade[];
     /** a click on a trade's entry arrow or exit square (its data opens under the chart) */
-    onPickTrade?: (t: ChartTrade) => void }) {
+    onPickTrade?: (t: ChartTrade) => void;
+    /** ma-cross's 3-minute candles, EMA9 / EMA20 and its trades' stops and targets, each drawn when toggled on */
+    structure?: SessionStructure; structureToggles: StructureToggles }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const clipId = `plot-${useId().replace(/:/g, "")}`;
   const [hover, setHover] = useState<{ m: number; y: number } | null>(null);
@@ -501,6 +528,22 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
   const pLo = Math.min(...ys), pHi = Math.max(...ys), near = Math.max((pHi - pLo) * 0.15, 1);
   const lv = levels ? mergeLevels(visibleLevels(levels.levels, toggles), levels.tolerancePct).filter((l) => minutes(l.from) <= b) : [];
   const zs = levels ? visibleZones(levels.zones, toggles).filter((z) => minutes(z.from) <= b && (!z.until || minutes(z.until) >= a)) : [];
+  // ma-cross's structure, as toggled: 3-minute candles (stamped with their first minute), its EMAs, each trade's stop and
+  // target from its entry decision to its exit (to the latest minute while open)
+  const candles = structureToggles.candles ? (structure?.candles ?? []).filter(([t]) => minutes(t) + 3 >= a && minutes(t) <= b) : [];
+  const emaLines = structureToggles.emas && structure ? [
+    { key: "ema9-3m", name: "EMA9 3m", tag: "EMA9", color: EMA9_COLOR, points: structure.ema9 },
+    { key: "ema20-3m", name: "EMA20 3m", tag: "EMA20 3m", color: EMA20_3M_COLOR, points: structure.ema20 },
+  ] : [];
+  const emaAt = (points: [string, number][], m: number) => { let v: number | undefined; for (const [t, p] of points) { if (minutes(t) <= m) v = p; else break; } return v; };
+  const stopLines = structureToggles.stops && structure ? structure.trades.flatMap((tr) => {
+    const m0 = minutes(tr.at), m1 = tr.exit ? minutes(tr.exit) : lastMinute;
+    if (m1 < a || m0 > b) return [];
+    return [
+      ...(tr.stop != null ? [{ key: `stop-${tr.position}`, v: tr.stop, color: STOP_COLOR, m0, m1, name: `${tr.side} stop` }] : []),
+      ...(tr.target != null ? [{ key: `target-${tr.position}`, v: tr.target, color: TARGET_COLOR, m0, m1, name: `${tr.side} target` }] : []),
+    ];
+  }) : [];
   // auto-fit: the visible prices, widened a little for levels just outside them
   const inBand = (v: number) => v >= pLo - near && v <= pHi + near;
   const mpNow = mpAt(b);
@@ -511,7 +554,8 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
   const fitted = [pLo, pHi, ...auInView, ...(closePrint && closePrint.m >= a && closePrint.m <= b ? [closePrint.v] : []),
     ...lv.filter((l) => inBand(l.price)).map((l) => l.price),
     ...(mpNow != null && inBand(mpNow) ? [mpNow] : []),
-    ...zs.filter((z) => inBand(z.lo) || inBand(z.hi)).flatMap((z) => [z.lo, z.hi])];
+    ...zs.filter((z) => inBand(z.lo) || inBand(z.hi)).flatMap((z) => [z.lo, z.hi]),
+    ...candles.flatMap((c) => [c[2], c[3]]), ...stopLines.filter((s) => inBand(s.v)).map((s) => s.v)];
   const fLo = Math.min(...fitted), fHi = Math.max(...fitted), pad = Math.max((fHi - fLo) * 0.06, 1);
   const y0 = manualY?.lo ?? fLo - pad, y1 = manualY?.hi ?? fHi + pad;
   geo.current = { view, y0, y1, priceH: PRICE_H, W, L, PW };
@@ -640,6 +684,7 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
       ? { start: whole.start, end: whole.end, pct: Math.round((100 * split.b) / (split.b + split.s)) } : null;
     return { m: hover.m, price, vol: vols.get(hover.m), surge: byMinute.get(hover.m), inside, up, down, flips: burst?.flips ?? [], burstSplit,
       vwap: lineMaps.vwap.get(hover.m), ema: lineMaps.ema20.get(hover.m), maxPain: mpAt(hover.m),
+      emas: emaLines.map((e) => ({ name: e.name, v: emaAt(e.points, hover.m) })).filter((e) => e.v != null),
       auction: hover.m >= minutes("15:10") ? auAt(hover.m + 59 / 60) : undefined,
       ce: prem ? premAt("CE", hover.m) : null, pe: prem ? premAt("PE", hover.m) : null };
   })();
@@ -747,7 +792,7 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
             ))}
           </g>
           <g clipPath={`url(#${clipId}-price)`}>
-            {/* tested zones, from their second touch until broken; named only when zoomed in (the tooltip names them always) */}
+            {/* tested zones, from their second touch until broken; always named (user, 6 Nov 2026), in full when zoomed in */}
             {drawnZones.map((z) => {
               const x0 = X(minutes(z.from)), x1 = z.until ? X(minutes(z.until)) : W - R;
               const top = Y(z.hi), h = Math.max(3, Y(z.lo) - Y(z.hi));
@@ -755,8 +800,8 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
               return (
                 <g key={`${z.kind}-${z.from}-${z.lo}`}>
                   <rect x={x0} width={Math.max(1, x1 - x0)} y={top} height={h} fill={c} opacity={0.14} />
-                  {span <= 120 && <text x={Math.max(x0, L) + 3} y={top - 2} fontSize="9" fill={c} opacity={0.9}>
-                    {z.kind === "support" ? "support" : "resistance"} {z.touches}×</text>}
+                  <text x={Math.max(x0, L) + 3} y={top - 2} fontSize="9" fill={c} opacity={0.9} {...HALO}>
+                    {span <= 120 ? (z.kind === "support" ? "support" : "resistance") : z.kind === "support" ? "S" : "R"} {z.touches}×</text>
                 </g>
               );
             })}
@@ -793,7 +838,29 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
                 <title>official close {nf(closePrint.v, 2)} at {auction.data?.closeAt}</title>
               </g>
             )}
-            <polyline fill="none" stroke="var(--color-accent)" strokeWidth="1.6"
+            {/* ma-cross's 3-minute candles, EMAs and its trades' stop / target */}
+            {candles.map(([t, o, hi, lo, c]) => {
+              const m = minutes(t), x = X(m + 1.5), w = Math.max(1.5, (PW / span) * 3 * 0.7);
+              const col = c >= o ? "var(--color-up)" : "var(--color-down)";
+              return (
+                <g key={`c-${t}`} opacity={0.8}>
+                  <line x1={x} x2={x} y1={Y(hi)} y2={Y(lo)} stroke={col} strokeWidth={1} />
+                  <rect x={x - w / 2} width={w} y={Y(Math.max(o, c))} height={Math.max(1, Math.abs(Y(o) - Y(c)))} fill={col} />
+                </g>
+              );
+            })}
+            {emaLines.map((e) => e.points.length > 1 && (
+              <polyline key={e.key} fill="none" stroke={e.color} strokeWidth="1.8" opacity={0.9}
+                points={e.points.map(([t, v]) => `${X(minutes(t)).toFixed(1)},${Y(v).toFixed(1)}`).join(" ")}>
+                <title>{e.name}: ma-cross's EMA of 3-minute closes, each point at its bar's close</title>
+              </polyline>
+            ))}
+            {stopLines.map((s) => (
+              <line key={s.key} x1={X(s.m0)} x2={X(s.m1)} y1={Y(s.v)} y2={Y(s.v)} stroke={s.color} strokeWidth={2} strokeDasharray="6 4">
+                <title>ma-cross {s.name} {nf(s.v, 2)}</title>
+              </line>
+            ))}
+            <polyline fill="none" stroke="var(--color-accent)" strokeWidth={candles.length ? 1 : 1.6} opacity={candles.length ? 0.4 : 1}
               points={pts.map((p) => `${X(minutes(p[0])).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(" ")} />
             {shown.filter((s) => s.spot != null && minutes(s.t) >= a - 1 && minutes(s.t) <= b + 1).map((s) => {
               const r = Math.min(6.5, 2.5 + Math.sqrt(s.x) * 0.8);
@@ -853,6 +920,15 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
               const v = lineMaps[k].get(minutes(lastShown[0]));
               return v != null && inY(v) ? [{ key: k, y: Y(v), text: `${k === "vwap" ? "VWAP" : "EMA"} ${nf(v, 0)}`, full: k, color: LEVEL_COLORS[k], fill: false }] : [];
             }) : []),
+            ...emaLines.flatMap((e) => {
+              const v = emaAt(e.points, minutes(lastShown[0]));
+              return v != null && inY(v) ? [{ key: e.key, y: Y(v), text: `${e.tag} ${nf(v, 0)}`, full: e.name, color: e.color, fill: false }] : [];
+            }),
+            // the zones still standing at the right edge, at their middle
+            ...drawnZones.filter((z) => !z.until || minutes(z.until) >= b).map((z) => ({
+              key: `z-${z.kind}-${z.from}-${z.lo}`, y: Y((z.lo + z.hi) / 2), text: `${z.kind === "support" ? "S" : "R"} ${z.touches}× ${nf((z.lo + z.hi) / 2, 0)}`,
+              full: `${z.kind} zone ${nf(z.lo, 0)}–${nf(z.hi, 0)}, ${z.touches} touches`,
+              color: z.kind === "support" ? LEVEL_COLORS.support : LEVEL_COLORS.resistance, fill: false })),
             ...(mpNow != null && inY(mpNow) ? [{ key: "maxpain", y: Y(mpNow), text: `MaxP ${nf(mpNow, 0)}`,
               full: `max pain, expiry ${maxPain.data?.expiry ?? ""}`, color: LEVEL_COLORS.maxPain, fill: false }] : []),
             ...(() => {
@@ -979,6 +1055,11 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
                 {tip.vwap != null && <>VWAP {nf(tip.vwap, 0)} ({signed(tip.price - tip.vwap, 0)})</>}
                 {tip.vwap != null && tip.ema != null && " · "}
                 {tip.ema != null && <>EMA20 {nf(tip.ema, 0)} ({signed(tip.price - tip.ema, 0)})</>}
+              </div>
+            )}
+            {tip.emas.length > 0 && tip.price != null && (
+              <div className="num text-muted">
+                {tip.emas.map((e) => `${e.name} ${nf(e.v, 0)} (${signed(tip.price! - e.v!, 0)})`).join(" · ")}
               </div>
             )}
             {tip.auction && (tip.auction[1] != null || tip.auction[2] != null) && (
