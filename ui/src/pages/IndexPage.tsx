@@ -1,3 +1,4 @@
+import { IndexChart } from "../components/IndexChart";
 import { useQuery } from "@tanstack/react-query";
 import { Link, NavLink, useParams, useSearchParams } from "react-router";
 import { get, parseSide, type LastDecisionRow, type PositionRow, type SessionRow, type Status, type TradePositionRow, isPrimaryLive } from "../api";
@@ -79,6 +80,8 @@ export function IndexPage() {
       {CONTEXT_ONLY.has(underlying) && (
         <p className="text-xs text-muted">{underlying} is recorded for context (chart, futures volume, PCR, levels); no strategy trades it.</p>
       )}
+
+      {day && <IndexChart key={underlying} underlying={underlying} until={day} live={showLive} />}
 
       {showLive ? <LiveDay underlying={underlying} s={s} nav={nav} inspect={inspect} /> : day
         ? <PastDay key={day} underlying={underlying} day={day} nav={nav} inspect={inspect}
