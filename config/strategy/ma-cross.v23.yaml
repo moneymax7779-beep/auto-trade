@@ -4,7 +4,7 @@
 # so the held-out days decide. Never trades an index on the day it expires. Every value is a round number, not fitted.
 version: mac-v23
 strategy: ma-cross
-status: RESEARCH
+status: UNCALIBRATED
 source: "A-332 (no entry on a 1-minute spike > 0.5 ATR(1m)); values fixed from the discovery half 28 Sep-16 Oct before any replay of this file"
 
 scope:
