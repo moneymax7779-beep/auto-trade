@@ -79,8 +79,9 @@ class LiveBookIT {
                                  String closed, Double gross, Double charges) {
         long qty = "CLOSED".equals(status) ? 0 : 65;
         return jdbc.queryForObject("insert into exec.position (tenant_id, broker_account_id, entry_trade_intent_id, strategy_id, "
-                + "underlying, option_side, instrument_token, symbol, quantity_open, average_entry, opened_at, closed_at, "
-                + "exit_reason, realised_gross, charges, status) values (?, ?, ?, 'oi-burst-cross', 'NIFTY', 'CE', ?, "
+                + "underlying, option_side, instrument_token, instrument_key, symbol, quantity_open, average_entry, opened_at, "
+                + "closed_at, exit_reason, realised_gross, charges, status) values (?, ?, ?, 'oi-burst-cross', 'NIFTY', 'CE', ?, "
+                + "'NSE_FO|40009', "
                 + "'NIFTY 24650 CE 09 NOV 26', ?, ?, now() - ?::interval, now() - ?::interval, ?, ?, ?, ?) returning id", Long.class,
                 tenant, account, intent, TOKEN, qty, entry, opened, closed, closed == null ? null : "STOP", gross, charges, status);
     }
@@ -126,8 +127,12 @@ class LiveBookIT {
         tick("30 seconds", 163.70);                        // the newest
 
         long done = intent(group, session, account, 2, "LIVE");
-        position(tenant, account, done, "CLOSED", 185.00, "2 days", "2 days", -2574.0, 89.51);
+        position(tenant, account, done, "CLOSED", 185.00, "2 days 01:00:00", "2 days", -2574.0, 89.51);
         order(tenant, account, done, "ENTRY", "FILLED", 65, null);
+        long add = intent(group, session, account, 4, "LIVE");             // an add to it 30 minutes in: 130 bought in all
+        jdbc.update("update exec.trade_intent set action = 'ADD', created_at = now() - interval '2 days 00:30:00' where id = ?", add);
+        order(tenant, account, add, "ENTRY", "FILLED", 65, null);
+        jdbc.update("insert into exec.kill_switch (scope, reason, engaged_by) values ('GLOBAL_LIVE', 'ops', 'it')");
 
         long rehearsal = intent(group, session, account, 3, "DRY_RUN");
         position(tenant, account, rehearsal, "CLOSED", 100.00, "3 days", "3 days", 650.0, 40.0);
@@ -137,7 +142,9 @@ class LiveBookIT {
         LiveBookController api = new LiveBookController(new Access(dataSource), dataSource);
         Map<String, Object> book = api.liveBook("local-owner", account, 7);
 
-        assertThat(book).containsEntry("account", "ZERODHA-1").containsEntry("mode", "LIVE");
+        assertThat(book).containsEntry("account", "ZERODHA-1").containsEntry("mode", "LIVE").containsEntry("canAct", true);
+        assertThat((List<Map<String, Object>>) book.get("killSwitches")).singleElement().satisfies(k -> assertThat(k)
+                .containsEntry("text", "all LIVE accounts: ops").containsEntry("releasable", false));   // GLOBAL_LIVE: ADMIN only
         List<Map<String, Object>> open = (List<Map<String, Object>>) book.get("open");
         assertThat(open).singleElement().satisfies(p -> {
             assertThat(p).containsEntry("quantity", 65L).containsEntry("bid", 163.70).containsEntry("best", 163.80)
@@ -148,12 +155,32 @@ class LiveBookIT {
         });
         List<Map<String, Object>> closed = (List<Map<String, Object>>) book.get("closed");
         assertThat(closed).as("the DRY_RUN rehearsal is not real money").singleElement().satisfies(p -> {
-            assertThat(p).containsEntry("quantity", 65L).containsEntry("exit", 145.40).containsEntry("exitReason", "STOP")
-                    .containsEntry("net", -2663.51).containsEntry("pct", -21.41);
+            assertThat(p).containsEntry("quantity", 130L).containsEntry("exit", 165.2).containsEntry("exitReason", "STOP")
+                    .containsEntry("net", -2663.51).containsEntry("pct", -10.7);
         });
         Map<String, Object> summary = (Map<String, Object>) book.get("summary");
         assertThat(summary).containsEntry("openPnl", 1127.75).containsEntry("atRisk", 5885.75)
                 .containsEntry("realisedToday", 0.0).containsEntry("sinceLiveNet", -2663.51).containsEntry("sinceLiveTrades", 1);
+
+        // a stop being cancelled no longer protects the position: not working, nothing counted at risk
+        jdbc.update("update exec.order_execution set status = 'CANCEL_PENDING' where role = 'STOP' and trade_intent_id = ?", live);
+        Map<String, Object> cancelling = ((List<Map<String, Object>>) api.liveBook("local-owner", account, 7).get("open")).getFirst();
+        assertThat(cancelling).containsEntry("stopWorking", false).doesNotContainKey("atRisk");
+
+        // sold outside the app: the reconciler's kill names the contract; the book offers the window to price the hand sale
+        jdbc.update("update exec.order_execution set status = 'CANCELLED', updated_at = now() - interval '400 seconds' "
+                + "where role = 'STOP' and trade_intent_id = ?", live);
+        tick("390 seconds", 150.10);
+        tick("370 seconds", 147.00);
+        jdbc.update("insert into exec.kill_switch (tenant_id, scope, broker_account_id, reason, engaged_by, engaged_at) values "
+                + "(?, 'ACCOUNT', ?, 'RECONCILIATION: NSE_FO|40009: ours 65, broker 0', 'reconciler', now() - interval '350 "
+                + "seconds')", tenant, account);
+        Map<String, Object> sold = api.liveBook("local-owner", account, 7);
+        assertThat(((List<Map<String, Object>>) sold.get("open")).getFirst()).extractingByKey("notAtBroker")
+                .satisfies(h -> assertThat((Map<String, Object>) h).containsEntry("bidFirst", 150.10)
+                        .containsEntry("bidLow", 147.00).containsEntry("bidHigh", 150.10));
+        assertThat((List<Map<String, Object>>) sold.get("killSwitches")).hasSize(2).first().as("the account's own: oldest first")
+                .satisfies(k -> assertThat(k).containsEntry("releasable", true));
 
         long other = accounts.ensureTenant("other");
         accounts.ensureMembership(other, accounts.ensureUser("kc-other", "other"), "OWNER");

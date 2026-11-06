@@ -178,6 +178,55 @@ class AccountsController {
                 f.reason() == null ? "manual" : f.reason(), LocalDate.now(IST)));
     }
 
+    record PositionExit(String confirm) {
+    }
+
+    /** The trader's per-position Exit (7 Nov 2026): sells that one position now, the account keeps trading. */
+    @PostMapping("/api/execution/accounts/{id}/positions/{positionId}/exit")
+    Map<String, Object> exitPosition(@RequestHeader(value = Access.HEADER, required = false) String subject,
+                                     @PathVariable long id, @PathVariable long positionId, @RequestBody PositionExit e)
+            throws Exception {
+        Access.User user = access.user(subject);
+        Access.require("EXIT".equals(e.confirm()), "confirm with \"EXIT\"");
+        BrokerAccount a = own(user, id);
+        try {
+            return Map.of("account", a.displayName(), "result", service.exitPosition(a.id(), positionId, user.subject(),
+                    LocalDate.now(IST)));
+        } catch (IllegalArgumentException ex) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, ex.getMessage());
+        }
+    }
+
+    /** {@code at}: ISO local date-time in IST (e.g. 2026-11-06T09:57:30); {@code unchecked}: book without a broker read. */
+    record HandExit(Double price, String at, Boolean unchecked) {
+    }
+
+    /**
+     * Book a hand exit (7 Nov 2026): a position the trader sold outside the app closes in our record as MANUAL at the
+     * price and time they enter ({@link com.autotrade.execution.ManualExit} says when it is refused).
+     */
+    @PostMapping("/api/execution/accounts/{id}/positions/{positionId}/hand-exit")
+    Map<String, Object> handExit(@RequestHeader(value = Access.HEADER, required = false) String subject,
+                                 @PathVariable long id, @PathVariable long positionId, @RequestBody HandExit h) throws Exception {
+        Access.User user = access.user(subject);
+        BrokerAccount a = own(user, id);
+        if (h.price() == null || h.at() == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "price and at are required");
+        }
+        java.time.Instant at;
+        try {
+            at = java.time.LocalDateTime.parse(h.at()).atZone(IST).toInstant();
+        } catch (java.time.format.DateTimeParseException ex) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "at: a date-time like 2026-11-06T09:57:30");
+        }
+        try {
+            return Map.of("account", a.displayName(), "result", service.bookManualExit(a.id(), positionId, h.price(), at,
+                    user.subject(), Boolean.TRUE.equals(h.unchecked())));
+        } catch (IllegalArgumentException ex) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, ex.getMessage());
+        }
+    }
+
     @PostMapping("/api/execution/flatten-all")
     Map<String, Object> flattenAll(@RequestHeader(value = Access.HEADER, required = false) String subject,
                                    @RequestBody Flatten f) throws Exception {

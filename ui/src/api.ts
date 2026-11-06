@@ -456,7 +456,10 @@ export interface ExecPosition {
 export interface LiveBook {
   account: string;
   mode: string;
-  killSwitches: string[];
+  /** whether the caller may act on the account (exit, book a hand exit); a viewer only reads */
+  canAct: boolean;
+  /** engaged switches that stop the account's entries, oldest first */
+  killSwitches: { id: number; text: string; releasable: boolean }[];
   summary: { openPnl: number; atRisk: number; realisedToday: number; sinceLiveNet: number; sinceLiveTrades: number;
     sinceLiveFrom: string | null };
   open: LiveOpenPosition[];
@@ -490,6 +493,11 @@ export interface LiveOpenPosition extends LiveBookRow {
   pnl?: number;
   pnlPct?: number | null;
   atRisk?: number;
+  /**
+   * The reconciler found the broker no longer holds it (sold outside the app): the window to price the hand sale from
+   * (IST, its stop's cancel or a minute before the kill, to the kill) and the captured bids in it.
+   */
+  notAtBroker?: { from: string; to: string; bidLow: number | null; bidHigh: number | null; bidFirst: number | null };
 }
 
 export interface LiveClosedPosition extends LiveBookRow {

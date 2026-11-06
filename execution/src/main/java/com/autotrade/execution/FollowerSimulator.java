@@ -864,13 +864,23 @@ public final class FollowerSimulator {
      */
     public List<String> flatten(BrokerAccount account, LocalDate date, java.util.function.ToDoubleFunction<Map<String, Object>> price,
                                 String reason) {
+        return flatten(account, date, price, reason, null);
+    }
+
+    /**
+     * Flatten, or with {@code onlyPosition} exit that one open position the same way (the trader's per-position Exit,
+     * 7 Nov 2026): stop off first, then sold now; audited FLATTEN, or POSITION_EXIT for one position.
+     */
+    public List<String> flatten(BrokerAccount account, LocalDate date, java.util.function.ToDoubleFunction<Map<String, Object>> price,
+                                String reason, Long onlyPosition) {
         Day day = new Day(account, date);
         List<String> lines = new ArrayList<>();
         for (Map<String, Object> pos : jdbc.queryForList("select p.id, p.entry_trade_intent_id, p.strategy_id, p.underlying, "
                 + "p.option_side, p.instrument_token, p.instrument_key, p.symbol, p.quantity_open, p.average_entry, "
                 + "d.lot_size, i.execution_mode from exec.position p join exec.trade_intent i on i.id = p.entry_trade_intent_id "
                 + "join exec.trade_batch b on b.id = i.trade_batch_id join exec.signal_decision d on d.id = b.signal_decision_id "
-                + "where p.broker_account_id = ? and p.status = 'OPEN' order by p.id", account.id())) {
+                + "where p.broker_account_id = ? and p.status = 'OPEN' and (?::bigint is null or p.id = ?) order by p.id", account.id(),
+                onlyPosition, onlyPosition)) {
             long positionId = ((Number) pos.get("id")).longValue();
             String symbol = (String) pos.get("symbol");
             FollowerVenue.Release release = venue.release(account, positionId);
@@ -906,7 +916,8 @@ public final class FollowerSimulator {
                 lines.add(symbol + ": " + open + " sold at " + String.format(java.util.Locale.ROOT, "%.2f", fill.price()));
             }
         }
-        kills.audit(account, "flatten", "FLATTEN", Map.of("reason", reason, "positions", lines));
+        kills.audit(account, "flatten", onlyPosition == null ? "FLATTEN" : "POSITION_EXIT", Map.of("reason", reason,
+                "positions", lines));
         return lines;
     }
 

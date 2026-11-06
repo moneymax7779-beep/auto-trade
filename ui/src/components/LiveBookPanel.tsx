@@ -1,6 +1,6 @@
 import { type ReactNode, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { get, type ExecutionAccount, type LiveBook, type PositionRow } from "../api";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { get, postJson, type ExecutionAccount, type LiveBook, type LiveOpenPosition, type PositionRow } from "../api";
 import { ErrorNote } from "./ui";
 
 /**
@@ -34,6 +34,12 @@ export interface OpenView {
   pnl: number | null;
   pnlPct: number | null;
   leg?: string;
+  /** the strategy's stage (CONFIRMED, RUNNER, ...) when the engine reports one */
+  stage?: string;
+  /** a straddle: its legs, shown instead of one entry -> bid and the rail */
+  legs?: { side: string; entry: number; bid: number | null; pnl: number | null }[];
+  /** under the card: what the trader can do with it (LIVE: Exit, book a hand exit) */
+  actions?: ReactNode;
 }
 
 export interface ClosedView {
@@ -73,7 +79,7 @@ const istToday = () => new Date(Date.now() + 330 * 60_000).toISOString().slice(0
 
 /** "NIFTY 24650 CE 09 NOV 26" -> contract "NIFTY 24650 CE" and expiry "9 Nov". */
 function contract(symbol: string) {
-  const m = /^(\S+ \S+ (?:CE|PE)) (\d{1,2}) ([A-Za-z]{3})/.exec(symbol);
+  const m = /^(\S+ \S+ (?:CE\+PE|CE|PE)) (\d{1,2}) ([A-Za-z]{3})/.exec(symbol);
   return m ? { name: m[1], expiry: `${Number(m[2])} ${m[3].charAt(0)}${m[3].slice(1).toLowerCase()}` } : { name: symbol, expiry: "" };
 }
 
@@ -111,6 +117,7 @@ function LiveBookPanel({ accountId }: { accountId: number }) {
     stopNote: p.stop == null ? "no stop on record"
       : p.stopWorking ? <>stop resting at the broker{p.bid != null ? <> · {px(p.bid - p.stop)} pts below the bid · {money(p.atRisk ?? null, false)} at risk</> : null}</>
       : <span className="text-down">stop {p.stopStatus?.toLowerCase() ?? "not working"} at the broker</span>,
+    actions: b.canAct ? <PositionActions accountId={accountId} p={p} /> : undefined,
   }));
   const closed: ClosedView[] = b.closed.map((c) => ({ key: c.id, strategy: c.strategy, symbol: c.symbol, quantity: c.quantity,
     lotSize: c.lotSize, entry: c.entry, exit: c.exit, exitReason: c.exitReason, opened: c.opened, closed: c.closed,
@@ -124,8 +131,124 @@ function LiveBookPanel({ accountId }: { accountId: number }) {
   ];
   return (
     <PositionsPanel title={<>Auto-trade positions · {b.account}</>} badge="LIVE" note="only trades auto-trade placed"
-      banner={b.killSwitches.length > 0 ? <><b>Entries stopped:</b> {b.killSwitches.join(" · ")} <span className="opacity-80">(exits are never blocked)</span></> : null}
+      banner={b.killSwitches.length > 0 ? <KillBanner accountId={accountId} kills={b.killSwitches} /> : null}
       totals={totals} open={open} closed={closed} weekly footnote="prices from the own capture · refreshed every 5 s · P&L at the bid" />
+  );
+}
+
+/** Why entries are stopped, one line per switch, each with Release for the switches the user may release. */
+function KillBanner({ accountId, kills }: { accountId: number; kills: LiveBook["killSwitches"] }) {
+  const client = useQueryClient();
+  const release = useMutation({
+    mutationFn: (id: number) => postJson(`/api/execution/kill-switches/${id}/release`, {}),
+    onSettled: () => client.invalidateQueries({ queryKey: ["live-book", accountId] }),
+  });
+  return (
+    <div className="space-y-1">
+      <div><b>Entries stopped</b> <span className="opacity-80">(exits are never blocked)</span></div>
+      {kills.map((k) => (
+        <div key={k.id} className="flex flex-wrap items-center gap-2">
+          <span className="min-w-0 break-words">{k.text}</span>
+          {k.releasable && (
+            <button onClick={() => { if (window.confirm(`Release this kill switch? ${k.text}\n\nThe account takes new entries again.`)) release.mutate(k.id); }}
+              disabled={release.isPending}
+              className="rounded border border-rose-300 bg-white px-2 py-0.5 text-xs font-medium text-rose-700 hover:bg-rose-100 disabled:opacity-50">
+              Release</button>
+          )}
+        </div>
+      ))}
+      {release.error && <div className="text-xs">Not released: {(release.error as Error).message}</div>}
+    </div>
+  );
+}
+
+/** IST wall time now as "YYYY-MM-DDTHH:MM:SS" (what the hand-exit form edits and the API takes). */
+const istNow = () => new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 19);
+
+/**
+ * A LIVE position's own controls (7 Nov 2026, user: "give the flexibility for the trader to close his open position when
+ * he wants ... allow the user to edit the price for reconcile and close the position"):
+ * - Exit: sells this position now at the broker (its stop comes off first); the account keeps trading.
+ * - Book hand exit: it was sold outside the app (in Kite): our record closes as MANUAL at the price and time the trader
+ *   enters; nothing is sent to the broker. Opened by itself when the reconciler found the broker holds none of it.
+ */
+function PositionActions({ accountId, p }: { accountId: number; p: LiveOpenPosition }) {
+  const client = useQueryClient();
+  const hint = p.notAtBroker;
+  const [mode, setMode] = useState<"idle" | "exit" | "hand">(hint ? "hand" : "idle");
+  const [price, setPrice] = useState<string>(() => (hint?.bidFirst ?? p.bid ?? p.entry).toFixed(2));
+  const [at, setAt] = useState<string>(() => (hint?.from ?? istNow()).slice(0, 19));
+  const [unchecked, setUnchecked] = useState(false);
+  const [done, setDone] = useState<string | null>(null);
+  const refresh = () => client.invalidateQueries({ queryKey: ["live-book", accountId] });
+  const base = `/api/execution/accounts/${accountId}/positions/${p.id}`;
+  const exit = useMutation({
+    mutationFn: () => postJson<{ result: string[] }>(`${base}/exit`, { confirm: "EXIT" }),
+    onSuccess: (r) => { setDone(r.result.join(" · ")); setMode("idle"); },
+    onSettled: refresh,
+  });
+  const hand = useMutation({
+    mutationFn: () => postJson<{ result: string }>(`${base}/hand-exit`, { price: Number(price), at, unchecked }),
+    onSuccess: (r) => { setDone(r.result); setMode("idle"); },
+    onSettled: refresh,
+  });
+  const value = Number(price);
+  const valid = Number.isFinite(value) && value > 0 && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2})?$/.test(at);
+  const gross = valid ? (value - p.entry) * p.quantity : null;
+  const needsUnchecked = /unchecked/.test((hand.error as Error | null)?.message ?? "");
+  const btn = "rounded-md border px-3 py-1.5 text-sm font-medium disabled:opacity-50";
+  return (
+    <div className="md:col-span-4">
+      {hint && (
+        <div className="mb-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <b>The broker holds none of this:</b> it was sold outside the app between {hint.from.slice(11, 19)} and {hint.to.slice(11, 19)}
+          {hint.bidLow != null && hint.bidHigh != null ? <> (captured bid {px(hint.bidLow)}–{px(hint.bidHigh)})</> : null}.
+          {" "}Book the sale at your fill price from Kite → Orders → Trades; then release the kill switch above.
+        </div>
+      )}
+      {mode === "idle" && (
+        <div className="flex flex-wrap items-center gap-2">
+          {!hint && <button className={`${btn} border-rose-400 text-rose-700 hover:bg-rose-50`} onClick={() => { exit.reset(); setMode("exit"); }}>Exit</button>}
+          <button className={`${btn} border-line text-muted hover:text-text`} onClick={() => { hand.reset(); setMode("hand"); }}>
+            Sold it in Kite? Book the exit</button>
+          {done && <span className="text-sm text-muted">{done}</span>}
+        </div>
+      )}
+      {mode === "exit" && (
+        <div className="flex flex-wrap items-center gap-2 rounded-md border border-rose-300 bg-rose-50 px-3 py-2 text-sm">
+          <span>Sell <b>{lotsText(p.quantity, p.lotSize)}</b> of <b>{contract(p.symbol).name}</b> now at the broker{p.bid != null ? <> (bid {px(p.bid)})</> : null}? Its stop comes off first.</span>
+          <button className={`${btn} border-rose-500 bg-rose-600 text-white hover:bg-rose-700`} disabled={exit.isPending}
+            onClick={() => exit.mutate()}>{exit.isPending ? "Selling…" : "Confirm exit"}</button>
+          <button className={`${btn} border-line bg-white`} disabled={exit.isPending} onClick={() => setMode("idle")}>Cancel</button>
+          {exit.error && <span className="w-full text-rose-800">Not sold: {(exit.error as Error).message}</span>}
+        </div>
+      )}
+      {mode === "hand" && (
+        <form className="flex flex-wrap items-end gap-3 rounded-md border border-line bg-panel-2 px-3 py-2 text-sm"
+          onSubmit={(e) => { e.preventDefault(); if (valid) hand.mutate(); }}>
+          <label className="flex flex-col text-xs text-muted">Sold at (₹ per unit)
+            <input type="number" step="0.05" min="0.05" value={price} onChange={(e) => setPrice(e.target.value)}
+              className="num mt-0.5 w-28 rounded border border-line bg-white px-2 py-1 text-sm text-text" required /></label>
+          <label className="flex flex-col text-xs text-muted">Time (IST)
+            <input type="datetime-local" step="1" value={at} onChange={(e) => setAt(e.target.value)}
+              className="num mt-0.5 rounded border border-line bg-white px-2 py-1 text-sm text-text" required /></label>
+          <div className="text-xs text-muted">
+            <div>{lotsText(p.quantity, p.lotSize)} · entry {px(p.entry)}</div>
+            <div className={`num text-sm font-semibold ${tone(gross)}`}>{gross != null ? <>{money(gross)} gross</> : "–"}</div>
+          </div>
+          {needsUnchecked && (
+            <label className="flex items-center gap-1.5 text-xs text-amber-900">
+              <input type="checkbox" checked={unchecked} onChange={(e) => setUnchecked(e.target.checked)} />
+              Kite can't be read now: book it without checking Kite</label>
+          )}
+          <button type="submit" className={`${btn} border-accent bg-accent text-white hover:opacity-90`} disabled={!valid || hand.isPending}>
+            {hand.isPending ? "Booking…" : "Book sold by hand"}</button>
+          {!hint && <button type="button" className={`${btn} border-line bg-white`} onClick={() => setMode("idle")}>Cancel</button>}
+          <span className="w-full text-xs text-muted">Only for a sale made outside the app: nothing is sent to the broker, our record closes as "sold by hand".</span>
+          {hand.error && <span className="w-full text-rose-800">Not booked: {(hand.error as Error).message}</span>}
+        </form>
+      )}
+    </div>
   );
 }
 
@@ -137,7 +260,7 @@ export function PaperPositions({ account, date, openRows, closedRows }: {
 }) {
   const iso = (t: string | null) => (t ? (t.length > 8 ? t : `${date}T${t}`) : `${date}T00:00:00`);
   let atRisk = 0;
-  const open: OpenView[] = openRows.map((r, i) => {
+  const single: OpenView[] = openRows.map((r, i) => {
     const stop = r.stopPct != null ? r.averageCost * (1 - r.stopPct / 100) : null;
     const target = r.targetPct != null ? r.averageCost * (1 + r.targetPct / 100) : null;
     const bid = r.bid ?? null;
@@ -148,14 +271,33 @@ export function PaperPositions({ account, date, openRows, closedRows }: {
       key: `${r.strategy}|${r.symbol}|${r.opened}|${i}`, strategy: r.strategy ?? "", symbol: r.symbol, quantity: r.quantity,
       lotSize: r.lotSize ?? null, entry: r.averageCost, opened: iso(r.opened), bid, best: null, stop, target, pnl,
       pnlPct: pnl != null && r.averageCost > 0 ? (100 * pnl) / (r.averageCost * r.quantity) : null, leg: r.leg || undefined,
+      stage: r.stages?.length ? r.stages[r.stages.length - 1] : undefined,
       stopNote: stop == null ? "no stop"
         : <>engine stop −{r.stopPct} %{bid != null ? <> · {px(bid - stop)} pts below the bid · {money(risk, false)} at risk</> : null}{target != null ? <> · target +{r.targetPct} %</> : null}</>,
     };
   });
+  // a straddle's legs (same strategy, index and entry time) are one trade: one card, both legs, the combined P&L
+  const open: OpenView[] = [];
+  single.forEach((v, i) => {
+    const r = openRows[i];
+    if (!v.leg) { open.push(v); return; }
+    const group = `${r.strategy}|${r.underlying}|${r.opened}`;
+    const leg = { side: v.leg, entry: v.entry, bid: v.bid, pnl: v.pnl };
+    const trade = open.find((o) => o.key === group);
+    if (!trade) {
+      open.push({ ...v, key: group, symbol: v.symbol.replace(/ (CE|PE) /, " CE+PE "), legs: [leg], stop: null, target: null,
+        best: null, bid: null, stopNote: "each leg has its own stop" });
+      return;
+    }
+    trade.legs!.push(leg);
+    trade.pnl = trade.pnl != null && v.pnl != null ? trade.pnl + v.pnl : null;
+    trade.entry += v.entry;                                  // the straddle's premium per unit: both legs
+    trade.pnlPct = trade.pnl != null && trade.entry > 0 ? (100 * trade.pnl) / (trade.entry * trade.quantity) : null;
+  });
   const closed: ClosedView[] = closedRows.map((r, i) => {
     const qty = r.boughtQuantity ?? r.quantity;
     return {
-      key: `${r.strategy}|${r.symbol}|${r.opened}|${i}`, strategy: r.strategy ?? "", symbol: r.symbol, quantity: qty,
+      key: `${r.strategy}|${r.symbol}|${r.opened}|${i}`, strategy: r.leg ? `${r.strategy ?? ""} · ${r.leg} leg` : r.strategy ?? "", symbol: r.symbol, quantity: qty,
       lotSize: r.lotSize ?? null, entry: r.averageCost, exit: r.exitPrice ?? null, exitReason: r.exitReason, opened: iso(r.opened),
       closed: iso(r.closed), charges: r.costs ?? 0, net: r.net,
       pct: r.premiumPaid ? (100 * (r.realised ?? r.net)) / r.premiumPaid : null,
@@ -241,24 +383,38 @@ function OpenCard({ p }: { p: OpenView }) {
   return (
     <div className={`mb-3 grid grid-cols-1 items-center gap-3 rounded-lg border border-line border-l-4 p-4 md:grid-cols-[1.3fr_0.9fr_2fr_0.8fr] ${edge}`}>
       <div className="min-w-0">
-        <div className="text-lg font-bold">{c.name}{p.leg ? <span className="ml-2 text-xs font-normal text-muted">straddle leg</span> : null}</div>
+        <div className="text-lg font-bold">{c.name}{p.legs ? <span className="ml-2 text-xs font-normal text-muted">straddle</span> : p.leg ? <span className="ml-2 text-xs font-normal text-muted">straddle leg</span> : null}</div>
         <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted">
           {c.expiry && <span>expires {c.expiry}</span>}
           <Tag strategy>{p.strategy}</Tag>
+          {p.stage && <Tag>{p.stage.toLowerCase()}</Tag>}
           <Tag>{lotsText(p.quantity, p.lotSize)}</Tag>
         </div>
         <div className="mt-1 text-xs text-muted">bought {hhmm(p.opened)} · held {held(p.opened)}</div>
       </div>
-      <div>
-        <div className="text-xs text-muted">Entry → bid</div>
-        <div className="num text-lg font-bold">{px(p.entry)} → {px(p.bid)}</div>
-        <div className="text-xs text-muted">{money(p.entry * p.quantity, false)} paid{p.quoteAt ? ` · ${hhmm(p.quoteAt)}` : p.bid == null ? " · no recent quote" : ""}</div>
-      </div>
-      <Rail p={p} />
+      {p.legs ? (
+        <div className="md:col-span-2">
+          <div className="text-xs text-muted">Straddle legs: entry → bid · P&amp;L</div>
+          {p.legs.map((l) => (
+            <div key={l.side} className="num text-sm"><b>{l.side}</b> {px(l.entry)} → {px(l.bid)} · <span className={tone(l.pnl)}>{money(l.pnl)}</span></div>
+          ))}
+          <div className="text-xs text-muted">{money(p.entry * p.quantity, false)} paid · {p.stopNote}</div>
+        </div>
+      ) : (
+        <>
+          <div>
+            <div className="text-xs text-muted">Entry → bid</div>
+            <div className="num text-lg font-bold">{px(p.entry)} → {px(p.bid)}</div>
+            <div className="text-xs text-muted">{money(p.entry * p.quantity, false)} paid{p.quoteAt ? ` · ${hhmm(p.quoteAt)}` : p.bid == null ? " · no recent quote" : ""}</div>
+          </div>
+          <Rail p={p} />
+        </>
+      )}
       <div className="text-right">
         <div className={`num text-xl font-bold ${tone(p.pnl)}`}>{p.pnl != null ? money(p.pnl) : <span className="text-base font-normal text-muted">no price</span>}</div>
         <div className={`text-xs ${tone(p.pnl)}`}>{p.pnlPct != null ? `${p.pnlPct > 0 ? "+" : ""}${p.pnlPct.toFixed(1)} %` : ""}</div>
       </div>
+      {p.actions}
     </div>
   );
 }
@@ -306,7 +462,7 @@ function Tag({ children, strategy }: { children: ReactNode; strategy?: boolean }
 }
 
 const REASONS: Record<string, string> = { STOP: "stop", MANUAL: "sold by hand", TARGET: "target", FLAT_BY: "end of day",
-  TRAIL: "trail", EOD_SQUARE_OFF: "square-off", FLATTEN: "flattened", TIME_60: "60-min time stop" };
+  TRAIL: "trail", EOD_SQUARE_OFF: "square-off", FLATTEN: "flattened", TIME_60: "60-min time stop", TRADER_EXIT: "exited by you" };
 
 function ClosedTable({ rows, showDay }: { rows: ClosedView[]; showDay: boolean }) {
   const heads = ["Day", "Contract", "Strategy", "Lots · qty", "Entry → exit", "Exit", "In → out", "P&L %", "Charges", "Net"];

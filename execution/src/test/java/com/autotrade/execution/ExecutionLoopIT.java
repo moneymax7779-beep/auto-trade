@@ -1,6 +1,7 @@
 package com.autotrade.execution;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.nio.file.Path;
 import java.time.Instant;
@@ -253,6 +254,107 @@ class ExecutionLoopIT {
             assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? "
                     + "and action = 'EOD_SQUARE_OFF'", Integer.class, follower)).isEqualTo(1);
             assertThat(loop.squareOff(today)).as("nothing left open").isEmpty();
+        } finally {
+            jdbc.update("update acct.copy_group set enabled = false where id = ?", group);   // not served by "*" workers
+        }
+    }
+
+    @Test
+    void theTraderExitsOnePositionAndBooksAHandExitAtTheirOwnPrice() throws Exception {
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
+        AccountStore accounts = new AccountStore(dataSource);
+        CostModel costs = CostModel.from(ThresholdConfig.load(Path.of("..", "config", "costs",
+                "india-index-options-costs.v2.yaml")));
+        jdbc.update("insert into ref.instrument_snapshot (id, snapshot_date, source, file_sha256, instruments) values "
+                + "(900, ?, 'it', 'it', 1) on conflict do nothing", java.sql.Date.valueOf(today));
+        jdbc.update("insert into ref.instrument (snapshot_id, instrument_key, exchange_token, segment, exchange, type, "
+                + "underlying, trading_symbol, expiry, strike, lot_size, tick_size, freeze_quantity, weekly) values (900, "
+                + "'NSE_FO|47168', '47168', 'NSE_FO', 'NSE', 'PE', 'NIFTY', 'NIFTY 23100 PE', ?, 23100, 65, 0.05, 1755, true) "
+                + "on conflict do nothing", java.sql.Date.valueOf(today.plusDays(4)));
+        long tenant = accounts.ensureTenant("t-dave");
+        long user = accounts.ensureUser("kc-dave", "dave");
+        accounts.ensureMembership(tenant, user, "OWNER");
+        long signal = accounts.ensureSignalSourceAccount(tenant, user, "SIG-dave", 500_000, today,
+                "config/risk/signal-source.v2.yaml");
+        long group = accounts.ensureCopyGroup(tenant, "SET-dave", signal);
+        long kite = accounts.ensureFollowerAccount(tenant, user, "DAVE-KITE", BrokerType.ZERODHA, TradeMode.DRY_RUN,
+                500_000, EquityMode.FIXED, today, "../config/risk/follower-risk.v3.yaml", 100);
+        long paper = accounts.ensureFollowerAccount(tenant, user, "DAVE-PAPER", BrokerType.PAPER, TradeMode.PAPER, 500_000,
+                EquityMode.FIXED, today, "../config/risk/follower-risk.v3.yaml", 100);
+        new FanOut(dataSource).subscribe(group, kite, List.of("opening-drive"), 1.0);
+        new FanOut(dataSource).subscribe(group, paper, List.of("opening-drive"), 1.0);
+        jdbc.update("update acct.strategy_subscription set enabled_at = now() - interval '1 hour' where copy_group_id = ?",
+                group);                                     // subscribed before the session's decisions (V27)
+        new SignalDecisionStore(dataSource).insert(new SignalDecision(group, 9400, today, Instant.now().minusSeconds(120),
+                "opening-drive", 2, "NIFTY", SignalDecision.Action.ENTER, "PE", null, "CONFIRMED", "IT", 3000047168L,
+                "NSE_FO|47168", "NIFTY 23100 PE", 65, 100, 130_000, 500_000, 20, "D:enter",
+                Map.of("strategy_lots", 1.0, "intended_lots", 1.0, "stop_pct", 25.0)));
+        QuoteSource none = (d, u, t, at) -> Double.NaN;
+        try (ExecutionLoop loop = new ExecutionLoop(dataSource, "t-dave", "SET-dave", "worker-D", costs, none, 1e9)) {
+            loop.tick(today, 20_000);
+            long kitePosition = jdbc.queryForObject("select id from exec.position where broker_account_id = ? and status = "
+                    + "'OPEN'", Long.class, kite);
+            Instant entered = jdbc.queryForObject("select opened_at from exec.position where id = ?", java.sql.Timestamp.class,
+                    kitePosition).toInstant();
+
+            // a hand exit is not booked while its stop rests at the broker, nor while the broker still holds it
+            assertThatThrownBy(() -> loop.bookManualExit(kite, kitePosition, 90, entered.plusSeconds(5), "kc-dave", false))
+                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("STOP OPEN");
+            jdbc.update("update exec.order_execution set status = 'CANCELLED' where broker_account_id = ? and role = 'STOP'",
+                    kite);
+            assertThatThrownBy(() -> loop.bookManualExit(kite, kitePosition, 90, entered.plusSeconds(5), "kc-dave", true))
+                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("the broker still holds 1300");
+            jdbc.update("update exec.order_execution set status = 'OPEN' where broker_account_id = ? and role = 'STOP'", kite);
+
+            // Exit sells that one position now (stop off first); no kill switch, the account trades on
+            assertThat(loop.exitPosition(kite, kitePosition, "kc-dave", today)).singleElement().asString()
+                    .contains("1300 sold");
+            assertThat(jdbc.queryForObject("select status || ':' || exit_reason from exec.position where id = ?", String.class,
+                    kitePosition)).isEqualTo("CLOSED:TRADER_EXIT");
+            assertThat(jdbc.queryForList("select role || ':' || status from exec.order_execution where broker_account_id = ? "
+                    + "order by id", String.class, kite)).containsExactly("ENTRY:FILLED", "STOP:CANCELLED",
+                    "EMERGENCY_EXIT:FILLED");
+            assertThat(new KillSwitches(dataSource).engaged(accounts.byId(kite).orElseThrow(), "opening-drive",
+                    "NSE_FO|47168")).isNull();
+            assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? "
+                    + "and action = 'POSITION_EXIT'", Integer.class, kite)).isEqualTo(1);
+            assertThat(loop.exitPosition(kite, kitePosition, "kc-dave", today)).containsExactly("position " + kitePosition
+                    + " is not open");
+            assertThatThrownBy(() -> loop.exitPosition(signal, kitePosition, "kc-dave", today))
+                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("signal source");
+            assertThatThrownBy(() -> loop.bookManualExit(signal, kitePosition, 90, Instant.now(), "kc-dave", true))
+                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("signal source");
+
+            // a hand exit on an account whose broker cannot be read: only when the trader confirms booking unchecked
+            Map<String, Object> held = jdbc.queryForMap("select id, quantity_open, average_entry, charges from exec.position "
+                    + "where broker_account_id = ? and status = 'OPEN'", paper);
+            long paperPosition = ((Number) held.get("id")).longValue();
+            long quantity = ((Number) held.get("quantity_open")).longValue();
+            double average = ((Number) held.get("average_entry")).doubleValue();
+            Instant soldAt = Instant.now().minusSeconds(10);
+            assertThatThrownBy(() -> loop.bookManualExit(paper, paperPosition, 118.55, soldAt, "kc-dave", false))
+                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("confirm booking it unchecked");
+            assertThatThrownBy(() -> loop.bookManualExit(paper, paperPosition, 0, soldAt, "kc-dave", true))
+                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("price");
+            assertThatThrownBy(() -> loop.bookManualExit(paper, paperPosition, 118.55, soldAt.minusSeconds(3600), "kc-dave",
+                    true)).isInstanceOf(IllegalArgumentException.class).hasMessageContaining("between the entry");
+            assertThatThrownBy(() -> loop.bookManualExit(paper, kitePosition, 118.55, soldAt, "kc-dave", true))
+                    .as("another account's position").isInstanceOf(IllegalArgumentException.class).hasMessageContaining("no position");
+            assertThat(loop.bookManualExit(paper, paperPosition, 118.55, soldAt, "kc-dave", true))
+                    .contains("booked sold by hand at 118.55");
+            Map<String, Object> booked = jdbc.queryForMap("select status, exit_reason, quantity_open, realised_gross, charges, "
+                    + "closed_at from exec.position where id = ?", paperPosition);
+            assertThat(booked).containsEntry("status", "CLOSED").containsEntry("exit_reason", "MANUAL")
+                    .containsEntry("quantity_open", 0L);
+            assertThat(((Number) booked.get("realised_gross")).doubleValue()).isCloseTo((118.55 - average) * quantity,
+                    org.assertj.core.data.Offset.offset(0.01));
+            assertThat(((Number) booked.get("charges")).doubleValue()).isGreaterThan(((Number) held.get("charges")).doubleValue());
+            assertThat(((java.sql.Timestamp) booked.get("closed_at")).toInstant()).isEqualTo(soldAt.truncatedTo(
+                    java.time.temporal.ChronoUnit.MICROS));
+            assertThat(jdbc.queryForObject("select actor || ':' || (detail ->> 'price') from exec.audit_log where "
+                    + "broker_account_id = ? and action = 'MANUAL_EXIT'", String.class, paper)).isEqualTo("kc-dave:118.55");
+            assertThatThrownBy(() -> loop.bookManualExit(paper, paperPosition, 118.55, soldAt, "kc-dave", true))
+                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("already closed");
         } finally {
             jdbc.update("update acct.copy_group set enabled = false where id = ?", group);   // not served by "*" workers
         }
