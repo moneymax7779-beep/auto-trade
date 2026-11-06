@@ -164,6 +164,11 @@ autotrade:
       # 2026-11-01 (A-297, user: "do it"): odm-v4 out of the live set (see strategy-files); its own session keeps its
       # forward record next to odm-v1/v2/v3/v5/v9.
       - config/strategy/opening-drive-momentum.v4.yaml
+      # 2026-11-06 (A-327, user: "yes register wbr-v3 and run it in shadow"): wbr-v3 (later-entry guard, no flip after a
+      # loss, 40 % stop, no no-progress exit, trail +100/25, wall re-cross exit) and wbr-v2 as its control, expiry index
+      # only, each its own session; read once at 20 expiry days (v3 must beat v2 on the same days).
+      - config/strategy/wall-break-rider.v3.yaml
+      - config/strategy/wall-break-rider.v2.yaml
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"

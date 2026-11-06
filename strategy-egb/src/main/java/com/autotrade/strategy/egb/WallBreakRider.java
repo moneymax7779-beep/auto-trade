@@ -28,6 +28,13 @@ import com.autotrade.strategy.Strategy;
  * {@code signal.confirm_minutes} consecutive snapshots, on the trend side of the VWAP proxy and with futures OI not
  * opposing. Exits: a close back through the last swing, a peak trail on the held option, a no-progress time stop, the
  * resting premium stop, flat at {@code flat_by}. Study: docs/studies/2026-10-07-wall-break-rider.md.
+ * <p>
+ * v3 (ledger A-327), each off when its key is absent: no entry after the index already moved more than
+ * {@code signal.max_prior_move_atr} ATR(3m) toward the trade over {@code signal.prior_move_min}; after a losing trade
+ * (the last bid seen while open below the average premium) no entry on the opposite side for
+ * {@code signal.no_flip_after_loss_min}; {@code exits.wall_recross_exit}: once the index crosses the wall strike recorded
+ * at entry, a 3-minute close back through it exits (WALL_LOST); {@code exits.time_stop_min: 0} turns the no-progress
+ * exit off.
  */
 final class WallBreakRider implements Strategy {
 
@@ -40,6 +47,14 @@ final class WallBreakRider implements Strategy {
     private double trailPeak = Double.NaN;
     private double bestBid = Double.NaN;
     private boolean wasOpen;
+    private final java.util.ArrayDeque<double[]> spots = new java.util.ArrayDeque<>();   // {epoch second, spot}
+    private OptionSide heldSide;
+    private double lastBid = Double.NaN;
+    private double lastAverage = Double.NaN;
+    private OptionSide blockedSide;
+    private Instant blockedUntil;
+    private double entryWall = Double.NaN;
+    private boolean wallCrossed;
 
     WallBreakRider(WallBreakRiderConfig config) {
         this.config = config;
@@ -63,11 +78,12 @@ final class WallBreakRider implements Strategy {
         boolean expiryDay = snapshot.regime().dteTradingDays() == config.dte();
         boolean continuous = SessionPhase.valueOf(snapshot.phase()).isContinuous();
         boolean window = expiryDay && continuous && !time.isBefore(config.entryFrom()) && time.isBefore(config.lastNewEntry());
+        double priorMove = priorMove(snapshot);
         ceStreak = callSignal(snapshot) ? ceStreak + 1 : 0;
         peStreak = putSignal(snapshot) ? peStreak + 1 : 0;
         Map<OptionSide, Map<String, Boolean>> conditions = new java.util.EnumMap<>(OptionSide.class);
         for (OptionSide side : OptionSide.values()) {
-            conditions.put(side, conditions(side, snapshot, expiryDay, window));
+            conditions.put(side, conditions(side, snapshot, expiryDay, window, priorMove, now));
         }
 
         List<OrderIntent> orders = new ArrayList<>();
@@ -75,12 +91,20 @@ final class WallBreakRider implements Strategy {
             // a position just closed: a re-entry needs a fresh signal of confirm_minutes
             ceStreak = 0;
             peStreak = 0;
+            if (config.noFlipAfterLossMin() > 0 && heldSide != null && lastBid < lastAverage) {   // NaN compares false
+                blockedSide = heldSide == OptionSide.CE ? OptionSide.PE : OptionSide.CE;
+                blockedUntil = now.plus(Duration.ofMinutes(config.noFlipAfterLossMin()));
+                conditions.put(blockedSide, conditions(blockedSide, snapshot, expiryDay, window, priorMove, now));
+            }
         }
         wasOpen = position.open();
         if (position.open()) {
             OptionSide side = position.side();
             double bid = position.bid();
+            heldSide = side;
+            lastAverage = position.averagePremium();
             if (bid > 0) {
+                lastBid = bid;
                 bestBid = Double.isNaN(bestBid) ? bid : Math.max(bestBid, bid);
                 if (Double.isNaN(trailPeak) && bid >= position.averagePremium() * (1 + config.trailActivationPct() / 100.0)) {
                     trailPeak = bid;
@@ -88,14 +112,19 @@ final class WallBreakRider implements Strategy {
                     trailPeak = Math.max(trailPeak, bid);
                 }
             }
+            if (config.wallRecrossExit() && !wallCrossed && Double.isFinite(entryWall)) {
+                wallCrossed = side == OptionSide.CE ? snapshot.spot() > entryWall : snapshot.spot() < entryWall;
+            }
             String exit = null;
             if (!time.isBefore(config.flatBy())) {
                 exit = "FLAT_BY";
             } else if (side == OptionSide.PE ? st.lastBarClose() > st.lastSwingHigh() : st.lastBarClose() < st.lastSwingLow()) {
                 exit = side == OptionSide.PE ? "SWING_HIGH_RECLAIMED" : "SWING_LOW_LOST";     // NaN compares false
+            } else if (wallCrossed && (side == OptionSide.CE ? st.lastBarClose() < entryWall : st.lastBarClose() > entryWall)) {
+                exit = "WALL_LOST";
             } else if (!Double.isNaN(trailPeak) && bid > 0 && bid <= trailPeak * (1 - config.trailGivebackPct() / 100.0)) {
                 exit = "TRAIL_" + Math.round(config.trailGivebackPct());
-            } else if (position.openedAt() != null && Duration.between(position.openedAt(), now).toMinutes() >= config.timeStopMin()
+            } else if (config.timeStopMin() > 0 && position.openedAt() != null && Duration.between(position.openedAt(), now).toMinutes() >= config.timeStopMin()
                     && !(bestBid >= position.averagePremium() * (1 + config.timeStopMinGainPct() / 100.0))) {
                 exit = "NO_PROGRESS_" + config.timeStopMin();
             }
@@ -107,8 +136,15 @@ final class WallBreakRider implements Strategy {
             exitSent = false;
             trailPeak = Double.NaN;
             bestBid = Double.NaN;
+            heldSide = null;
+            lastBid = Double.NaN;
+            lastAverage = Double.NaN;
+            entryWall = Double.NaN;
+            wallCrossed = false;
             for (OptionSide side : List.of(OptionSide.CE, OptionSide.PE)) {
                 if (conditions.get(side).get("trigger")) {
+                    entryWall = side == OptionSide.CE ? snapshot.options().callBarrierStrike()
+                            : snapshot.options().putSupportStrike();
                     orders.add(new OrderIntent(OrderIntent.Action.ENTER, side, 1, Stage.CONFIRMED,
                             side == OptionSide.CE ? "CALL_WALL_COVERING" : "PUT_FLOOR_COVERING", config.premiumStopPct(),
                             config.strikeOffset()));
@@ -121,6 +157,29 @@ final class WallBreakRider implements Strategy {
         MarketState state = new MarketState(Double.NaN, Double.NaN, Double.NaN, Double.NaN,
                 expiryDay ? "EXPIRY_WALLS" : "NOT_EXPIRY", null);
         return new Decision(now, snapshot.underlying(), state, ce, pe, List.copyOf(orders));
+    }
+
+    /**
+     * v3: the index move over {@code prior_move_min} in ATR(3m), signed up (NaN when off or without that much history).
+     * Each snapshot's spot is kept for that long.
+     */
+    private double priorMove(FeatureSnapshot s) {
+        if (Double.isNaN(config.maxPriorMoveAtr())) {
+            return Double.NaN;
+        }
+        long now = s.time().getEpochSecond();
+        spots.addLast(new double[] {now, s.spot()});
+        long cutoff = now - config.priorMoveMin() * 60L;
+        while (spots.size() > 1) {                        // keep the newest snapshot at or before the cutoff
+            double[] first = spots.pollFirst();
+            if (spots.peekFirst()[0] > cutoff) {
+                spots.addFirst(first);
+                break;
+            }
+        }
+        double then = spots.peekFirst()[0] <= cutoff ? spots.peekFirst()[1] : Double.NaN;
+        double atr = s.structure().atr3m();
+        return Double.isFinite(then) && atr > 0 ? (s.spot() - then) / atr : Double.NaN;
     }
 
     /** v1: the call-wall weakening flag; v2: the wall's OI down at least wall_oi_drop_pct over 10 min, index rising. */
@@ -140,7 +199,8 @@ final class WallBreakRider implements Strategy {
         return change <= -config.wallOiDropPct() && s.structure().spotChange3m() < 0;
     }
 
-    private Map<String, Boolean> conditions(OptionSide side, FeatureSnapshot s, boolean expiryDay, boolean window) {
+    private Map<String, Boolean> conditions(OptionSide side, FeatureSnapshot s, boolean expiryDay, boolean window,
+                                            double priorMove, Instant now) {
         boolean call = side == OptionSide.CE;
         Map<String, Boolean> c = new LinkedHashMap<>();
         c.put("expiry_day", expiryDay);
@@ -150,7 +210,19 @@ final class WallBreakRider implements Strategy {
         c.put("vwap_side", Double.isFinite(vwap) && (call ? s.spot() > vwap : s.spot() < vwap));
         String oi = s.futures().oiState();
         c.put("futures_oi_ok", oi == null || !config.rejectFuturesStates().get(side).contains(oi));
-        c.put("trigger", window && c.get("wall_weakening") && c.get("vwap_side") && c.get("futures_oi_ok"));
+        boolean v3 = true;
+        if (!Double.isNaN(config.maxPriorMoveAtr())) {
+            // NaN (not enough history) does not block
+            boolean ok = !(priorMove * (call ? 1 : -1) > config.maxPriorMoveAtr());
+            c.put("not_extended", ok);
+            v3 = ok;
+        }
+        if (config.noFlipAfterLossMin() > 0) {
+            boolean ok = blockedSide != side || blockedUntil == null || !now.isBefore(blockedUntil);
+            c.put("no_flip_after_loss", ok);
+            v3 = v3 && ok;
+        }
+        c.put("trigger", window && c.get("wall_weakening") && c.get("vwap_side") && c.get("futures_oi_ok") && v3);
         return java.util.Collections.unmodifiableMap(c);
     }
 

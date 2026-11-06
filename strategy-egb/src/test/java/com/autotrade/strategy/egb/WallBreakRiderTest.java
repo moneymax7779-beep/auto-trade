@@ -78,4 +78,84 @@ class WallBreakRiderTest {
         away.decide(falling.at("12:40"), PositionView.FLAT);
         assertThat(away.decide(falling.at("12:41"), PositionView.FLAT).orders()).as("index moving away from the wall").isEmpty();
     }
+
+    // ------------------------------------------------------------------ v3 (ledger A-327)
+
+    private static Strategy v3() {
+        return Strategies.load(Path.of("..", "config", "strategy", "wall-break-rider.v3.yaml")).create("NIFTY", Snapshots.SESSION);
+    }
+
+    private static Snapshots callSignal(double spot) {
+        return covering(false).set("options.callWallOiChangePct", -6.0).set("structure.spotChange3m", 5.0).set("spot", spot)
+                .set("options.callBarrierStrike", 23150.0);
+    }
+
+    private static Snapshots putSignal() {
+        return covering(false).set("options.putFloorOiChangePct", -6.0).set("options.callWallOiChangePct", 0.0)
+                .set("structure.spotChange3m", -5.0).set("structure.vwapSpotProxy", 23300.0).set("futures.oiState", "NEUTRAL");
+    }
+
+    private static java.time.Instant at(int hour, int minute) {
+        return Snapshots.SESSION.atTime(java.time.LocalTime.of(hour, minute)).atZone(com.autotrade.core.time.MarketTime.IST).toInstant();
+    }
+
+    @Test
+    void v3Loads() {
+        StrategyFactory f = Strategies.load(Path.of("..", "config", "strategy", "wall-break-rider.v3.yaml"));
+        assertThat(f.version()).isEqualTo("wbr-v3");
+    }
+
+    @Test
+    void v3SkipsAnEntryAfterAMoreThanFourAtrMoveInThirtyMinutes() {
+        Strategy late = v3();
+        late.decide(callSignal(23000).set("options.callWallOiChangePct", 0.0).at("12:10"), PositionView.FLAT);
+        late.decide(callSignal(23115).at("12:40"), PositionView.FLAT);
+        assertThat(late.decide(callSignal(23115).at("12:41"), PositionView.FLAT).orders()).as("11.5 ATR in 30 min").isEmpty();
+        Strategy fine = v3();
+        fine.decide(callSignal(23090).set("options.callWallOiChangePct", 0.0).at("12:10"), PositionView.FLAT);
+        fine.decide(callSignal(23115).at("12:40"), PositionView.FLAT);
+        assertThat(fine.decide(callSignal(23115).at("12:41"), PositionView.FLAT).orders()).as("2.5 ATR").singleElement()
+                .satisfies(o -> assertThat(o.side()).isEqualTo(OptionSide.CE));
+    }
+
+    @Test
+    void v3WaitsAnHourBeforeTheOtherSideAfterALoss() {
+        Strategy s = v3();
+        s.decide(callSignal(23115).at("12:40"), PositionView.FLAT);
+        assertThat(s.decide(callSignal(23115).at("12:41"), PositionView.FLAT).orders()).hasSize(1);
+        s.decide(covering(false).at("12:50"), new PositionView(true, OptionSide.CE, 1, 100, at(12, 41), 70));
+        s.decide(putSignal().at("12:51"), PositionView.FLAT);                         // closed below its cost: a loss
+        s.decide(putSignal().at("12:52"), PositionView.FLAT);
+        assertThat(s.decide(putSignal().at("12:53"), PositionView.FLAT).orders()).as("puts blocked till 13:51").isEmpty();
+        s.decide(putSignal().at("13:51"), PositionView.FLAT);
+        assertThat(s.decide(putSignal().at("13:52"), PositionView.FLAT).orders()).singleElement()
+                .satisfies(o -> assertThat(o.side()).isEqualTo(OptionSide.PE));
+
+        Strategy won = v3();
+        won.decide(callSignal(23115).at("12:40"), PositionView.FLAT);
+        won.decide(callSignal(23115).at("12:41"), PositionView.FLAT);
+        won.decide(covering(false).at("12:50"), new PositionView(true, OptionSide.CE, 1, 100, at(12, 41), 130));
+        won.decide(putSignal().at("12:51"), PositionView.FLAT);                     // the close resets the streak
+        won.decide(putSignal().at("12:52"), PositionView.FLAT);
+        assertThat(won.decide(putSignal().at("12:53"), PositionView.FLAT).orders()).as("after a win: no block").hasSize(1);
+    }
+
+    @Test
+    void v3ExitsWhenTheIndexFallsBackThroughTheWallItCrossedAndHasNoNoProgressExit() {
+        Strategy s = v3();
+        s.decide(callSignal(23115).at("12:40"), PositionView.FLAT);
+        s.decide(callSignal(23115).at("12:41"), PositionView.FLAT);                 // entry wall 23150
+        PositionView held = new PositionView(true, OptionSide.CE, 1, 100, at(12, 41), 101);
+        assertThat(s.decide(covering(false).at("13:05"), held).orders()).as("no no-progress exit after 24 min").isEmpty();
+        assertThat(s.decide(covering(false).set("spot", 23160.0).set("structure.lastBarClose", 23160.0).at("13:06"), held)
+                .orders()).as("crossed the wall").isEmpty();
+        assertThat(s.decide(covering(false).set("spot", 23140.0).set("structure.lastBarClose", 23140.0).at("13:09"), held)
+                .orders()).singleElement().satisfies(o -> assertThat(o.reason()).isEqualTo("WALL_LOST"));
+
+        Strategy never = v3();
+        never.decide(callSignal(23115).at("12:40"), PositionView.FLAT);
+        never.decide(callSignal(23115).at("12:41"), PositionView.FLAT);
+        assertThat(never.decide(covering(false).set("structure.lastBarClose", 23140.0).at("13:09"), held).orders())
+                .as("below a wall it never crossed: no wall exit").isEmpty();
+    }
 }

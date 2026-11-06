@@ -8,7 +8,7 @@ import java.util.Set;
 import com.autotrade.config.ThresholdConfig;
 import com.autotrade.strategy.OptionSide;
 
-/** Typed view of wall-break-rider.vN.yaml (ledger A-057). */
+/** Typed view of wall-break-rider.vN.yaml (ledger A-057; v3 keys A-327, each off when absent). */
 record WallBreakRiderConfig(
         String hash,
         String version,
@@ -28,7 +28,14 @@ record WallBreakRiderConfig(
         int timeStopMin,
         double timeStopMinGainPct,
         /** v2: the wall's OI must have fallen at least this % over 10 minutes with the index moving toward it (NaN = v1's weakening flags). */
-        double wallOiDropPct) {
+        double wallOiDropPct,
+        /** v3: no entry when the index moved more than this many ATR(3m) toward the trade over priorMoveMin (NaN = off). */
+        double maxPriorMoveAtr,
+        int priorMoveMin,
+        /** v3: after a losing trade, no entry on the opposite side for this many minutes from its exit (0 = off). */
+        int noFlipAfterLossMin,
+        /** v3: once the index crosses the wall strike recorded at entry, a 3-minute close back through it exits. */
+        boolean wallRecrossExit) {
 
     static WallBreakRiderConfig from(ThresholdConfig c) {
         return new WallBreakRiderConfig(c.contentHash(), c.version(), c.getInt("scope.dte"),
@@ -40,7 +47,11 @@ record WallBreakRiderConfig(
                 c.getDouble("exits.premium_stop_pct"), c.getDouble("exits.trail_activation_pct"),
                 c.getDouble("exits.trail_giveback_pct"), c.getInt("exits.time_stop_min"),
                 c.getDouble("exits.time_stop_min_gain_pct"),
-                c.has("signal.wall_oi_drop_pct") ? c.getDouble("signal.wall_oi_drop_pct") : Double.NaN);
+                c.has("signal.wall_oi_drop_pct") ? c.getDouble("signal.wall_oi_drop_pct") : Double.NaN,
+                c.has("signal.max_prior_move_atr") ? c.getDouble("signal.max_prior_move_atr") : Double.NaN,
+                c.has("signal.prior_move_min") ? c.getInt("signal.prior_move_min") : 30,
+                c.has("signal.no_flip_after_loss_min") ? c.getInt("signal.no_flip_after_loss_min") : 0,
+                c.has("exits.wall_recross_exit") && Boolean.TRUE.equals(c.get("exits.wall_recross_exit")));
     }
 
     @SuppressWarnings("unchecked")
