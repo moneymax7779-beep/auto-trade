@@ -508,7 +508,9 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
       const x = (e.clientX - box.left) * k, y = (e.clientY - box.top) * k;
       if (e.ctrlKey || e.metaKey || (fullRef.current && Math.abs(e.deltaY) >= Math.abs(e.deltaX))) {
         e.preventDefault();
-        const f = Math.exp(Math.max(-1, Math.min(1, e.deltaY * 0.01)));
+        // a pinch / cmd-ctrl scroll sends small steps; a mouse wheel's plain scroll (expanded) sends ~100 a notch: gentler there
+        const pinchLike = e.ctrlKey || e.metaKey;
+        const f = Math.exp(pinchLike ? Math.max(-1, Math.min(1, e.deltaY * 0.01)) : Math.max(-0.2, Math.min(0.2, e.deltaY * 0.0015)));
         if (x < L && y <= T + g.priceH) {
           const v = g.y1 - ((y - T) / g.priceH) * (g.y1 - g.y0);
           setManualY({ lo: v - (v - g.y0) * f, hi: v + (g.y1 - v) * f });
