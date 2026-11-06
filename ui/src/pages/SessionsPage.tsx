@@ -242,8 +242,8 @@ export function SessionDetailPage() {
   const { id } = useParams();
   const [underlying, setUnderlying] = useState("NIFTY");
   const [chosenStrategy, setChosenStrategy] = useState<string | null>(null);
-  const sessions = useQuery({ queryKey: ["sessions"], queryFn: () => get<SessionRow[]>("/api/sessions") });
-  const sessionRow = sessions.data?.find((s) => String(s.id) === id);
+  // by id: the sessions list holds only the newest 200, so an older replay would have no strategy and no chart
+  const sessionRow = useQuery({ queryKey: ["session", id], queryFn: () => get<SessionRow>(`/api/sessions/${id}`) }).data;
   // A session may run several strategies ("a+b"); the charts show one at a time.
   const strategyIds = (sessionRow?.strategy_id ?? "").split("+").filter(Boolean);
   const strategy = chosenStrategy ?? strategyIds[0] ?? null;
