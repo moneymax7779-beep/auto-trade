@@ -55,6 +55,7 @@ final class WallBreakRider implements Strategy {
     private Instant blockedUntil;
     private double entryWall = Double.NaN;
     private boolean wallCrossed;
+    private double barAtCross = Double.NaN;    // the last 3-minute close when the wall was crossed (bar from before it)
 
     WallBreakRider(WallBreakRiderConfig config) {
         this.config = config;
@@ -114,13 +115,17 @@ final class WallBreakRider implements Strategy {
             }
             if (config.wallRecrossExit() && !wallCrossed && Double.isFinite(entryWall)) {
                 wallCrossed = side == OptionSide.CE ? snapshot.spot() > entryWall : snapshot.spot() < entryWall;
+                barAtCross = st.lastBarClose();
             }
+            // only a 3-minute close made after the crossing counts: the bar closed before it is still on the old side
+            // (A-327 first run, 6 Nov: without this the exit fired at the crossing itself)
+            boolean newBar = wallCrossed && Double.isFinite(st.lastBarClose()) && st.lastBarClose() != barAtCross;
             String exit = null;
             if (!time.isBefore(config.flatBy())) {
                 exit = "FLAT_BY";
             } else if (side == OptionSide.PE ? st.lastBarClose() > st.lastSwingHigh() : st.lastBarClose() < st.lastSwingLow()) {
                 exit = side == OptionSide.PE ? "SWING_HIGH_RECLAIMED" : "SWING_LOW_LOST";     // NaN compares false
-            } else if (wallCrossed && (side == OptionSide.CE ? st.lastBarClose() < entryWall : st.lastBarClose() > entryWall)) {
+            } else if (newBar && (side == OptionSide.CE ? st.lastBarClose() < entryWall : st.lastBarClose() > entryWall)) {
                 exit = "WALL_LOST";
             } else if (!Double.isNaN(trailPeak) && bid > 0 && bid <= trailPeak * (1 - config.trailGivebackPct() / 100.0)) {
                 exit = "TRAIL_" + Math.round(config.trailGivebackPct());
@@ -141,6 +146,7 @@ final class WallBreakRider implements Strategy {
             lastAverage = Double.NaN;
             entryWall = Double.NaN;
             wallCrossed = false;
+            barAtCross = Double.NaN;
             for (OptionSide side : List.of(OptionSide.CE, OptionSide.PE)) {
                 if (conditions.get(side).get("trigger")) {
                     entryWall = side == OptionSide.CE ? snapshot.options().callBarrierStrike()

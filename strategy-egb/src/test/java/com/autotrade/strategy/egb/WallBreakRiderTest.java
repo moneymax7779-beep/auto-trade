@@ -152,6 +152,18 @@ class WallBreakRiderTest {
         assertThat(s.decide(covering(false).set("spot", 23140.0).set("structure.lastBarClose", 23140.0).at("13:09"), held)
                 .orders()).singleElement().satisfies(o -> assertThat(o.reason()).isEqualTo("WALL_LOST"));
 
+        Strategy stale = v3();                         // crossing while the last 3-minute close is still below the wall
+        stale.decide(callSignal(23115).at("12:40"), PositionView.FLAT);
+        stale.decide(callSignal(23115).at("12:41"), PositionView.FLAT);
+        assertThat(stale.decide(covering(false).set("spot", 23160.0).set("structure.lastBarClose", 23140.0).at("13:07"), held)
+                .orders()).as("the bar before the crossing does not count").isEmpty();
+        assertThat(stale.decide(covering(false).set("spot", 23170.0).set("structure.lastBarClose", 23140.0).at("13:08"), held)
+                .orders()).as("still no newer bar").isEmpty();
+        assertThat(stale.decide(covering(false).set("spot", 23165.0).set("structure.lastBarClose", 23165.0).at("13:09"), held)
+                .orders()).as("a new close above the wall").isEmpty();
+        assertThat(stale.decide(covering(false).set("spot", 23130.0).set("structure.lastBarClose", 23130.0).at("13:12"), held)
+                .orders()).singleElement().satisfies(o -> assertThat(o.reason()).isEqualTo("WALL_LOST"));
+
         Strategy never = v3();
         never.decide(callSignal(23115).at("12:40"), PositionView.FLAT);
         never.decide(callSignal(23115).at("12:41"), PositionView.FLAT);
