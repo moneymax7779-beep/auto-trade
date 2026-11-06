@@ -48,12 +48,21 @@ public final class KillSwitches {
         return reasons.isEmpty() ? null : reasons.getFirst();
     }
 
-    /** Engages the account's switch (once: an engaged one is kept, the new reason audited). */
+    /**
+     * Engages the account's switch (once: an engaged one is kept, a new reason audited once; 6 Nov 2026: the reconciler's
+     * same difference every 30 s wrote 1,076 audit rows).
+     */
     public void engageAccount(BrokerAccount account, String reason, String actor) {
         int engaged = jdbc.update("insert into exec.kill_switch (tenant_id, scope, broker_account_id, reason, engaged_by) "
                 + "select ?, 'ACCOUNT', ?, ?, ? where not exists (select 1 from exec.kill_switch where scope = 'ACCOUNT' "
                 + "and broker_account_id = ? and released_at is null)", account.tenantId(), account.id(), reason, actor,
                 account.id());
+        if (engaged == 0 && jdbc.queryForObject("select exists (select 1 from exec.audit_log l join exec.kill_switch k on "
+                + "k.broker_account_id = l.broker_account_id and k.scope = 'ACCOUNT' and k.released_at is null where "
+                + "l.broker_account_id = ? and l.action in ('KILL_ACCOUNT', 'KILL_ACCOUNT_ALREADY_ENGAGED') "
+                + "and l.detail ->> 'reason' = ? and l.at >= k.engaged_at)", Boolean.class, account.id(), reason)) {
+            return;                                                   // this reason is already on record for the switch
+        }
         audit(account, actor, engaged > 0 ? "KILL_ACCOUNT" : "KILL_ACCOUNT_ALREADY_ENGAGED", Map.of("reason", reason));
         log.error("ACCOUNT KILL {} ({}): {}", account.id(), account.displayName(), reason);
     }

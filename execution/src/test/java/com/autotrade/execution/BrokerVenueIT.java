@@ -475,6 +475,71 @@ class BrokerVenueIT {
                 + "and action = 'END_OF_DAY'", String.class, s.broker().id())).isEqualTo(eod.differences().get(0));
     }
 
+    /** Sells by hand (no tag of ours) of {@code lots} × 650 at {@code price}, as the user does in Kite. */
+    private void sellByHand(String tag, int lots, double price) {
+        sim.quote(KEY, price, 1_000_000, price + 0.05, 1_000_000, price);
+        for (int i = 1; i <= lots; i++) {
+            gateway.place(new OrderRequest(tag + i, 3000047168L, KEY, SYMBOL, "NSE_FO", OrderSide.SELL, OrderType.LIMIT,
+                    650, price, 0, tag + i));
+        }
+    }
+
+    @Test
+    void aPositionSoldByHandAfterItsStopsWereCancelledIsBookedAsAManualExitNotAKill() throws Exception {
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        FollowerSimulator kite = brokerFollower();
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(position(s.broker()).get("quantity_open")).isEqualTo(2600L);
+        // 6 Nov 2026 on ZERODHA-1: the user cancels the bot's stops in Kite and sells the position by hand
+        orders(s.broker()).stream().filter(r -> r.get("role").equals("STOP"))
+                .forEach(r -> gateway.cancel((String) r.get("client_tag")));
+        sellByHand("HAND", 4, 90);
+
+        BrokerReconciler reconciler = new BrokerReconciler(dataSource, costs);
+        assertThat(reconciler.check(s.broker(), gateway).differences()).singleElement().asString()
+                .contains("ours 2600, broker 0");
+        assertThat(position(s.broker()).get("status")).as("one check alone books nothing").isEqualTo("OPEN");
+        assertThat(reconciler.check(s.broker(), gateway).matched()).isTrue();
+        Map<String, Object> p = position(s.broker());
+        assertThat(p.get("status")).isEqualTo("CLOSED");
+        assertThat(p.get("exit_reason")).isEqualTo("MANUAL");
+        assertThat(p.get("quantity_open")).isEqualTo(0L);
+        assertThat((Double) p.get("realised_gross")).isEqualTo(-10.0 * 2600);
+        assertThat(new KillSwitches(dataSource).engaged(s.broker(), "opening-drive", KEY)).isNull();
+        Map<String, Object> audit = jdbc.queryForMap("select detail ->> 'quantity' q, detail ->> 'price' price, "
+                + "jsonb_array_length(detail -> 'trades') n from exec.audit_log where broker_account_id = ? "
+                + "and action = 'MANUAL_EXIT'", s.broker().id());
+        assertThat(audit).containsEntry("q", "2600").containsEntry("price", "90.0").containsEntry("n", 4);
+
+        // the strategy's exit later finds nothing to sell: no order goes to the broker, the account stays tradable
+        int before = sim.orderCount();
+        decide(s, "10:00:00", SignalDecision.Action.EXIT, 120);
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(sim.orderCount()).isEqualTo(before);
+        assertThat(reconciler.check(s.broker(), gateway).matched()).isTrue();
+        assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? "
+                + "and action = 'MANUAL_EXIT'", Integer.class, s.broker().id())).as("the hand sells are used once").isEqualTo(1);
+    }
+
+    @Test
+    void aHandSaleWhileAStopIsStillLiveIsNotBookedAndTheKillIsAuditedOnce() throws Exception {
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        brokerFollower().run(s.broker(), s.group(), DAY);
+        sellByHand("HANDX", 4, 90);                                   // the stops still rest: they could sell again
+        BrokerReconciler reconciler = new BrokerReconciler(dataSource, costs);
+        for (int i = 0; i < 4; i++) {
+            assertThat(reconciler.check(s.broker(), gateway).matched()).isFalse();
+        }
+        assertThat(position(s.broker()).get("status")).isEqualTo("OPEN");
+        assertThat(new KillSwitches(dataSource).engaged(s.broker(), "opening-drive", KEY)).startsWith("ACCOUNT: RECONCILIATION");
+        assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? and action like "
+                + "'KILL_ACCOUNT%'", Integer.class, s.broker().id())).as("the same difference every check: one row").isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? "
+                + "and action = 'MANUAL_EXIT'", Integer.class, s.broker().id())).isZero();
+    }
+
     @Test
     void aDifferenceGoneByTheNextCheckEngagesNothing() throws Exception {
         Setup s = setup(false);
