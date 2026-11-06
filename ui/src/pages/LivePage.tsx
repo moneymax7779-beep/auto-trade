@@ -6,11 +6,10 @@ import {
   type SessionRow, type Status, type StrategyView, type TradePositionRow, isPrimaryLive } from "../api";
 import { ConfirmButton, ErrorNote, Loading, Panel, Pnl, Stat } from "../components/ui";
 import { groupTrades, TradesTable } from "../components/TradesTable";
-import { LivePositions } from "../components/LivePositions";
 import { MarketCard } from "../components/MarketCard";
 import { splitDecisionKey, storedScores, StrategyMatrix, type MatrixCell } from "../components/strategies";
 import { AlertBanner } from "../components/AlertBanner";
-import { LiveBooks } from "../components/LiveBookPanel";
+import { LiveBooks, PaperPositions } from "../components/LiveBookPanel";
 import { CuesPanel } from "../components/CuesPanel";
 import { MarketRead } from "../components/MarketRead";
 import { ReplayControls } from "../components/TradeInspector";
@@ -57,12 +56,13 @@ export function LivePage({ canAct = true }: { canAct?: boolean }) {
     );
   }
   const killed = (s.killSwitches ?? []).length > 0;
+  const istMinute = Math.floor(((Date.now() / 60_000) + 330) % 1440);
+  const beforeOpen = istMinute < 9 * 60 + 15;
   const lag = s.feedLagSeconds;
 
   return (
     <div className="space-y-4">
       <AlertBanner />
-      <LiveBooks />
       <Panel
         title={<>Session {s.session} · {s.date} · <span className="text-warn">{s.mode}</span></>}
         right={canAct &&
@@ -104,18 +104,19 @@ export function LivePage({ canAct = true }: { canAct?: boolean }) {
 
       {canAct && <ReplayControls s={s} />}
 
-      <EquityPanel today={s} />
+      {/* 6 Nov 2026 (user: "can we move to the top at the best place"): money first (real, then paper), then the market
+          that moves it, the strategies' state, reference panels; the pre-open cues lead only before 09:15 */}
+      {beforeOpen && <CuesPanel />}
 
-      <CuesPanel />
+      <LiveBooks />
+      <PaperPositions account={s.account ?? "PAPER-1"} date={s.date ?? ""} openRows={s.openPositions ?? []}
+        closedRows={s.closedPositions ?? []} />
 
       <LiveOverview date={s.date} views={s.strategy ?? {}} positions={s.openPositions ?? []} live={s.status === "RUNNING"} />
 
-      <Panel title="Open positions">
-        <LivePositions rows={s.openPositions ?? []} closed={false} empty="Flat." />
-      </Panel>
-      <Panel title="Closed today">
-        <LivePositions rows={s.closedPositions ?? []} closed empty="No closed positions yet." />
-      </Panel>
+      <EquityPanel today={s} />
+
+      {!beforeOpen && <CuesPanel />}
       <Panel title="Recent refusals (risk, stale data, missing quotes)">
         {(s.recentRejections ?? []).length === 0 ? (
           <p className="text-sm text-muted">None.</p>
