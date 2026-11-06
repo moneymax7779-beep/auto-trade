@@ -11,6 +11,7 @@ import { ErrorNote, Loading, Panel, Pnl, StageBadge, Table } from "../components
 import { chartTrades, TradesTable } from "../components/TradesTable";
 import { compactRupees } from "../components/TimelineChart";
 import { STRATEGY_INFO, strategyShort } from "../components/strategies";
+import { EMA9_COLOR, EMA20_3M_COLOR, StructureTogglesBar, useStructureToggles } from "../components/structure";
 
 /** Background tints for runs, alternating; translucent so they read in light and dark themes. */
 const RUN_TINTS = ["rgba(59,130,246,0.10)", "rgba(245,158,11,0.12)", "rgba(16,185,129,0.10)", "rgba(168,85,247,0.10)",
@@ -217,27 +218,6 @@ export function SessionsPage() {
 
 const WHOLE_DAY = { a: 9 * 60 + 15, b: 15 * 60 + 30 };
 
-/** ma-cross's own view of the index (4 Nov 2026): its EMAs of 3-minute closes, 3-minute candles, each trade's stop / target. */
-interface StructureToggles { emas: boolean; candles: boolean; stops: boolean }
-const STRUCTURE_KEY = "chart-structure-toggles";
-const STRUCTURE_DEFAULT: StructureToggles = { emas: true, candles: false, stops: true };
-const EMA9_COLOR = "#0ea5e9", EMA20_3M_COLOR = "#6d28d9";
-
-function useStructureToggles(): [StructureToggles, (t: StructureToggles) => void] {
-  const [t, setT] = useState<StructureToggles>(() => {
-    try {
-      const raw = localStorage.getItem(STRUCTURE_KEY);
-      if (raw) return { ...STRUCTURE_DEFAULT, ...(JSON.parse(raw) as Partial<StructureToggles>) };
-    } catch { /* storage unavailable: defaults */ }
-    return STRUCTURE_DEFAULT;
-  });
-  const update = (next: StructureToggles) => {
-    setT(next);
-    try { localStorage.setItem(STRUCTURE_KEY, JSON.stringify(next)); } catch { /* not persisted */ }
-  };
-  return [t, update];
-}
-
 export function SessionDetailPage() {
   const { id } = useParams();
   const [underlying, setUnderlying] = useState("NIFTY");
@@ -396,19 +376,7 @@ export function SessionDetailPage() {
               {session && <DayContextCard date={session.session_date} underlying={underlying} />}
               <div className="mb-2 flex flex-wrap items-center gap-3">
                 <LevelTogglesBar toggles={toggles} onChange={setToggles} />
-                <div className="flex flex-wrap items-center gap-1 text-xs" role="group" aria-label="Strategy view">
-                  <span className="text-muted">ma-cross</span>
-                  {([["emas", <><i className="mr-1.5 inline-block h-0.5 w-3 align-middle" style={{ background: EMA9_COLOR }} />EMA9
-                    <i className="mx-1.5 inline-block h-0.5 w-3 align-middle" style={{ background: EMA20_3M_COLOR }} />EMA20 3m</>],
-                    ["candles", "3-min candles"], ["stops", <><span style={{ color: "#dc2626" }}>stop</span> / <span style={{ color: "#16a34a" }}>target</span></>]] as const)
-                    .map(([key, label]) => (
-                      <button key={key} type="button" aria-pressed={structureToggles[key]}
-                        onClick={() => setStructureToggles({ ...structureToggles, [key]: !structureToggles[key] })}
-                        className={`rounded-full border px-2.5 py-1 ${structureToggles[key] ? "border-line bg-panel-2" : "border-transparent text-muted opacity-60"}`}>
-                        {label}
-                      </button>
-                    ))}
-                </div>
+                <StructureTogglesBar toggles={structureToggles} onChange={setStructureToggles} />
                 {strategyIds.length > 1 && (
                   <div className="flex items-center gap-1 text-xs" role="group" aria-label="Trades on the chart">
                     <span className="text-muted">trades on chart</span>

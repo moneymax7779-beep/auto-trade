@@ -114,6 +114,12 @@ class SessionPanelsIT {
                 .hasMessageContaining("404");
         assertThatThrownBy(() -> panels.structure(999_999, "NIFTY")).isInstanceOf(ResponseStatusException.class)
                 .hasMessageContaining("404");
+        // the index page's day structure: the session's candles, EMAs and swings, no trades
+        Map<String, Object> day = panels.dayStructure(DAY.toString(), "nifty");
+        assertThat(day).containsEntry("source", "bars").containsEntry("trades", List.of());
+        for (String key : List.of("candles", "ema9", "ema20", "swings")) {
+            assertThat(day.get(key)).as(key).isEqualTo(structure.get(key));
+        }
 
         Map<String, Object> context = panels.dayContext(DAY.toString(), "NIFTY");
         @SuppressWarnings("unchecked")
