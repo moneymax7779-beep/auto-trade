@@ -540,7 +540,7 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
   }
 
   // expanded: premium and volume a little taller, the price pane takes the rest of the screen
-  const sized = full ? { prem: 130, vol: 120, price: Math.max(240, viewportH - 230 - (showPremium ? 130 : 0) - 120) } : SIZES[size];
+  const sized = full ? { prem: 130, vol: 120, price: Math.max(240, viewportH - 105 - (showPremium ? 130 : 0) - 120) } : SIZES[size];
   const { price: PRICE_H, prem: PREM_SIZE, vol: VOL_H } = sized;
   const PREM_H = showPremium ? PREM_SIZE : 0;
   const PY0 = T + PRICE_H + GAP;                       // premium pane top
