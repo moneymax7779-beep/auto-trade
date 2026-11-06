@@ -26,12 +26,26 @@ interface Wall { strike: number; oi: N; change: N; since: string; from: number |
 interface Structure { callWall: Wall | null; nearCeiling: Wall | null; nearFloor: Wall | null; putWall: Wall | null; atmIv: N; sigmaClose: N }
 interface StrikesData {
   date: string; underlying: string; at?: string; from?: string; spot?: number | null; atm?: number | null; strikeStep?: number;
-  deferred?: boolean; rows: Row[]; extras?: boolean; rebuilding?: boolean; prints?: number; lastPrint?: string | null; structure?: Structure;
+  since?: "open" | "close" | null; deferred?: boolean; rows: Row[]; extras?: boolean; rebuilding?: boolean; prints?: number; lastPrint?: string | null; structure?: Structure;
 }
 
 interface Side { oi: N; oi0: N; d: N; pct: N; iv: N; iv0: N; px: N; px0: N; vol: N; who: Who }
 /** gc / gp: the calls' / puts' gamma × OI (index units of delta per point of the index). */
 interface Strike { k: number; c: Side; p: Side; gc: N; gp: N; wc: N[]; wp: N[] }
+
+/**
+ * The ladder's window: seconds back, or since a fixed point of the day (user, 6 Nov 2026): "open", the first OI print
+ * after 09:15, or "close", the pre-open OI, which is the exchange's closing OI of the day before (today's whole build-up).
+ */
+type Back = number | "open" | "close";
+const BACKS: Back[] = [30, 60, 300, 900, 1800, 3600, 10800, "open", "close"];
+const backText = (b: Back) => b === "open" ? "since open" : b === "close" ? "overall" : b < 60 ? `${b} s` : b < 3600 ? `${b / 60} min` : `${b / 3600} h`;
+const BACK_HELP: Record<string, string> = {
+  open: "Change since the day's first OI print after 09:15 (the exchange publishes the first intraday OI a minute or so into the session)",
+  close: "Change since the previous close: the pre-open OI, which is the exchange's closing OI of the day before, so today's whole build-up",
+};
+/** A window that reaches back to the pre-open OI (the previous day's closing OI). */
+const fromPreOpen = (d: StrikesData) => d.from === "pre-open" || d.from === "previous close";
 
 /** The windows of the "changes 1–30 min" column, and their shades (the shortest darkest, drawn last, on top). */
 const WINDOWS = [1, 5, 15, 30];
@@ -84,12 +98,12 @@ const ivText = (v: N) => (v == null ? "–" : `${(100 * v).toFixed(1)} %`);
 const hhmm = (t: string | null | undefined) => (t ? t.slice(0, 5) : "–");
 
 export function Strikes({ underlying, date, at, pinned, live }: { underlying: string; date: string; at: string; pinned: boolean; live?: boolean }) {
-  const [back, setBack] = useState(300);
+  const [back, setBack] = useState<Back>(300);
   const [opts, setOpts] = useOpts();
   // live and unpinned, "at" follows the tape's latest step, so a new step is a new query: no timer of its own
   const q = useQuery({
     queryKey: ["oi-strikes", underlying, date, at, back],
-    queryFn: () => get<StrikesData>(`/api/oi-tape/strikes?underlying=${underlying}&date=${date}&at=${at}&back=${back}`),
+    queryFn: () => get<StrikesData>(`/api/oi-tape/strikes?underlying=${underlying}&date=${date}&at=${at}&${typeof back === "number" ? `back=${back}` : `since=${back}`}`),
     placeholderData: (prev) => prev,          // keep the last ladder while the next loads (no 700 px collapse every 30 s)
     refetchInterval: (query) => (query.state.data?.rebuilding ? 15_000 : false),   // an old day's IV is being read again
   });
@@ -115,11 +129,11 @@ export function Strikes({ underlying, date, at, pinned, live }: { underlying: st
     <div ref={ref} className="mt-4 border-t border-line pt-3">
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <span className="font-semibold">Strikes at {d?.at ?? at}{pinned ? "" : live ? " (latest)" : " (close)"}</span>
-        <span className="text-muted">· change since {d?.from ?? "…"}{printsText && <span title={`The exchange's OI updates near the money in this window (each contract's OI changes once per update; NSE about once a minute, BSE every 2½–3 minutes). Near-the-money OI last changed in the step from ${d?.lastPrint ?? "–"}.`}> · {printsText}</span>}</span>
+        <span className="text-muted">· change since {d?.from ?? "…"}{d?.since === "open" ? " (first OI print)" : ""}{printsText && <span title={`The exchange's OI updates near the money in this window (each contract's OI changes once per update; NSE about once a minute, BSE every 2½–3 minutes). Near-the-money OI last changed in the step from ${d?.lastPrint ?? "–"}.`}> · {printsText}</span>}</span>
         <span className="ml-2 text-muted">over</span>
-        {[30, 60, 300, 900, 1800].map((b) => (
-          <button key={b} type="button" onClick={() => setBack(b)}
-            className={`rounded border px-2 py-0.5 ${back === b ? "border-accent bg-accent/10" : "border-line text-muted hover:text-text"}`}>{b < 60 ? `${b} s` : `${b / 60} min`}</button>
+        {BACKS.map((b) => (
+          <button key={b} type="button" onClick={() => setBack(b)} title={BACK_HELP[b]}
+            className={`rounded border px-2 py-0.5 ${back === b ? "border-accent bg-accent/10" : "border-line text-muted hover:text-text"}`}>{backText(b)}</button>
         ))}
         <button type="button" onClick={() => setOpts({ panel: !opts.panel })} aria-expanded={opts.panel}
           className={`rounded border px-2 py-0.5 ${opts.panel ? "border-accent bg-accent/10" : "border-line text-muted hover:text-text"}`}>
@@ -133,7 +147,7 @@ export function Strikes({ underlying, date, at, pinned, live }: { underlying: st
           {/* judged near the money (ATM ± 5): deep in-the-money strikes also tick off the exchange's clock */}
           {d && rows.length > 0 && (d.prints != null ? d.prints === 0 : rows.filter(near).every((r) => (r.c.d ?? 0) === 0 && (r.p.d ?? 0) === 0)) && (
             <p className="mt-2 text-xs text-warn">No OI print between {d.from} and {d.at}: the exchange publishes {underlying === "NIFTY" || underlying === "BANKNIFTY"
-              ? "NSE option OI about once a minute" : "BSE option OI every 2½–3 minutes"}, so a {back < 60 ? `${back}-second` : `${back / 60}-minute`} window can fall between two prints. Try a longer window or another moment.</p>
+              ? "NSE option OI about once a minute" : "BSE option OI every 2½–3 minutes"}, so {typeof back === "number" ? `a ${back < 60 ? `${back}-second` : `${back / 60}-minute`} window can fall between two prints. Try a longer window or another moment.` : "nothing has changed yet."}</p>
           )}
           {d && d.extras === false && (opts.who !== "off" || opts.gamma || opts.sigma || opts.read) && (
             <p className="mt-2 text-xs text-muted">{d.rebuilding ? "This day's IV, premium and volume are being read again from the ticks; the ladder fills them in by itself in a minute or two."
@@ -151,7 +165,7 @@ export function Strikes({ underlying, date, at, pinned, live }: { underlying: st
               ? <Mirror d={d} rows={rows} W={W} opts={opts} whoOf={whoOf} underlying={underlying} />
               : <Stacked d={d} rows={rows} W={W} opts={opts} whoOf={whoOf} underlying={underlying} />)}
           </div>
-          <Legend d={d} at={at} opts={opts} />
+          <Legend d={d} at={at} opts={opts} openIv={typeof back !== "number" || back > 1800} />
         </>
       )}
     </div>
@@ -208,7 +222,7 @@ function wallTags(d: StrikesData): Map<number, Tag[]> {
   const st = d.structure;
   if (!st) return out;
   const add = (k: number, t: Tag) => out.set(k, [...(out.get(k) ?? []), t]);
-  const inWindow = (w: Wall) => w.from != null && d.from != null && (d.from === "pre-open" || w.since > d.from);
+  const inWindow = (w: Wall) => w.from != null && d.from != null && (fromPreOpen(d) || w.since > d.from);
   const one = (w: Wall, name: string, short: string, color: string) => {
     const arrow = inWindow(w) ? (w.strike > (w.from as number) ? " ↑" : " ↓") : "";
     add(w.strike, { text: `${name}${arrow}`, short: `${short}${arrow}`, color,
@@ -491,14 +505,15 @@ function Mirror({ d, rows, W: box, opts, whoOf, underlying }: LadderProps) {
   );
 }
 
-function Legend({ d, at, opts }: { d?: StrikesData; at: string; opts: Opts }) {
+/** openIv: the window is one the server reads who traded for from the open's IV when it reaches the pre-open OI. */
+function Legend({ d, at, opts, openIv }: { d?: StrikesData; at: string; opts: Opts; openIv: boolean }) {
   const parts: ReactNode[] = [];
   // each sentence is keyed when rendered (an array of fragments)
   parts.push(opts.layout === "mirror"
     ? <>Bars: put OI to the left, call OI to the right at {d?.at ?? at}; the tick is where it stood at {d?.from ?? "…"}. Outside: the change{opts.size === "pct" ? " as a share of the strike's earlier OI" : ""}.</>
     : <>Bars: call (top) and put (bottom) OI at {d?.at ?? at}; the tick is where it stood at {d?.from ?? "…"}. Right: the change in calls and puts{opts.size === "pct" ? " as a share of the strike's earlier OI" : ""}.</>);
   parts.push(<> Hover a row for its OI, IV, premium and volume. The highlighted row is the ATM strike.</>);
-  if (opts.who !== "off") parts.push(<> Who traded is read from the OI change against the change in the strike's IV (OI up and IV down: writers opening; OI down and IV up: writers buying back); blank when either change is small (OI under 0.5 % of the strike, IV under 0.1 point). Not from the premium: it mostly follows the index, so a rally would read as call buying and put writing whoever traded. An inference, not a record of who traded. On a narrow screen the labels are W, B, C and X.</>);
+  if (opts.who !== "off") parts.push(<> Who traded is read from the OI change against the change in the strike's IV (OI up and IV down: writers opening; OI down and IV up: writers buying back); blank when either change is small (OI under 0.5 % of the strike, IV under 0.1 point). Not from the premium: it mostly follows the index, so a rally would read as call buying and put writing whoever traded. An inference, not a record of who traded. On a narrow screen the labels are W, B, C and X.{d && fromPreOpen(d) && openIv ? " Over a window from the previous close the IV then is the strike's first IV of today (none is recorded before the open), so the label weighs a day's net OI change against the IV move since the open: many traders' opening and closing netted into one word." : ""}</>);
   if (opts.multi) parts.push(<> Changes 1–30 min: each strike's OI change over the last 1, 5, 15 and 30 minutes at once, as nested bars from the zero line (right: added, left: cut), 30 min palest and 1 min darkest, one scale for all{opts.size === "pct" ? " (as a share of the strike's OI at each window's start)" : ""}; hover a row for the numbers. A 1-minute window holds about one exchange OI update.</>);
   if (opts.walls) parts.push(<> Walls: the largest call OI above spot (call wall: within ATM ± 15; ceiling: within 6 strikes) and the largest put OI below it (put wall, floor); a wall moves only when another strike holds 5 % more OI; ↑ / ↓ and "was" mark a move inside the window.</>);
   if (opts.gamma) parts.push(<> Gamma: Black-Scholes gamma from each side's IV times its OI, calls (top) and puts (bottom) on one scale; hover a row for the numbers: per contract unit, in units of delta per point of the index, and in ₹ crore of delta per 1 % move. Option writers are short this gamma, so it shows where their risk changes fastest as the price moves; whether they hedge it, and so whether it speeds moves up or pins them, it does not say (A-164: no usable regime filter).</>);
@@ -510,7 +525,7 @@ const fmtM = (v: number) => big(v, true);
 /** The written read of the structure (shown when "structure read" is on): what the walls, flow, volume and gamma show. */
 function StructureRead({ d, rows, allRows, maxPain }: { d: StrikesData; rows: Strike[]; allRows: Strike[]; maxPain: number | null }) {
   const st = d.structure as Structure;
-  const inWindow = (w: Wall | null) => !!w && w.from != null && d.from != null && (d.from === "pre-open" || w.since > d.from);
+  const inWindow = (w: Wall | null) => !!w && w.from != null && d.from != null && (fromPreOpen(d) || w.since > d.from);
   const wallLine = (w: Wall | null, what: string) => {
     if (!w) return `no ${what} in range`;
     const moved = w.from != null ? `${w.strike > w.from ? "moved up" : "moved down"} from ${strikeText(w.from)} at ${hhmm(w.since)}` : `since ${hhmm(w.since)}`;
