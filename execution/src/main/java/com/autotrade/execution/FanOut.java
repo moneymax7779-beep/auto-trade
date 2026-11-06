@@ -22,9 +22,21 @@ import org.springframework.jdbc.core.JdbcTemplate;
 public final class FanOut {
 
     private final JdbcTemplate jdbc;
+    /** The clock a subscription's {@code enabled_at} is read from; null: the database's now() (tests set their own). */
+    private java.time.Clock clock;
 
     public FanOut(DataSource dataSource) {
         this.jdbc = new JdbcTemplate(dataSource);
+    }
+
+    /**
+     * Tests: stamps {@code enabled_at} from {@code clock}, the clock their decisions' {@code decided_at} comes from (the
+     * database container's clock runs a few ms off the JVM's, so a decision made right after subscribing could fall
+     * "before" it and never fan out).
+     */
+    FanOut withClock(java.time.Clock clock) {
+        this.clock = clock;
+        return this;
     }
 
     /** Fans out every not yet batched decision of the group's day; returns the number of intents created. */
@@ -64,12 +76,15 @@ public final class FanOut {
      * off counts from now ({@code enabled_at}); one already on keeps its time.
      */
     public void subscribe(long copyGroupId, long brokerAccountId, List<String> strategyIds, double sizeMultiplier) {
+        java.sql.Timestamp at = clock == null ? null : java.sql.Timestamp.from(clock.instant());
         for (String strategyId : strategyIds) {
             jdbc.update("insert into acct.strategy_subscription (copy_group_id, broker_account_id, strategy_id, enabled, "
-                    + "size_multiplier) values (?, ?, ?, true, ?) on conflict (copy_group_id, broker_account_id, strategy_id) "
+                    + "size_multiplier, enabled_at) values (?, ?, ?, true, ?, coalesce(cast(? as timestamptz), now())) "
+                    + "on conflict (copy_group_id, broker_account_id, strategy_id) "
                     + "do update set enabled = true, size_multiplier = excluded.size_multiplier, enabled_at = case "
-                    + "when acct.strategy_subscription.enabled then acct.strategy_subscription.enabled_at else now() end",
-                    copyGroupId, brokerAccountId, strategyId, sizeMultiplier);
+                    + "when acct.strategy_subscription.enabled then acct.strategy_subscription.enabled_at "
+                    + "else excluded.enabled_at end",
+                    copyGroupId, brokerAccountId, strategyId, sizeMultiplier, at);
         }
     }
 }

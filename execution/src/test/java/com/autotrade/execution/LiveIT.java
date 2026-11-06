@@ -4,8 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
@@ -53,6 +55,15 @@ class LiveIT {
             DockerImageName.parse("timescale/timescaledb:2.30.1-pg17").asCompatibleSubstituteFor("postgres");
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     private static final LocalDate DAY = LocalDate.now(IST);
+    /**
+     * The tests' one clock, today at 10:00 IST ({@code -Dexecution.it.time=HH:mm} for another time; the entries that
+     * should reach Kite need one before the 15:10 last LIVE entry): subscriptions, decisions and the LIVE checks read it,
+     * never the wall clock. Decisions made at the wall clock were STALE_SIGNAL against a fixed 10:00 check clock before
+     * 09:59, and fell "before" a subscription stamped by the database container's clock, a few ms ahead of the JVM's,
+     * so FanOut gave them no intent (6 Nov 2026).
+     */
+    private static final Clock CLOCK = Clock.fixed(DAY.atTime(LocalTime.parse(System.getProperty("execution.it.time",
+            "10:00"))).atZone(IST).toInstant(), IST);
     private static final String V7 = "../config/risk/follower-risk.v7.yaml";
     private static final int LOT = 65;
     private static final String[] KEYS = {"NSE_FO|47168", "NSE_FO|47169", "NSE_FO|47170"};
@@ -129,7 +140,7 @@ class LiveIT {
                 Long.class, tenant, "kite-app-" + n);
         jdbc.update("update acct.broker_account set credential_profile_id = ?, trade_mode = 'LIVE', "
                 + "live_trading_enabled = ? where id = ?", profile, live, id);
-        new FanOut(dataSource).subscribe(group, id, List.of(strategies), 1.0);
+        new FanOut(dataSource).withClock(CLOCK).subscribe(group, id, List.of(strategies), 1.0);
         return accounts.byId(id).orElseThrow();
     }
 
@@ -149,12 +160,12 @@ class LiveIT {
                 + "'{}'::jsonb, 'it', 'DONE') returning id", Long.class, "SIG-" + group, DAY);
     }
 
-    /** An ENTER of {@code strategy} in contract {@code i}, decided now, fanned out. */
+    /** An ENTER of {@code strategy} in contract {@code i}, decided at {@link #CLOCK}, fanned out. */
     private void enter(long group, long sessionId, String strategy, int i) {
         int n = jdbc.queryForObject("select count(*) from exec.signal_decision where copy_group_id = ?", Integer.class,
                 group) + 1;
         long token = 3_000_000_000L + Long.parseLong(KEYS[i].substring(7));
-        new SignalDecisionStore(dataSource).insert(new SignalDecision(group, sessionId, DAY, Instant.now(), strategy, 2,
+        new SignalDecisionStore(dataSource).insert(new SignalDecision(group, sessionId, DAY, CLOCK.instant(), strategy, 2,
                 "NIFTY", SignalDecision.Action.ENTER, "PE", null, "CONFIRMED", "IT", token, KEYS[i], SYMBOLS[i], LOT, 100,
                 260_000, 500_000, 0, group + ":" + sessionId + ":" + n,
                 Map.of("strategy_lots", 40.0, "intended_lots", 40.0, "liquidity_lots", 1000.0, "stop_pct", 25.0)));
@@ -172,7 +183,7 @@ class LiveIT {
         BrokerConnections.Route route = registry.route(account, risk);
         assertThat(route.venue()).as(route.description()).isNotNull();
         BrokerVenue venue = new BrokerVenue(dataSource, route.connection(), risk.orders().fast(), (k, u) -> 1755L, o -> { });
-        return new FollowerSimulator(dataSource, costs, risk, venue, null).withClock(MORNING);
+        return new FollowerSimulator(dataSource, costs, risk, venue, null).withClock(CLOCK);
     }
 
     private static String intentState(BrokerAccount a) {
@@ -180,21 +191,14 @@ class LiveIT {
                 + "where i.broker_account_id = ? order by i.id desc limit 1", String.class, a.id());
     }
 
-    /** The LIVE checks' clock: 10:00 IST, decisions made "now" are never stale or late (code review 3 Nov 2026). */
-    private static final java.time.Clock MORNING = java.time.Clock.fixed(java.time.LocalDate.now(java.time.ZoneId.of(
-            "Asia/Kolkata")).atTime(10, 0).atZone(java.time.ZoneId.of("Asia/Kolkata")).toInstant(), java.time.ZoneId.of("Asia/Kolkata"));
-
     @Test
     void aLiveEntryFollowsItsSignalAtOnceOrNotAtAll() {
         long group = group();
         BrokerAccount a = account(group, true, "ma-cross");
         enter(group, signalSession(group), "ma-cross", 0);
-        java.time.Instant ten = MORNING.instant();                                  // decided 10:00, run at 10:02
-        jdbc.update("update exec.signal_decision set decided_at = ? where copy_group_id = ?", java.sql.Timestamp.from(ten),
-                group);
+        Instant decided = CLOCK.instant();                                          // decided 10:00, run at 10:02
         try (BrokerConnections registry = registry()) {
-            follower(registry, a).withClock(java.time.Clock.fixed(ten.plusSeconds(120), java.time.ZoneId.of("UTC")))
-                    .run(a, group, DAY);
+            follower(registry, a).withClock(Clock.fixed(decided.plusSeconds(120), IST)).run(a, group, DAY);
         }
         assertThat(intentState(a)).isEqualTo("REJECTED_STALE_SIGNAL");
         assertThat(kite.requests("place")).as("nothing sent").isZero();
@@ -205,14 +209,12 @@ class LiveIT {
         long group = group();
         BrokerAccount a = account(group, true, "ma-cross");
         enter(group, signalSession(group), "ma-cross", 0);
-        java.time.Instant at1512 = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Kolkata")).atTime(15, 12)
-                .atZone(java.time.ZoneId.of("Asia/Kolkata")).toInstant();
-        java.time.Instant decided = jdbc.queryForObject("select max(decided_at) from exec.signal_decision where copy_group_id = ?",
-                java.sql.Timestamp.class, group).toInstant();
-        java.time.Instant clockAt = decided.isAfter(at1512) ? decided.plusSeconds(1)  // run late in the day: the same day
-                : at1512;                                                              // decided earlier: 15:12 today
+        Instant at1512 = DAY.atTime(15, 12).atZone(IST).toInstant();
+        Instant decided = CLOCK.instant();
+        Instant clockAt = decided.isAfter(at1512) ? decided.plusSeconds(1)    // a clock set late in the day: the same day
+                : at1512;                                                    // decided earlier: 15:12 today
         try (BrokerConnections registry = registry()) {
-            follower(registry, a).withClock(java.time.Clock.fixed(clockAt, java.time.ZoneId.of("UTC"))).run(a, group, DAY);
+            follower(registry, a).withClock(Clock.fixed(clockAt, IST)).run(a, group, DAY);
         }
         assertThat(intentState(a)).isEqualTo("REJECTED_LATE_ENTRY");
         assertThat(kite.requests("place")).as("nothing sent").isZero();
