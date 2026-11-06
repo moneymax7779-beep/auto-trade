@@ -38,7 +38,8 @@ import com.autotrade.core.time.MarketTime;
  *       22,700 first appear at 12:04), so a wider band would count a moving set of strikes.</li>
  *   <li>{@code /api/oi-tape/strikes}: every strike within ATM ± {@value #STRIKES} at a step ({@code at}: the step's
  *       start, as the tape labels it; the values are those at its end), its call and put OI then and {@code back} seconds
- *       earlier (null where the capture had none yet).</li>
+ *       earlier (null where the capture had none yet), or since the day's first OI print or the previous close
+ *       ({@code since}).</li>
  *   <li>{@code /api/oi-tape/max-pain} (user, 5 Nov 2026): the nearest expiry's max pain as the day goes, the strike
  *       at which the option buyers' payout at expiry (calls' and puts' OI times their intrinsic value) is smallest,
  *       over every strike the capture has OI for by then. The capture holds about ATM ± 16 strikes (re-centred as the
@@ -219,9 +220,17 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
                 + "order by 1 desc", String.class);
     }
 
+    /**
+     * The ladder at {@code at} against {@code back} seconds earlier (the pre-open OI when that is before the open), or,
+     * with {@code since} (user, 6 Nov 2026), against a fixed point of the day: {@code open}, the first OI the exchange
+     * published after 09:15 (so the change is today's trading after that print), or {@code close}, the pre-open OI, which
+     * is the exchange's closing OI of the day before (today's whole build-up). Not the previous session's last captured
+     * OI: the next morning's opening OI differs from it by up to a third at some strikes (2-3 Nov 2026).
+     */
     @GetMapping("/strikes")
     Map<String, Object> strikes(@RequestParam(required = false) String date, @RequestParam String underlying,
-                                @RequestParam String at, @RequestParam(defaultValue = "300") int back) {
+                                @RequestParam String at, @RequestParam(defaultValue = "300") int back,
+                                @RequestParam(required = false) String since) {
         LocalDate day = date == null ? LocalDate.now(MarketTime.IST) : LocalDate.parse(date);
         String u = known(underlying);
         Map<String, Object> out = header(day, u);
@@ -244,13 +253,22 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
             }
             double step = d.strikeStep(), spot = carried(d.spot, i);
             double atm = Double.isNaN(spot) ? Double.NaN : Math.round(spot / step) * step;
+            String from = j < 0 ? "pre-open" : null;
+            if ("close".equals(since)) {
+                j = -1;
+                from = "previous close";
+            } else if ("open".equals(since)) {
+                j = openingStep(d, i, step);
+            }
             out.put("expiry", d.expiry.toString());
             out.put("strikeStep", step);
             out.put("at", time(i));
-            out.put("from", j < 0 ? "pre-open" : time(j));
+            out.put("from", from != null ? from : time(j));
+            out.put("since", since);
             out.put("spot", Double.isNaN(spot) ? null : spot);
             out.put("atm", Double.isNaN(atm) ? null : atm);
-            out.putAll(ladder(d, i, j, step, market::tradingDay));
+            // a window reaching the pre-open OI has no IV or premium then: the longer ones take the open's for who traded
+            out.putAll(ladder(d, i, j, step, market::tradingDay, since != null || back > WINDOWS[WINDOWS.length - 1]));
             out.put("rebuilding", rebuilding(day, u));
         }
         return out;
@@ -349,7 +367,20 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
      * strike before), the ATM IV and one standard deviation of the index to the close.
      */
     static Map<String, Object> ladder(Day d, int i, int j, double step, java.util.function.Predicate<LocalDate> tradingDay) {
+        return ladder(d, i, j, step, tradingDay, false);
+    }
+
+    /**
+     * As {@link #ladder(Day, int, int, double, java.util.function.Predicate)}; with {@code openPrices} a window from the
+     * pre-open ({@code j} < 0) takes each contract's first IV and premium of the day as its IV and premium then (none is
+     * recorded before the open), so who traded reads the OI change since the previous close against the IV change since
+     * the open.
+     */
+    static Map<String, Object> ladder(Day d, int i, int j, double step, java.util.function.Predicate<LocalDate> tradingDay,
+                                      boolean openPrices) {
         Map<String, Object> out = new LinkedHashMap<>();
+        java.util.function.BiFunction<Map<Double, float[]>, Double, Double> then =
+                (side, k) -> j < 0 && openPrices ? firstAt(side, k, i) : at(side, k, j);
         Map<Double, double[]> calls = carriedAll(d.calls, d.seedCalls, d.steps), puts = carriedAll(d.puts, d.seedPuts, d.steps);
         double[] spots = carry(d.spot, d.steps);
         double spot = spots[i];
@@ -363,8 +394,8 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
                 continue;
             }
             double c = oiAt(calls, k, i), c0 = oiAt(calls, k, j), p = oiAt(puts, k, i), p0 = oiAt(puts, k, j);
-            double cIv = at(d.callIv, k, i), cIv0 = at(d.callIv, k, j), pIv = at(d.putIv, k, i), pIv0 = at(d.putIv, k, j);
-            double cPx = at(d.callPx, k, i), cPx0 = at(d.callPx, k, j), pPx = at(d.putPx, k, i), pPx0 = at(d.putPx, k, j);
+            double cIv = at(d.callIv, k, i), cIv0 = then.apply(d.callIv, k), pIv = at(d.putIv, k, i), pIv0 = then.apply(d.putIv, k);
+            double cPx = at(d.callPx, k, i), cPx0 = then.apply(d.callPx, k), pPx = at(d.putPx, k, i), pPx0 = then.apply(d.putPx, k);
             // each side's gamma from its own IV (a side with none recorded borrows the other's: the two are close)
             double cG = gamma(spot, k, Double.isNaN(cIv) ? pIv : cIv, years) * nz(c);
             double pG = gamma(spot, k, Double.isNaN(pIv) ? cIv : pIv, years) * nz(p);
@@ -530,6 +561,54 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
         return new int[] {n, last};
     }
 
+    /**
+     * The step that ends the day's first OI print after 09:15, read within ATM ± {@value #BAND} of step {@code i} as
+     * {@link #prints}, or -1 when none has come by then: the first step in which a contract's OI moved from its
+     * pre-open value, or the next one when the print's ticks ran on into it (other contracts change there, none of them a
+     * second time). When the capture holds no pre-open OI near the money, the step its first values came in.
+     */
+    /** The step a since-the-open window starts from at step {@code i}: {@link #openingPrint}, or {@code i} before it. */
+    static int openingStep(Day d, int i, double step) {
+        int f = openingPrint(carriedAll(d.calls, d.seedCalls, d.steps), carriedAll(d.puts, d.seedPuts, d.steps),
+                carry(d.spot, d.steps), step, i);
+        return f < 0 ? i : f;                                          // no print yet: nothing has changed since the open
+    }
+
+    static int openingPrint(Map<Double, double[]> calls, Map<Double, double[]> puts, double[] spots, double step, int i) {
+        double sp = spots[i];
+        if (Double.isNaN(sp)) {
+            return -1;
+        }
+        double atm = Math.round(sp / step) * step;
+        List<double[]> band = new ArrayList<>();
+        for (Map<Double, double[]> side : List.of(calls, puts)) {
+            side.forEach((k, v) -> {
+                if (Math.abs(k - atm) <= BAND * step + 1e-6) {
+                    band.add(v);
+                }
+            });
+        }
+        if (band.stream().allMatch(v -> Double.isNaN(v[0]))) {         // no opening OI: the first values recorded
+            for (int s = 0; s <= i; s++) {
+                final int t = s;
+                if (band.stream().anyMatch(v -> !Double.isNaN(v[t + 1]))) {
+                    return s;
+                }
+            }
+            return -1;
+        }
+        for (int s = 0; s <= i; s++) {
+            final int t = s;
+            if (band.stream().noneMatch(v -> changed(v, t))) {
+                continue;
+            }
+            boolean tail = s < i && band.stream().anyMatch(v -> changed(v, t + 1))
+                    && band.stream().noneMatch(v -> changed(v, t) && changed(v, t + 1));
+            return tail ? s + 1 : s;
+        }
+        return -1;
+    }
+
     private static boolean changed(double[] carried, int s) {
         return !Double.isNaN(carried[s]) && !Double.isNaN(carried[s + 1]) && carried[s + 1] != carried[s];
     }
@@ -604,6 +683,19 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
         for (int t = s; t >= 0; t--) {
             if (!Float.isNaN(v[t])) {
                 return v[t];
+            }
+        }
+        return Double.NaN;
+    }
+
+    /** The first value of a contract in steps 0 to {@code i}, NaN when none. */
+    private static double firstAt(Map<Double, float[]> side, double k, int i) {
+        float[] v = side.get(k);
+        if (v != null) {
+            for (int t = 0; t <= i; t++) {
+                if (!Float.isNaN(v[t])) {
+                    return v[t];
+                }
             }
         }
         return Double.NaN;

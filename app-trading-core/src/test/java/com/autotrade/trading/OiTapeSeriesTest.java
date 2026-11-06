@@ -212,6 +212,54 @@ class OiTapeSeriesTest {
     }
 
     @Test
+    void sinceTheOpenStartsAfterTheDaysFirstOiPrintIncludingTicksThatRanIntoTheNextStep() {
+        OiTapeController.Day d = new OiTapeController.Day(LocalDate.of(2026, 11, 4), LocalDate.of(2026, 11, 9));
+        d.steps = 6;
+        for (int s = 0; s < 6; s++) {
+            d.spot[s] = 23_010;
+        }
+        d.seedCalls.put(23_000.0, 100.0);
+        d.seedPuts.put(23_050.0, 200.0);
+        // the first print straddles steps 1 and 2 (the call in step 1, the put in step 2); the next print is in step 4
+        d.calls.put(23_000.0, steps(100, 110, 110, 110, 120, 120));
+        d.puts.put(23_050.0, steps(200, 200, 205, 205, 210, 210));
+        assertThat(OiTapeController.openingStep(d, 5, 50)).isEqualTo(2);
+        assertThat(OiTapeController.openingStep(d, 0, 50)).isEqualTo(0);              // no print yet: no change
+        // a contract changing in two adjacent steps is two prints: the first ends in its own step
+        d.puts.put(23_050.0, steps(200, 200, 200, 200, 210, 210));
+        d.calls.put(23_000.0, steps(100, 110, 115, 115, 120, 120));
+        assertThat(OiTapeController.openingStep(d, 5, 50)).isEqualTo(1);
+        // no pre-open OI near the money: the step the first values came in
+        d.seedCalls.clear();
+        d.seedPuts.clear();
+        d.calls.put(23_000.0, steps(Double.NaN, Double.NaN, 110, 120, 120, 120));
+        d.puts.put(23_050.0, steps(Double.NaN, Double.NaN, Double.NaN, 205, 205, 205));
+        assertThat(OiTapeController.openingStep(d, 5, 50)).isEqualTo(2);
+    }
+
+    @Test
+    void aWindowFromThePreviousCloseTakesTheOpensIvForWhoTradedOnlyWhenAsked() {
+        OiTapeController.Day d = day();
+        d.callIv.put(23_000.0, fsteps(Double.NaN, 0.150, 0.140, 0.140));
+        d.callPx.put(23_000.0, fsteps(Double.NaN, 101, 96, 96));
+        // call OI 1,000 at the previous close -> 1,300 at step 2; IV 0.150 at its first print of the day -> 0.140
+        List<Object> r = ladderRow(OiTapeController.ladder(d, 2, -1, 50, t -> true, true), 23_000.0);
+        assertThat(r.subList(1, 3)).containsExactly(1_300.0, 1_000.0);
+        assertThat(r.subList(5, 7)).containsExactly((double) 0.14f, (double) 0.15f);
+        assertThat(r.subList(9, 11)).containsExactly(96.0, 101.0);
+        assertThat(r.get(15)).isEqualTo("WRITING");
+        // the windows up to 30 minutes keep no IV then when they reach the pre-open
+        List<Object> plain = ladderRow(OiTapeController.ladder(d, 2, -1, 50, t -> true), 23_000.0);
+        assertThat(plain.get(6)).isNull();
+        assertThat(plain.get(15)).isNull();
+    }
+
+    @SuppressWarnings("unchecked")
+    private static List<Object> ladderRow(java.util.Map<String, Object> ladder, double k) {
+        return ((List<List<Object>>) ladder.get("rows")).stream().filter(x -> x.get(0).equals(k)).findFirst().orElseThrow();
+    }
+
+    @Test
     void oneSigmaToTheCloseSharesTheOptionsVarianceOverTheTradingMinutesLeft() {
         LocalDate thu = LocalDate.of(2026, 11, 5), tue = LocalDate.of(2026, 11, 10);
         int i = OiTapeController.index(java.time.LocalTime.of(14, 29, 30));            // ends 14:30: 60 minutes left
