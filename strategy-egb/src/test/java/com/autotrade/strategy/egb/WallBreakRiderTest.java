@@ -223,4 +223,46 @@ class WallBreakRiderTest {
         assertThat(unfilled.decide(callSignal(23115).at("12:41"), PositionView.FLAT).orders()).hasSize(1);
         assertThat(unfilled.decide(callSignal(23115).at("12:42"), PositionView.FLAT).orders()).hasSize(1);
     }
+
+    // ------------------------------------------------------------------ A-329 versions
+
+    @Test
+    void v8TakesNoNewEntryFromHalfPastOneAfterAWinningTrade() {
+        Strategy s = version("v8");
+        s.decide(callSignal(23115).at("13:20"), PositionView.FLAT);
+        assertThat(s.decide(callSignal(23115).at("13:21"), PositionView.FLAT).orders()).hasSize(1);
+        s.decide(covering(false).at("13:28"), new PositionView(true, OptionSide.CE, 1, 100, at(13, 21), 150));
+        s.decide(callSignal(23115).at("13:29"), PositionView.FLAT);                    // closed with a gain
+        s.decide(callSignal(23115).at("13:30"), PositionView.FLAT);
+        assertThat(s.decide(callSignal(23115).at("13:31"), PositionView.FLAT).orders()).as("after the win, from 13:30").isEmpty();
+
+        Strategy before = version("v8");                  // a re-entry before 13:30 is still allowed
+        before.decide(callSignal(23115).at("12:40"), PositionView.FLAT);
+        before.decide(callSignal(23115).at("12:41"), PositionView.FLAT);
+        before.decide(covering(false).at("12:50"), new PositionView(true, OptionSide.CE, 1, 100, at(12, 41), 150));
+        before.decide(callSignal(23115).at("12:51"), PositionView.FLAT);
+        before.decide(callSignal(23115).at("12:52"), PositionView.FLAT);
+        assertThat(before.decide(callSignal(23115).at("12:53"), PositionView.FLAT).orders()).hasSize(1);
+
+        Strategy lost = version("v8");                    // after a loss the late entry stays allowed
+        lost.decide(callSignal(23115).at("13:20"), PositionView.FLAT);
+        lost.decide(callSignal(23115).at("13:21"), PositionView.FLAT);
+        lost.decide(covering(false).at("13:28"), new PositionView(true, OptionSide.CE, 1, 100, at(13, 21), 70));
+        lost.decide(callSignal(23115).at("13:29"), PositionView.FLAT);
+        lost.decide(callSignal(23115).at("13:30"), PositionView.FLAT);
+        assertThat(lost.decide(callSignal(23115).at("13:31"), PositionView.FLAT).orders()).hasSize(1);
+    }
+
+    @Test
+    void v9SkipsAnEntryWhenTheAtmIvOfItsSideIsThirtyFivePercentOrMore() {
+        Strategy dear = version("v9");
+        Snapshots high = callSignal(23115).set("options.atmCeIv", 0.37).set("options.atmPeIv", 0.20);
+        dear.decide(high.at("12:40"), PositionView.FLAT);
+        assertThat(dear.decide(high.at("12:41"), PositionView.FLAT).orders()).isEmpty();
+        Strategy fair = version("v9");
+        Snapshots low = callSignal(23115).set("options.atmCeIv", 0.29).set("options.atmPeIv", 0.40);
+        fair.decide(low.at("12:40"), PositionView.FLAT);
+        assertThat(fair.decide(low.at("12:41"), PositionView.FLAT).orders()).as("the call side's IV counts").hasSize(1);
+        assertThat(version("v10")).isNotNull();
+    }
 }

@@ -39,6 +39,10 @@ import com.autotrade.strategy.Strategy;
  * A-328 (each off when absent): {@code signal.max_vwap_dist_atr} skips an entry further than that from VWAP on the trade's
  * side; {@code signal.min_wall_dist_atr} skips an entry whose wall is closer than that to the index;
  * {@code signal.max_trades_per_day} caps the filled entries of the day.
+ * <p>
+ * A-329 (each off when absent): {@code signal.reentry_after_win_until}: after a winning trade today (its last bid above
+ * its average premium) no new entry from that time; {@code signal.max_entry_iv}: no entry when the ATM IV of the trade's
+ * side is at or above it.
  */
 final class WallBreakRider implements Strategy {
 
@@ -61,6 +65,7 @@ final class WallBreakRider implements Strategy {
     private boolean wallCrossed;
     private double barAtCross = Double.NaN;
     private int tradesToday;    // the last 3-minute close when the wall was crossed (bar from before it)
+    private boolean wonToday;
 
     WallBreakRider(WallBreakRiderConfig config) {
         this.config = config;
@@ -101,6 +106,12 @@ final class WallBreakRider implements Strategy {
                 blockedSide = heldSide == OptionSide.CE ? OptionSide.PE : OptionSide.CE;
                 blockedUntil = now.plus(Duration.ofMinutes(config.noFlipAfterLossMin()));
                 conditions.put(blockedSide, conditions(blockedSide, snapshot, expiryDay, window, priorMove, now));
+            }
+            if (config.reentryAfterWinUntil() != null && heldSide != null && lastBid > lastAverage) {
+                wonToday = true;
+                for (OptionSide side : OptionSide.values()) {
+                    conditions.put(side, conditions(side, snapshot, expiryDay, window, priorMove, now));
+                }
             }
         }
         if (!wasOpen && position.open()) {
@@ -246,6 +257,17 @@ final class WallBreakRider implements Strategy {
         if (config.maxTradesPerDay() > 0) {
             boolean ok = tradesToday < config.maxTradesPerDay();
             c.put("trades_left", ok);
+            v3 = v3 && ok;
+        }
+        if (config.reentryAfterWinUntil() != null) {
+            boolean ok = !wonToday || now.atZone(MarketTime.IST).toLocalTime().isBefore(config.reentryAfterWinUntil());
+            c.put("no_late_reentry_after_win", ok);
+            v3 = v3 && ok;
+        }
+        if (!Double.isNaN(config.maxEntryIv())) {
+            double iv = call ? s.options().atmCeIv() : s.options().atmPeIv();
+            boolean ok = !(iv >= config.maxEntryIv());                // NaN (no quote yet) does not block
+            c.put("iv_ok", ok);
             v3 = v3 && ok;
         }
         if (config.noFlipAfterLossMin() > 0) {
