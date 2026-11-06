@@ -334,8 +334,9 @@ function HitRate({ surges }: { surges: Surge[] }) {
 const T = 10, GAP = 10, AXIS = 24;
 const FULL_W = 1000;                                  // the viewBox width on a wide screen (scaled to fit)
 /** Layout for a width: below FULL_W the chart is drawn 1:1 in pixels so text stays readable on a phone. */
-export function layout(boxWidth: number | null) {
-  const W = boxWidth && boxWidth < FULL_W ? Math.max(280, Math.round(boxWidth)) : FULL_W;
+export function layout(boxWidth: number | null, oneToOne = false) {
+  // expanded (full screen) the chart is drawn 1:1 at any width, so it gains room instead of growing its text
+  const W = boxWidth && (oneToOne || boxWidth < FULL_W) ? Math.max(280, Math.round(boxWidth)) : FULL_W;
   const narrow = W < 600;
   const L = narrow ? 48 : 60, R = narrow ? 84 : 104;   // the right gutter holds the price tags
   return { W, L, R, PW: W - L - R, narrow };
@@ -408,7 +409,13 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
   const drag = useRef<Drag | null>(null);
   const boxRef = useRef<HTMLDivElement>(null);
   const [boxWidth, setBoxWidth] = useState<number | null>(null);
-  const { W, L, R, PW, narrow } = layout(boxWidth);
+  // Expand (6 Nov 2026, user: "can't we make existing chart zoomable and expandable"): the chart fills the screen, drawn
+  // 1:1, a plain scroll zooms (no page to scroll behind it), Esc or Close leaves
+  const [full, setFull] = useState(false);
+  const fullRef = useRef(false);
+  fullRef.current = full;
+  const [viewportH, setViewportH] = useState(() => window.innerHeight);
+  const { W, L, R, PW, narrow } = layout(boxWidth, full);
   const geo = useRef({ view, y0: 0, y1: 1, priceH: 200, W, L, PW });
   const pts = data.index;
   const prices = useMemo(() => new Map(pts.map(([t, p]) => [minutes(t), p])), [pts]);
@@ -472,7 +479,24 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
     setView((v) => (m >= v.a && m <= v.b ? v : clampView(m - (v.b - v.a) / 2, m + (v.b - v.a) / 2)));
   }, [selected]);
 
-  // pinch (trackpad) or ⌘/ctrl + scroll zooms; a sideways scroll pans; a plain scroll still scrolls the page
+  useEffect(() => {
+    if (!full) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setFull(false); };
+    const onResize = () => setViewportH(window.innerHeight);
+    onResize();
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";              // the page behind does not scroll
+    document.addEventListener("keydown", onKey);
+    window.addEventListener("resize", onResize);
+    return () => {
+      document.body.style.overflow = overflow;
+      document.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", onResize);
+    };
+  }, [full]);
+
+  // pinch (trackpad) or ⌘/ctrl + scroll zooms (expanded: a plain scroll too); a sideways scroll pans; on the page a plain
+  // scroll still scrolls the page
   useEffect(() => {
     const svg = svgRef.current;
     if (!svg) return;
@@ -482,7 +506,7 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
       const { W, L, PW } = g;
       const k = W / box.width;                          // the viewBox scales uniformly
       const x = (e.clientX - box.left) * k, y = (e.clientY - box.top) * k;
-      if (e.ctrlKey || e.metaKey) {
+      if (e.ctrlKey || e.metaKey || (fullRef.current && Math.abs(e.deltaY) >= Math.abs(e.deltaX))) {
         e.preventDefault();
         const f = Math.exp(Math.max(-1, Math.min(1, e.deltaY * 0.01)));
         if (x < L && y <= T + g.priceH) {
@@ -515,7 +539,9 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
       : `No index data for ${date}: neither auto-trade's own capture (from 28 Sep 2026) nor zt-tiger-v2 has this day's ticks.`}</p>;
   }
 
-  const { price: PRICE_H, prem: PREM_SIZE, vol: VOL_H } = SIZES[size];
+  // expanded: premium and volume a little taller, the price pane takes the rest of the screen
+  const sized = full ? { prem: 130, vol: 120, price: Math.max(240, viewportH - 230 - (showPremium ? 130 : 0) - 120) } : SIZES[size];
+  const { price: PRICE_H, prem: PREM_SIZE, vol: VOL_H } = sized;
   const PREM_H = showPremium ? PREM_SIZE : 0;
   const PY0 = T + PRICE_H + GAP;                       // premium pane top
   const VY0 = PY0 + (PREM_H ? PREM_H + GAP : 0);       // volume pane top
@@ -701,8 +727,9 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
 
   const btn = (on: boolean) => `rounded px-2 py-0.5 ${on ? "bg-panel-2 font-semibold" : "text-muted hover:text-text"}`;
   return (
-    <div>
+    <div className={full ? "fixed inset-0 z-50 overflow-auto bg-panel p-3" : undefined}>
       <div className="mb-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+        {full && <span className="text-sm font-semibold">{data.underlying} · {shortDay(date)}</span>}
         <div className="flex items-center gap-0.5" role="group" aria-label="Time zoom">
           <button type="button" className={btn(false)} aria-label="Zoom out" onClick={() => zoomX(1.5)}>−</button>
           <button type="button" className={btn(false)} aria-label="Zoom in" onClick={() => zoomX(1 / 1.5)}>+</button>
@@ -713,12 +740,12 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
         </div>
         <button type="button" className={btn(manualY == null)} aria-pressed={manualY == null} onClick={() => setManualY(null)}
           title="fit the price axis to the visible minutes">price auto</button>
-        <div className="flex items-center gap-0.5" role="group" aria-label="Chart height">
+        {!full && <div className="flex items-center gap-0.5" role="group" aria-label="Chart height">
           <span className="text-muted">height</span>
           {(Object.keys(SIZES) as Size[]).map((s) => (
             <button key={s} type="button" className={btn(size === s)} aria-pressed={size === s} onClick={() => setSize(s)}>{s}</button>
           ))}
-        </div>
+        </div>}
         <div className="flex items-center gap-0.5" role="group" aria-label="Premium pane">
           <button type="button" className={btn(showPremium)} aria-pressed={showPremium}
             onClick={() => { setShowPremium(!showPremium); try { localStorage.setItem(PREMIUM_KEY, String(!showPremium)); } catch { /* not kept */ } }}
@@ -745,8 +772,11 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
               title="the next day, at the same zoom (its open when zoomed in)">{nav.next ? shortDay(nav.next) : ""} ›</button>
           </div>
         )}
-        <span className="ml-auto hidden text-muted sm:inline">pinch or ⌘/ctrl + scroll to zoom · drag to pan · drag the price or time axis to stretch · double-click resets</span>
+        <span className="ml-auto hidden text-muted sm:inline">{full ? "scroll or pinch to zoom · drag to pan · drag the price or time axis to stretch · double-click resets · Esc closes"
+          : "pinch or ⌘/ctrl + scroll to zoom · drag to pan · drag the price or time axis to stretch · double-click resets"}</span>
         <span className="text-muted sm:hidden">pinch to zoom · drag to pan · double-tap resets</span>
+        <button type="button" onClick={() => setFull(!full)} title={full ? "back to the page (Esc)" : "full screen: a plain scroll zooms there"}
+          className="ml-auto rounded border border-line px-2 py-0.5 font-medium hover:border-accent sm:ml-0">{full ? "✕ Close" : "⤢ Expand"}</button>
       </div>
       <div ref={boxRef} className="relative overflow-hidden rounded border border-line">
         {/* panned to the open (close): the previous (next) day is one click away */}
