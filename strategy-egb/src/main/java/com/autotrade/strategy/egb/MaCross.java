@@ -26,6 +26,15 @@ final class MaCross extends SetupStrategy {
     private final double maxStopAtr;
     private final double rewardToRisk;
     private final boolean requireVwapSide;
+    // A-332 (all off when absent = v1): skip a spike cross; time stop only for a trade that never reached unlessR;
+    // runner: no exit at the target, the index stop trails trailR behind the best after the target (never below lockR)
+    private final double maxChg1mAtr1m;
+    private final int timeStopMin;
+    private final double timeStopUnlessR;
+    private final double runnerTrailR;
+    private final double runnerLockR;
+    private double entrySpot = Double.NaN, entryRisk = Double.NaN, bestR = Double.NaN;
+    private java.time.Instant entryTime;
     private double previousDiff = Double.NaN;
 
     MaCross(ThresholdConfig c) {
@@ -33,6 +42,30 @@ final class MaCross extends SetupStrategy {
         maxStopAtr = c.getDouble("setup.max_stop_atr");
         rewardToRisk = c.getDouble("setup.reward_to_risk");
         requireVwapSide = c.has("setup.require_vwap_side") && c.getBoolean("setup.require_vwap_side");
+        maxChg1mAtr1m = c.has("setup.max_chg1m_atr1m") ? c.getDouble("setup.max_chg1m_atr1m") : Double.NaN;
+        timeStopMin = c.has("exits.cross_time_stop_min") ? c.getInt("exits.cross_time_stop_min") : 0;
+        timeStopUnlessR = c.has("exits.cross_time_stop_unless_r") ? c.getDouble("exits.cross_time_stop_unless_r") : Double.NaN;
+        runnerTrailR = c.has("exits.runner_trail_r") ? c.getDouble("exits.runner_trail_r") : Double.NaN;
+        runnerLockR = c.has("exits.runner_lock_r") ? c.getDouble("exits.runner_lock_r") : Double.NaN;
+    }
+
+    /** A-332: the conditional time stop and the runner, on the index in units of the entry's risk. */
+    @Override
+    protected String customExit(FeatureSnapshot s, OptionSide side, LocalTime time) {
+        double spot = s.spot();
+        if (!Double.isFinite(entrySpot) || !(entryRisk > 0) || !Double.isFinite(spot)) {
+            return null;
+        }
+        double r = (side == OptionSide.CE ? spot - entrySpot : entrySpot - spot) / entryRisk;
+        bestR = Double.isNaN(bestR) ? r : Math.max(bestR, r);
+        if (Double.isFinite(runnerTrailR) && bestR >= rewardToRisk && r <= Math.max(runnerLockR, bestR - runnerTrailR)) {
+            return "RUNNER_STOP";
+        }
+        if (timeStopMin > 0 && entryTime != null && java.time.Duration.between(entryTime, s.time()).toMinutes() >= timeStopMin
+                && !(bestR >= timeStopUnlessR)) {
+            return "TIME_" + timeStopMin;
+        }
+        return null;
     }
 
     @Override
@@ -72,6 +105,15 @@ final class MaCross extends SetupStrategy {
                 return null;
             }
         }
+        if (Double.isFinite(maxChg1mAtr1m)) {
+            // A-332 v23: the cross came on a 1-minute spike in its own direction (a chase): no entry; NaN = no veto
+            double push = (crossUp ? 1 : -1) * st.spotChange1m() / st.atr1m();
+            boolean calm = !(push > maxChg1mAtr1m);
+            c.put("no_spike", calm);
+            if (!calm) {
+                return null;
+            }
+        }
         double stop = crossUp ? st.lastSwingLow() : st.lastSwingHigh();
         double risk = crossUp ? spot - stop : stop - spot;
         boolean stopOk = Double.isFinite(stop) && atr > 0 && risk > 0 && risk <= maxStopAtr * atr;
@@ -79,6 +121,10 @@ final class MaCross extends SetupStrategy {
         if (!stopOk) {
             return null;
         }
+        entrySpot = spot;
+        entryRisk = risk;
+        entryTime = s.time();
+        bestR = Double.NaN;
         double target = crossUp ? spot + rewardToRisk * risk : spot - rewardToRisk * risk;
         return new Entry(crossUp ? OptionSide.CE : OptionSide.PE, stop, target, crossUp ? "EMA_CROSS_UP" : "EMA_CROSS_DOWN");
     }
