@@ -61,7 +61,7 @@ class SecurityConfigTest {
                 "/api/execution", "/actuator/info", "/api/surges", "/api/sessions/7/positions", "/api/sessions/7/decisions",
                 "/api/oi-tape/strikes", "/api/runs", "/api/equity", "/api/sessions/7/rejections", "/api/close-auction",
                 "/api/live/ticks", "/api/replay-control", "/api/sessions/7/trade-context", "/api/sessions/7/at", "/api/structure",
-                "/api/day-context", "/api/sessions/7/structure"})
+                "/api/day-context", "/api/sessions/7/structure", "/api/index-bars"})
         String read() {
             return "ok";
         }
@@ -189,7 +189,7 @@ class SecurityConfigTest {
             MockMvc mvc = mvc(context);
             for (String path : List.of("/api/me", "/api/execution", "/api/execution/accounts", "/api/sessions", "/api/surges",
                     "/api/sessions/7/positions", "/api/oi-tape/strikes", "/api/equity", "/api/sessions/7/rejections",
-                    "/api/close-auction", "/api/live/ticks", "/api/structure", "/api/day-context")) {
+                    "/api/close-auction", "/api/live/ticks", "/api/structure", "/api/day-context", "/api/index-bars")) {
                 mvc.perform(get(path).with(user("member"))).andExpect(status().isOk());
             }
             // the replay controls and a session's trade data and minute inspector are the operator's
