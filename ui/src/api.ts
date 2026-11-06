@@ -452,6 +452,56 @@ export interface ExecPosition {
   status: string;
 }
 
+/** GET /api/execution/accounts/{id}/live-book?days=: a LIVE account's own positions (LIVE intents only), open and closed. */
+export interface LiveBook {
+  account: string;
+  mode: string;
+  killSwitches: string[];
+  summary: { openPnl: number; atRisk: number; realisedToday: number; sinceLiveNet: number; sinceLiveTrades: number;
+    sinceLiveFrom: string | null };
+  open: LiveOpenPosition[];
+  closed: LiveClosedPosition[];
+}
+
+interface LiveBookRow {
+  id: number;
+  strategy: string;
+  underlying: string;
+  side: string;
+  symbol: string;
+  lotSize: number | null;
+  entry: number;
+  /** IST, ISO local date-time */
+  opened: string;
+  quantity: number;
+}
+
+export interface LiveOpenPosition extends LiveBookRow {
+  status: string;
+  /** null when no quote was captured in the last 10 minutes */
+  bid: number | null;
+  ask?: number;
+  ltp?: number | null;
+  quoteAt?: string;
+  best: number | null;
+  stop: number | null;
+  stopStatus: string | null;
+  stopWorking: boolean;
+  pnl?: number;
+  pnlPct?: number | null;
+  atRisk?: number;
+}
+
+export interface LiveClosedPosition extends LiveBookRow {
+  exit: number | null;
+  exitReason: string | null;
+  closed: string;
+  gross: number;
+  charges: number;
+  net: number;
+  pct: number | null;
+}
+
 /** GET /api/execution/accounts/{id}/ledger?days=: the account's own ledger, newest day first. */
 export interface LedgerRow {
   day: string;
