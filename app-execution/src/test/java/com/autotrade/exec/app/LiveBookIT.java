@@ -126,8 +126,12 @@ class LiveBookIT {
         tick("30 seconds", 163.70);                        // the newest
 
         long done = intent(group, session, account, 2, "LIVE");
-        position(tenant, account, done, "CLOSED", 185.00, "2 days", "2 days", -2574.0, 89.51);
+        position(tenant, account, done, "CLOSED", 185.00, "2 days 01:00:00", "2 days", -2574.0, 89.51);
         order(tenant, account, done, "ENTRY", "FILLED", 65, null);
+        long add = intent(group, session, account, 4, "LIVE");             // an add to it 30 minutes in: 130 bought in all
+        jdbc.update("update exec.trade_intent set action = 'ADD', created_at = now() - interval '2 days 00:30:00' where id = ?", add);
+        order(tenant, account, add, "ENTRY", "FILLED", 65, null);
+        jdbc.update("insert into exec.kill_switch (scope, reason, engaged_by) values ('GLOBAL_LIVE', 'ops', 'it')");
 
         long rehearsal = intent(group, session, account, 3, "DRY_RUN");
         position(tenant, account, rehearsal, "CLOSED", 100.00, "3 days", "3 days", 650.0, 40.0);
@@ -137,7 +141,8 @@ class LiveBookIT {
         LiveBookController api = new LiveBookController(new Access(dataSource), dataSource);
         Map<String, Object> book = api.liveBook("local-owner", account, 7);
 
-        assertThat(book).containsEntry("account", "ZERODHA-1").containsEntry("mode", "LIVE");
+        assertThat(book).containsEntry("account", "ZERODHA-1").containsEntry("mode", "LIVE")
+                .containsEntry("killSwitches", List.of("all LIVE accounts: ops"));
         List<Map<String, Object>> open = (List<Map<String, Object>>) book.get("open");
         assertThat(open).singleElement().satisfies(p -> {
             assertThat(p).containsEntry("quantity", 65L).containsEntry("bid", 163.70).containsEntry("best", 163.80)
@@ -148,12 +153,17 @@ class LiveBookIT {
         });
         List<Map<String, Object>> closed = (List<Map<String, Object>>) book.get("closed");
         assertThat(closed).as("the DRY_RUN rehearsal is not real money").singleElement().satisfies(p -> {
-            assertThat(p).containsEntry("quantity", 65L).containsEntry("exit", 145.40).containsEntry("exitReason", "STOP")
-                    .containsEntry("net", -2663.51).containsEntry("pct", -21.41);
+            assertThat(p).containsEntry("quantity", 130L).containsEntry("exit", 165.2).containsEntry("exitReason", "STOP")
+                    .containsEntry("net", -2663.51).containsEntry("pct", -10.7);
         });
         Map<String, Object> summary = (Map<String, Object>) book.get("summary");
         assertThat(summary).containsEntry("openPnl", 1127.75).containsEntry("atRisk", 5885.75)
                 .containsEntry("realisedToday", 0.0).containsEntry("sinceLiveNet", -2663.51).containsEntry("sinceLiveTrades", 1);
+
+        // a stop being cancelled no longer protects the position: not working, nothing counted at risk
+        jdbc.update("update exec.order_execution set status = 'CANCEL_PENDING' where role = 'STOP' and trade_intent_id = ?", live);
+        Map<String, Object> cancelling = ((List<Map<String, Object>>) api.liveBook("local-owner", account, 7).get("open")).getFirst();
+        assertThat(cancelling).containsEntry("stopWorking", false).doesNotContainKey("atRisk");
 
         long other = accounts.ensureTenant("other");
         accounts.ensureMembership(other, accounts.ensureUser("kc-other", "other"), "OWNER");

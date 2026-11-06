@@ -34,6 +34,10 @@ export interface OpenView {
   pnl: number | null;
   pnlPct: number | null;
   leg?: string;
+  /** the strategy's stage (CONFIRMED, RUNNER, ...) when the engine reports one */
+  stage?: string;
+  /** a straddle: its legs, shown instead of one entry -> bid and the rail */
+  legs?: { side: string; entry: number; bid: number | null; pnl: number | null }[];
 }
 
 export interface ClosedView {
@@ -73,7 +77,7 @@ const istToday = () => new Date(Date.now() + 330 * 60_000).toISOString().slice(0
 
 /** "NIFTY 24650 CE 09 NOV 26" -> contract "NIFTY 24650 CE" and expiry "9 Nov". */
 function contract(symbol: string) {
-  const m = /^(\S+ \S+ (?:CE|PE)) (\d{1,2}) ([A-Za-z]{3})/.exec(symbol);
+  const m = /^(\S+ \S+ (?:CE\+PE|CE|PE)) (\d{1,2}) ([A-Za-z]{3})/.exec(symbol);
   return m ? { name: m[1], expiry: `${Number(m[2])} ${m[3].charAt(0)}${m[3].slice(1).toLowerCase()}` } : { name: symbol, expiry: "" };
 }
 
@@ -137,7 +141,7 @@ export function PaperPositions({ account, date, openRows, closedRows }: {
 }) {
   const iso = (t: string | null) => (t ? (t.length > 8 ? t : `${date}T${t}`) : `${date}T00:00:00`);
   let atRisk = 0;
-  const open: OpenView[] = openRows.map((r, i) => {
+  const single: OpenView[] = openRows.map((r, i) => {
     const stop = r.stopPct != null ? r.averageCost * (1 - r.stopPct / 100) : null;
     const target = r.targetPct != null ? r.averageCost * (1 + r.targetPct / 100) : null;
     const bid = r.bid ?? null;
@@ -148,14 +152,33 @@ export function PaperPositions({ account, date, openRows, closedRows }: {
       key: `${r.strategy}|${r.symbol}|${r.opened}|${i}`, strategy: r.strategy ?? "", symbol: r.symbol, quantity: r.quantity,
       lotSize: r.lotSize ?? null, entry: r.averageCost, opened: iso(r.opened), bid, best: null, stop, target, pnl,
       pnlPct: pnl != null && r.averageCost > 0 ? (100 * pnl) / (r.averageCost * r.quantity) : null, leg: r.leg || undefined,
+      stage: r.stages?.length ? r.stages[r.stages.length - 1] : undefined,
       stopNote: stop == null ? "no stop"
         : <>engine stop −{r.stopPct} %{bid != null ? <> · {px(bid - stop)} pts below the bid · {money(risk, false)} at risk</> : null}{target != null ? <> · target +{r.targetPct} %</> : null}</>,
     };
   });
+  // a straddle's legs (same strategy, index and entry time) are one trade: one card, both legs, the combined P&L
+  const open: OpenView[] = [];
+  single.forEach((v, i) => {
+    const r = openRows[i];
+    if (!v.leg) { open.push(v); return; }
+    const group = `${r.strategy}|${r.underlying}|${r.opened}`;
+    const leg = { side: v.leg, entry: v.entry, bid: v.bid, pnl: v.pnl };
+    const trade = open.find((o) => o.key === group);
+    if (!trade) {
+      open.push({ ...v, key: group, symbol: v.symbol.replace(/ (CE|PE) /, " CE+PE "), legs: [leg], stop: null, target: null,
+        best: null, bid: null, stopNote: "each leg has its own stop" });
+      return;
+    }
+    trade.legs!.push(leg);
+    trade.pnl = trade.pnl != null && v.pnl != null ? trade.pnl + v.pnl : null;
+    trade.entry += v.entry;                                  // the straddle's premium per unit: both legs
+    trade.pnlPct = trade.pnl != null && trade.entry > 0 ? (100 * trade.pnl) / (trade.entry * trade.quantity) : null;
+  });
   const closed: ClosedView[] = closedRows.map((r, i) => {
     const qty = r.boughtQuantity ?? r.quantity;
     return {
-      key: `${r.strategy}|${r.symbol}|${r.opened}|${i}`, strategy: r.strategy ?? "", symbol: r.symbol, quantity: qty,
+      key: `${r.strategy}|${r.symbol}|${r.opened}|${i}`, strategy: r.leg ? `${r.strategy ?? ""} · ${r.leg} leg` : r.strategy ?? "", symbol: r.symbol, quantity: qty,
       lotSize: r.lotSize ?? null, entry: r.averageCost, exit: r.exitPrice ?? null, exitReason: r.exitReason, opened: iso(r.opened),
       closed: iso(r.closed), charges: r.costs ?? 0, net: r.net,
       pct: r.premiumPaid ? (100 * (r.realised ?? r.net)) / r.premiumPaid : null,
@@ -241,20 +264,33 @@ function OpenCard({ p }: { p: OpenView }) {
   return (
     <div className={`mb-3 grid grid-cols-1 items-center gap-3 rounded-lg border border-line border-l-4 p-4 md:grid-cols-[1.3fr_0.9fr_2fr_0.8fr] ${edge}`}>
       <div className="min-w-0">
-        <div className="text-lg font-bold">{c.name}{p.leg ? <span className="ml-2 text-xs font-normal text-muted">straddle leg</span> : null}</div>
+        <div className="text-lg font-bold">{c.name}{p.legs ? <span className="ml-2 text-xs font-normal text-muted">straddle</span> : p.leg ? <span className="ml-2 text-xs font-normal text-muted">straddle leg</span> : null}</div>
         <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted">
           {c.expiry && <span>expires {c.expiry}</span>}
           <Tag strategy>{p.strategy}</Tag>
+          {p.stage && <Tag>{p.stage.toLowerCase()}</Tag>}
           <Tag>{lotsText(p.quantity, p.lotSize)}</Tag>
         </div>
         <div className="mt-1 text-xs text-muted">bought {hhmm(p.opened)} · held {held(p.opened)}</div>
       </div>
-      <div>
-        <div className="text-xs text-muted">Entry → bid</div>
-        <div className="num text-lg font-bold">{px(p.entry)} → {px(p.bid)}</div>
-        <div className="text-xs text-muted">{money(p.entry * p.quantity, false)} paid{p.quoteAt ? ` · ${hhmm(p.quoteAt)}` : p.bid == null ? " · no recent quote" : ""}</div>
-      </div>
-      <Rail p={p} />
+      {p.legs ? (
+        <div className="md:col-span-2">
+          <div className="text-xs text-muted">Straddle legs: entry → bid · P&amp;L</div>
+          {p.legs.map((l) => (
+            <div key={l.side} className="num text-sm"><b>{l.side}</b> {px(l.entry)} → {px(l.bid)} · <span className={tone(l.pnl)}>{money(l.pnl)}</span></div>
+          ))}
+          <div className="text-xs text-muted">{money(p.entry * p.quantity, false)} paid · {p.stopNote}</div>
+        </div>
+      ) : (
+        <>
+          <div>
+            <div className="text-xs text-muted">Entry → bid</div>
+            <div className="num text-lg font-bold">{px(p.entry)} → {px(p.bid)}</div>
+            <div className="text-xs text-muted">{money(p.entry * p.quantity, false)} paid{p.quoteAt ? ` · ${hhmm(p.quoteAt)}` : p.bid == null ? " · no recent quote" : ""}</div>
+          </div>
+          <Rail p={p} />
+        </>
+      )}
       <div className="text-right">
         <div className={`num text-xl font-bold ${tone(p.pnl)}`}>{p.pnl != null ? money(p.pnl) : <span className="text-base font-normal text-muted">no price</span>}</div>
         <div className={`text-xs ${tone(p.pnl)}`}>{p.pnlPct != null ? `${p.pnlPct > 0 ? "+" : ""}${p.pnlPct.toFixed(1)} %` : ""}</div>

@@ -348,6 +348,8 @@ const MIN_SPAN = 10;                                  // zoomed in no further th
 const SIZES = { S: { price: 200, prem: 70, vol: 70 }, M: { price: 320, prem: 100, vol: 90 }, L: { price: 480, prem: 140, vol: 110 } } as const;
 type Size = keyof typeof SIZES;
 const SIZE_KEY = "surge-chart-size";
+/** The indices whose chart is expanded (full screen), across the remount a day step causes. */
+const EXPANDED = new Set<string>();
 const PRESETS: { label: string; span: number | null }[] = [{ label: "day", span: null }, { label: "2h", span: 120 }, { label: "1h", span: 60 }, { label: "30m", span: 30 }];
 
 interface YRange { lo: number; hi: number }           // a stretched price axis; null = fit the visible minutes
@@ -411,7 +413,9 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
   const [boxWidth, setBoxWidth] = useState<number | null>(null);
   // Expand (6 Nov 2026, user: "can't we make existing chart zoomable and expandable"): the chart fills the screen, drawn
   // 1:1, a plain scroll zooms (no page to scroll behind it), Esc or Close leaves
-  const [full, setFull] = useState(false);
+  // kept per index outside the component: a day step remounts the chart (the page keys it by day) and stays expanded
+  const [full, setFullState] = useState(() => EXPANDED.has(data.underlying));
+  const setFull = (on: boolean) => { if (on) EXPANDED.add(data.underlying); else EXPANDED.delete(data.underlying); setFullState(on); };
   const fullRef = useRef(false);
   fullRef.current = full;
   const [viewportH, setViewportH] = useState(() => window.innerHeight);
