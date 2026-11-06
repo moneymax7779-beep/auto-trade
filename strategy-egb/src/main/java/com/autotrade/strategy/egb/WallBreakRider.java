@@ -35,6 +35,10 @@ import com.autotrade.strategy.Strategy;
  * {@code signal.no_flip_after_loss_min}; {@code exits.wall_recross_exit}: once the index crosses the wall strike recorded
  * at entry, a 3-minute close back through it exits (WALL_LOST); {@code exits.time_stop_min: 0} turns the no-progress
  * exit off.
+ * <p>
+ * A-328 (each off when absent): {@code signal.max_vwap_dist_atr} skips an entry further than that from VWAP on the trade's
+ * side; {@code signal.min_wall_dist_atr} skips an entry whose wall is closer than that to the index;
+ * {@code signal.max_trades_per_day} caps the filled entries of the day.
  */
 final class WallBreakRider implements Strategy {
 
@@ -55,7 +59,8 @@ final class WallBreakRider implements Strategy {
     private Instant blockedUntil;
     private double entryWall = Double.NaN;
     private boolean wallCrossed;
-    private double barAtCross = Double.NaN;    // the last 3-minute close when the wall was crossed (bar from before it)
+    private double barAtCross = Double.NaN;
+    private int tradesToday;    // the last 3-minute close when the wall was crossed (bar from before it)
 
     WallBreakRider(WallBreakRiderConfig config) {
         this.config = config;
@@ -97,6 +102,9 @@ final class WallBreakRider implements Strategy {
                 blockedUntil = now.plus(Duration.ofMinutes(config.noFlipAfterLossMin()));
                 conditions.put(blockedSide, conditions(blockedSide, snapshot, expiryDay, window, priorMove, now));
             }
+        }
+        if (!wasOpen && position.open()) {
+            tradesToday++;                                   // a filled entry (one strategy instance per session)
         }
         wasOpen = position.open();
         if (position.open()) {
@@ -222,6 +230,23 @@ final class WallBreakRider implements Strategy {
             boolean ok = !(priorMove * (call ? 1 : -1) > config.maxPriorMoveAtr());
             c.put("not_extended", ok);
             v3 = ok;
+        }
+        double atr = s.structure().atr3m();
+        if (!Double.isNaN(config.maxVwapDistAtr())) {
+            boolean ok = !(Double.isFinite(vwap) && atr > 0 && (s.spot() - vwap) * (call ? 1 : -1) / atr > config.maxVwapDistAtr());
+            c.put("vwap_not_stretched", ok);
+            v3 = v3 && ok;
+        }
+        if (!Double.isNaN(config.minWallDistAtr())) {
+            double wall = call ? s.options().callBarrierStrike() : s.options().putSupportStrike();
+            boolean ok = !(Double.isFinite(wall) && atr > 0 && (wall - s.spot()) * (call ? 1 : -1) / atr < config.minWallDistAtr());
+            c.put("wall_room", ok);
+            v3 = v3 && ok;
+        }
+        if (config.maxTradesPerDay() > 0) {
+            boolean ok = tradesToday < config.maxTradesPerDay();
+            c.put("trades_left", ok);
+            v3 = v3 && ok;
         }
         if (config.noFlipAfterLossMin() > 0) {
             boolean ok = blockedSide != side || blockedUntil == null || !now.isBefore(blockedUntil);

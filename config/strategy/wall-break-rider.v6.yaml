@@ -1,0 +1,37 @@
+# Wall-break rider, v6 (user 2026-11-06 evening: "try these and run replays to see how it performs in different version";
+# ledger A-328): wall-break-rider.v3.yaml with ONE change from the v3 loss postmortem: no entry when the entry wall is less than 0.5 ATR(3m) from the index.
+# In-sample replay only (the rule comes from v3's losers on the same days); nothing else differs from v3.
+version: wbr-v6
+strategy: wall-break-rider
+status: UNCALIBRATED
+source: "user-request-2026-11-06 (A-328; one change to wbr-v3, value fixed at registration)"
+
+scope:
+  dte: 0                               # only the index that expires today
+  entry_from: "10:30"
+  last_new_entry: "14:30"
+  flat_by: "15:15"
+
+signal:
+  confirm_minutes: 2                   # the signal on 2 consecutive snapshots
+  wall_oi_drop_pct: 5                  # v2: wall OI down >= 5 % over 10 min, index moving toward it over 3 min
+  reject_futures_states:               # futures OI must not oppose the move
+    CE: [FRESH_SHORT]
+    PE: [FRESH_LONG]
+  max_prior_move_atr: 4                # v3: no entry after a > 4 ATR(3m) move toward the trade ...
+  prior_move_min: 30                   # ... over the last 30 minutes
+  no_flip_after_loss_min: 60           # v3: after a losing trade, the opposite side waits 60 minutes
+  min_wall_dist_atr: 0.5               # v6: the wall must be at least 0.5 ATR(3m) beyond the index
+
+position:
+  premium_budget: 250000               # half the starting capital (risk scales it with equity); last in order
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 40                 # v3 (v2 30): resting emergency stop
+  trail_activation_pct: 100            # v3 (v2 50): the trail arms at +100 % on the bid ...
+  trail_giveback_pct: 25               # ... and exits 25 % below the peak bid (v2 15)
+  time_stop_min: 0                     # v3: no no-progress exit (v2 15 min / +10 %)
+  time_stop_min_gain_pct: 10           # unused while time_stop_min is 0
+  wall_recross_exit: true              # v3: once crossed, a 3-minute close back through the entry wall exits

@@ -170,4 +170,57 @@ class WallBreakRiderTest {
         assertThat(never.decide(covering(false).set("structure.lastBarClose", 23140.0).at("13:09"), held).orders())
                 .as("below a wall it never crossed: no wall exit").isEmpty();
     }
+
+    // ------------------------------------------------------------------ A-328 versions
+
+    private static Strategy version(String v) {
+        return Strategies.load(Path.of("..", "config", "strategy", "wall-break-rider." + v + ".yaml")).create("NIFTY", Snapshots.SESSION);
+    }
+
+    @Test
+    void v4SkipsAnEntryMoreThanSixAtrFromVwap() {
+        Strategy far = version("v4");                     // spot 23115, VWAP 23000, ATR 10: 11.5 ATR above VWAP
+        far.decide(callSignal(23115).at("12:40"), PositionView.FLAT);
+        assertThat(far.decide(callSignal(23115).at("12:41"), PositionView.FLAT).orders()).isEmpty();
+        Strategy near = version("v4");
+        Snapshots close = callSignal(23115).set("structure.vwapSpotProxy", 23080.0);  // 3.5 ATR
+        near.decide(close.at("12:40"), PositionView.FLAT);
+        assertThat(near.decide(close.at("12:41"), PositionView.FLAT).orders()).hasSize(1);
+    }
+
+    @Test
+    void v5TakesNoNewEntryAfterQuarterPastOne() {
+        Strategy s = version("v5");
+        s.decide(callSignal(23115).at("13:15"), PositionView.FLAT);
+        assertThat(s.decide(callSignal(23115).at("13:16"), PositionView.FLAT).orders()).isEmpty();
+        Strategy early = version("v5");
+        early.decide(callSignal(23115).at("13:13"), PositionView.FLAT);
+        assertThat(early.decide(callSignal(23115).at("13:14"), PositionView.FLAT).orders()).hasSize(1);
+    }
+
+    @Test
+    void v6SkipsAnEntryWhoseWallIsUnderHalfAnAtrAway() {
+        Strategy tight = version("v6");                   // wall 23118 vs spot 23115: 0.3 ATR
+        Snapshots close = callSignal(23115).set("options.callBarrierStrike", 23118.0);
+        tight.decide(close.at("12:40"), PositionView.FLAT);
+        assertThat(tight.decide(close.at("12:41"), PositionView.FLAT).orders()).isEmpty();
+        Strategy room = version("v6");                    // wall 23150: 3.5 ATR
+        room.decide(callSignal(23115).at("12:40"), PositionView.FLAT);
+        assertThat(room.decide(callSignal(23115).at("12:41"), PositionView.FLAT).orders()).hasSize(1);
+    }
+
+    @Test
+    void v7TakesOneTradeADay() {
+        Strategy s = version("v7");
+        s.decide(callSignal(23115).at("12:40"), PositionView.FLAT);
+        assertThat(s.decide(callSignal(23115).at("12:41"), PositionView.FLAT).orders()).hasSize(1);
+        s.decide(covering(false).at("12:50"), new PositionView(true, OptionSide.CE, 1, 100, at(12, 41), 150));
+        s.decide(callSignal(23115).at("12:51"), PositionView.FLAT);                    // closed with a gain
+        s.decide(callSignal(23115).at("12:52"), PositionView.FLAT);
+        assertThat(s.decide(callSignal(23115).at("12:53"), PositionView.FLAT).orders()).as("the day's trade is used").isEmpty();
+        Strategy unfilled = version("v7");                // an entry that never filled does not count
+        unfilled.decide(callSignal(23115).at("12:40"), PositionView.FLAT);
+        assertThat(unfilled.decide(callSignal(23115).at("12:41"), PositionView.FLAT).orders()).hasSize(1);
+        assertThat(unfilled.decide(callSignal(23115).at("12:42"), PositionView.FLAT).orders()).hasSize(1);
+    }
 }
