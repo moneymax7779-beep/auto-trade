@@ -3,6 +3,9 @@ package com.autotrade.strategy.egb;
 import java.time.LocalTime;
 import java.util.Map;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import com.autotrade.config.ThresholdConfig;
 import com.autotrade.features.snapshot.FeatureSnapshot;
 import com.autotrade.features.snapshot.StructureFeatures;
@@ -18,6 +21,8 @@ import com.autotrade.strategy.OptionSide;
  */
 final class MaCross extends SetupStrategy {
 
+    private static final Logger log = LoggerFactory.getLogger(MaCross.class);
+    private final java.util.ArrayDeque<java.time.Instant> crosses = new java.util.ArrayDeque<>();
     private final double maxStopAtr;
     private final double rewardToRisk;
     private final boolean requireVwapSide;
@@ -39,6 +44,22 @@ final class MaCross extends SetupStrategy {
         previousDiff = Double.isFinite(diff) ? diff : previousDiff;
         c.put("cross_up", crossUp);
         c.put("cross_down", crossDown);
+        if (crossUp || crossDown) {
+            // A-332 anatomy: every cross with its context (one line, parsed by .local/a332); no behaviour change
+            while (!crosses.isEmpty() && crosses.peekFirst().isBefore(s.time().minusSeconds(3600))) {
+                crosses.pollFirst();
+            }
+            double sw = crossUp ? st.lastSwingLow() : st.lastSwingHigh();
+            log.info("A332CROSS {} {} {} canEnter={} spot={} ema9={} ema20={} slope={} atr3m={} atr1m={} swing={} riskAtr={} "
+                    + "vwapAtr={} orhAtr={} orlAtr={} ema20Atr={} dayHigh={} dayLow={} open={} body={} rangeVsAvg={} chg3m={} "
+                    + "chg1m={} higherLows={} lowerHighs={} prior60={} pdhAtr={} pdlAtr={}", s.underlying(), time,
+                    crossUp ? "UP" : "DOWN", canEnter, s.spot(), st.ema9(), st.ema20(), st.ema9Slope(), st.atr3m(), st.atr1m(),
+                    sw, (crossUp ? s.spot() - sw : sw - s.spot()) / st.atr3m(), st.distVwapAtr(), st.distOrhAtr(),
+                    st.distOrlAtr(), st.distEma20Atr(), st.dayHigh(), st.dayLow(), st.dayOpen(), st.lastBarBodyRatio(),
+                    st.lastBarRangeVsAvg(), st.spotChange3m(), st.spotChange1m(), st.higherLows(), st.lowerHighs(),
+                    crosses.size(), st.distPdhAtr(), st.distPdlAtr());
+            crosses.addLast(s.time());
+        }
         if (!canEnter || !(crossUp || crossDown)) {
             return null;
         }
