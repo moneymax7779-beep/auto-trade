@@ -122,6 +122,23 @@ class ExecutionService implements DisposableBean {
         return current.flatten(accountId, actor, reason, day);
     }
 
+    List<String> exitPosition(long accountId, long positionId, String actor, LocalDate day) throws Exception {
+        ExecutionLoop current = loop;
+        if (current == null) {
+            return List.of("the worker has not started");
+        }
+        return current.exitPosition(accountId, positionId, actor, day);
+    }
+
+    String bookManualExit(long accountId, long positionId, double price, java.time.Instant at, String actor,
+                          boolean unchecked) throws Exception {
+        ExecutionLoop current = loop;
+        if (current == null) {
+            throw new IllegalArgumentException("the worker has not started");
+        }
+        return current.bookManualExit(accountId, positionId, price, at, actor, unchecked);
+    }
+
     /** When the loop last finished a tick (null before the first): the watchdog's heartbeat. */
     java.time.Instant lastTick() {
         return lastTick;

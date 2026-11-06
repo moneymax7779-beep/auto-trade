@@ -62,7 +62,7 @@ class LiveBookController {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "no such account"));
         int window = Math.max(1, Math.min(days, 366));
         List<Map<String, Object>> rows = jdbc.queryForList("select p.id, p.strategy_id, p.underlying, p.option_side, p.symbol, "
-                + "p.instrument_token, p.quantity_open, p.average_entry, p.opened_at, p.closed_at, p.exit_reason, p.realised_gross, "
+                + "p.instrument_key, p.instrument_token, p.entry_trade_intent_id, p.quantity_open, p.average_entry, p.opened_at, p.closed_at, p.exit_reason, p.realised_gross, "
                 + "p.charges, p.status, "
                 + "(select coalesce(sum(o.quantity_filled), 0) from exec.order_execution o join exec.trade_intent x on "
                 + "x.id = o.trade_intent_id where o.role = 'ENTRY' and (x.id = p.entry_trade_intent_id or (x.action = 'ADD' "
@@ -80,6 +80,13 @@ class LiveBookController {
                 + "where p.broker_account_id = ? and i.execution_mode = 'LIVE' "
                 + "and (p.status <> 'CLOSED' or p.closed_at > now() - make_interval(days => ?)) order by p.opened_at desc",
                 id, window);
+
+        // the scopes that stop this account's entries (KillSwitches): every LIVE account, this account, a strategy of its tenant
+        List<Map<String, Object>> killRows = jdbc.queryForList("select id, scope, tenant_id, engaged_at, case scope when "
+                + "'GLOBAL_LIVE' then 'all LIVE accounts: ' || reason when 'STRATEGY' then strategy_id || ': ' || reason "
+                + "else reason end text from exec.kill_switch where released_at is null and ((scope = 'GLOBAL_LIVE' and ?) or "
+                + "(scope = 'ACCOUNT' and broker_account_id = ?) or (scope = 'STRATEGY' and tenant_id = ?)) order by engaged_at",
+                a.tradeMode() == com.autotrade.account.TradeMode.LIVE, id, a.tenantId());
 
         LocalDate today = LocalDate.now(IST);
         List<Map<String, Object>> open = new ArrayList<>();
@@ -121,6 +128,10 @@ class LiveBookController {
                         atRisk += risk;
                     }
                 }
+                Map<String, Object> hint = handSaleHint(r, killRows);
+                if (hint != null) {
+                    out.put("notAtBroker", hint);
+                }
                 open.add(out);
             } else {
                 best.remove(((Number) r.get("id")).longValue());                // closed: its running best is done
@@ -145,12 +156,12 @@ class LiveBookController {
         Map<String, Object> since = jdbc.queryForMap("select count(*) trades, coalesce(sum(p.realised_gross - coalesce(p.charges, 0)), 0) "
                 + "net, min(p.opened_at) first from exec.position p join exec.trade_intent i on i.id = p.entry_trade_intent_id "
                 + "where p.broker_account_id = ? and i.execution_mode = 'LIVE' and p.status = 'CLOSED'", id);
-        // the scopes that stop this account's entries (KillSwitches): every LIVE account, this account, a strategy of its tenant
-        List<String> kills = jdbc.queryForList("select case scope when 'GLOBAL_LIVE' then 'all LIVE accounts: ' || reason "
-                + "when 'STRATEGY' then strategy_id || ': ' || reason else reason end from exec.kill_switch where released_at is null "
-                + "and ((scope = 'GLOBAL_LIVE' and ?) or (scope = 'ACCOUNT' and broker_account_id = ?) "
-                + "or (scope = 'STRATEGY' and tenant_id = ?)) order by engaged_at", String.class,
-                a.tradeMode() == com.autotrade.account.TradeMode.LIVE, id, a.tenantId());
+        List<Map<String, Object>> kills = new ArrayList<>();
+        for (Map<String, Object> k : killRows) {
+            Long tenant = k.get("tenant_id") == null ? null : ((Number) k.get("tenant_id")).longValue();
+            kills.add(Map.of("id", k.get("id"), "text", k.get("text"),
+                    "releasable", tenant == null ? user.admin() : user.mayAct(tenant)));
+        }
 
         Map<String, Object> summary = new LinkedHashMap<>();
         summary.put("openPnl", round(openPnl));
@@ -164,11 +175,46 @@ class LiveBookController {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("account", a.displayName());
         out.put("mode", a.tradeMode().name());
+        out.put("canAct", user.mayAct(a.tenantId()));
         out.put("killSwitches", kills);
         out.put("summary", summary);
         out.put("open", open);
         out.put("closed", closed);
         return out;
+    }
+
+    /**
+     * An open position the reconciler found the broker no longer holds ("KEY: ours N, broker 0" in an engaged account
+     * kill switch): sold outside the app. The window to price the hand sale from: since its stop was cancelled (else a
+     * minute before the kill) until the kill, with the captured bids in it (the trader enters the real fill price).
+     */
+    private Map<String, Object> handSaleHint(Map<String, Object> r, List<Map<String, Object>> killRows) {
+        String key = (String) r.get("instrument_key");
+        Timestamp kill = null;
+        for (Map<String, Object> k : killRows) {
+            if ("ACCOUNT".equals(k.get("scope")) && key != null && String.valueOf(k.get("text")).matches(
+                    "(?s).*" + java.util.regex.Pattern.quote(key) + ": ours \\d+, broker 0\\b.*")) {
+                kill = (Timestamp) k.get("engaged_at");
+            }
+        }
+        if (kill == null) {
+            return null;
+        }
+        Timestamp cancelled = jdbc.queryForList("select max(updated_at) from exec.order_execution where trade_intent_id = ? "
+                + "and role = 'STOP' and status = 'CANCELLED' and updated_at <= ?", Timestamp.class,
+                r.get("entry_trade_intent_id"), kill).stream().filter(java.util.Objects::nonNull).findFirst().orElse(null);
+        Timestamp from = cancelled != null && cancelled.after(new Timestamp(kill.getTime() - 15 * 60_000L)) ? cancelled
+                : new Timestamp(kill.getTime() - 60_000L);
+        Map<String, Object> bids = jdbc.queryForMap("select min(bid_px[1]) low, max(bid_px[1]) high, (array_agg(bid_px[1] "
+                + "order by recv_ts))[1] first from md.option_tick where instrument_token = ? and recv_ts between ? and ? "
+                + "and bid_px[1] > 0", ((Number) r.get("instrument_token")).longValue(), from, kill);
+        Map<String, Object> hint = new LinkedHashMap<>();
+        hint.put("from", ist(from));
+        hint.put("to", ist(kill));
+        hint.put("bidLow", bids.get("low") == null ? null : num(bids.get("low")));
+        hint.put("bidHigh", bids.get("high") == null ? null : num(bids.get("high")));
+        hint.put("bidFirst", bids.get("first") == null ? null : num(bids.get("first")));
+        return hint;
     }
 
     /** The newest captured quote of the contract (if recent) and the best bid since the entry (extended incrementally). */

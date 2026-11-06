@@ -136,4 +136,40 @@ class ExecutionApiIT {
         assertThat(api.audit("kc-alice", null)).extracting(r -> r.get("action")).contains("KILL_ACCOUNT", "KILL_RELEASED");
         assertThat(api.audit("kc-bob", null)).extracting(r -> r.get("action")).doesNotContain("KILL_ACCOUNT");
     }
+
+    private interface Call {
+        void run() throws Exception;
+    }
+
+    private static int code(Call call) {
+        return status(() -> {
+            try {
+                call.run();
+            } catch (ResponseStatusException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new IllegalStateException(e);
+            }
+        });
+    }
+
+    @Test
+    void aPositionsExitAndHandExitAreTheOwnersAloneAndCheckedBeforeTheWorker() throws Exception {
+        AccountsController.HandExit hand = new AccountsController.HandExit(118.55, "2026-11-06T09:57:30", false);
+        assertThat(code(() -> api.exitPosition("kc-bob", aliceAccount, 1, new AccountsController.PositionExit("EXIT"))))
+                .isEqualTo(404);
+        assertThat(code(() -> api.handExit("kc-bob", aliceAccount, 1, hand))).isEqualTo(404);
+        assertThat(code(() -> api.exitPosition("kc-viewer", aliceAccount, 1, new AccountsController.PositionExit("EXIT"))))
+                .isEqualTo(403);
+        assertThat(code(() -> api.handExit("kc-viewer", aliceAccount, 1, hand))).isEqualTo(403);
+        assertThat(code(() -> api.exitPosition("kc-alice", aliceAccount, 1, new AccountsController.PositionExit("yes"))))
+                .as("needs its confirmation word").isEqualTo(403);
+        assertThat(code(() -> api.handExit("kc-alice", aliceAccount, 1, new AccountsController.HandExit(118.55, "9:57",
+                false)))).isEqualTo(400);
+        assertThat(code(() -> api.handExit("kc-alice", aliceAccount, 1, new AccountsController.HandExit(null,
+                "2026-11-06T09:57:30", false)))).isEqualTo(400);
+        assertThat(api.exitPosition("kc-alice", aliceAccount, 1, new AccountsController.PositionExit("EXIT")))
+                .containsEntry("result", List.of("the worker has not started"));
+        assertThat(code(() -> api.handExit("kc-alice", aliceAccount, 1, hand))).isEqualTo(409);
+    }
 }

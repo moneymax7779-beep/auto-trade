@@ -294,38 +294,110 @@ public final class ExecutionLoop implements AutoCloseable {
         return lines;
     }
 
+    /**
+     * Exit one open position now (the trader's per-position Exit, 7 Nov 2026): like {@link #flatten} for that position
+     * alone (stop off first, sold at the broker or at the stored bid), audited POSITION_EXIT; no kill switch, the
+     * account keeps trading.
+     */
+    public List<String> exitPosition(long accountId, long positionId, String actor, LocalDate day) throws Exception {
+        BrokerAccount account = accounts.byId(accountId).orElseThrow(() -> new IllegalArgumentException("no account "
+                + accountId));
+        if (account.role() == com.autotrade.account.AccountRole.SIGNAL_SOURCE) {
+            throw new IllegalArgumentException(account.displayName() + " is a signal source: its positions are not orders");
+        }
+        List<String> lines = flattenOnLane(account, day, "TRADER_EXIT", positionId);
+        return lines.isEmpty() ? List.of("position " + positionId + " is not open") : lines;
+    }
+
+    /**
+     * Book a hand exit of one position at the trader's price and time ({@link ManualExit}): on the account's lane, with
+     * what the broker holds of the contract read first when there is a broker session.
+     */
+    public String bookManualExit(long accountId, long positionId, double price, Instant at, String actor, boolean unchecked)
+            throws Exception {
+        BrokerAccount account = accounts.byId(accountId).orElseThrow(() -> new IllegalArgumentException("no account "
+                + accountId));
+        if (account.role() == com.autotrade.account.AccountRole.SIGNAL_SOURCE) {
+            throw new IllegalArgumentException(account.displayName() + " is a signal source: its positions are not orders");
+        }
+        FollowerRisk risk = risks.computeIfAbsent(account.id(), id -> FollowerRisk.load(Path.of(account.riskFile())));
+        BrokerConnections.Route route = connections.route(account, risk);
+        return onLane(account, (epoch, borrowed) -> {
+            String key = jdbc.queryForList("select instrument_key from exec.position where id = ? and broker_account_id = ?",
+                    String.class, positionId, accountId).stream().findFirst().orElse(null);
+            ManualExit.BrokerHolding holding;
+            if (route.connection() == null) {
+                holding = new ManualExit.BrokerHolding(null, route.description());
+            } else {
+                try {
+                    holding = new ManualExit.BrokerHolding(route.connection().positions().stream()
+                            .filter(x -> key != null && key.equals(x.instrumentKey() == null ? x.symbol() : x.instrumentKey()))
+                            .mapToLong(x -> x.netQuantity()).sum(), null);
+                } catch (RuntimeException e) {
+                    holding = new ManualExit.BrokerHolding(null, String.valueOf(e.getMessage()));
+                }
+            }
+            return new ManualExit(dataSource, costs).book(account, positionId, price, at, actor, holding, unchecked);
+        });
+    }
+
     private List<String> flattenOnLane(BrokerAccount account, LocalDate day, String reason) throws Exception {
+        return flattenOnLane(account, day, reason, null);
+    }
+
+    private List<String> flattenOnLane(BrokerAccount account, LocalDate day, String reason, Long positionId) throws Exception {
         FollowerRisk risk = risks.computeIfAbsent(account.id(), id -> FollowerRisk.load(Path.of(account.riskFile())));
         BrokerConnections.Route route = connections.route(account, risk);
         if (route.venue() == null) {
             return List.of("not flattened: " + route.description());
         }
-        java.util.concurrent.Callable<List<String>> task = () -> {
+        try {
+            return onLane(account, (epoch, borrowed) -> {
+                FollowerSimulator simulator = borrowed
+                        ? new FollowerSimulator(dataSource, costs, risk, route.venue(), quotes).asWorker(workerId, epoch)
+                        : simulators.computeIfAbsent(account.id(), id -> new FollowerSimulator(dataSource, costs, risk,
+                                route.venue(), quotes).asWorker(workerId, epoch));
+                return simulator.flatten(account, day, this::flattenPrice, reason, positionId);
+            });
+        } catch (IllegalStateException e) {
+            if (!String.valueOf(e.getMessage()).startsWith("another worker")) {
+                throw e;
+            }
+            return List.of("not flattened here: " + e.getMessage());
+        }
+    }
+
+    /** Work on an account's own lane, under its lease (borrowed for the call when this worker does not hold it). */
+    private interface LaneWork<T> {
+        T run(long epoch, boolean borrowed) throws Exception;
+    }
+
+    private <T> T onLane(BrokerAccount account, LaneWork<T> work) throws Exception {
+        java.util.concurrent.Callable<T> task = () -> {
             AccountLease lease = leases.get(account.id());
             boolean borrowed = lease == null;                  // not an account this worker trades: given back after
             if (borrowed) {
                 java.util.Optional<AccountLease> acquired = AccountLease.tryAcquire(dataSource, account.id(), workerId);
                 if (acquired.isEmpty()) {
-                    return List.of("not flattened here: another worker holds the account (flatten there)");
+                    throw new IllegalStateException("another worker holds the account (do it there)");
                 }
                 lease = acquired.get();
             }
             try {
-                long epoch = lease.epoch();
-                FollowerSimulator simulator = borrowed
-                        ? new FollowerSimulator(dataSource, costs, risk, route.venue(), quotes).asWorker(workerId, epoch)
-                        : simulators.computeIfAbsent(account.id(), id -> new FollowerSimulator(dataSource, costs, risk,
-                                route.venue(), quotes).asWorker(workerId, epoch));
-                return simulator.flatten(account, day, this::flattenPrice, reason);
+                return work.run(lease.epoch(), borrowed);
             } finally {
                 if (borrowed) {
                     lease.close();
                 }
             }
         };
-        return lanes.computeIfAbsent(account.id(), id -> Executors.newSingleThreadExecutor(
-                Thread.ofPlatform().name("exec-account-" + id).daemon(true).factory())).submit(task)
-                .get(120, TimeUnit.SECONDS);
+        try {
+            return lanes.computeIfAbsent(account.id(), id -> Executors.newSingleThreadExecutor(
+                    Thread.ofPlatform().name("exec-account-" + id).daemon(true).factory())).submit(task)
+                    .get(120, TimeUnit.SECONDS);
+        } catch (java.util.concurrent.ExecutionException e) {
+            throw e.getCause() instanceof Exception x ? x : e;
+        }
     }
 
     private double flattenPrice(Map<String, Object> position) {
