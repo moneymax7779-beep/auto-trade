@@ -67,8 +67,10 @@ interface Opts {
   layout: "stacked" | "mirror"; size: "units" | "pct"; who: "off" | "iv";
   walls: boolean; sigma: boolean; gamma: boolean; read: boolean; panel: boolean; multi: boolean;
 }
-const DEFAULTS: Opts = { layout: "stacked", size: "units", who: "off", walls: false, sigma: false, gamma: false, read: false, panel: false, multi: false };
-const KEY = "oi-strikes-view-v1";
+// the default view (user, 7 Nov 2026): puts left and calls right, units, who traded by IV, the 1 min–open changes, walls
+// and gamma
+const DEFAULTS: Opts = { layout: "mirror", size: "units", who: "iv", walls: true, sigma: false, gamma: true, read: false, panel: false, multi: true };
+const KEY = "oi-strikes-view-v2";   // v2 (7 Nov 2026): the new default view replaces choices saved under v1
 
 /** The display options, remembered in this browser (a private window or blocked storage just starts from the defaults). */
 function useOpts(): [Opts, (o: Partial<Opts>) => void] {
