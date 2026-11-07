@@ -495,3 +495,46 @@ A workspace on the PAPER broker only (no broker connected, e.g. DEMO-1) trades t
 
 - `ACCOUNT_MODE` workspaces (your own tenant: SIGNAL-1, PAPER-1, ZERODHA-1) run exactly as before.
 - Every new rule is gated on `trading_control = 'DAILY_SWITCH'`.
+
+### 10.9 Changes after the code review and the end-to-end run (7 Nov 2026)
+
+**LIVE switch**
+- **Who:** the workspace's OWNER, or SUPPORT with the member's grant. A TRADER chooses the broker and can stop trouble,
+  but does not switch real money LIVE.
+- **Session-bound:** a LIVE switch counts only during the broker session it was made in (`acct.entry_target`). After a
+  lost session and a re-login, the day is PAPER until switched LIVE again.
+
+**Session-lost fallback**
+- Runs under the workspace's lock, re-reads the state, and never undoes a broker change made meanwhile.
+- Covers every way a session ends: the worker's reconciliation or order call, the 06:00 expiry sweep, a logout here, a
+  session marked DISCONNECTED by hand, and the member being disabled.
+
+**Idle accounts:** a pending add does not wake an idle LIVE-eligible account (adds are fanned out in that account's
+LIVE mode). A leftover from an earlier day does not either.
+
+**Never strand an open LIVE position:** logout, disabling a broker app, and replacing its keys are all refused while an
+account using that app holds a position or a working order.
+
+**Disabled OWNER:** still owns the workspace. SUPPORT gains no rights by disabling a member, and that member's LIVE day
+goes back to PAPER.
+
+**V29 data step:** a family workspace's real broker accounts start PAPER-only. LIVE eligibility is the admin's new
+check, not inherited.
+
+**Not built as first planned**
+- No `trader` realm role: memberships decide everything.
+- No `on_behalf_of` column: SUPPORT's actions are audited in the member's workspace under SUPPORT's own name.
+- Secrets go to the owner-only file store, not GCP Secret Manager (10.7).
+
+**End-to-end run on the Mac** (scratch database, the local Keycloak, broker APIs pointed at a dead address)
+- **Admin:** added a member, whose login was created in Keycloak with the first-sign-in actions.
+- **Member:** added a Zerodha account (its twin was created), created a Kite app, stored keys write-only (0600 files),
+  and linked them.
+- **Simulated login:** written to the scratch database only.
+- **Admin:** marked the account LIVE-eligible.
+- **Member:** switched LIVE.
+- **Worker:** found no usable session and sent the day back to PAPER within the second.
+- **Signals:** before and after went to the paper twin. An exit closed the twin's position, and the idle real account's
+  copy was closed NOT_HELD with no broker call.
+- **Groww and Upstox:** LIVE refused ("no LIVE order adapter yet").
+- **Unreachable broker:** a clear message, recorded as the app's last check.
