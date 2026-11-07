@@ -325,15 +325,16 @@ function WindowBars({ x0, half, y, h, w, now, max, color, opts }: { x0: number; 
 
 /** The column's header: the zero line's caption and a swatch per window. */
 function WindowHeader({ x, y }: { x: number; y: number }) {
-  const sw = 22;
+  // each entry a swatch, its tag (about 5.5 px a character at 9 px) and a gap
+  const at = WINDOW_TAGS.map((_, n) => WINDOW_TAGS.slice(0, n).reduce((w, m) => w + 12 + m.length * 5.5 + 6, 0));
   return (
     <g className="text-[9px]">
       {WINDOW_TAGS.map((m, n) => (
         <g key={m}>
           {n === OPEN_WINDOW
-            ? <rect x={x + n * (sw + 4) + 0.5} y={y - 7.5} width={9} height={7} fill="none" stroke="var(--color-muted)" strokeDasharray="2 1.5" />
-            : <rect x={x + n * (sw + 4)} y={y - 8} width={10} height={8} fill="var(--color-muted)" opacity={SHADES[n]} />}
-          <text x={x + n * (sw + 4) + 12} y={y} className="fill-current opacity-70">{m}</text>
+            ? <rect x={x + at[n] + 0.5} y={y - 7.5} width={9} height={7} fill="none" stroke="var(--color-muted)" strokeDasharray="2 1.5" />
+            : <rect x={x + at[n]} y={y - 8} width={10} height={8} fill="var(--color-muted)" opacity={SHADES[n]} />}
+          <text x={x + at[n] + 12} y={y} className="fill-current opacity-70">{m}</text>
         </g>
       ))}
       <title>{`OI change over 1, 5, 15, 30 minutes, 1 hour and since the day's first OI print, from the zero line (right: added, left: cut); one scale for all, 1 h palest, since open dashed.`}</title>
