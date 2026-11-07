@@ -171,8 +171,10 @@ export function AddAccountPanel({ tenants, onDone }: {
   );
 }
 
-export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDone }: {
+export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDone, dailySwitch = false }: {
   accountId: number;
+  /** A member's workspace (trader workspaces): PAPER/LIVE is the day's switch, not a mode of the account; no Kite button here. */
+  dailySwitch?: boolean;
   /** OWNER / ADMIN of the account's tenant: may change its settings; anyone else sees them read-only. */
   canManage: boolean;
   /** May act on it (OWNER, ADMIN, TRADER): the broker login. */
@@ -212,7 +214,7 @@ export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDo
       else if (loss != null && loss !== d.dailyLossLimit) body.dailyLossLimit = loss;
       if (form.mode !== d.mode) body.mode = form.mode;
       if (form.enabled !== d.enabled) body.enabled = form.enabled;
-      if (d.broker === "ZERODHA" && form.clientId.trim() !== (d.clientId ?? "")) body.clientId = form.clientId.trim();
+      if (!dailySwitch && d.broker === "ZERODHA" && form.clientId.trim() !== (d.clientId ?? "")) body.clientId = form.clientId.trim();
       const before = d.strategies.filter((s) => s.enabled).map((s) => s.strategy_id).sort().join(",");
       if ([...form.strategies].sort().join(",") !== before) body.strategies = form.strategies;
       if (Object.keys(body).length === 0) throw new Error("nothing changed");
@@ -248,7 +250,7 @@ export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDo
           {kite && <span><span className="text-muted">Kite session </span>
             <span className={sessionActive ? "text-up" : "text-down"}>{sessionActive ? `active until ${a.session!.expires}` : "not logged in"}</span>
           </span>}
-          {kite && canAct && <a className={primary} href={`/api/execution/accounts/${a.id}/kite/login`} target="_blank" rel="noreferrer">
+          {kite && canAct && !dailySwitch && <a className={primary} href={`/api/execution/accounts/${a.id}/kite/login`} target="_blank" rel="noreferrer">
             {sessionActive ? "Log in to Kite again" : "Log in to Kite"}</a>}
         </div>
 
@@ -279,15 +281,15 @@ export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDo
             <Field label="Daily loss limit (₹)" hint="blank = the risk file's %">
               <input className={input} value={form.loss} inputMode="numeric"
                 onChange={(e) => setForm({ ...form, loss: e.target.value })} /></Field>
-            <Field label="Mode" hint="LIVE is a separate step">
+            {!dailySwitch && <Field label="Mode" hint="LIVE is a separate step">
               <select className={input} value={form.mode} onChange={(e) => setForm({ ...form, mode: e.target.value })}
                 disabled={a.broker === "PAPER" || a.mode === "LIVE"}>
                 {a.broker !== "PAPER" && <option value="DRY_RUN">DRY_RUN (broker simulator)</option>}
                 <option value="PAPER">PAPER (simulated fills)</option>
                 {a.mode === "LIVE" && <option value="LIVE">LIVE</option>}
               </select>
-            </Field>
-            {kite && <Field label="Zerodha client id"><input className={input} value={form.clientId}
+            </Field>}
+            {kite && !dailySwitch && <Field label="Zerodha client id"><input className={input} value={form.clientId}
               onChange={(e) => setForm({ ...form, clientId: e.target.value.toUpperCase() })} /></Field>}
             <Field label="Enabled">
               <label className="flex items-center gap-1.5 text-sm text-text">

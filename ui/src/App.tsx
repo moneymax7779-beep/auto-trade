@@ -2,13 +2,18 @@ import { useQuery } from "@tanstack/react-query";
 import { NavLink, Route, Routes } from "react-router";
 import { get } from "./api";
 import { AccountsPage } from "./pages/AccountsPage";
+import { BrokersPage } from "./pages/BrokersPage";
 import { ConfigPage } from "./pages/ConfigPage";
+import { HouseholdPage } from "./pages/HouseholdPage";
 import { IndexPage } from "./pages/IndexPage";
 import { LivePage } from "./pages/LivePage";
 import { PerformancePage } from "./pages/PerformancePage";
 import { ReplayPage } from "./pages/ReplayPage";
 import { ResearchPage, RunDetailPage } from "./pages/ResearchPage";
 import { SessionDetailPage, SessionsPage } from "./pages/SessionsPage";
+import { SettingsPage } from "./pages/SettingsPage";
+import { TodayPage } from "./pages/TodayPage";
+import { WorkspaceProvider, WorkspaceSwitcher } from "./workspace";
 
 const NAV = [
   ["/live", "Overview"],
@@ -21,16 +26,21 @@ const NAV = [
   ["/research", "Research"],
   ["/replay", "Replay"],
   ["/accounts", "Accounts"],          // live execution: accounts, kill switches, flatten (feature/live-execution)
+  ["/household", "Family"],           // trader workspaces (7 Nov 2026): every member's day at a glance, members
   ["/config", "Config"],
 ] as const;
 
 /**
  * A family member or viewer (signed in without the operator role) sees the Overview without its controls (user, 5 Nov
- * 2026), their own accounts and the index chart pages; the rest is the owner's.
+ * 2026), their own workspace (trader workspaces, 7 Nov 2026: Today's broker and PAPER/LIVE switch, their brokers and
+ * logins, settings), their accounts and the index chart pages; the rest is the owner's.
  */
 const MEMBER_NAV = [
   ["/live", "Overview"],
+  ["/today", "Today"],
+  ["/brokers", "Brokers"],
   ["/accounts", "My accounts"],
+  ["/settings", "Settings"],
   ["/index/NIFTY", "NIFTY"],          // the same index chart pages as the owner's (user, 29 Oct 2026), read-only
   ["/index/SENSEX", "SENSEX"],
   ["/index/BANKNIFTY", "BANKNIFTY"],
@@ -42,6 +52,7 @@ export function App() {
   const member = me.data?.mode === "oidc" && !me.data.operator;
   const nav = member ? MEMBER_NAV : NAV;
   return (
+    <WorkspaceProvider>
     <div className="min-h-full">
       <header className="sticky top-0 z-10 border-b border-line bg-bg/90 backdrop-blur">
         <div className="mx-auto flex max-w-7xl items-center gap-3 px-4 py-2.5 sm:gap-6">
@@ -57,6 +68,7 @@ export function App() {
               </NavLink>
             ))}
           </nav>
+          <WorkspaceSwitcher />
           <SignedIn />
         </div>
       </header>
@@ -66,6 +78,9 @@ export function App() {
             <Route path="/" element={<LivePage canAct={false} />} />
             <Route path="/live" element={<LivePage canAct={false} />} />
             <Route path="/index/:underlying" element={<IndexPage />} />
+            <Route path="/today" element={<TodayPage />} />
+            <Route path="/brokers" element={<BrokersPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<AccountsPage />} />
           </Routes>
         ) : (
@@ -81,10 +96,15 @@ export function App() {
           <Route path="/replay" element={<ReplayPage />} />
           <Route path="/config" element={<ConfigPage />} />
           <Route path="/accounts" element={<AccountsPage />} />
+          <Route path="/household" element={<HouseholdPage />} />
+          <Route path="/today" element={<TodayPage />} />
+          <Route path="/brokers" element={<BrokersPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
         </Routes>
         )}
       </main>
     </div>
+    </WorkspaceProvider>
   );
 }
 

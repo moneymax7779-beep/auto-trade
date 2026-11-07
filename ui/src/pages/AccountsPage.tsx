@@ -5,7 +5,6 @@ import {
 } from "../api";
 import { ErrorNote, Loading, Panel, Table } from "../components/ui";
 import { AccountDetailPanel, AddAccountPanel } from "./AccountManagement";
-import { MembersPanel } from "./MembersPanel";
 
 // Live execution: the caller's broker accounts across copy groups, kill switches, flatten and the audit log. Every call
 // goes to the execution workers (app-execution) through trading-core; the workers scope it to the user's tenants.
@@ -196,7 +195,7 @@ export function AccountsPage() {
 
       {managed.length > 0 && <AddAccountPanel tenants={managed} onDone={(text, ok) => setMessage({ ok, text })} />}
 
-      {me.data?.admin && <MembersPanel onDone={(text, ok) => setMessage({ ok, text })} />}
+      {me.data?.admin && <p className="text-sm text-muted">Family members and their workspaces: the Family page.</p>}
 
       {acting.length > 0 && <>
       <KillSwitchPanel switches={switches} accounts={rows.filter((a) => mayAct(a.tenantId))} names={names} busy={act.isPending}
