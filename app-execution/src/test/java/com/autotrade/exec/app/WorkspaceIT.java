@@ -349,6 +349,39 @@ class WorkspaceIT {
         members.status("satya", "hina", new MembersController.Status("ACTIVE"));
     }
 
+    /** Second review, 7 Nov 2026: LIVE eligibility was checked for a client id and an app; changing either removes it. */
+    @Test
+    void changingTheClientIdOrTheBrokerAppRemovesLiveEligibility() {
+        long ira = member("ira", "OWNER");
+        long account = account("ira", ira, "Kite", "ZERODHA", "MN1234");
+        loggedIn(ira, account);
+        workspaces.liveEligible("satya", account, new WorkspaceController.Eligible(true, "Kite"));
+        workspaces.mode("ira", ira, new WorkspaceController.Mode("LIVE", "LIVE"));
+        jdbc.update("update acct.broker_session set status = 'EXPIRED' where broker_account_id = ?", account);
+        admin.settings("ira", account, new AccountAdminController.Settings(null, null, null, null, null, null, "OP1234",
+                null));
+        AccountStore accounts = new AccountStore(dataSource);
+        assertThat(accounts.byId(account).orElseThrow().liveTradingEnabled()).isFalse();
+        assertThat(state("ira", ira)).containsEntry("mode", "PAPER");
+        // eligible again, then another app linked: removed again
+        jdbc.update("insert into acct.broker_session (broker_account_id, token_ref, acquired_at, expires_at, status) values "
+                + "(?, 'file:kite-x.token', now(), now() + interval '6 hours', 'ACTIVE')", account);
+        workspaces.liveEligible("satya", account, new WorkspaceController.Eligible(true, "Kite"));
+        jdbc.update("update acct.broker_session set status = 'EXPIRED' where broker_account_id = ?", account);
+        long other = jdbc.queryForObject("insert into acct.broker_credential_profile (tenant_id, broker_type, scope, name, "
+                + "api_key_ref, api_secret_ref) values (?, 'ZERODHA', 'USER_PRIVATE', 'second', 'store:a', 'store:b') "
+                + "returning id", Long.class, ira);
+        TransactionTemplate tx = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
+        BrokerAppController apps = new BrokerAppController(new Access(dataSource), dataSource, tx,
+                new KiteLoginProperties(null, null, null, null, null, "/nonexistent/bot.env"),
+                new BrokerLoginProperties(null, null, null, null, null));
+        apps.link("ira", account, new BrokerAppController.Link(other));
+        assertThat(accounts.byId(account).orElseThrow().liveTradingEnabled()).isFalse();
+        assertThat(jdbc.queryForList("select detail->>'reason' from exec.audit_log where broker_account_id = ? and action = "
+                + "'LIVE_ELIGIBLE_OFF' order by id", String.class, account)).containsExactly("client id changed",
+                "broker app changed");
+    }
+
     @Test
     void twoWorkspacesMayNameTheirAccountsAlike() {
         long f1 = member("farah", "OWNER"), f2 = member("gita", "OWNER");

@@ -71,6 +71,13 @@ The order matters: trading-core owns the migrations, and the execution worker re
 - **Session lost while LIVE:** the day goes back to PAPER by itself (Telegram to the member and the admin). The member
   logs in again and switches LIVE again if they want.
 
+- Session lost while LIVE, or a new login on a LIVE day: the day goes back to PAPER by itself (Telegram on a loss); the
+  member switches LIVE again if they want. A LIVE switch counts only in the session it was made in.
+- On a LIVE day the broker account is reconciled against the broker every 30 s: the member must not trade F&O by hand
+  in that same account that day (a position the app does not know stops its entries, as for ZERODHA-1). On PAPER days
+  the account is idle and never reconciled, so hand trading there is fine.
+- Changing an eligible account's client id or broker app removes its LIVE eligibility (the admin checks again).
+
 ## 4. Emergencies (the admin, without the member's grant)
 
 - **Family page:** "To PAPER" (new signals paper-trade) or "Kill" (TENANT switch: no new entries on any of the member's

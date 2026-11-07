@@ -199,28 +199,36 @@ class MembersController {
             throw new ResponseStatusException(e.status == 409 ? HttpStatus.CONFLICT : HttpStatus.BAD_GATEWAY,
                     e.getMessage() + (e.status == 409 ? " (add them with login EXISTING to use that login)" : ""));
         }
-        Map<String, Object> created = tx.execute(t -> {
-            long tenant = accounts.ensureTenant(tenantName);
-            jdbc.update("update acct.tenant set trading_control = 'DAILY_SWITCH' where id = ?", tenant);
-            long member = accounts.ensureUser(username, display);
-            jdbc.update("update acct.app_user set relationship = ? where id = ?", relationship, member);
-            accounts.ensureMembership(tenant, member, role);
-            accounts.ensureMembership(tenant, user.id(), "SUPPORT");
-            for (long group : follows) {
-                accounts.shareCopyGroup(group, tenant, user.id());
-            }
-            jdbc.update("insert into acct.invite (username, display_name, relationship, email, tenant_id, keycloak_user_id, "
-                    + "delivery, created_by) values (?, ?, ?, ?, ?, ?, ?, ?)", username, display, relationship, email, tenant,
-                    delivery.keycloakUserId(), delivery.delivery(), user.id());
-            Map<String, Object> m = new LinkedHashMap<>();
-            m.put("tenantId", tenant);
-            m.put("username", username);
-            m.put("role", role);
-            m.put("relationship", relationship);
-            m.put("follows", follows);
-            m.put("delivery", delivery.delivery());
-            return m;
-        });
+        Map<String, Object> created;
+        try {
+            created = tx.execute(t -> {
+                long tenant = accounts.ensureTenant(tenantName);
+                jdbc.update("update acct.tenant set trading_control = 'DAILY_SWITCH' where id = ?", tenant);
+                long member = accounts.ensureUser(username, display);
+                jdbc.update("update acct.app_user set relationship = ? where id = ?", relationship, member);
+                accounts.ensureMembership(tenant, member, role);
+                accounts.ensureMembership(tenant, user.id(), "SUPPORT");
+                for (long group : follows) {
+                    accounts.shareCopyGroup(group, tenant, user.id());
+                }
+                jdbc.update("insert into acct.invite (username, display_name, relationship, email, tenant_id, keycloak_user_id, "
+                        + "delivery, created_by) values (?, ?, ?, ?, ?, ?, ?, ?)", username, display, relationship, email, tenant,
+                        delivery.keycloakUserId(), delivery.delivery(), user.id());
+                Map<String, Object> m = new LinkedHashMap<>();
+                m.put("tenantId", tenant);
+                m.put("username", username);
+                m.put("role", role);
+                m.put("relationship", relationship);
+                m.put("follows", follows);
+                m.put("delivery", delivery.delivery());
+                return m;
+            });
+        } catch (RuntimeException e) {
+            // the login exists already: say so, so the admin adds them again as an existing login (second review)
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "the member was not added (" + e.getClass().getSimpleName()
+                    + ")" + (delivery.keycloakUserId() != null ? "; their Keycloak login " + username + " was created: add "
+                    + "them again with login EXISTING" : ""));
+        }
         audit.audit((Long) created.get("tenantId"), null, user.subject(), "MEMBER_ADDED", created);
         Map<String, Object> out = new LinkedHashMap<>(created);
         if (delivery.oneTimePassword() != null) {

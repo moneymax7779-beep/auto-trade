@@ -240,9 +240,21 @@ class BrokerAppController {
         Integer sessions = jdbc.queryForObject("select count(*) from acct.broker_session where broker_account_id = ? "
                 + "and status = 'ACTIVE' and expires_at > now()", Integer.class, id);
         require(sessions == null || sessions == 0, a.displayName() + " is logged in: log out first");
-        jdbc.update("update acct.broker_account set credential_profile_id = ?, updated_at = now() where id = ?",
-                body.profileId(), id);
-        audit.audit(a, user.subject(), "BROKER_APP_LINKED", Map.of("app", body.profileId()));
+        Integer open = jdbc.queryForObject("select count(*) from exec.position where broker_account_id = ? and status <> "
+                + "'CLOSED'", Integer.class, id);
+        require(!a.liveTradingEnabled() || open == null || open == 0, a.displayName() + " is LIVE-eligible and holds a "
+                + "position: flatten it before changing its broker app");
+        Long current = jdbc.queryForObject("select credential_profile_id from acct.broker_account where id = ?", Long.class, id);
+        boolean revoke = a.liveTradingEnabled() && !body.profileId().equals(current);
+        // another app means the admin's LIVE check no longer holds: PAPER-only again (second review, 7 Nov 2026)
+        jdbc.update("update acct.broker_account set credential_profile_id = ?, trade_mode = case when ? then 'PAPER' "
+                + "else trade_mode end, live_trading_enabled = live_trading_enabled and not ?, updated_at = now() where id = ?",
+                body.profileId(), revoke, revoke, id);
+        if (revoke) {
+            new com.autotrade.execution.TradingDay(jdbc.getDataSource()).sessionLost(a, user.subject());
+            audit.audit(a, user.subject(), "LIVE_ELIGIBLE_OFF", Map.of("reason", "broker app changed"));
+        }
+        audit.audit(a, user.subject(), "BROKER_APP_LINKED", Map.of("app", body.profileId(), "liveEligibilityRemoved", revoke));
         return Map.of("account", a.displayName(), "app", body.profileId());
     }
 

@@ -399,6 +399,9 @@ class AccountAdminController {
                 jdbc.update("update acct.broker_account set external_broker_user_id = ?, updated_at = now() where id = ?",
                         clientId, id);
                 changed.put("clientId", clientId);
+                if (!clientId.equals(before.get("clientId")) && revokeEligibility(a, "client id changed")) {
+                    changed.put("liveEligible", false);  // the admin's check was made for the old client (second review)
+                }
             }
             if (body.strategies() != null) {
                 List<String> wanted = strategyList(body.strategies());
@@ -447,6 +450,26 @@ class AccountAdminController {
         return jdbc.queryForList("select app_user_id from acct.tenant_membership where tenant_id = ? and role not in "
                 + "('ADMIN', 'SUPPORT') order by case role when 'OWNER' then 0 when 'TRADER' then 1 when 'VIEWER' then 2 "
                 + "else 3 end, app_user_id limit 1", Long.class, tenant).stream().findFirst().orElse(user.id());
+    }
+
+    /**
+     * Takes a real account's LIVE eligibility away (it was checked for its client id and broker app): PAPER-only again,
+     * a LIVE day on it back to PAPER; refused while it holds a position or has a working order. False when it was not
+     * eligible.
+     */
+    private boolean revokeEligibility(BrokerAccount a, String why) {
+        if (!a.liveTradingEnabled()) {
+            return false;
+        }
+        Integer open = jdbc.queryForObject("select count(*) from exec.position where broker_account_id = ? and status <> "
+                + "'CLOSED'", Integer.class, a.id());
+        require(open == null || open == 0, a.displayName() + " is LIVE-eligible and holds a position: flatten it before "
+                + "changing its " + (why.startsWith("client") ? "client id" : "broker app"));
+        jdbc.update("update acct.broker_account set trade_mode = 'PAPER', live_trading_enabled = false, updated_at = now() "
+                + "where id = ?", a.id());
+        new com.autotrade.execution.TradingDay(jdbc.getDataSource()).sessionLost(a, "eligibility");
+        audit.audit(a, "execution", "LIVE_ELIGIBLE_OFF", Map.of("reason", why));
+        return true;
     }
 
     private boolean dailySwitch(long tenant) {

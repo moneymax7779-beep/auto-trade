@@ -483,16 +483,21 @@ class WorkspaceController {
         return r;
     }
 
+    /** A risk file's LIVE strategies, read once per file (risk files are versioned: a change is a new file). */
+    private static final Map<String, List<String>> LIVE_STRATEGIES = new java.util.concurrent.ConcurrentHashMap<>();
+
     private static List<String> liveStrategies(BrokerAccount a) {
         if (!LIVE_BROKERS.contains(a.brokerType())) {
             return List.of();
         }
-        try {
-            FollowerRisk risk = FollowerRisk.load(Path.of(a.riskFile()));
-            return risk.live() == null ? List.of() : new TreeSet<>(risk.live().strategies()).stream().toList();
-        } catch (RuntimeException e) {
-            return List.of();
-        }
+        return LIVE_STRATEGIES.computeIfAbsent(a.riskFile(), file -> {
+            try {
+                FollowerRisk risk = FollowerRisk.load(Path.of(file));
+                return risk.live() == null ? List.of() : List.copyOf(new TreeSet<>(risk.live().strategies()));
+            } catch (RuntimeException e) {
+                return List.of();
+            }
+        });
     }
 
     // ------------------------------------------------------------------------------------------------- helpers

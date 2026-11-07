@@ -47,8 +47,13 @@ class BrokerSecretsTest {
         secrets.write(ref, "s3cret-value");
         assertThat(secrets.stored(ref)).isTrue();
         assertThat(secrets.read(ref)).isEqualTo("s3cret-value");
-        assertThat(java.nio.file.Files.getPosixFilePermissions(dir.resolve("store").resolve("t7-p12-secret")).toString())
-                .isEqualTo("[OWNER_READ, OWNER_WRITE]");
+        assertThat(java.nio.file.Files.getPosixFilePermissions(dir.resolve("store").resolve("t7-p12-secret")))
+                .containsExactlyInAnyOrder(java.nio.file.attribute.PosixFilePermission.OWNER_READ,
+                        java.nio.file.attribute.PosixFilePermission.OWNER_WRITE);
+        assertThat(java.nio.file.Files.getPosixFilePermissions(dir.resolve("store"))).as("the folder owner-only")
+                .containsExactlyInAnyOrder(java.nio.file.attribute.PosixFilePermission.OWNER_READ,
+                        java.nio.file.attribute.PosixFilePermission.OWNER_WRITE,
+                        java.nio.file.attribute.PosixFilePermission.OWNER_EXECUTE);
         try (var files = Files.list(dir.resolve("store"))) {
             assertThat(files.map(f -> f.getFileName().toString())).containsExactly("t7-p12-secret");   // no .tmp left
         }

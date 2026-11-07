@@ -90,11 +90,14 @@ export function AccountsPage() {
   const tenants = new Map((me.data?.tenants ?? []).map((t) => [t.id, t]));
   const mayAct = (tenantId: number) => legacy || (tenants.get(tenantId)?.mayAct ?? false);
   const manages = (tenantId: number) => legacy || (tenants.get(tenantId)?.manages ?? false);
+  // trader workspaces: SUPPORT may stop trouble without the member's grant; a member's workspace switches daily
+  const canStop = (tenantId: number) => legacy || (tenants.get(tenantId)?.canStop ?? mayAct(tenantId));
+  const daily = (tenantId: number) => tenants.get(tenantId)?.control === "DAILY_SWITCH";
   const several = tenants.size > 1;
   const legacyTenants = legacy ? [...new Set(rows.map((a) => a.tenantId))].map((id) => ({ id, name: String(id), role: "?",
     mayAct: true, manages: true })) : [];
-  const acting = legacy ? legacyTenants : [...tenants.values()].filter((t) => t.mayAct);
-  const managed = legacy ? legacyTenants : [...tenants.values()].filter((t) => t.manages);
+  const acting = legacy ? legacyTenants : [...tenants.values()].filter((t) => t.canStop ?? t.mayAct);
+  const managed = legacy ? legacyTenants : [...tenants.values()].filter((t) => t.manages && t.control !== "DAILY_SWITCH");
 
   return (
     <div className="space-y-4">
@@ -110,7 +113,11 @@ export function AccountsPage() {
                 <span><span className="text-muted">Follows </span>{(t.follows ?? []).join(", ") || "nothing yet"}</span>
               </div>
             ))}
-            <p className="text-xs text-muted">PAPER and DRY_RUN only: no real orders. Open positions are squared off at 15:20.</p>
+            <p className="text-xs text-muted">{me.data.tenants.some((t) => t.control === "DAILY_SWITCH")
+              ? "Your day's broker and its PAPER/LIVE switch are on the Today page; brokers, keys and logins on the Brokers "
+                + "page. Each broker account's paper twin (\"… paper\") holds what traded in PAPER. Open positions are "
+                + "squared off at 15:20."
+              : "PAPER and DRY_RUN only: no real orders. Open positions are squared off at 15:20."}</p>
           </div>
         </Panel>
       ) : (
@@ -160,7 +167,7 @@ export function AccountsPage() {
                 <a className="rounded border border-line px-2 py-0.5 text-xs hover:bg-panel-2" target="_blank" rel="noreferrer"
                   href={`/api/execution/accounts/${a.id}/kite/login`}>Log in to Kite</a>
               )}
-              {mayAct(a.tenantId) && <>
+              {canStop(a.tenantId) && <>
               <button className="rounded border border-warn/60 px-2 py-0.5 text-xs text-warn hover:bg-warn/10" disabled={act.isPending}
                 onClick={() => {
                   const reason = window.prompt(`Stop new entries on ${a.name}: reason`);
@@ -190,6 +197,7 @@ export function AccountsPage() {
         <AccountDetailPanel key={openAccount} accountId={openAccount} onClose={() => setOpenAccount(null)}
           canManage={manages(accounts.data!.find((a) => a.id === openAccount)?.tenantId ?? -1)}
           canAct={mayAct(accounts.data!.find((a) => a.id === openAccount)?.tenantId ?? -1)}
+          dailySwitch={daily(accounts.data!.find((a) => a.id === openAccount)?.tenantId ?? -1)}
           onDone={(text, ok) => setMessage({ ok, text })} />
       )}
 

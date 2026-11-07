@@ -126,6 +126,7 @@ class SessionActivation {
         audited.put("expiresAt", expires.toString());
         safeAudit(account, actor, "SESSION_LOGIN", audited);
         log.info("account {} ({}): {} session ACTIVE until {}", account.id(), account.displayName(), app.broker(), expires);
+        tradingDay.sessionStarted(account, actor);         // a LIVE day there needs a new switch in the new session
     }
 
     private void record(BrokerAccount account, App app, String tokenFile, Instant acquired, Instant expires) {

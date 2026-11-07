@@ -369,6 +369,46 @@ class TradingDayIT {
         assertThat(td.stateNow(w.tenant()).brokerAccountId()).isEqualTo(w.real());
     }
 
+    /**
+     * Second review, 7 Nov 2026: a LIVE switch committing while the session-lost fallback waits for the workspace's lock
+     * is seen (clock_timestamp, not the transaction's start) and sent back to PAPER; a new session records PAPER.
+     */
+    @Test
+    void aSwitchCommittedWhileTheFallbackWaitsIsSeenAndANewSessionRecordsPaper() throws Exception {
+        LocalDate today = TradingDay.today();
+        Workspace w = workspace("meera", today, true);
+        TradingDay td = new TradingDay(dataSource);
+        BrokerAccount real = new AccountStore(dataSource).byId(w.real()).orElseThrow();
+        org.springframework.transaction.support.TransactionTemplate tx = new org.springframework.transaction.support
+                .TransactionTemplate(new org.springframework.jdbc.datasource.DataSourceTransactionManager(dataSource));
+        java.util.concurrent.CountDownLatch locked = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        Thread person = Thread.ofPlatform().start(() -> tx.executeWithoutResult(t -> {
+            td.lock(w.tenant());                                     // the HTTP switch holds the lock ...
+            locked.countDown();
+            try {
+                release.await();
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+            td.append(w.tenant(), w.real(), TradingDay.Mode.LIVE, "SWITCH", w.member());     // ... and commits LIVE
+        }));
+        locked.await();
+        java.util.concurrent.Future<?> fallback = java.util.concurrent.Executors.newSingleThreadExecutor()
+                .submit(() -> td.sessionLost(real, "IT"));          // the worker's fallback starts its wait now
+        Thread.sleep(300);
+        release.countDown();
+        person.join();
+        fallback.get(10, java.util.concurrent.TimeUnit.SECONDS);
+        assertThat(jdbc.queryForList("select mode || ':' || reason from acct.trading_day_event where tenant_id = ? order by id",
+                String.class, w.tenant())).containsExactly("LIVE:SWITCH", "PAPER:SESSION_LOST");
+
+        td.append(w.tenant(), w.real(), TradingDay.Mode.LIVE, "SWITCH", w.member());
+        assertThat(td.sessionStarted(real, "IT")).isTrue();
+        assertThat(td.stateNow(w.tenant()).mode()).isEqualTo(TradingDay.Mode.PAPER);
+        assertThat(td.sessionStarted(real, "IT")).as("PAPER already: nothing").isFalse();
+    }
+
     @Test
     void aTwinKeepsInStepWithItsRealAccount() {
         Workspace w = workspace("indu", DAY, false);

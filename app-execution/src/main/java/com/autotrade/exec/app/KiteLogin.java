@@ -200,11 +200,13 @@ class KiteLogin {
             detail.put("equityAvailable", funds);
             detail.put("expiresAt", expires.toString());
             safeAudit(account, p.subject(), "SESSION_LOGIN", detail);
+            boolean backToPaper = tradingDay.sessionStarted(account, p.subject());   // LIVE needs a new switch (V29)
             log.info("account {} ({}): Kite session ACTIVE for {} until {}, equity available {}", account.id(),
                     account.displayName(), session.userId(), expires, Math.round(funds));
             return new Result(true, account.displayName(), "Logged in as Zerodha client " + session.userId()
                     + ". Session valid until " + ZonedDateTime.ofInstant(expires, IST).toLocalDateTime()
-                    + " IST. Equity available: Rs " + String.format("%,.0f", funds) + ".");
+                    + " IST. Equity available: Rs " + String.format("%,.0f", funds) + "."
+                    + (backToPaper ? " Today was LIVE: it is PAPER now, switch LIVE again on the Today page." : ""));
         }
     }
 

@@ -86,15 +86,17 @@ public final class TradingDay {
 
     /**
      * The entry target now by the database's clock, the clock the day's events are stamped with (code review 7 Nov 2026:
-     * a JVM clock behind the database's would not yet see a switch just made).
+     * a JVM clock behind the database's would not yet see a switch just made). {@code clock_timestamp()}, not
+     * {@code now()}: inside a transaction {@code now()} is its start, before a switch that committed while it waited for
+     * the workspace's lock (second review, 7 Nov 2026).
      */
     public Long entryTargetNow(long tenantId) {
-        return jdbc.queryForObject("select acct.entry_target(?, now())", Long.class, tenantId);
+        return jdbc.queryForObject("select acct.entry_target(?, clock_timestamp())", Long.class, tenantId);
     }
 
-    /** The state now by the database's clock. */
+    /** The state now by the database's clock (the statement's time, see {@link #entryTargetNow}). */
     public State stateNow(long tenantId) {
-        return jdbc.query("select broker_account_id, mode, since from acct.trading_state(?, now())", (rs, i) -> {
+        return jdbc.query("select broker_account_id, mode, since from acct.trading_state(?, clock_timestamp())", (rs, i) -> {
             long id = rs.getLong(1);
             Long account = rs.wasNull() ? null : id;
             Timestamp since = rs.getTimestamp(3);
@@ -162,6 +164,31 @@ public final class TradingDay {
         if (before != null) {
             audit.audit(account, actor, "MODE_PAPER_SESSION_LOST", Map.of("since", String.valueOf(before.since())));
         }
+    }
+
+    /**
+     * A new broker session began on a real account (a login, also one made while already logged in). A LIVE switch counts
+     * only during the session it was made in ({@code acct.entry_target}), so a LIVE day on this account is recorded as
+     * PAPER now, matching where entries go: the member switches LIVE again when they want (second review, 7 Nov 2026: the
+     * page said LIVE while entries went to the paper twin). Returns true when the day went back to PAPER.
+     */
+    public boolean sessionStarted(BrokerAccount account, String actor) {
+        if (account.brokerType() == BrokerType.PAPER || !dailySwitch(account.tenantId())) {
+            return false;
+        }
+        State before = tx.execute(t -> {
+            lock(account.tenantId());
+            State now = stateNow(account.tenantId());
+            if (now.mode() == Mode.LIVE && Long.valueOf(account.id()).equals(now.brokerAccountId())) {
+                append(account.tenantId(), account.id(), Mode.PAPER, "NEW_SESSION", null);
+                return now;
+            }
+            return null;
+        });
+        if (before != null) {
+            audit.audit(account, actor, "MODE_PAPER_NEW_SESSION", Map.of("since", String.valueOf(before.since())));
+        }
+        return before != null;
     }
 
     /**

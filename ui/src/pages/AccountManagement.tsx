@@ -309,7 +309,7 @@ export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDo
         </div>
         )}
 
-        {kite && canManage && <LiveSwitch account={a} onDone={onDone} />}
+        {kite && canManage && !dailySwitch && <LiveSwitch account={a} onDone={onDone} />}
 
         <div>
           <div className="mb-2 flex items-center gap-2">
