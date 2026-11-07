@@ -268,7 +268,7 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
             out.put("spot", Double.isNaN(spot) ? null : spot);
             out.put("atm", Double.isNaN(atm) ? null : atm);
             // a window reaching the pre-open OI has no IV or premium then: the longer ones take the open's for who traded
-            out.putAll(ladder(d, i, j, step, market::tradingDay, since != null || back > WINDOWS[WINDOWS.length - 1]));
+            out.putAll(ladder(d, i, j, step, market::tradingDay, since != null || back > 1800));
             out.put("rebuilding", rebuilding(day, u));
         }
         return out;
@@ -352,8 +352,11 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
     /** An IV change smaller than this (0.1 volatility point) is too small to say who traded. */
     static final double MIN_IV_CHANGE = 0.001;
     private static final double TRADING_MINUTES = 375;
-    /** The windows the ladder's "changes 1-30 min" column shows side by side (user, 5 Nov 2026), in seconds. */
-    static final int[] WINDOWS = {60, 300, 900, 1800};
+    /**
+     * The windows the ladder's "changes" column shows side by side (user, 5 Nov 2026; 1 h added 7 Nov), in seconds; after
+     * them comes the change since the day's first OI print ({@link #openingPrint}, user 7 Nov 2026).
+     */
+    static final int[] WINDOWS = {60, 300, 900, 1800, 3600};
 
     /**
      * The ladder at step {@code i} against step {@code j} (-1 = pre-open): per strike within ATM ± {@value #STRIKES}
@@ -361,7 +364,8 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
      * price then, put price, put price then, call volume in the window, put volume in the window, who traded the calls
      * (by IV), who traded the puts, the calls' gamma × OI, the puts' gamma × OI (each side from its own IV, else the
      * other side's), [the call OI change over each of
-     * {@link #WINDOWS} then the put OI change over each] (null where the earlier OI is not known)]; the OI prints in the
+     * {@link #WINDOWS} and since the day's first OI print, then the put OI change over the same] (null where the earlier
+     * OI is not known)]; the OI prints in the
      * window; and the
      * structure: the call wall, near ceiling, near floor and put wall (each with the step it took its strike and the
      * strike before), the ATM IV and one standard deviation of the index to the close.
@@ -386,6 +390,8 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
         double spot = spots[i];
         double atm = Double.isNaN(spot) ? Double.NaN : Math.round(spot / step) * step;
         double years = yearsToExpiry(d.date, d.expiry, i);
+        int first = openingPrint(calls, puts, spots, step, i);
+        int open = first < 0 ? i : first;                              // no print yet: nothing has changed since the open
         List<Object> rows = new ArrayList<>();
         TreeSet<Double> ks = new TreeSet<>(calls.keySet());
         ks.addAll(puts.keySet());
@@ -403,7 +409,7 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
                     num(cPx), num(cPx0), num(pPx), num(pPx0), num(windowVolume(d.callVol, k, i, j)),
                     num(windowVolume(d.putVol, k, i, j)),
                     who(c, c0, cIv, cIv0, MIN_IV_CHANGE), who(p, p0, pIv, pIv0, MIN_IV_CHANGE), num(cG), num(pG),
-                    windowChanges(calls, puts, k, i)));
+                    windowChanges(calls, puts, k, i, open)));
         }
         out.put("rows", rows);
         out.put("extras", d.extras);
@@ -655,17 +661,25 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
         return Math.exp(-0.5 * d1 * d1) / Math.sqrt(2 * Math.PI) / (spot * sd);
     }
 
-    /** [call OI change over each of {@link #WINDOWS}, then put OI change over each] up to step {@code i}. */
-    private static List<Double> windowChanges(Map<Double, double[]> calls, Map<Double, double[]> puts, double k, int i) {
-        List<Double> out = new ArrayList<>(2 * WINDOWS.length);
+    /**
+     * [call OI change over each of {@link #WINDOWS} and since step {@code open}, then the put OI change over the same] up
+     * to step {@code i}.
+     */
+    private static List<Double> windowChanges(Map<Double, double[]> calls, Map<Double, double[]> puts, double k, int i,
+                                              int open) {
+        List<Double> out = new ArrayList<>(2 * (WINDOWS.length + 1));
         for (Map<Double, double[]> side : List.of(calls, puts)) {
             double now = oiAt(side, k, i);
             for (int w : WINDOWS) {
-                double then = oiAt(side, k, Math.max(-1, i - w / STEP));
-                out.add(Double.isNaN(now) || Double.isNaN(then) ? null : now - then);
+                out.add(change(now, oiAt(side, k, Math.max(-1, i - w / STEP))));
             }
+            out.add(change(now, oiAt(side, k, open)));
         }
         return out;
+    }
+
+    private static Double change(double now, double then) {
+        return Double.isNaN(now) || Double.isNaN(then) ? null : now - then;
     }
 
     /** A carried contract's OI at step {@code s} (-1 = pre-open), NaN when none. */
