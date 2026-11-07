@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { OiTapePanel, type TapeInsets } from "../components/OiTapePanel";
-import { useChartView } from "../components/chartView";
+import { presetView, setMoment, useChartView } from "../components/chartView";
 import { LEVEL_COLORS, LevelTogglesBar, levelColor, mergeLevels, useLevels, useLevelToggles, visibleLevels, visibleZones } from "../components/levels";
 import { Link, useParams, useSearchParams } from "react-router";
 import { fixed, get, type DecisionRow, type OrderRow, type SessionRow, type SessionRunRow, type SessionStructure, type TradePositionRow } from "../api";
@@ -337,6 +337,24 @@ export function SessionDetailPage() {
   const [axisWidth, setAxisWidth] = useState(64);
   const tapeInsets = useMemo<TapeInsets>(() => () => ({ L: 0, R: axisWidth }), [axisWidth]);
   const wholeDay = () => { setFocus(null); setView(WHOLE_DAY); };
+  // A link to one moment of a trade (user, 7 Nov 2026: a screenshot at every entry and exit): ?position=<id>&moment=entry
+  // or exit opens the position's index with the chart ending 8 minutes after that moment (the price chart's labels cover
+  // its last minutes, so the trade's marker clears them), the moment pinned (a line on the charts, the strike ladder at it)
+  // and the position picked.
+  const [linkParams] = useSearchParams();
+  const linkPosition = Number(linkParams.get("position")) || null, linkMoment = linkParams.get("moment");
+  const linkedPosition = useMemo(() => (positions.data ?? []).find((p) => p.id === linkPosition) ?? null, [positions.data, linkPosition]);
+  useEffect(() => {
+    if (!linkedPosition || !session || (linkMoment !== "entry" && linkMoment !== "exit")) return;
+    const minutes = (ts: string) => Number(ts.slice(11, 13)) * 60 + Number(ts.slice(14, 16)) + Number(ts.slice(17, 19)) / 60;
+    const opened = minutes(linkedPosition.opened_at), closed = linkedPosition.closed_at ? minutes(linkedPosition.closed_at) : opened;
+    const at = linkMoment === "entry" ? opened : closed;
+    setUnderlying(linkedPosition.underlying);
+    setPickedPosition(linkedPosition.id ?? null);
+    presetView(session.session_date, linkedPosition.underlying,
+      { a: Math.max(WHOLE_DAY.a, Math.min(opened - 30, at - 75)), b: Math.min(WHOLE_DAY.b, at + 8) });
+    setMoment("pin", session.session_date, linkedPosition.underlying, at);
+  }, [linkedPosition, linkMoment, session]);
   const spotAt = useMemo(() => {
     const byMinute = new Map(rows.map((r) => [r.t, r.spot ?? null]));
     return (t: string) => byMinute.get(t) ?? null;
