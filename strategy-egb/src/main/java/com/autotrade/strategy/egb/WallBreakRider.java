@@ -86,7 +86,8 @@ final class WallBreakRider implements Strategy {
         Instant now = snapshot.time();
         LocalTime time = now.atZone(MarketTime.IST).toLocalTime();
         StructureFeatures st = snapshot.structure();
-        boolean expiryDay = snapshot.regime().dteTradingDays() == config.dte();
+        // A-338: scope.dte -1 = every day (the nearest expiry's walls and options); otherwise only on that DTE
+        boolean expiryDay = config.dte() < 0 || snapshot.regime().dteTradingDays() == config.dte();
         boolean continuous = SessionPhase.valueOf(snapshot.phase()).isContinuous();
         boolean window = expiryDay && continuous && !time.isBefore(config.entryFrom()) && time.isBefore(config.lastNewEntry());
         double priorMove = priorMove(snapshot);

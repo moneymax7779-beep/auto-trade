@@ -12,6 +12,7 @@ import com.autotrade.strategy.OptionSide;
 record WallBreakRiderConfig(
         String hash,
         String version,
+        /** Days to expiry the strategy trades on; -1 = every day (A-338). */
         int dte,
         LocalTime entryFrom,
         LocalTime lastNewEntry,
