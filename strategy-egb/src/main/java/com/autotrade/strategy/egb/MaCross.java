@@ -45,6 +45,12 @@ final class MaCross extends SetupStrategy {
     private Entry pendingReverse;
     private java.time.Instant pendingAt;
     private boolean oppositeExit;
+    // A-334 (off when absent = v1): early-fail exit once, at earlyFailMin after entry, when the option bid is below
+    // earlyFailPct % of the average premium; stretch exit when the index is stretchAtr ATR(3m) beyond EMA9 the trade's way
+    private final int earlyFailMin;
+    private final double earlyFailPct;
+    private final double stretchAtr;
+    private boolean earlyChecked;
     private double previousDiff = Double.NaN;
 
     MaCross(ThresholdConfig c) {
@@ -61,6 +67,9 @@ final class MaCross extends SetupStrategy {
         if (!java.util.Set.of("ignore", "close", "reverse").contains(onOppositeCross)) {
             throw new IllegalArgumentException("setup.on_opposite_cross must be ignore, close or reverse: " + onOppositeCross);
         }
+        earlyFailMin = c.has("exits.early_fail_min") ? c.getInt("exits.early_fail_min") : 0;
+        earlyFailPct = c.has("exits.early_fail_pct") ? c.getDouble("exits.early_fail_pct") : Double.NaN;
+        stretchAtr = c.has("exits.stretch_atr") ? c.getDouble("exits.stretch_atr") : Double.NaN;
         reverseOnlyBelowR = c.has("setup.opposite_cross_only_below_r") ? c.getDouble("setup.opposite_cross_only_below_r")
                 : Double.NaN;
     }
@@ -75,6 +84,20 @@ final class MaCross extends SetupStrategy {
         return super.decide(s, position);
     }
 
+    /** A-334: the early-fail exit (needs the position's premium and bid), then the index exits below. */
+    @Override
+    protected String customExit(FeatureSnapshot s, PositionView position, LocalTime time) {
+        if (earlyFailMin > 0 && !earlyChecked && entryTime != null
+                && java.time.Duration.between(entryTime, s.time()).toMinutes() >= earlyFailMin) {
+            earlyChecked = true;
+            if (position.averagePremium() > 0 && position.bid() > 0
+                    && (position.bid() / position.averagePremium() - 1) * 100.0 < earlyFailPct) {
+                return "EARLY_FAIL_" + earlyFailMin;
+            }
+        }
+        return super.customExit(s, position, time);
+    }
+
     /** A-332: the conditional time stop and the runner, on the index in units of the entry's risk. */
     @Override
     protected String customExit(FeatureSnapshot s, OptionSide side, LocalTime time) {
@@ -86,6 +109,11 @@ final class MaCross extends SetupStrategy {
         bestR = Double.isNaN(bestR) ? r : Math.max(bestR, r);
         if (oppositeExit) {
             return "REVERSE";
+        }
+        double ema9 = s.structure().ema9(), atr = s.structure().atr3m();
+        if (Double.isFinite(stretchAtr) && atr > 0 && Double.isFinite(ema9)
+                && (side == OptionSide.CE ? spot - ema9 : ema9 - spot) / atr >= stretchAtr) {
+            return "STRETCH";
         }
         if (Double.isFinite(runnerTrailR) && bestR >= rewardToRisk && r <= Math.max(runnerLockR, bestR - runnerTrailR)) {
             return "RUNNER_STOP";
@@ -147,6 +175,7 @@ final class MaCross extends SetupStrategy {
                 entryRisk = risk;
                 entryTime = s.time();
                 bestR = Double.NaN;
+                earlyChecked = false;
                 double target = next.side() == OptionSide.CE ? entrySpot + rewardToRisk * risk : entrySpot - rewardToRisk * risk;
                 return new Entry(next.side(), next.stop(), target, next.reason() + "_REVERSE");
             }
@@ -160,6 +189,7 @@ final class MaCross extends SetupStrategy {
             entryRisk = crossUp ? entrySpot - e.stop() : e.stop() - entrySpot;
             entryTime = s.time();
             bestR = Double.NaN;
+            earlyChecked = false;
         }
         return e;
     }
