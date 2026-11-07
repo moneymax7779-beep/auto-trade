@@ -141,9 +141,11 @@ class OiTapeSeriesTest {
         double g = OiTapeController.gamma(23_020, 23_000, 0.14f, OiTapeController.yearsToExpiry(d.date, d.expiry, 2));
         assertThat((Double) r.get(17)).isCloseTo(g * 1_300, org.assertj.core.data.Offset.offset(1e-9));
         assertThat((Double) r.get(18)).isCloseTo(g * 1_900, org.assertj.core.data.Offset.offset(1e-9));
-        // the 1/5/15/30-minute changes at step 2 (calls 1,300, puts 1,900): 1 min back is step 0 (calls 1,100, puts 2,000);
-        // the longer windows reach back to the pre-open values (calls 1,000, puts 2,000)
-        assertThat(r.get(19)).isEqualTo(java.util.Arrays.asList(200.0, 300.0, 300.0, 300.0, -100.0, -100.0, -100.0, -100.0));
+        // the 1/5/15/30-minute and 1-hour changes at step 2 (calls 1,300, puts 1,900): 1 min back is step 0 (calls 1,100,
+        // puts 2,000); the longer windows reach back to the pre-open values (calls 1,000, puts 2,000); since the open: the
+        // first print ran from step 0 into step 1, so from step 1 (calls 1,100, puts 1,900)
+        assertThat(r.get(19)).isEqualTo(java.util.Arrays.asList(200.0, 300.0, 300.0, 300.0, 300.0, 200.0,
+                -100.0, -100.0, -100.0, -100.0, -100.0, 0.0));
         assertThat(l.get("extras")).isEqualTo(true);
     }
 

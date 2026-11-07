@@ -47,9 +47,14 @@ const BACK_HELP: Record<string, string> = {
 /** A window that reaches back to the pre-open OI (the previous day's closing OI). */
 const fromPreOpen = (d: StrikesData) => d.from === "pre-open" || d.from === "previous close";
 
-/** The windows of the "changes 1–30 min" column, and their shades (the shortest darkest, drawn last, on top). */
-const WINDOWS = [1, 5, 15, 30];
-const SHADES = [1, 0.6, 0.36, 0.2];
+/**
+ * The windows of the "changes" column (1 h and since the open added 7 Nov 2026): their names and shades, the shortest
+ * darkest; "since open" is an outline, so it shows apart from the 1-hour bar it often matches.
+ */
+const WINDOWS = ["1 min", "5 min", "15 min", "30 min", "1 h", "since open"];
+const WINDOW_TAGS = ["1m", "5m", "15m", "30m", "1h", "open"];
+const SHADES = [1, 0.62, 0.4, 0.25, 0.14, 1];
+const OPEN_WINDOW = WINDOWS.length - 1;
 
 const side = (r: Row, a: number, b: number, iv: number, ivb: number, pr: number, prb: number, vol: number, wi: number): Side => {
   const oi = (r[a] as N) ?? null, oi0 = (r[b] as N) ?? null;
@@ -113,7 +118,7 @@ export function Strikes({ underlying, date, at, pinned, live }: { underlying: st
   const rows: Strike[] = useMemo(() => (d?.rows ?? []).map((r) => ({
     k: r[0], c: side(r, 1, 2, 5, 6, 9, 10, 13, 15), p: side(r, 3, 4, 7, 8, 11, 12, 14, 16),
     gc: (r[17] as N) ?? null, gp: (r[18] as N) ?? null,
-    wc: ((r[19] as N[] | undefined) ?? []).slice(0, 4), wp: ((r[19] as N[] | undefined) ?? []).slice(4, 8),
+    wc: ((r[19] as N[] | undefined) ?? []).slice(0, WINDOWS.length), wp: ((r[19] as N[] | undefined) ?? []).slice(WINDOWS.length, 2 * WINDOWS.length),
   })), [d]);
   const whoOf = (s: Side): Who => (opts.who === "iv" ? s.who : null);
   const movers = (key: "c" | "p", sign: 1 | -1) => rows.filter((r) => r[key].d != null && sign * (r[key].d as number) > 0)
@@ -200,7 +205,7 @@ function OptionsBar({ opts, setOpts }: { opts: Opts; setOpts: (o: Partial<Opts>)
       <Seg label="Who traded" value={opts.who} options={[["off", "off"], ["iv", "on (by IV)"]]} set={(v) => setOpts({ who: v })} />
       <span className="inline-flex flex-wrap items-center gap-1">
         <span className="text-muted">Show</span>
-        <Check label="changes 1–30 min" on={opts.multi} set={(v) => setOpts({ multi: v })} title="Each strike's OI change over 1, 5, 15 and 30 minutes at once: nested bars, 30 min palest, 1 min darkest" />
+        <Check label="changes 1 min–open" on={opts.multi} set={(v) => setOpts({ multi: v })} title="Each strike's OI change over 1, 5, 15, 30 minutes, 1 hour and since the open at once: nested bars, 1 min darkest, 1 h palest, since open dashed" />
         <Check label="structure read" on={opts.read} set={(v) => setOpts({ read: v })} title="A written read of the walls, who traded, volume, gamma, ±1σ and max pain" />
         <Check label="walls" on={opts.walls} set={(v) => setOpts({ walls: v })} title="The call wall, near ceiling, near floor and put wall, and where they moved from" />
         <Check label="±1σ to close" on={opts.sigma} set={(v) => setOpts({ sigma: v })} title="One standard deviation of the index to 15:30, from the ATM IV" />
@@ -255,7 +260,7 @@ function rowTitle(r: Strike, spot?: number | null) {
   const one = (name: string, s: Side) => `${name}: OI ${big(s.oi)} (${big(s.d, true)}, ${pctText(s.pct)})`
     + ` · IV ${ivText(s.iv0)} → ${ivText(s.iv)} · premium ${px(s.px0)} → ${px(s.px)} · traded ${big(s.vol)}`
     + (s.who ? ` · ${WHO_HELP[s.who]}` : "");
-  const win = (w: N[]) => WINDOWS.map((m, n) => `${m} min ${big(w[n], true)}`).join(", ");
+  const win = (w: N[]) => WINDOWS.map((m, n) => `${m} ${big(w[n] ?? null, true)}`).join(", ");
   return `${strikeText(r.k)}\n${one("calls", r.c)}\n${one("puts", r.p)}`
     + (r.wc.length ? `\nOI change · calls: ${win(r.wc)} · puts: ${win(r.wp)}` : "")
     + (r.gc != null || r.gp != null ? `\ngamma · calls: ${gammaText(r.gc, r.c.oi, spot)}\ngamma · puts: ${gammaText(r.gp, r.p.oi, spot)}` : "");
@@ -300,32 +305,39 @@ const windowMax = (rows: Strike[], opts: Opts) => {
   return opts.size === "pct" ? all[Math.min(all.length - 1, Math.floor(0.95 * all.length))] : all[all.length - 1];
 };
 
-/** One side's 1/5/15/30-minute changes as nested bars from a zero line at {@code x0}, 30 min palest and drawn first. */
+/**
+ * One side's changes over each window as nested bars from a zero line at {@code x0}: the longest bar drawn first, so a
+ * shorter one is never hidden under it; "since open" as an outline on top.
+ */
 function WindowBars({ x0, half, y, h, w, now, max, color, opts }: { x0: number; half: number; y: number; h: number; w: N[]; now: N; max: number; color: string; opts: Opts }) {
+  const bars = WINDOWS.map((_, n) => ({ n, v: windowValue(w[n] ?? null, now, opts) }))
+    .filter((b): b is { n: number; v: number } => b.v != null && b.v !== 0)
+    .map((b) => ({ ...b, len: Math.min(half, (Math.abs(b.v) / max) * half) }));
+  const filled = bars.filter((b) => b.n !== OPEN_WINDOW).sort((a, b) => b.len - a.len), open = bars.find((b) => b.n === OPEN_WINDOW);
   return (
     <g>
-      {[3, 2, 1, 0].map((n) => {
-        const v = windowValue(w[n] ?? null, now, opts);
-        if (v == null || v === 0) return null;
-        const len = Math.min(half, (Math.abs(v) / max) * half);
-        return <rect key={n} x={v > 0 ? x0 : x0 - len} y={y} width={Math.max(1, len)} height={h} fill={color} opacity={SHADES[n]} />;
-      })}
+      {filled.map(({ n, v, len }) => <rect key={n} x={v > 0 ? x0 : x0 - len} y={y} width={Math.max(1, len)} height={h} fill={color} opacity={SHADES[n]} />)}
+      {open && <rect x={(open.v > 0 ? x0 : x0 - open.len) + 0.5} y={y + 0.5} width={Math.max(1, open.len - 1)} height={Math.max(1, h - 1)}
+        fill="none" stroke={color} strokeWidth={1} strokeDasharray="2 1.5" />}
     </g>
   );
 }
 
 /** The column's header: the zero line's caption and a swatch per window. */
 function WindowHeader({ x, y }: { x: number; y: number }) {
-  const sw = 26;
+  // each entry a swatch, its tag (about 5.5 px a character at 9 px) and a gap
+  const at = WINDOW_TAGS.map((_, n) => WINDOW_TAGS.slice(0, n).reduce((w, m) => w + 12 + m.length * 5.5 + 6, 0));
   return (
     <g className="text-[9px]">
-      {WINDOWS.map((m, n) => (
+      {WINDOW_TAGS.map((m, n) => (
         <g key={m}>
-          <rect x={x + n * (sw + 4)} y={y - 8} width={10} height={8} fill="var(--color-muted)" opacity={SHADES[n]} />
-          <text x={x + n * (sw + 4) + 12} y={y} className="fill-current opacity-70">{m}m</text>
+          {n === OPEN_WINDOW
+            ? <rect x={x + at[n] + 0.5} y={y - 7.5} width={9} height={7} fill="none" stroke="var(--color-muted)" strokeDasharray="2 1.5" />
+            : <rect x={x + at[n]} y={y - 8} width={10} height={8} fill="var(--color-muted)" opacity={SHADES[n]} />}
+          <text x={x + at[n] + 12} y={y} className="fill-current opacity-70">{m}</text>
         </g>
       ))}
-      <title>{`OI change over 1, 5, 15 and 30 minutes, from the zero line (right: added, left: cut); one scale for all, 30 min palest.`}</title>
+      <title>{`OI change over 1, 5, 15, 30 minutes, 1 hour and since the day's first OI print, from the zero line (right: added, left: cut); one scale for all, 1 h palest, since open dashed.`}</title>
     </g>
   );
 }
@@ -514,7 +526,7 @@ function Legend({ d, at, opts, openIv }: { d?: StrikesData; at: string; opts: Op
     : <>Bars: call (top) and put (bottom) OI at {d?.at ?? at}; the tick is where it stood at {d?.from ?? "…"}. Right: the change in calls and puts{opts.size === "pct" ? " as a share of the strike's earlier OI" : ""}.</>);
   parts.push(<> Hover a row for its OI, IV, premium and volume. The highlighted row is the ATM strike.</>);
   if (opts.who !== "off") parts.push(<> Who traded is read from the OI change against the change in the strike's IV (OI up and IV down: writers opening; OI down and IV up: writers buying back); blank when either change is small (OI under 0.5 % of the strike, IV under 0.1 point). Not from the premium: it mostly follows the index, so a rally would read as call buying and put writing whoever traded. An inference, not a record of who traded. On a narrow screen the labels are W, B, C and X.{d && fromPreOpen(d) && openIv ? " Over a window from the previous close the IV then is the strike's first IV of today (none is recorded before the open), so the label weighs a day's net OI change against the IV move since the open: many traders' opening and closing netted into one word." : ""}</>);
-  if (opts.multi) parts.push(<> Changes 1–30 min: each strike's OI change over the last 1, 5, 15 and 30 minutes at once, as nested bars from the zero line (right: added, left: cut), 30 min palest and 1 min darkest, one scale for all{opts.size === "pct" ? " (as a share of the strike's OI at each window's start)" : ""}; hover a row for the numbers. A 1-minute window holds about one exchange OI update.</>);
+  if (opts.multi) parts.push(<> Changes 1 min–open: each strike's OI change over the last 1, 5, 15, 30 minutes and 1 hour, and since the day's first OI print, at once, as nested bars from the zero line (right: added, left: cut), 1 min darkest, 1 h palest and since open a dashed outline, one scale for all; the longest bar is drawn first so none hides another; a window reaching back before the open starts from the pre-open OI (the previous close){opts.size === "pct" ? " (as a share of the strike's OI at each window's start)" : ""}; hover a row for the numbers. A 1-minute window holds about one exchange OI update.</>);
   if (opts.walls) parts.push(<> Walls: the largest call OI above spot (call wall: within ATM ± 15; ceiling: within 6 strikes) and the largest put OI below it (put wall, floor); a wall moves only when another strike holds 5 % more OI; ↑ / ↓ and "was" mark a move inside the window.</>);
   if (opts.gamma) parts.push(<> Gamma: Black-Scholes gamma from each side's IV times its OI, calls (top) and puts (bottom) on one scale; hover a row for the numbers: per contract unit, in units of delta per point of the index, and in ₹ crore of delta per 1 % move. Option writers are short this gamma, so it shows where their risk changes fastest as the price moves; whether they hedge it, and so whether it speeds moves up or pins them, it does not say (A-164: no usable regime filter).</>);
   return <p className="text-xs text-muted">{parts.map((p, n) => <span key={n}>{p}</span>)}</p>;
