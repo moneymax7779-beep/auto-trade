@@ -46,7 +46,13 @@ record WallBreakRiderConfig(
         /** A-329 v8: after a winning trade today, no new entry from this time (null = off). */
         LocalTime reentryAfterWinUntil,
         /** A-329 v9: no entry when the ATM IV of the trade's side is at least this (a fraction, 0.35 = 35 %; NaN = off). */
-        double maxEntryIv) {
+        double maxEntryIv,
+        /** A-339 baseline: false = no wall-OI condition, the index only has to move toward the wall over 3 min (default true). */
+        boolean requireWallOiDrop,
+        /** A-340: false = the VWAP-side condition is off (default true). */
+        boolean requireVwapSide,
+        /** A-341: no entry when the ATM straddle is more than this many ATR(3m) (NaN = off). */
+        double maxStraddleAtr) {
 
     static WallBreakRiderConfig from(ThresholdConfig c) {
         return new WallBreakRiderConfig(c.contentHash(), c.version(), c.getInt("scope.dte"),
@@ -67,7 +73,10 @@ record WallBreakRiderConfig(
                 c.has("signal.min_wall_dist_atr") ? c.getDouble("signal.min_wall_dist_atr") : Double.NaN,
                 c.has("signal.max_trades_per_day") ? c.getInt("signal.max_trades_per_day") : 0,
                 c.has("signal.reentry_after_win_until") ? c.getTime("signal.reentry_after_win_until") : null,
-                c.has("signal.max_entry_iv") ? c.getDouble("signal.max_entry_iv") : Double.NaN);
+                c.has("signal.max_entry_iv") ? c.getDouble("signal.max_entry_iv") : Double.NaN,
+                !c.has("signal.require_wall_oi_drop") || Boolean.TRUE.equals(c.get("signal.require_wall_oi_drop")),
+                !c.has("signal.require_vwap_side") || Boolean.TRUE.equals(c.get("signal.require_vwap_side")),
+                c.has("signal.max_straddle_atr") ? c.getDouble("signal.max_straddle_atr") : Double.NaN);
     }
 
     @SuppressWarnings("unchecked")

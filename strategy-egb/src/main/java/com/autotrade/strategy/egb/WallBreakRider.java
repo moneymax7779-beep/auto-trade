@@ -43,6 +43,10 @@ import com.autotrade.strategy.Strategy;
  * A-329 (each off when absent): {@code signal.reentry_after_win_until}: after a winning trade today (its last bid above
  * its average premium) no new entry from that time; {@code signal.max_entry_iv}: no entry when the ATM IV of the trade's
  * side is at or above it.
+ * <p>
+ * A-339..A-341 (each off when absent): {@code signal.require_wall_oi_drop: false} drops the wall-OI condition (the index only
+ * has to move toward the wall: the no-OI baseline); {@code signal.require_vwap_side: false} drops the VWAP-side condition;
+ * {@code signal.max_straddle_atr} skips an entry when the ATM straddle is more than that many ATR(3m).
  */
 final class WallBreakRider implements Strategy {
 
@@ -213,6 +217,9 @@ final class WallBreakRider implements Strategy {
         if (Double.isNaN(config.wallOiDropPct())) {
             return s.options().callWallWeakening();
         }
+        if (!config.requireWallOiDrop()) {
+            return s.structure().spotChange3m() > 0;                    // A-339 baseline: no OI condition
+        }
         double change = s.options().callWallOiChangePct();
         return change <= -config.wallOiDropPct() && s.structure().spotChange3m() > 0;     // NaN compares false
     }
@@ -220,6 +227,9 @@ final class WallBreakRider implements Strategy {
     private boolean putSignal(FeatureSnapshot s) {
         if (Double.isNaN(config.wallOiDropPct())) {
             return s.options().putFloorWeakening();
+        }
+        if (!config.requireWallOiDrop()) {
+            return s.structure().spotChange3m() < 0;                    // A-339 baseline: no OI condition
         }
         double change = s.options().putFloorOiChangePct();
         return change <= -config.wallOiDropPct() && s.structure().spotChange3m() < 0;
@@ -233,7 +243,7 @@ final class WallBreakRider implements Strategy {
         c.put("window", window);
         c.put("wall_weakening", call ? ceStreak >= config.confirmMinutes() : peStreak >= config.confirmMinutes());
         double vwap = s.structure().vwapSpotProxy();
-        c.put("vwap_side", Double.isFinite(vwap) && (call ? s.spot() > vwap : s.spot() < vwap));
+        c.put("vwap_side", !config.requireVwapSide() || Double.isFinite(vwap) && (call ? s.spot() > vwap : s.spot() < vwap));
         String oi = s.futures().oiState();
         c.put("futures_oi_ok", oi == null || !config.rejectFuturesStates().get(side).contains(oi));
         boolean v3 = true;
@@ -269,6 +279,11 @@ final class WallBreakRider implements Strategy {
             double iv = call ? s.options().atmCeIv() : s.options().atmPeIv();
             boolean ok = !(iv >= config.maxEntryIv());                // NaN (no quote yet) does not block
             c.put("iv_ok", ok);
+            v3 = v3 && ok;
+        }
+        if (!Double.isNaN(config.maxStraddleAtr())) {
+            boolean ok = !(atr > 0 && s.options().straddle() / atr > config.maxStraddleAtr());   // NaN (no quote yet) does not block
+            c.put("straddle_ok", ok);
             v3 = v3 && ok;
         }
         if (config.noFlipAfterLossMin() > 0) {
