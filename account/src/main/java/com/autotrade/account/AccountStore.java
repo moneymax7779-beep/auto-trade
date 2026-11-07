@@ -19,7 +19,7 @@ public final class AccountStore {
 
     private static final String ACCOUNT_COLUMNS = "a.id, a.tenant_id, a.app_user_id, a.broker_type, a.display_name, "
             + "a.legacy_account_label, a.account_role, a.trade_mode, a.live_trading_enabled, a.allocated_capital, "
-            + "a.equity_mode, a.equity_from, a.risk_file, a.size_step_pct, a.enabled";
+            + "a.equity_mode, a.equity_from, a.risk_file, a.size_step_pct, a.enabled, a.paper_of_account_id";
 
     private final JdbcTemplate jdbc;
 
@@ -260,6 +260,6 @@ public final class AccountStore {
                 TradeMode.valueOf(rs.getString("trade_mode")), rs.getBoolean("live_trading_enabled"),
                 rs.getDouble("allocated_capital"), EquityMode.valueOf(rs.getString("equity_mode")),
                 rs.getDate("equity_from").toLocalDate(), rs.getString("risk_file"), rs.getDouble("size_step_pct"),
-                rs.getBoolean("enabled"));
+                rs.getBoolean("enabled"), (Long) rs.getObject("paper_of_account_id"));
     }
 }

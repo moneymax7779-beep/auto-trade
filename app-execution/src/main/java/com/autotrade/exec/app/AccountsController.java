@@ -35,6 +35,8 @@ import com.autotrade.execution.KillSwitches;
  *       position exited (broker stops off first);</li>
  *   <li>{@code GET /api/execution/audit?account=}: the audit log.</li>
  * </ul>
+ * Stopping trouble (engage a kill switch, flatten, exit one position) is open to SUPPORT in a member's workspace without
+ * a grant ({@link Access.User#emergency}); releasing a switch, booking a hand exit and setting a session are not.
  */
 @RestController
 class AccountsController {
@@ -88,7 +90,7 @@ class AccountsController {
     Map<String, Object> session(@RequestHeader(value = Access.HEADER, required = false) String subject,
                                 @PathVariable long id, @RequestBody Session body) {
         Access.User user = access.user(subject);
-        BrokerAccount a = own(user, id);
+        BrokerAccount a = own(user, id, false);
         String status = body.status() == null ? "" : body.status();
         Access.require(status.equals("ACTIVE") || status.equals("DISCONNECTED"), "status: ACTIVE or DISCONNECTED");
         Integer linked = jdbc.queryForObject("select count(*) from acct.broker_account where id = ? and credential_profile_id "
@@ -127,7 +129,7 @@ class AccountsController {
         }
         String scope = e.scope() == null ? "" : e.scope();
         if (Boolean.TRUE.equals(e.allTenants()) && (scope.equals("STRATEGY") || scope.equals("INSTRUMENT"))) {
-            List<Long> tenants = user.tenants().stream().filter(user::mayAct).toList();
+            List<Long> tenants = user.tenants().stream().filter(user::emergency).toList();
             Access.require(!tenants.isEmpty(), "no tenant you may act for");
             List<Long> ids = new ArrayList<>();
             for (long tenant : tenants) {
@@ -141,16 +143,18 @@ class AccountsController {
                 Access.require(user.admin(), "GLOBAL_LIVE needs ADMIN");
                 yield kills.engage(null, scope, null, null, null, e.reason(), user.subject());
             }
+            case "TENANT" -> kills.engage(actingTenant(user, e.tenantId()), scope, null, null, null, e.reason(),
+                    user.subject());           // a member's own switch: every account of theirs (V29)
             case "ACCOUNT" -> {
-                BrokerAccount a = own(user, e.accountId());
+                BrokerAccount a = own(user, e.accountId(), true);
                 yield kills.engage(a.tenantId(), scope, a.id(), null, null, e.reason(), user.subject());
             }
             case "STRATEGY" -> kills.engage(actingTenant(user, e.tenantId()), scope, null, e.strategyId(), null, e.reason(),
                     user.subject());
             case "INSTRUMENT" -> kills.engage(actingTenant(user, e.tenantId()), scope, null, null, e.instrumentKey(), e.reason(),
                     user.subject());
-            default -> throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "scope: GLOBAL_LIVE, ACCOUNT, STRATEGY "
-                    + "or INSTRUMENT");
+            default -> throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "scope: GLOBAL_LIVE, TENANT, ACCOUNT, "
+                    + "STRATEGY or INSTRUMENT");
         };
         return Map.of("id", id);
     }
@@ -173,7 +177,7 @@ class AccountsController {
                                 @PathVariable long id, @RequestBody Flatten f) throws Exception {
         Access.User user = access.user(subject);
         Access.require("FLATTEN".equals(f.confirm()), "confirm with \"FLATTEN\"");
-        BrokerAccount a = own(user, id);
+        BrokerAccount a = own(user, id, true);
         return Map.of("account", a.displayName(), "result", service.flatten(a.id(), user.subject(),
                 f.reason() == null ? "manual" : f.reason(), LocalDate.now(IST)));
     }
@@ -188,7 +192,7 @@ class AccountsController {
             throws Exception {
         Access.User user = access.user(subject);
         Access.require("EXIT".equals(e.confirm()), "confirm with \"EXIT\"");
-        BrokerAccount a = own(user, id);
+        BrokerAccount a = own(user, id, true);
         try {
             return Map.of("account", a.displayName(), "result", service.exitPosition(a.id(), positionId, user.subject(),
                     LocalDate.now(IST)));
@@ -209,7 +213,7 @@ class AccountsController {
     Map<String, Object> handExit(@RequestHeader(value = Access.HEADER, required = false) String subject,
                                  @PathVariable long id, @PathVariable long positionId, @RequestBody HandExit h) throws Exception {
         Access.User user = access.user(subject);
-        BrokerAccount a = own(user, id);
+        BrokerAccount a = own(user, id, false);
         if (h.price() == null || h.at() == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "price and at are required");
         }
@@ -234,7 +238,7 @@ class AccountsController {
         Access.require("FLATTEN ALL".equals(f.confirm()), "confirm with \"FLATTEN ALL\"");
         Map<String, Object> out = new LinkedHashMap<>();
         for (long tenant : user.tenants()) {
-            if (!user.mayAct(tenant)) {
+            if (!user.emergency(tenant)) {
                 continue;
             }
             for (BrokerAccount a : accounts.ofTenant(tenant)) {
@@ -252,21 +256,26 @@ class AccountsController {
                                     @RequestParam(value = "account", required = false) Long accountId) {
         Access.User user = access.user(subject);
         if (accountId != null) {
-            own(user, accountId);
+            accounts.byId(accountId).filter(x -> user.sees(x.tenantId()))
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "no account " + accountId));
         }
         return jdbc.queryForList("select id, tenant_id, broker_account_id, actor, action, detail::text detail, at "
                         + "from exec.audit_log where tenant_id = any(?) and (?::bigint is null or broker_account_id = ?) "
                         + "order by id desc limit 200", user.tenants().toArray(new Long[0]), accountId, accountId);
     }
 
-    /** An account the caller may act on (404 when it is another tenant's: its existence is not revealed). */
-    private BrokerAccount own(Access.User user, Long accountId) {
+    /**
+     * An account the caller may act on ({@code emergency}: or stop, as SUPPORT may without a grant); 404 when it is another
+     * tenant's (its existence is not revealed).
+     */
+    private BrokerAccount own(Access.User user, Long accountId, boolean emergency) {
         if (accountId == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "accountId is required");
         }
         BrokerAccount a = accounts.byId(accountId).filter(x -> user.sees(x.tenantId()))
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "no account " + accountId));
-        Access.require(user.mayAct(a.tenantId()), "read-only role for this account");
+        Access.require(emergency ? user.emergency(a.tenantId()) : user.mayAct(a.tenantId()), user.support(a.tenantId())
+                ? "SUPPORT needs the member's grant for this" : "read-only role for this account");
         return a;
     }
 
@@ -276,10 +285,10 @@ class AccountsController {
      */
     private static long actingTenant(Access.User user, Long requested) {
         if (requested != null) {
-            Access.require(user.sees(requested) && user.mayAct(requested), "no right to act for tenant " + requested);
+            Access.require(user.sees(requested) && user.emergency(requested), "no right to act for tenant " + requested);
             return requested;
         }
-        List<Long> acting = user.tenants().stream().filter(user::mayAct).toList();
+        List<Long> acting = user.tenants().stream().filter(user::emergency).toList();
         Access.require(!acting.isEmpty(), "no tenant you may act for");
         if (acting.size() > 1) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "you act for several tenants: give tenantId");

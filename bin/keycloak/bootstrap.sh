@@ -5,6 +5,7 @@
 # is passed or stored here.
 #
 #   bin/keycloak/bootstrap.sh --app-url http://localhost:8098 [--app-url https://host] --secret-file .local/keycloak/client-secret [--no-totp]
+#                             [--admin-secret-file .local/keycloak/admin-client-secret]
 #
 # What it sets:
 #   realm autotrade: no self-registration, usernames fixed, brute-force lockout, password policy (12+, not the username),
@@ -13,19 +14,28 @@
 #                    kcadm add-roles -r autotrade --uusername <user> --rolename operator
 #   client autotrade-web: confidential, authorization code only, redirect <app-url>/login/oauth2/code/keycloak; the
 #                    realm roles go into a "roles" claim
+#   client autotrade-admin (with --admin-secret-file; trader workspaces, 7 Nov 2026): confidential, service account
+#                    only (no browser sign-in), realm-management roles manage-users, view-users, query-users and
+#                    view-realm, so the execution service creates family members' logins (one-time password, authenticator
+#                    at first sign-in), resets an authenticator and enables/disables a login, instead of the admin console.
+#                    Its secret goes to --admin-secret-file (mode 600); the execution service reads it from
+#                    AUTOTRADE_EXECUTION_KEYCLOAK_CLIENT_SECRET.
 # The client secret is written to --secret-file (mode 600), never printed; trading-core reads it from
-# AUTOTRADE_AUTH_CLIENT_SECRET. Users are created by the owner in the Keycloak admin console (Users > Add user), and each
-# one needs an acct.app_user row whose external_subject is the Keycloak username, plus a tenant membership.
+# AUTOTRADE_AUTH_CLIENT_SECRET. Without autotrade-admin, users are created by the owner in the Keycloak admin console
+# (Users > Add user), and each one needs an acct.app_user row whose external_subject is the Keycloak username, plus a
+# tenant membership (the Members panel's "existing login").
 set -euo pipefail
 CONTAINER=${KEYCLOAK_CONTAINER:-autotrade-keycloak}
 REALM=autotrade
 CLIENT=autotrade-web
-APP_URLS=(); SECRET_FILE=""; TOTP=true
+APP_URLS=(); SECRET_FILE=""; TOTP=true; ADMIN_SECRET_FILE=""
+ADMIN_CLIENT=autotrade-admin
 while [ $# -gt 0 ]; do
   case "$1" in
     --app-url) APP_URLS+=("${2%/}"); shift 2 ;;
     --secret-file) SECRET_FILE="$2"; shift 2 ;;
     --no-totp) TOTP=false; shift ;;
+    --admin-secret-file) ADMIN_SECRET_FILE="$2"; shift 2 ;;
     *) echo "unknown argument $1" >&2; exit 2 ;;
   esac
 done
@@ -102,3 +112,27 @@ kc get "clients/$CID/client-secret" -r "$REALM" --fields value --format csv --no
 mv "$SECRET_FILE.tmp" "$SECRET_FILE"; chmod 600 "$SECRET_FILE"
 echo "client secret written to $SECRET_FILE (mode 600)"
 echo "redirects: $redirects"
+
+# The execution service's own client (trader workspaces): service account only, user management, nothing else.
+if [ -n "$ADMIN_SECRET_FILE" ]; then
+  ADMIN_JSON="{\"clientId\":\"$ADMIN_CLIENT\",\"name\":\"auto-trade execution (members' logins)\",\"enabled\":true,
+   \"protocol\":\"openid-connect\",\"publicClient\":false,\"clientAuthenticatorType\":\"client-secret\",
+   \"standardFlowEnabled\":false,\"implicitFlowEnabled\":false,\"directAccessGrantsEnabled\":false,
+   \"serviceAccountsEnabled\":true}"
+  ACID=$(kc get clients -r "$REALM" -q "clientId=$ADMIN_CLIENT" --fields id --format csv --noquotes | head -1)
+  if [ -n "$ACID" ]; then
+    echo "$ADMIN_JSON" | kcin update "clients/$ACID" -r "$REALM" -f - && echo "client $ADMIN_CLIENT updated"
+  else
+    echo "$ADMIN_JSON" | kcin create clients -r "$REALM" -f - >/dev/null && echo "client $ADMIN_CLIENT created"
+    ACID=$(kc get clients -r "$REALM" -q "clientId=$ADMIN_CLIENT" --fields id --format csv --noquotes | head -1)
+  fi
+  kc add-roles -r "$REALM" --uusername "service-account-$ADMIN_CLIENT" --cclientid realm-management \
+    --rolename manage-users --rolename view-users --rolename query-users --rolename view-realm
+  echo "service account roles: manage-users, view-users, query-users, view-realm"
+  umask 077
+  mkdir -p "$(dirname "$ADMIN_SECRET_FILE")"
+  kc get "clients/$ACID/client-secret" -r "$REALM" --fields value --format csv --noquotes > "$ADMIN_SECRET_FILE.tmp"
+  [ -s "$ADMIN_SECRET_FILE.tmp" ] || { rm -f "$ADMIN_SECRET_FILE.tmp"; echo "could not read the admin client secret" >&2; exit 1; }
+  mv "$ADMIN_SECRET_FILE.tmp" "$ADMIN_SECRET_FILE"; chmod 600 "$ADMIN_SECRET_FILE"
+  echo "admin client secret written to $ADMIN_SECRET_FILE (mode 600)"
+fi

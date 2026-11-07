@@ -227,24 +227,38 @@ class KiteLogin {
         }
     }
 
-    /** 08:30 IST, trading days: the login link of every enabled ZERODHA DRY_RUN / LIVE account without a session. */
+    /**
+     * 08:30 IST, trading days: the login link of every enabled ZERODHA DRY_RUN / LIVE account without a session. In a
+     * family member's workspace (DAILY_SWITCH, V29) only the day's broker, when it is LIVE-eligible, and the link goes to
+     * the member's own chat (they may log in any time; until they do and switch LIVE, the day trades PAPER).
+     */
     @Scheduled(cron = "0 30 8 * * MON-FRI", zone = "Asia/Kolkata")
     void morningLinks() {
         if (!tradingDays.isTradingDay(java.time.LocalDate.now(IST))) {
             return;                                         // an exchange holiday: no session, no login needed
         }
-        for (Map<String, Object> row : jdbc.queryForList("select a.id, a.display_name from acct.broker_account a "
+        for (Map<String, Object> row : jdbc.queryForList("select a.id, a.display_name, a.app_user_id, a.tenant_id, "
+                + "t.trading_control = 'DAILY_SWITCH' daily from acct.broker_account a join acct.tenant t on t.id = a.tenant_id "
                 + "where a.broker_type = 'ZERODHA' and a.enabled and a.trade_mode in ('DRY_RUN', 'LIVE') "
                 + "and a.credential_profile_id is not null and not exists (select 1 from acct.broker_session s "
-                + "where s.broker_account_id = a.id and s.status = 'ACTIVE') order by a.id")) {
+                + "where s.broker_account_id = a.id and s.status = 'ACTIVE') and (t.trading_control <> 'DAILY_SWITCH' "
+                + "or a.id = (select broker_account_id from acct.trading_state(a.tenant_id, now()))) order by a.id")) {
             long id = ((Number) row.get("id")).longValue();
             String name = (String) row.get("display_name");
             if (props.publicBaseUrl() == null) {
                 log.warn("account {} ({}) needs today's Kite login; no public-base-url set for a link", id, name);
                 continue;
             }
-            telegram.send("Kite login for " + name + " (today's session): " + props.publicBaseUrl()
-                    + "/api/execution/accounts/" + id + "/kite/login");
+            String link = props.publicBaseUrl() + "/api/execution/accounts/" + id + "/kite/login";
+            if (Boolean.TRUE.equals(row.get("daily"))) {
+                boolean told = telegram.sendToUser(((Number) row.get("app_user_id")).longValue(), "Kite login for " + name
+                        + " (today's broker; the day trades PAPER until you log in and switch LIVE): " + link);
+                if (!told) {
+                    log.info("account {} ({}): the member has no linked Telegram for the login link", id, name);
+                }
+            } else {
+                telegram.send("Kite login for " + name + " (today's session): " + link);
+            }
         }
     }
 

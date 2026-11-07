@@ -66,6 +66,10 @@ class LiveSwitchController {
         BrokerAccount a = accounts.byId(id).filter(x -> user.sees(x.tenantId()))
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "no such account"));
         Access.require(user.manages(a.tenantId()), "only an OWNER or ADMIN may switch an account LIVE");
+        // a member's workspace switches LIVE by the day (WorkspaceController), never an account's mode of its own (V29)
+        require(!"DAILY_SWITCH".equals(jdbc.queryForObject("select trading_control from acct.tenant where id = ?",
+                String.class, a.tenantId())), a.displayName() + " is in a workspace with a daily PAPER/LIVE switch: use "
+                + "Today's switch (and the admin's LIVE eligibility)");
         Integer open = jdbc.queryForObject("select count(*) from exec.position where broker_account_id = ? "
                 + "and status <> 'CLOSED'", Integer.class, id);
         require(open == null || open == 0, a.displayName() + " holds " + open + " position(s): flatten them first"

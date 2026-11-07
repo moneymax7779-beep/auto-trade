@@ -49,6 +49,11 @@ import com.autotrade.execution.KillSwitches;
  * </ul>
  * Nothing here makes an account LIVE: the mode is PAPER or DRY_RUN only, and {@code live_trading_enabled} is never
  * touched (LIVE stays a separate, explicit step, and is refused by the broker registry in this build).
+ * <p>
+ * <b>DAILY_SWITCH workspaces</b> (trader workspaces, V29): a member connects any of the four brokers (Zerodha, Upstox,
+ * Kotak Neo, Groww); a real broker account is created PAPER with its paper twin (same capital, limits and strategies,
+ * kept in step by every change here); the broker app and client id may follow later on the Brokers page; the mode is
+ * the day's switch, not a setting; a twin is never changed directly.
  */
 @RestController
 class AccountAdminController {
@@ -56,9 +61,13 @@ class AccountAdminController {
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     private static final Pattern NAME = Pattern.compile("[A-Za-z0-9][A-Za-z0-9 _-]{1,39}");
     private static final Pattern CLIENT_ID = Pattern.compile("[A-Z]{2}[0-9]{4,6}");
+    /** Upstox, Kotak Neo and Groww client codes (UCC): letters and digits. */
+    private static final Pattern UCC = Pattern.compile("[A-Z0-9]{4,12}");
     private static final Pattern STRATEGY = Pattern.compile("[a-z0-9][a-z0-9-]{1,59}");
     private static final double MAX_CAPITAL = 100_000_000;               // Rs 10 Cr: a typo guard, not a policy
     private static final String DEFAULT_RISK = "config/risk/follower-risk.v3.yaml";
+    /** A member's real broker account: the risk file with LIVE limits, one lot an entry (what LIVE eligibility needs). */
+    private static final String MEMBER_BROKER_RISK = "config/risk/follower-risk.v7.yaml";
 
     private final Access access;
     private final AccountStore accounts;
@@ -101,6 +110,10 @@ class AccountAdminController {
         out.put("credentialProfile", row.get("profile"));
         out.put("dailyLossLimit", row.get("daily_loss_limit") == null ? null : ((BigDecimal) row.get("daily_loss_limit")).doubleValue());
         out.put("connection", row.get("connection_status"));
+        out.put("paperOf", a.paperOf());
+        out.put("paperTwinId", jdbc.queryForList("select id from acct.broker_account where paper_of_account_id = ?",
+                Long.class, id).stream().findFirst().orElse(null));
+        out.put("liveEligible", a.liveTradingEnabled());
         out.put("session", jdbc.queryForList("select status, to_char(expires_at at time zone 'Asia/Kolkata', 'DD Mon HH24:MI') "
                 + "expires from acct.broker_session where broker_account_id = ? order by id desc limit 1", id).stream()
                 .findFirst().orElse(null));
@@ -237,10 +250,13 @@ class AccountAdminController {
         String name = trimmed(body.name());
         require(name != null && NAME.matcher(name).matches(), "name: 2-40 letters, digits, space, _ or -");
         BrokerType broker = parse(BrokerType.class, body.broker(), "broker");
-        require(broker == BrokerType.PAPER || broker == BrokerType.ZERODHA,
+        boolean daily = dailySwitch(tenant);
+        require(daily || broker == BrokerType.PAPER || broker == BrokerType.ZERODHA,
                 "broker: PAPER or ZERODHA (no order adapter for " + broker + " yet)");
-        TradeMode mode = parse(TradeMode.class, body.mode() == null ? (broker == BrokerType.PAPER ? "PAPER" : "DRY_RUN")
-                : body.mode(), "mode");
+        TradeMode mode = daily ? TradeMode.PAPER : parse(TradeMode.class, body.mode() == null
+                ? (broker == BrokerType.PAPER ? "PAPER" : "DRY_RUN") : body.mode(), "mode");
+        require(!daily || body.mode() == null || "PAPER".equalsIgnoreCase(body.mode().trim()),
+                "a member's broker account trades by the day's PAPER/LIVE switch, not a mode of its own");
         require(mode != TradeMode.LIVE, "an account is never created LIVE");
         require(broker != BrokerType.PAPER || mode == TradeMode.PAPER, "a PAPER broker account trades PAPER only");
         double allocation = capital(body.allocation(), "allocation");
@@ -248,11 +264,13 @@ class AccountAdminController {
         LocalDate from = body.equityFrom() == null || body.equityFrom().isBlank() ? LocalDate.now(IST)
                 : LocalDate.parse(body.equityFrom());
         Double loss = lossLimit(body.dailyLossLimit(), allocation);
-        String clientId = clientId(body.clientId());
+        String clientId = clientId(broker, body.clientId());
         Long profile = null;
-        if (broker == BrokerType.ZERODHA) {
+        if (broker == BrokerType.ZERODHA && !daily) {
             require(clientId != null, "a Zerodha account needs its client id (e.g. AB1234)");
             profile = profileId(tenant, body.credentialProfile());
+        } else if (broker != BrokerType.PAPER && trimmed(body.credentialProfile()) != null) {
+            profile = profileId(tenant, broker, body.credentialProfile());
         }
         long group = copyGroup(tenant);
         List<String> strategies = strategyList(body.strategies());
@@ -261,14 +279,29 @@ class AccountAdminController {
             Integer taken = jdbc.queryForObject("select count(*) from acct.broker_account where tenant_id = ? and display_name = ?",
                     Integer.class, tenant, name);
             require(taken != null && taken == 0, "an account named " + name + " already exists");
+            if (daily && broker != BrokerType.PAPER) {
+                Integer twinName = jdbc.queryForObject("select count(*) from acct.broker_account where tenant_id = ? "
+                        + "and display_name = ?", Integer.class, tenant, name + " paper");
+                require(twinName != null && twinName == 0, "an account named " + name + " paper already exists");
+            }
             long owner = owner(user, tenant);
-            long created = accounts.ensureFollowerAccount(tenant, owner, name, broker, mode, allocation, equityMode, from,
-                    DEFAULT_RISK, 100);
+            boolean member = daily && broker != BrokerType.PAPER;
+            long created = accounts.createFollowerAccount(tenant, owner, name, broker, mode, allocation, equityMode, from,
+                    member ? MEMBER_BROKER_RISK : DEFAULT_RISK, member ? 0 : 100);
             jdbc.update("update acct.broker_account set credential_profile_id = ?, external_broker_user_id = ?, "
                     + "daily_loss_limit = ?, enabled = ?, updated_at = now() where id = ?", profileId, clientId, loss,
                     !Boolean.FALSE.equals(body.enabled()), created);
             if (!strategies.isEmpty()) {
                 fanOut.subscribe(group, created, strategies, 1.0);
+            }
+            if (member) {
+                accounts.ensurePaperTwin(created);
+                accounts.syncPaperTwin(created);
+            }
+            Long chosen = jdbc.queryForObject("select default_broker_account_id from acct.tenant where id = ?", Long.class,
+                    tenant);
+            if (daily && chosen == null) {                       // the workspace's first account: its default broker
+                jdbc.update("update acct.tenant set default_broker_account_id = ? where id = ?", created, tenant);
             }
             return created;
         });
@@ -302,6 +335,10 @@ class AccountAdminController {
         BrokerAccount a = visible(user, id);
         Access.require(user.manages(a.tenantId()), "only an OWNER or ADMIN may change an account's settings");
         require(a.role().name().equals("FOLLOWER_TRADE"), a.displayName() + " is not a follower account");
+        require(a.paperOf() == null, a.displayName() + " is a paper twin: change its broker account, the twin follows");
+        boolean daily = dailySwitch(a.tenantId());
+        Long twin = jdbc.queryForList("select id from acct.broker_account where paper_of_account_id = ?", Long.class, id)
+                .stream().findFirst().orElse(null);
         Map<String, Object> before = details(subject, id);
         Map<String, Object> changed = new LinkedHashMap<>();
         tx.executeWithoutResult(t -> {
@@ -325,6 +362,7 @@ class AccountAdminController {
                 changed.put("dailyLossLimit", loss);
             }
             if (body.mode() != null) {
+                require(!daily, "a member's account trades by the day's PAPER/LIVE switch, not a mode of its own");
                 TradeMode m = parse(TradeMode.class, body.mode(), "mode");
                 require(m != TradeMode.LIVE, "LIVE is not switched here (a separate, explicit step)");
                 require(a.brokerType() != BrokerType.PAPER || m == TradeMode.PAPER, "a PAPER broker account trades PAPER only");
@@ -336,8 +374,9 @@ class AccountAdminController {
             if (body.enabled() != null) {
                 // code review 3 Nov 2026: a disabled account gets no turns, so its open positions would get no exits,
                 // stop bookings or reconciliation (only the broker stop and MIS square-off would be left)
-                require(body.enabled() || openPositions(id, null) == 0, a.displayName() + " holds open positions: flatten "
-                        + "them first, or engage its kill switch to stop new entries");
+                require(body.enabled() || openPositions(id, null) == 0 && (twin == null || openPositions(twin, null) == 0),
+                        a.displayName() + " holds open positions (or its paper twin does): flatten them first, or engage its "
+                        + "kill switch to stop new entries");
                 jdbc.update("update acct.broker_account set enabled = ?, updated_at = now() where id = ?", body.enabled(), id);
                 if (body.enabled() && !a.enabled()) {
                     // switched back on: it follows from now, not the entries it missed while off (code review 29 Oct)
@@ -347,8 +386,8 @@ class AccountAdminController {
                 changed.put("enabled", body.enabled());
             }
             if (body.clientId() != null) {
-                String clientId = clientId(body.clientId());
-                require(clientId != null, "client id: two letters and 4-6 digits (e.g. AB1234)");
+                String clientId = clientId(a.brokerType(), body.clientId());
+                require(clientId != null, "client id: required");
                 Integer sessions = jdbc.queryForObject("select count(*) from acct.broker_session where broker_account_id = ? "
                         + "and status = 'ACTIVE'", Integer.class, id);
                 require(sessions == null || sessions == 0 || clientId.equals(before.get("clientId")),
@@ -360,7 +399,8 @@ class AccountAdminController {
             if (body.strategies() != null) {
                 List<String> wanted = strategyList(body.strategies());
                 for (String held : jdbc.queryForList("select distinct strategy_id from exec.position where "
-                        + "broker_account_id = ? and status <> 'CLOSED'", String.class, id)) {
+                        + "broker_account_id = any(?) and status <> 'CLOSED'", String.class,
+                        (Object) (twin == null ? new Long[] {id} : new Long[] {id, twin}))) {
                     // an unsubscribed strategy's EXIT is no longer fanned out to this account (code review 3 Nov 2026)
                     require(wanted.contains(held), a.displayName() + " holds an open " + held + " position: keep the "
                             + "strategy until it is closed");
@@ -372,6 +412,9 @@ class AccountAdminController {
                     fanOut.subscribe(group, id, wanted, 1.0);
                 }
                 changed.put("strategies", wanted);
+            }
+            if (twin != null) {
+                accounts.syncPaperTwin(id);                    // the twin follows every change, in the same transaction
             }
         });
         require(!changed.isEmpty(), "nothing to change");
@@ -386,20 +429,25 @@ class AccountAdminController {
     // ------------------------------------------------------------------------------------------------- helpers
 
     /**
-     * Whose account a new one is: the caller's, unless they are the ADMIN of a family member's tenant (one the owner's
-     * signals are shared with), then that member's whatever their role (OWNER, TRADER, VIEWER, AUDITOR); the caller
-     * when the tenant has no such member. In the owner's own tenant it is always the caller.
+     * Whose account a new one is: the caller's when they are its OWNER, TRADER or the ADMIN of their own tenant; when they
+     * help in a member's workspace (SUPPORT, or ADMIN of a family tenant before V29), the member's (OWNER first, then
+     * TRADER, VIEWER, AUDITOR), else the caller.
      */
     private long owner(Access.User user, long tenant) {
-        long caller = jdbc.queryForObject("select id from acct.app_user where external_subject = ?", Long.class, user.subject());
+        String role = user.roles().get(tenant);
         Integer shared = jdbc.queryForObject("select count(*) from acct.copy_group_share where tenant_id = ?", Integer.class,
                 tenant);
-        if (!"ADMIN".equals(user.roles().get(tenant)) || shared == null || shared == 0) {
-            return caller;
+        if (!"SUPPORT".equals(role) && !("ADMIN".equals(role) && shared != null && shared > 0)) {
+            return user.id();
         }
-        return jdbc.queryForList("select app_user_id from acct.tenant_membership where tenant_id = ? and role <> 'ADMIN' "
-                + "order by case role when 'OWNER' then 0 when 'TRADER' then 1 when 'VIEWER' then 2 else 3 end, app_user_id "
-                + "limit 1", Long.class, tenant).stream().findFirst().orElse(caller);
+        return jdbc.queryForList("select app_user_id from acct.tenant_membership where tenant_id = ? and role not in "
+                + "('ADMIN', 'SUPPORT') order by case role when 'OWNER' then 0 when 'TRADER' then 1 when 'VIEWER' then 2 "
+                + "else 3 end, app_user_id limit 1", Long.class, tenant).stream().findFirst().orElse(user.id());
+    }
+
+    private boolean dailySwitch(long tenant) {
+        return "DAILY_SWITCH".equals(jdbc.queryForList("select trading_control from acct.tenant where id = ?", String.class,
+                tenant).stream().findFirst().orElse(null));
     }
 
     private BrokerAccount visible(Access.User user, long id) {
@@ -430,6 +478,14 @@ class AccountAdminController {
         return ids.getFirst();
     }
 
+    /** A tenant's active broker app of this broker, by name. */
+    private long profileId(long tenant, BrokerType broker, String name) {
+        List<Long> ids = jdbc.queryForList("select id from acct.broker_credential_profile where tenant_id = ? "
+                + "and broker_type = ? and status = 'ACTIVE' and name = ?", Long.class, tenant, broker.name(), name.trim());
+        require(ids.size() == 1, "no active " + broker + " app named " + name + " in this workspace");
+        return ids.getFirst();
+    }
+
     private long profileId(long tenant, String name) {
         List<Long> ids = name == null || name.isBlank()
                 ? jdbc.queryForList("select id from acct.broker_credential_profile where tenant_id = ? and broker_type = 'ZERODHA' "
@@ -454,13 +510,18 @@ class AccountAdminController {
         return Math.round(value * 100) / 100.0;
     }
 
-    private static String clientId(String value) {
+    /** The broker's client id: Zerodha's two letters and 4-6 digits, the others' client code (UCC) of letters and digits. */
+    static String clientId(BrokerType broker, String value) {
         String v = trimmed(value);
         if (v == null) {
             return null;
         }
         v = v.toUpperCase(Locale.ROOT);
-        require(CLIENT_ID.matcher(v).matches(), "client id: two letters and 4-6 digits (e.g. AB1234)");
+        if (broker == BrokerType.ZERODHA || broker == BrokerType.PAPER) {
+            require(CLIENT_ID.matcher(v).matches(), "client id: two letters and 4-6 digits (e.g. AB1234)");
+        } else {
+            require(UCC.matcher(v).matches(), broker + " client code: 4-12 letters and digits");
+        }
         return v;
     }
 

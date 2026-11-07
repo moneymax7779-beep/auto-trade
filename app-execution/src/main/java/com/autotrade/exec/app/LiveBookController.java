@@ -84,9 +84,10 @@ class LiveBookController {
         // the scopes that stop this account's entries (KillSwitches): every LIVE account, this account, a strategy of its tenant
         List<Map<String, Object>> killRows = jdbc.queryForList("select id, scope, tenant_id, engaged_at, case scope when "
                 + "'GLOBAL_LIVE' then 'all LIVE accounts: ' || reason when 'STRATEGY' then strategy_id || ': ' || reason "
+                + "when 'TENANT' then 'all your accounts: ' || reason "
                 + "else reason end text from exec.kill_switch where released_at is null and ((scope = 'GLOBAL_LIVE' and ?) or "
-                + "(scope = 'ACCOUNT' and broker_account_id = ?) or (scope = 'STRATEGY' and tenant_id = ?)) order by engaged_at",
-                a.tradeMode() == com.autotrade.account.TradeMode.LIVE, id, a.tenantId());
+                + "(scope = 'ACCOUNT' and broker_account_id = ?) or (scope in ('STRATEGY', 'TENANT') and tenant_id = ?)) "
+                + "order by engaged_at", a.tradeMode() == com.autotrade.account.TradeMode.LIVE, id, a.tenantId());
 
         LocalDate today = LocalDate.now(IST);
         List<Map<String, Object>> open = new ArrayList<>();
@@ -176,6 +177,7 @@ class LiveBookController {
         out.put("account", a.displayName());
         out.put("mode", a.tradeMode().name());
         out.put("canAct", user.mayAct(a.tenantId()));
+        out.put("canStop", user.emergency(a.tenantId()));     // SUPPORT: Exit and Flatten without a grant (V29)
         out.put("killSwitches", kills);
         out.put("summary", summary);
         out.put("open", open);
