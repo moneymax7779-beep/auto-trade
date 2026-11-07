@@ -102,6 +102,25 @@ public final class KillSwitches {
         audit(account.tenantId(), account.id(), actor, action, detail);
     }
 
+    /**
+     * The account's broker session is gone: TOKEN_EXPIRED (cleared at the next login) and a BROKER_SESSION_LOST audit row
+     * (sent on Telegram for LIVE and DRY_RUN accounts). The row is written only when the session was thought valid until
+     * now, or once a day when nobody logged in (7 Nov 2026: the reconciliation every 30 s wrote one each time, and every
+     * one was sent). Returns whether it was written.
+     */
+    public boolean loseSession(BrokerAccount account, String actor, Map<String, ?> detail) {
+        int changed = jdbc.update("update acct.broker_account set connection_status = 'TOKEN_EXPIRED', updated_at = now() "
+                + "where id = ? and connection_status not in ('TOKEN_EXPIRED', 'TOKEN_REJECTED', 'DISCONNECTED')", account.id());
+        Boolean toldToday = jdbc.queryForObject("select exists (select 1 from exec.audit_log where broker_account_id = ? "
+                + "and action = 'BROKER_SESSION_LOST' and at >= (now() at time zone 'Asia/Kolkata')::date::timestamp "
+                + "at time zone 'Asia/Kolkata')", Boolean.class, account.id());
+        if (changed == 0 && Boolean.TRUE.equals(toldToday)) {
+            return false;
+        }
+        audit(account, actor, "BROKER_SESSION_LOST", detail);
+        return true;
+    }
+
     public void audit(Long tenantId, Long accountId, String actor, String action, Map<String, ?> detail) {
         jdbc.update("insert into exec.audit_log (tenant_id, broker_account_id, actor, action, detail) values (?, ?, ?, ?, "
                 + "?::jsonb)", tenantId, accountId, actor, action, JSON.writeValueAsString(detail));

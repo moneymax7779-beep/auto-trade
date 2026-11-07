@@ -944,9 +944,7 @@ public final class FollowerSimulator {
 
     private void loseSession(BrokerAccount account, String message) {
         protectionChecked.removeIf(k -> k.startsWith(account.id() + ":"));   // stops are verified again after the login
-        jdbc.update("update acct.broker_account set connection_status = 'TOKEN_EXPIRED', updated_at = now() where id = ?",
-                account.id());
-        kills.audit(account, "execution", "BROKER_SESSION_LOST", Map.of("message", String.valueOf(message)));
+        kills.loseSession(account, "execution", Map.of("message", String.valueOf(message)));
     }
 
     private String done(Pending p, long quantity) {
