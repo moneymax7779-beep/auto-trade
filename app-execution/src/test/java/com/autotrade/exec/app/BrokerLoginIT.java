@@ -217,6 +217,63 @@ class BrokerLoginIT {
         apps.status("kavi", id, new BrokerAppController.Status(true));
     }
 
+    /** User, 7 Nov 2026: an app entered wrongly is renamed or deleted; deleting is refused while an account uses it. */
+    @Test
+    void anAppIsRenamedAndDeletedOnlyWhenNoAccountUsesIt() {
+        long t = member("nila");
+        long id = app("nila", t, "ZERODHA", "BH4567");
+        app("nila", t, "ZERODHA", "Nila Kite");
+        assertThat(code(() -> apps.rename("nila", id, new BrokerAppController.Rename("Nila Kite")))).as("names stay unique")
+                .isEqualTo(400);
+        assertThat(code(() -> apps.rename("nila", id, new BrokerAppController.Rename("x")))).isEqualTo(400);
+        apps.rename("nila", id, new BrokerAppController.Rename("Nila Zerodha"));
+        assertThat(jdbc.queryForObject("select name from acct.broker_credential_profile where id = ?", String.class, id))
+                .isEqualTo("Nila Zerodha");
+        apps.rename("nila", id, new BrokerAppController.Rename("Nila Zerodha"));
+        member("oma");
+        assertThat(code(() -> apps.rename("oma", id, new BrokerAppController.Rename("Mine")))).as("another workspace")
+                .isEqualTo(404);
+        assertThat(code(() -> apps.delete("oma", id))).isEqualTo(404);
+        assertThat(code(() -> apps.delete("satya", id))).as("SUPPORT without a grant").isEqualTo(403);
+        // in use: refused, nothing removed
+        apps.keys("nila", id, new BrokerAppController.Keys("kite-key-nila", "kite-secret", null));
+        long acc = account("nila", t, "Kite", "ZERODHA", "BH4567");
+        apps.link("nila", acc, new BrokerAppController.Link(id));
+        assertThat(code(() -> apps.delete("nila", id))).isEqualTo(409);
+        Path key = dir.resolve("store").resolve("t" + t + "-p" + id + "-key");
+        assertThat(key).exists();
+        // logged in: its session was issued for the current key and is read only through an active app
+        jdbc.update("insert into acct.broker_session (broker_account_id, token_ref, acquired_at, expires_at, status) values "
+                + "(?, 'session-file:kite-' || ?::text || '.token', now(), now() + interval '6 hours', 'ACTIVE')", acc, acc);
+        assertThat(code(() -> apps.keys("nila", id, new BrokerAppController.Keys("kite-key-new1", "kite-secret2", null))))
+                .isEqualTo(409);
+        assertThat(code(() -> apps.status("nila", id, new BrokerAppController.Status(false)))).isEqualTo(409);
+        apps.rename("nila", id, new BrokerAppController.Rename("Nila Zerodha 2"));
+        jdbc.update("update acct.broker_session set status = 'EXPIRED' where broker_account_id = ?", acc);
+        apps.keys("nila", id, new BrokerAppController.Keys("kite-key-nila", "kite-secret", null));
+        // free again: deleted with its stored keys, audited without a value
+        long other = ((Number) jdbc.queryForObject("select id from acct.broker_credential_profile where tenant_id = ? and "
+                + "name = 'Nila Kite'", Long.class, t)).longValue();
+        apps.link("nila", acc, new BrokerAppController.Link(other));
+        assertThat(apps.delete("nila", id)).containsEntry("deleted", true);
+        assertThat(jdbc.queryForObject("select count(*) from acct.broker_credential_profile where id = ?", Integer.class, id))
+                .isZero();
+        assertThat(key).doesNotExist();
+        assertThat(dir.resolve("store").resolve("t" + t + "-p" + id + "-secret")).doesNotExist();
+        assertThat(code(() -> apps.delete("nila", id))).isEqualTo(404);
+        assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where action in ('BROKER_APP_RENAMED', "
+                + "'BROKER_APP_DELETED') and detail->>'app' = ?", Integer.class, String.valueOf(id))).isEqualTo(3);
+        // an app set up on the server (env:/file: keys, autotrade kite-profile) is not renamed or deleted here
+        long server = jdbc.queryForObject("insert into acct.broker_credential_profile (tenant_id, broker_type, scope, name, "
+                + "api_key_ref, api_secret_ref) values (?, 'ZERODHA', 'TENANT_SHARED', 'kite-server', 'env:KITE_API_KEY', "
+                + "'file:kite-secret') returning id", Long.class, t);
+        assertThat(code(() -> apps.rename("nila", server, new BrokerAppController.Rename("Other")))).isEqualTo(400);
+        assertThat(code(() -> apps.delete("nila", server))).isEqualTo(400);
+        assertThat(apps.apps("nila", t).get("apps").toString()).contains("managedHere=false");
+        assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where detail::text like '%kite-secret%' "
+                + "or detail::text like '%kite-key-nila%'", Integer.class)).isZero();
+    }
+
     @Test
     void upstoxLogsInThePinnedClientOnceAndLogoutEndsALiveDay() {
         long t = member("mala");

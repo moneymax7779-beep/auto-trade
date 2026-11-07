@@ -82,6 +82,18 @@ final class BrokerSecrets {
         }
     }
 
+    /** Deletes the value behind a {@code store:} reference (a deleted broker app's keys); other references are left alone. */
+    void delete(String ref) {
+        if (ref == null || !ref.startsWith("store:") || storeDir == null) {
+            return;
+        }
+        try {
+            Files.deleteIfExists(storeFile(ref));
+        } catch (IOException e) {
+            throw new UncheckedIOException("cannot delete " + ref + " in " + storeDir, e);
+        }
+    }
+
     /** True when a {@code store:} reference has a value. */
     boolean stored(String ref) {
         return ref != null && ref.startsWith("store:") && storeDir != null && Files.isRegularFile(storeFile(ref));

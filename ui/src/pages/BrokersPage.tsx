@@ -204,15 +204,18 @@ function AppsPanel({ tenant, data, onDone, onError }: {
   const [broker, setBroker] = useState<string>("ZERODHA");
   const [name, setName] = useState("");
   const [keysFor, setKeysFor] = useState<number | null>(null);
+  const [renameFor, setRenameFor] = useState<number | null>(null);
+  const [newName, setNewName] = useState("");
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
   const [mobile, setMobile] = useState("");
   const call = useMutation({
     mutationFn: ({ path, body }: { path: string; body: unknown; ok: string }) => postJson<unknown>(path, body),
-    onSuccess: (_d, v) => { onDone(v.ok); setApiKey(""); setApiSecret(""); setMobile(""); setKeysFor(null); },
+    onSuccess: (_d, v) => { onDone(v.ok); setApiKey(""); setApiSecret(""); setMobile(""); setKeysFor(null); setRenameFor(null); },
     onError: (e) => { onError(e); setApiSecret(""); },
   });
   const editing = data.apps.find((a) => a.id === keysFor);
+  const renaming = data.apps.find((a) => a.id === renameFor);
   return (
     <Panel title="Broker apps (API keys)">
       <p className="mb-3 text-xs text-muted">Create the app at your broker's developer site under your own login, register the
@@ -231,11 +234,32 @@ function AppsPanel({ tenant, data, onDone, onError }: {
           {a.broker === "KOTAK_NEO" && a.settings.mobileNumber ? <>mobile {a.settings.mobileNumber}</> : null}</span> },
         { key: "u", label: "Used by", render: (a) => a.accounts.join(", ") || "–" },
         { key: "x", label: "", render: (a) => !data.canManage ? null : <span className="flex gap-1">
-          <button className={button} onClick={() => setKeysFor(keysFor === a.id ? null : a.id)}>{a.keysSet ? "Replace keys" : "Set keys"}</button>
+          {a.managedHere ? <>
+            <button className={button} onClick={() => { setRenameFor(null); setKeysFor(keysFor === a.id ? null : a.id); }}>
+              {a.keysSet ? "Replace keys" : "Set keys"}</button>
+            <button className={button} onClick={() => { setKeysFor(null); setNewName(a.name); setRenameFor(renameFor === a.id ? null : a.id); }}>
+              Rename</button>
+            <button className={button} disabled={call.isPending || a.accounts.length > 0}
+              title={a.accounts.length > 0 ? `Used by ${a.accounts.join(", ")}: link it to another app first` : undefined}
+              onClick={() => window.confirm(`Delete ${a.name} (${BROKER_NAMES[a.broker]})? Its stored keys are removed too. `
+                + "This cannot be undone.") && call.mutate({ path: `/api/execution/broker-apps/${a.id}/delete`, body: {},
+                ok: `${a.name} deleted` })}>Delete</button>
+          </> : <span className="self-center text-xs text-muted">set up on the server</span>}
           <button className={button} disabled={call.isPending} onClick={() => call.mutate({ path: `/api/execution/broker-apps/${a.id}/status`,
             body: { active: a.status !== "ACTIVE" }, ok: `${a.name} ${a.status === "ACTIVE" ? "disabled" : "enabled"}` })}>
             {a.status === "ACTIVE" ? "Disable" : "Enable"}</button></span> },
       ]} />
+      {renaming && (
+        <form className="mt-3 flex flex-wrap items-end gap-3 rounded border border-line p-3" autoComplete="off"
+          onSubmit={(e) => { e.preventDefault(); call.mutate({ path: `/api/execution/broker-apps/${renaming.id}/name`,
+            body: { name: newName.trim() }, ok: `${renaming.name} renamed to ${newName.trim()}` }); }}>
+          <label className="flex flex-col gap-1 text-xs text-muted">New name for {renaming.name} (a label only, not sent to the broker)
+            <input className={`${input} w-64`} value={newName} maxLength={40} onChange={(e) => setNewName(e.target.value)} /></label>
+          <button className={primary} type="submit" disabled={call.isPending || newName.trim().length < 2
+            || newName.trim() === renaming.name}>Save</button>
+          <button className={button} type="button" onClick={() => setRenameFor(null)}>Cancel</button>
+        </form>
+      )}
       {editing && (
         <form className="mt-3 flex flex-wrap items-end gap-3 rounded border border-line p-3" autoComplete="off"
           onSubmit={(e) => { e.preventDefault(); call.mutate({ path: `/api/execution/broker-apps/${editing.id}/keys`,

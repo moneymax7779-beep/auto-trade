@@ -11,6 +11,9 @@ import java.util.regex.Pattern;
 
 import javax.sql.DataSource;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -39,6 +42,8 @@ import com.autotrade.execution.KillSwitches;
  *       write-only (to the secret store, {@code store:}); Kotak Neo needs its consumer key and the registered mobile
  *       number, no secret;</li>
  *   <li>{@code POST /api/execution/broker-apps/{id}/status} {@code {"active": false}}: disable (or enable) an app;</li>
+ *   <li>{@code POST /api/execution/broker-apps/{id}/name} {@code {"name": ...}}: rename an app (a label only);</li>
+ *   <li>{@code POST /api/execution/broker-apps/{id}/delete}: delete an app no account uses, with its stored keys;</li>
  *   <li>{@code POST /api/execution/accounts/{id}/broker-app} {@code {"profileId": n}}: which app an account logs in with
  *       (not while it has an ACTIVE session).</li>
  * </ul>
@@ -46,6 +51,8 @@ import com.autotrade.execution.KillSwitches;
  */
 @RestController
 class BrokerAppController {
+
+    private static final Logger log = LoggerFactory.getLogger(BrokerAppController.class);
 
     private static final Pattern NAME = Pattern.compile("[A-Za-z0-9][A-Za-z0-9 _-]{1,39}");
     /** A key or secret as typed: printable, no spaces, 6-4096 characters (Groww's are long JWT-like strings). */
@@ -93,6 +100,8 @@ class BrokerAppController {
             String ref = (String) a.remove("api_key_ref");
             // a key held elsewhere (the owner's env: / file: setup) is "set" too; a store: key only once typed
             a.put("keysSet", ref != null && (!ref.startsWith("store:") || secrets.stored(ref)));
+            // an env:/file: app is the owner's server setup (autotrade kite-profile): not changed from this page
+            a.put("managedHere", ref != null && ref.startsWith("store:"));
             a.put("accounts", p.get("accounts") instanceof java.sql.Array arr ? arrayOf(arr) : List.of());
             Map<String, Object> settings = new LinkedHashMap<>();
             BrokerHttp.JSON.readTree((String) p.get("settings")).properties().forEach(e -> settings.put(e.getKey(),
@@ -168,6 +177,7 @@ class BrokerAppController {
         BrokerType broker = BrokerType.valueOf((String) p.get("broker_type"));
         String keyRef = (String) p.get("api_key_ref"), secretRef = (String) p.get("api_secret_ref");
         notInUseLive(id, "its keys cannot change");
+        notLoggedIn(id, "its session belongs to the current key");
         require(keyRef.startsWith("store:"), "this app's keys are kept on the server (" + keyRef.replaceAll(":.*", ":")
                 + "...): they are changed there, not here");
         String key = body.apiKey() == null ? "" : body.apiKey().strip();
@@ -212,12 +222,82 @@ class BrokerAppController {
         require(body.active() != null, "active: true or false");
         if (!body.active()) {
             notInUseLive(id, "it cannot be disabled");
+            notLoggedIn(id, "a disabled app's session is not read");
         }
         jdbc.update("update acct.broker_credential_profile set status = ?, updated_at = now() where id = ?",
                 body.active() ? "ACTIVE" : "DISABLED", id);
         audit.audit(tenant, null, user.subject(), body.active() ? "BROKER_APP_ENABLED" : "BROKER_APP_DISABLED",
                 Map.of("app", id));
         return Map.of("id", id, "status", body.active() ? "ACTIVE" : "DISABLED");
+    }
+
+    record Rename(String name) {
+    }
+
+    /** A new name for an app: a label only (never sent to the broker), so it may change at any time (user, 7 Nov 2026). */
+    @PostMapping("/api/execution/broker-apps/{id}/name")
+    Map<String, Object> rename(@RequestHeader(value = Access.HEADER, required = false) String subject, @PathVariable long id,
+                               @RequestBody Rename body) {
+        Access.User user = access.user(subject);
+        Map<String, Object> p = profile(user, id);
+        long tenant = ((Number) p.get("tenant_id")).longValue();
+        manage(user, tenant);
+        managedHere(p);
+        String name = body.name() == null ? "" : body.name().trim();
+        require(NAME.matcher(name).matches(), "name: 2-40 letters, digits, space, _ or -");
+        String old = (String) p.get("name");
+        if (name.equals(old)) {
+            return Map.of("id", id, "name", name);
+        }
+        try {
+            jdbc.update("update acct.broker_credential_profile set name = ?, updated_at = now() where id = ?", name, id);
+        } catch (DuplicateKeyException e) {
+            throw bad("a broker app named " + name + " already exists");
+        }
+        audit.audit(tenant, null, user.subject(), "BROKER_APP_RENAMED", Map.of("app", id, "from", old, "to", name));
+        return Map.of("id", id, "name", name);
+    }
+
+    /**
+     * Deletes an app entered by mistake (user, 7 Nov 2026): only while no account uses it (link the account to another app
+     * first), so no login, session or position can depend on it; its stored keys are removed too.
+     */
+    @PostMapping("/api/execution/broker-apps/{id}/delete")
+    Map<String, Object> delete(@RequestHeader(value = Access.HEADER, required = false) String subject, @PathVariable long id) {
+        Access.User user = access.user(subject);
+        Map<String, Object> p = profile(user, id);
+        long tenant = ((Number) p.get("tenant_id")).longValue();
+        manage(user, tenant);
+        managedHere(p);
+        String name = (String) p.get("name");
+        int deleted = tx.execute(t -> {
+            // the app's row locked first: a link racing this delete waits on it (its foreign key check) and then fails
+            if (jdbc.queryForList("select id from acct.broker_credential_profile where id = ? for update", Long.class, id)
+                    .isEmpty()) {
+                return 0;
+            }
+            List<String> users = jdbc.queryForList("select display_name from acct.broker_account where credential_profile_id = ? "
+                    + "order by id", String.class, id);
+            if (!users.isEmpty()) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, String.join(", ", users) + " uses " + name
+                        + ": link it to another app before deleting this one");
+            }
+            return jdbc.update("delete from acct.broker_credential_profile where id = ?", id);
+        });
+        if (deleted != 1) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "no broker app " + id);
+        }
+        audit.audit(tenant, null, user.subject(), "BROKER_APP_DELETED", Map.of("app", id, "broker", p.get("broker_type"),
+                "name", name));
+        // the row is gone: a key file left behind is unreachable (its reference died with the row), so a failure is logged
+        for (String ref : List.of((String) p.get("api_key_ref"), (String) p.get("api_secret_ref"))) {
+            try {
+                secrets.delete(ref);
+            } catch (RuntimeException e) {
+                log.warn("broker app {} deleted but its stored value {} was not removed: {}", id, ref, e.getMessage());
+            }
+        }
+        return Map.of("id", id, "deleted", true);
     }
 
     record Link(Long profileId) {
@@ -276,6 +356,26 @@ class BrokerAppController {
         }
     }
 
+    /**
+     * Refused while an account using the app is logged in (review 7 Nov 2026): its session was issued for the current key
+     * and is read only through an ACTIVE app, so changing either would silently lose it (an alert, a LIVE day to PAPER).
+     */
+    private void notLoggedIn(long profileId, String why) {
+        List<String> logged = jdbc.queryForList("select a.display_name from acct.broker_account a where a.credential_profile_id = ? "
+                + "and exists (select 1 from acct.broker_session s where s.broker_account_id = a.id and s.status = 'ACTIVE' "
+                + "and s.expires_at > now()) order by a.id", String.class, profileId);
+        if (!logged.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, String.join(", ", logged) + " is logged in with this app ("
+                    + why + "): log out there first");
+        }
+    }
+
+    /** Only apps created on this page (keys in the store) are renamed or deleted here; env:/file: apps are the server's. */
+    private static void managedHere(Map<String, Object> p) {
+        require(String.valueOf(p.get("api_key_ref")).startsWith("store:"), "this app is set up on the server (autotrade "
+                + "kite-profile): it is renamed or removed there, not here");
+    }
+
     /** The broker's redirect URL to register on the app (Kite, Upstox); null for brokers without a redirect. */
     private String redirect(BrokerType broker) {
         if (kite.publicBaseUrl() == null) {
@@ -294,7 +394,7 @@ class BrokerAppController {
     }
 
     private Map<String, Object> profile(Access.User user, long id) {
-        return jdbc.queryForList("select id, tenant_id, broker_type, api_key_ref, api_secret_ref, status from "
+        return jdbc.queryForList("select id, tenant_id, broker_type, name, api_key_ref, api_secret_ref, status from "
                 + "acct.broker_credential_profile where id = ?", id).stream()
                 .filter(p -> user.sees(((Number) p.get("tenant_id")).longValue())).findFirst()
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "no broker app " + id));

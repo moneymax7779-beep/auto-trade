@@ -444,6 +444,8 @@ export interface BrokerApp {
   verified_at: string | null;
   last_check_error: string | null;
   keysSet: boolean;
+  /** false for the owner's server-set-up apps (env:/file: keys): keys, name and removal are changed on the server */
+  managedHere: boolean;
   accounts: string[];
 }
 
