@@ -96,7 +96,7 @@ final class BarReplaySource implements SessionEventSource {
         return new ReplayResult(n, 0);
     }
 
-    /** The day's bars: index and VIX, the nearest-expiry future and options with bars that day, the constituents. */
+    /** The day's bars: index and VIX, the futures and the nearest-expiry options with bars that day, the constituents. */
     private List<Bar> load(LocalDate session, List<String> underlyings) {
         Timestamp from = Timestamp.from(session.atStartOfDay(MarketTime.IST).toInstant());
         Timestamp to = Timestamp.from(session.plusDays(1).atStartOfDay(MarketTime.IST).toInstant());
@@ -104,11 +104,14 @@ final class BarReplaySource implements SessionEventSource {
         List<Object> args = new ArrayList<>(underlyings);
         args.add(from);
         args.add(to);
-        // one expiry per underlying and kind: the nearest at or after the session that has bars that day
+        // options: the nearest expiry at or after the session that has bars that day; futures: every such expiry (A-248:
+        // FuturesState keeps the nearest for price and volume and sums the OI only under features v16)
         String sql = "with day as (select * from hist.candle where underlying in (" + in + ") and bar_start >= ? and bar_start < ?), "
                 + "near as (select underlying, kind, min(expiry) expiry from day where expiry is not null and expiry >= ?::date group by 1, 2) "
                 + "select d.* from day d left join near n on n.underlying = d.underlying and n.kind = d.kind "
-                + "where d.expiry is null or d.expiry = n.expiry order by d.bar_start, d.kind, d.instrument_key";
+                + "where d.expiry is null or d.expiry = n.expiry or (d.kind = 'FUTURE' and d.expiry >= ?::date) "
+                + "order by d.bar_start, d.kind, d.expiry, d.instrument_key";
+        args.add(session);
         args.add(session);
         return jdbc.query(sql, (rs, i) -> new Bar(rs.getString("instrument_key"), rs.getString("underlying"), rs.getString("kind"),
                 rs.getString("symbol"), rs.getString("exchange_token"), rs.getObject("expiry", LocalDate.class),
@@ -139,7 +142,8 @@ final class BarReplaySource implements SessionEventSource {
         // at each instant the index (and VIX) tick comes last: the strategies decide on index ticks, so the option and
         // futures quotes they see are this minute's, not the previous bar's close (else a marketable entry limit sits
         // below a gapped open and never fills; A-045 round 2)
-        ordered.sort(Comparator.comparing(Bar::start).thenComparingInt(BarReplaySource::kindRank).thenComparing(Bar::key));
+        ordered.sort(Comparator.comparing(Bar::start).thenComparingInt(BarReplaySource::kindRank)
+                .thenComparing(Bar::expiry, Comparator.nullsFirst(Comparator.naturalOrder())).thenComparing(Bar::key));   // near month first
         long sequence = 0;
         for (Bar b : ordered) {
             boolean quoted = b.kind().equals("OPTION") || b.kind().equals("FUTURE");

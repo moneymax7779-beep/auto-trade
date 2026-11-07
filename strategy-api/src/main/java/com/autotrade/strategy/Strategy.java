@@ -15,4 +15,11 @@ public interface Strategy {
     String configHash();
 
     Decision decide(FeatureSnapshot snapshot, PositionView position);
+
+    /**
+     * A-229: a snapshot of another underlying traded or recorded in the same session, delivered as it is computed (so
+     * always before this underlying's next {@link #decide}). Replay and live call it identically. Default: ignored.
+     */
+    default void observeOther(FeatureSnapshot other) {
+    }
 }

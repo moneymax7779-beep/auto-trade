@@ -19,7 +19,11 @@ import com.autotrade.features.indicators.WilderAtr;
 import com.autotrade.features.levels.StructureState;
 import com.autotrade.features.snapshot.FuturesFeatures;
 
-/** The nearest-expiry future: momentum, acceleration, basis, OI state and time-of-day RVOL. */
+/**
+ * The nearest-expiry future: momentum, acceleration, basis, OI state and time-of-day RVOL. With
+ * {@link FeatureConfig#futuresOiCombined()} (v16, A-248) the OI, its changes and the OI state are the sum over every
+ * futures expiry seen in the session, so the roll into the next month does not read as unwinding or covering.
+ */
 public final class FuturesState implements StructureState.FuturesVolume {
 
     private static final Duration RETENTION = Duration.ofMinutes(15);
@@ -49,6 +53,10 @@ public final class FuturesState implements StructureState.FuturesVolume {
     private double vwap = Double.NaN;
     private double firstOi = Double.NaN;
     private Instant lastTime;
+    /** v16: latest OI of the other (farther) expiries by token, and the summed series (restarted when an expiry first prints). */
+    private final Map<Long, Double> otherOi = new TreeMap<>();
+    private TimedSeries combinedOi = new TimedSeries(RETENTION);
+    private double firstCombinedOi = Double.NaN;
 
     public FuturesState(FeatureConfig config, String underlying, LocalDate session, Instant sessionOpen,
                         VolumeProfile profile) {
@@ -66,8 +74,16 @@ public final class FuturesState implements StructureState.FuturesVolume {
         if (token != tick.instrumentToken()) {
             boolean nearer = expiry == null || (tick.expiry() != null && tick.expiry().isBefore(expiry));
             if (!nearer) {
+                if (config.futuresOiCombined() && tick.openInterest() != null) {
+                    boolean first = otherOi.put(tick.instrumentToken(), tick.openInterest()) == null;
+                    addCombined(tick.receivedAt(), first);
+                }
                 return;
             }
+            if (config.futuresOiCombined() && token != -1 && oi != null && !oi.isEmpty()) {
+                otherOi.put(token, oi.latest());                     // the former selection is now a farther expiry
+            }
+            otherOi.remove(tick.instrumentToken());
             select(tick);
         }
         Instant time = tick.receivedAt();
@@ -76,9 +92,13 @@ public final class FuturesState implements StructureState.FuturesVolume {
             basis.add(time, tick.price() - latestSpot);
         }
         if (tick.openInterest() != null) {
+            boolean first = oi.isEmpty();
             oi.add(time, tick.openInterest());
             if (Double.isNaN(firstOi)) {
                 firstOi = tick.openInterest();
+            }
+            if (config.futuresOiCombined()) {
+                addCombined(time, first);
             }
         }
         long delta = 0;
@@ -121,6 +141,25 @@ public final class FuturesState implements StructureState.FuturesVolume {
         lastCumulative = null;
         vwap = Double.NaN;
         firstOi = Double.NaN;
+    }
+
+    /** v16: one more point of the summed OI; a contract's first print restarts the series so no change spans it. */
+    private void addCombined(Instant time, boolean restart) {
+        if (oi == null || oi.isEmpty()) {
+            return;
+        }
+        if (restart) {
+            combinedOi = new TimedSeries(RETENTION);
+            firstCombinedOi = Double.NaN;
+        }
+        double total = oi.latest();
+        for (double other : otherOi.values()) {
+            total += other;
+        }
+        combinedOi.add(time, total);
+        if (Double.isNaN(firstCombinedOi)) {
+            firstCombinedOi = total;
+        }
     }
 
     public Instant lastTime() {
@@ -226,11 +265,13 @@ public final class FuturesState implements StructureState.FuturesVolume {
         double futuresAtr = atr.value();
 
         Duration oiWindow = Duration.ofMinutes(config.oiStateWindowMin());
-        double oiChange = oi.change(time, oiWindow);
+        boolean combined = config.futuresOiCombined() && !combinedOi.isEmpty();
+        TimedSeries oiSeries = combined ? combinedOi : oi;
+        double oiChange = oiSeries.change(time, oiWindow);
         double priceChange = price.change(time, oiWindow);
         OiState state = OiState.classify(priceChange, oiChange,
                 Double.isNaN(spotAtr3m) ? 0 : config.oiStateMinPriceAtr() * spotAtr3m,
-                oi.isEmpty() ? 0 : config.oiStateMinOiFraction() * oi.latest());
+                oiSeries.isEmpty() ? 0 : config.oiStateMinOiFraction() * oiSeries.latest());
 
         LocalTime minute = minuteOf(time);
         long lastMinuteVolume = minuteVolumes.getOrDefault(minute.minusMinutes(1), 0L);
@@ -243,7 +284,8 @@ public final class FuturesState implements StructureState.FuturesVolume {
                 basis.latest(),
                 basis.change(time, Duration.ofMinutes(config.basisChangeWindowsMin().get(0))),
                 basis.change(time, Duration.ofMinutes(config.basisChangeWindowsMin().get(1))),
-                oi.latest(), oiChange, oi.latest() - firstOi, state.name(), lastMinuteVolume, rvol[0], rvol[1],
+                oiSeries.latest(), oiChange, oiSeries.latest() - (combined ? firstCombinedOi : firstOi), state.name(),
+                lastMinuteVolume, rvol[0], rvol[1],
                 (int) rvol[2], rvol[3], daysToExpiry, futuresAtr);
     }
 

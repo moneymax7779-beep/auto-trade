@@ -1,0 +1,34 @@
+# Trend rider on the non-expiring index, v2 (ledger A-229; user, 25 Oct: "register trr-v2 flat before etr's window and run it").
+# trr-v1 (A-227) passed alone out of sample (Aug 2026 bars: 24 trades, +Rs 2.29 L, PF 1.99) but cost the set on the
+# tick days (-Rs 4.17 L): it held the shared Rs 5 L into the other index's expiry afternoon, so etr's runners entered
+# at half size (15 Sep, 8, 14, 15 Oct). etr trades 11:00-14:30, the same window as trr, so "flat before etr's window"
+# means: on a day another index in the session expires, trr takes no entry and no add. Everything else is trr-v1.
+#
+version: trr-v2
+strategy: trend-rider
+status: UNCALIBRATED
+source: "user-request-2026-10-25 (A-229: trr-v1 + flat on the other index's expiry day; values fixed at registration)"
+
+scope:
+  dte: 1                               # the index that does not expire today ...
+  dte_max: 5                           # ... up to a week out (inclusive); dte 0 stays with expiry-trend-rider
+  skip_other_expiry_day: true         # v2 (A-229): no entry or add on a day another index in the session expires (its etr window)
+  entry_from: "11:00"                  # as etr-v1: new entries and adds from ...
+  last_new_entry: "14:30"              # ... until (exclusive)
+  flat_by: "15:15"                     # whole position closed
+
+trend:
+  breadth_min: 50                      # weighted mover breadth <= -50 for puts, >= +50 for calls
+  reject_futures_states:               # futures OI must not oppose the move
+    PE: [FRESH_LONG, SHORT_COVERING]
+    CE: [FRESH_SHORT, LONG_UNWIND]
+  iv_change_3m_min: 0                  # ATM IV rising over 3 minutes (> 0)
+
+position:
+  premium_budget: 250000               # half of etr-v1: the full plan (entry + add) at the entry ask
+  intended_lots: 2                     # 1 plan lot per entry or add (about Rs 1,25,000 each)
+  max_adds: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 40                 # resting emergency stop; the swing exit comes first (as etr-v1)

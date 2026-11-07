@@ -108,7 +108,12 @@ public record FeatureConfig(
         /** v14: the constituents' pre-open call auction (IEP vs previous close, imbalance); EMPTY when off. */
         boolean preopen,
         /** v15 (A-239): the ATM ± N strikes of the ATM OI band shares ({@code atmBandShare*}); 2 before v15. */
-        int atmBandStrikes) {
+        int atmBandStrikes,
+        /**
+         * v16 (A-248): futures OI, its changes and the OI state are summed over every futures expiry of the underlying
+         * seen in the session, so the roll into the next month does not read as unwinding / covering. Off before v16.
+         */
+        boolean futuresOiCombined) {
 
     public static FeatureConfig from(ThresholdConfig features, ThresholdConfig exchange) {
         Map<String, LocalTime[]> windows = new LinkedHashMap<>();
@@ -194,7 +199,8 @@ public record FeatureConfig(
                 features.has("options_chain.oi_zscore") && features.getBoolean("options_chain.oi_zscore"),
                 features.has("cues.enabled") && features.getBoolean("cues.enabled"),
                 features.has("preopen.enabled") && features.getBoolean("preopen.enabled"),
-                atmBandStrikes(features));
+                atmBandStrikes(features),
+                features.has("futures.oi_combine_months") && features.getBoolean("futures.oi_combine_months"));
     }
 
     /** v15: options_chain.atm_band_strikes (2 when absent); refused at load unless 1-10, so a typo never yields NaN all day. */

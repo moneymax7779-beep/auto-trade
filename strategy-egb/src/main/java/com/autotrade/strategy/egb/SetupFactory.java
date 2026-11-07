@@ -28,7 +28,20 @@ public final class SetupFactory implements StrategyFactory {
             Map.entry("atm-oi-burst", AtmOiBurst::new),   // A-158
             Map.entry("market-phase-squeeze", SetupFactory::marketPhase),   // A-239 (v1), A-240 (v2 relaxed)
             Map.entry("market-phase-expansion", SetupFactory::marketPhase),
-            Map.entry("market-phase-avalanche", SetupFactory::marketPhase));
+            Map.entry("market-phase-avalanche", SetupFactory::marketPhase),
+            Map.entry("playbook-squeeze", c -> new Playbook(c, "NIFTY")),   // A-244 (T1 / RUNNER parts per file)
+            Map.entry("playbook-squeeze-runner", c -> new Playbook(c, "NIFTY")),
+            Map.entry("playbook-avalanche", c -> new Playbook(c, "NIFTY")),
+            Map.entry("playbook-avalanche-runner", c -> new Playbook(c, "NIFTY")),
+            Map.entry("playbook-vwap", c -> new Playbook(c, "NIFTY")),
+            Map.entry("playbook-vwap-runner", c -> new Playbook(c, "NIFTY")),
+            Map.entry("playbook-box", c -> new Playbook(c, "NIFTY")),
+            Map.entry("playbook-mac-squeeze", c -> new Playbook(c, "NIFTY")),   // A-246
+            Map.entry("playbook-mac-squeeze-runner", c -> new Playbook(c, "NIFTY")),
+            Map.entry("playbook-orl-retest", c -> new Playbook(c, "NIFTY")),
+            Map.entry("playbook-stand-aside-probe", c -> new Playbook(c, "NIFTY")),
+            Map.entry("oi-burst-cross", c -> new OiBurstCross(c, "NIFTY")),   // A-251 (per-index threshold)
+            Map.entry("oi-burst-allday", c -> new OiBurstCross(c, "NIFTY")));   // A-258: obc's signal all day
 
     /** A-240: a file with {@code setup.relaxed: true} is the relaxed rows (per-index parameters); else A-239's. */
     private static boolean relaxed(ThresholdConfig c) {
@@ -51,6 +64,12 @@ public final class SetupFactory implements StrategyFactory {
         family.apply(config);                                         // fail at load on a missing key, not mid-session
         if (config.strategy().startsWith("market-phase-") && relaxed(config)) {
             new MarketPhaseRelaxed(config, "SENSEX");                    // A-240: the SENSEX keys too
+        }
+        if (config.strategy().startsWith("playbook-")) {
+            new Playbook(config, "SENSEX");                              // A-244: the SENSEX keys too
+        }
+        if (config.strategy().startsWith("oi-burst-")) {
+            new OiBurstCross(config, "SENSEX");                          // A-251: the SENSEX threshold too
         }
     }
 
@@ -88,6 +107,12 @@ public final class SetupFactory implements StrategyFactory {
     public Strategy create(String underlying, LocalDate session) {
         if (config.strategy().startsWith("market-phase-") && relaxed(config)) {
             return new MarketPhaseRelaxed(config, underlying);
+        }
+        if (config.strategy().startsWith("playbook-")) {
+            return new Playbook(config, underlying);                     // A-244: per-index candles and buffers
+        }
+        if (config.strategy().startsWith("oi-burst-")) {
+            return new OiBurstCross(config, underlying);                 // A-251: per-index threshold
         }
         return family.apply(config);
     }

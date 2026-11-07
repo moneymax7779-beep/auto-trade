@@ -290,6 +290,13 @@ public final class TradingSession {
                 log.warn("feature snapshot not saved: {}", e.getMessage());
             }
         }
+        for (Map.Entry<String, List<Slot>> other : strategies.entrySet()) {      // A-229: the other underlyings' strategies
+            if (!other.getKey().equals(underlying)) {
+                for (Slot slot : other.getValue()) {
+                    slot.strategy().observeOther(snapshot);
+                }
+            }
+        }
         boolean squareOff = risk.squareOffDue(time);
         MarketContext market = new MarketContext(time, snapshot.secondsSinceSpot(), snapshot.secondsSinceOption());
         // Live: never open or add from a stale snapshot (e.g. while the feed catches up on the morning).

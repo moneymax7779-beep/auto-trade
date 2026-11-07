@@ -217,7 +217,8 @@ final class MarketPhaseRelaxed extends SetupStrategy {
                     int span = boxCandles * candleMin;            // the N candles before the current one
                     double hi = extreme(candleMin, candleMin + span - 1, true);
                     double lo = extreme(candleMin, candleMin + span - 1, false);
-                    boolean tight = Double.isFinite(hi) && Double.isFinite(lo) && hi - lo <= boxMaxAtr * atr;
+                    boolean tight = closes.size() >= candleMin + span                  // a whole lookback of today's minutes
+                            && Double.isFinite(hi) && Double.isFinite(lo) && hi - lo <= boxMaxAtr * atr;
                     box = tight && (calls ? spot > hi + bufferAtr * atr : spot < lo - bufferAtr * atr)
                             && f.rvolTod() >= 1.5;
                     if (box) {

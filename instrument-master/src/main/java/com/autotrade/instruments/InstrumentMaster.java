@@ -53,6 +53,15 @@ public final class InstrumentMaster {
                 .min(Comparator.comparing(Instrument::expiry));
     }
 
+    /** The {@code count} nearest-expiry futures on or after {@code from}, nearest first (A-248: the roll). */
+    public List<Instrument> nearestFutures(String underlying, LocalDate from, int count) {
+        return instruments(underlying).stream()
+                .filter(i -> i.isFuture() && i.expiry() != null && !i.expiry().isBefore(from))
+                .sorted(Comparator.comparing(Instrument::expiry))
+                .limit(count)
+                .toList();
+    }
+
     /** Strike spacing for an expiry (smallest gap between listed strikes). */
     public double strikeStep(String underlying, LocalDate expiry) {
         TreeSet<Double> strikes = new TreeSet<>();

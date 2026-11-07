@@ -1,0 +1,19 @@
+2026-09-25|6|STOPPED|0|0|
+2026-09-25|7|STOPPED|0|0|
+2026-09-25|8|DONE|0|0|
+2026-09-28|130|DONE|0|0|
+2026-09-29|222|DONE|0|0|
+2026-09-30|270|DONE|-69677|1|opening-drive:-69677
+2026-10-01|317|DONE|9229|1|early-confirm-runner:9229
+2026-10-05|487|DONE|0|0|
+2026-10-06|498|DONE|-44913|1|expiry-trend-rider:-44913
+2026-10-07|641|DONE|60121|4|break-retest:-13972 break-retest:4013 break-retest:40386 break-retest:29695
+2026-10-08|745|DONE|437098|13|opening-drive:-24666 opening-drive:-207 opening-drive:31644 break-retest:-29885 break-retest:-22238 break-retest:-2807 break-retest:41364 expiry-trend-rider:448456 expiry-trend-rider@etr-v6:101901 expiry-trend-rider@etr-v6:75958 expiry-trend-rider@etr-v6:-29062 expiry-trend-rider:-77889 expiry-trend-rider@etr-v6:-75471
+2026-10-09|801|DONE|64644|1|break-retest:64644
+2026-10-12|876|DONE|-54763|2|ma-cross:-8815 ma-cross:-45948
+2026-10-13|881|DONE|62195|3|opening-drive-momentum:171326 ma-cross:-100527 expiry-trend-rider:-8604
+2026-10-14|894|DONE|-308783|2|opening-drive:-183366 opening-drive:-125417
+2026-10-15|904|DONE|534999|5|opening-drive:-11742 opening-drive:-26386 opening-drive:188105 expiry-trend-rider:330594 ma-cross:54428
+2026-10-16|914|DONE|-516984|2|opening-drive-momentum:-317028 opening-drive-momentum:-199956
+2026-10-19|925|DONE|-116673|7|opening-drive:-7001 opening-drive-momentum:22441 zone-break-flow:-39924 expiry-trend-rider:92224 zone-break-flow:-53641 zone-break-flow:-55881 expiry-trend-rider:-74890
+2026-10-21|936|DONE|0|0|

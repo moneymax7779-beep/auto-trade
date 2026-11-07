@@ -68,6 +68,14 @@ abstract class SetupStrategy implements Strategy {
     private final double trailActivationPct;
     private final double trailGivebackPct;
     private double trailPeak = Double.NaN;
+    /**
+     * A-249: early-failure exit. {@link #earlyFailMin} minutes after the entry, exit when the index's best move in the trade's
+     * direction since the entry is below {@link #earlyFailMfeR} x R (R = |index at entry - stop|); checked once. 0 = off.
+     */
+    private final int earlyFailMin;
+    private final double earlyFailMfeR;
+    private double bestFavourable;
+    private boolean earlyChecked;
 
     /** Minute closes, newest last (the snapshot spot each minute). */
     protected final ArrayDeque<Double> closes = new ArrayDeque<>();
@@ -103,6 +111,8 @@ abstract class SetupStrategy implements Strategy {
         this.useTarget = !config.has("exits.use_target") || config.getBoolean("exits.use_target");
         this.trailActivationPct = config.has("exits.trail_activation_pct") ? config.getDouble("exits.trail_activation_pct") : 0;
         this.trailGivebackPct = config.has("exits.trail_giveback_pct") ? config.getDouble("exits.trail_giveback_pct") : 0;
+        this.earlyFailMin = config.has("exits.early_fail_min") ? config.getInt("exits.early_fail_min") : 0;
+        this.earlyFailMfeR = config.has("exits.early_fail_mfe_r") ? config.getDouble("exits.early_fail_mfe_r") : 0;
         if (config.has("filters.quiet_window")) {                // A-103: "10:30-12:30"
             String[] w = config.getString("filters.quiet_window").split("-");
             this.quietFrom = LocalTime.parse(w[0].trim());
@@ -212,6 +222,8 @@ abstract class SetupStrategy implements Strategy {
                 trailStop = entry.stop();
                 kept = false;
                 lastSwingSeen = Double.NaN;
+                bestFavourable = 0;
+                earlyChecked = false;
             }
         }
         lastConditions = Collections.unmodifiableMap(c);
@@ -270,6 +282,16 @@ abstract class SetupStrategy implements Strategy {
         }
         if (Double.isFinite(stop) && sign * (spot - stop) < 0) {
             return kept && stop != plan.stop() ? "TRAIL_STOP" : "STOP";
+        }
+        if (earlyFailMin > 0 && !earlyChecked && enteredAt != null) {          // A-249
+            bestFavourable = Math.max(bestFavourable, sign * (spot - entrySpot));
+            if (Duration.between(enteredAt, now).toMinutes() >= earlyFailMin) {
+                earlyChecked = true;
+                double r = Math.abs(entrySpot - plan.stop());
+                if (Double.isFinite(r) && r > 0 && bestFavourable < earlyFailMfeR * r) {
+                    return "EARLY_FAIL";
+                }
+            }
         }
         if (vwapTrail3m && threeMinuteClose(time) && Double.isFinite(vwap) && sign * (spot - vwap) < 0) {
             return "VWAP_TRAIL";

@@ -27,10 +27,16 @@ import com.autotrade.strategy.Strategy;
  * one plan lot (up to {@code max_adds}); the whole position exits on a 3-minute close back beyond the last
  * swing, at {@code flat_by}, or at the resting premium stop. No limit on trades: after an exit the next new
  * extreme may enter again. Study: docs/studies/2026-10-01-expiry-trend-rider.md (ledger A-029).
+ * <p>
+ * A-227: the same rules under the {@code trend-rider} key ({@link #NX_ID}) on the index that does not expire today
+ * ({@code scope.dte} to {@code scope.dte_max} days to expiry, the nearest weekly option). The id comes from the file's
+ * key, so both can run side by side in one session.
  */
 final class ExpiryTrendRider implements Strategy {
 
     static final String ID = "expiry-trend-rider";
+    /** A-227: the non-expiring-index variant's strategy key. */
+    static final String NX_ID = "trend-rider";
 
     private final ExpiryTrendRiderConfig config;
     private double previousLow = Double.NaN;
@@ -41,6 +47,8 @@ final class ExpiryTrendRider implements Strategy {
     private boolean timeStopped;            // v5: a time-stop exit happened today: no new entry
     private double trailPeak = Double.NaN;  // v6: the held option's highest bid since the trail armed (NaN = not armed)
     private boolean lockArmed;              // v7: the bid has been profit_lock_arm_pct above the average premium
+    /** A-229: another index in the session expires today (seen through {@link #observeOther}). */
+    private boolean otherExpiresToday;
     /** v8: the index each minute over the last hour, for its 60-minute high-low range: {epoch minute, spot}. */
     private final java.util.ArrayDeque<double[]> lastHour = new java.util.ArrayDeque<>();
 
@@ -50,7 +58,7 @@ final class ExpiryTrendRider implements Strategy {
 
     @Override
     public String id() {
-        return ID;
+        return config.id();
     }
 
     @Override
@@ -59,13 +67,23 @@ final class ExpiryTrendRider implements Strategy {
     }
 
     @Override
+    public void observeOther(FeatureSnapshot other) {
+        if (other.regime() != null && other.regime().dteTradingDays() == 0 && other.regime().expiry() != null) {
+            otherExpiresToday = true;
+        }
+    }
+
+    @Override
     public Decision decide(FeatureSnapshot snapshot, PositionView position) {
         Instant now = snapshot.time();
         LocalTime time = now.atZone(MarketTime.IST).toLocalTime();
         StructureFeatures st = snapshot.structure();
-        boolean expiryDay = snapshot.regime().dteTradingDays() == config.dte();
+        int dte = snapshot.regime().dteTradingDays();
+        boolean expiryDay = dte >= config.dte() && dte <= config.dteMax();        // A-227: a DTE band (etr: 0 only)
         boolean continuous = SessionPhase.valueOf(snapshot.phase()).isContinuous();
-        boolean window = expiryDay && continuous && !time.isBefore(config.entryFrom()) && time.isBefore(config.lastNewEntry());
+        boolean yield = config.skipOtherExpiryDay() && otherExpiresToday;    // A-229: the expiry strategies' day
+        boolean window = expiryDay && !yield && continuous && !time.isBefore(config.entryFrom())
+                && time.isBefore(config.lastNewEntry());
         boolean newLow = Double.isFinite(previousLow) && st.dayLow() < previousLow;
         boolean newHigh = Double.isFinite(previousHigh) && st.dayHigh() > previousHigh;
         if (Double.isFinite(st.dayLow())) {
@@ -186,6 +204,9 @@ final class ExpiryTrendRider implements Strategy {
         boolean put = side == OptionSide.PE;
         Map<String, Boolean> c = new LinkedHashMap<>();
         c.put("expiry_day", expiryDay);
+        if (config.skipOtherExpiryDay()) {
+            c.put("other_index_not_expiring", !otherExpiresToday);      // A-229
+        }
         c.put("window", window);
         c.put("beyond_opening_range", st.orComplete() && (put ? spot < st.orLow() : spot > st.orHigh()));
         double breadth = s.breadth().moverBreadth();

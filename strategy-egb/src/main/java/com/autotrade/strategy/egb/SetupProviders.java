@@ -135,4 +135,95 @@ public final class SetupProviders {
             return "market-phase-avalanche";
         }
     }
+
+    public static final class PlaybookSqueezeProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "playbook-squeeze";
+        }
+    }
+
+    public static final class PlaybookSqueezeRunnerProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "playbook-squeeze-runner";
+        }
+    }
+
+    public static final class PlaybookAvalancheProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "playbook-avalanche";
+        }
+    }
+
+    public static final class PlaybookAvalancheRunnerProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "playbook-avalanche-runner";
+        }
+    }
+
+    public static final class PlaybookVwapProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "playbook-vwap";
+        }
+    }
+
+    public static final class PlaybookVwapRunnerProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "playbook-vwap-runner";
+        }
+    }
+
+    public static final class PlaybookBoxProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "playbook-box";
+        }
+    }
+
+    public static final class PlaybookMacSqueezeProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "playbook-mac-squeeze";
+        }
+    }
+
+    public static final class PlaybookMacSqueezeRunnerProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "playbook-mac-squeeze-runner";
+        }
+    }
+
+    public static final class PlaybookOrlRetestProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "playbook-orl-retest";
+        }
+    }
+
+    public static final class PlaybookStandAsideProbeProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "playbook-stand-aside-probe";
+        }
+    }
+
+    public static final class OiBurstCrossProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "oi-burst-cross";
+        }
+    }
+
+    public static final class OiBurstAlldayProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "oi-burst-allday";
+        }
+    }
 }

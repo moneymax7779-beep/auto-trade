@@ -14,7 +14,7 @@ import com.autotrade.instruments.UpstoxInstrumentFile;
 
 /**
  * What auto-trade subscribes to on Upstox and what each instrument key means: the index, India
- * VIX, the nearest future, index constituents (for breadth and the closing auction), and a band of
+ * VIX, the two nearest futures, index constituents (for breadth and the closing auction), and a band of
  * nearest-expiry options around the ATM strike that is re-centred as the index moves.
  */
 public final class UpstoxUniverse {
@@ -30,6 +30,8 @@ public final class UpstoxUniverse {
     public record Constituent(UpstoxInstrumentFile.Listing listing, double weightPercent) {
     }
 
+    /** A-248: the current and the next futures expiry. */
+    static final int FUTURES_PER_UNDERLYING = 2;
     public static final String VIX_KEY = "NSE_INDEX|India VIX";
     public static final String VIX_UNDERLYING = "INDIA_VIX";
     static final Map<String, String> INDEX_KEYS = Map.of(
@@ -59,9 +61,12 @@ public final class UpstoxUniverse {
             }
             add(new Meta(indexKey, token(indexKey, INDEX_TOKENS.get(indexKey)), Kind.INDEX, underlying, underlying, null,
                     0, null, null, null));
-            master.nearestFuture(underlying, session).ifPresent(future -> add(new Meta(future.instrumentKey(),
-                    token(future.instrumentKey(), future.exchangeToken()), Kind.FUTURE, underlying, future.tradingSymbol(),
-                    future.expiry(), 0, null, future.lotSize(), null)));
+            // A-248: the next month too, so futures OI can be summed across the roll (features v16); every consumer
+            // of the price, volume and VWAP keeps to the nearest expiry
+            for (Instrument future : master.nearestFutures(underlying, session, FUTURES_PER_UNDERLYING)) {
+                add(new Meta(future.instrumentKey(), token(future.instrumentKey(), future.exchangeToken()), Kind.FUTURE,
+                        underlying, future.tradingSymbol(), future.expiry(), 0, null, future.lotSize(), null));
+            }
             for (Constituent constituent : constituents.getOrDefault(underlying, List.of())) {
                 UpstoxInstrumentFile.Listing listing = constituent.listing();
                 add(new Meta(listing.instrumentKey(), token(listing.instrumentKey(), listing.exchangeToken()),

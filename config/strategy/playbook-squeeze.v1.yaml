@@ -1,0 +1,33 @@
+# Options-buying playbook (A-244; user 2026-10-26: "Check this.. be genuine with analysis and implementation of strategies do
+# the replay" / "define strategies and do the replay on tick days"): Strategy 1 Short Squeeze, the 50 % T1 part. Rules in Playbook.java and the ledger, fixed before
+# the replay. The engine exits whole positions, so a 1R partial runs as two files (T1 and RUNNER) entering together.
+version: pbs-v1
+strategy: playbook-squeeze
+status: UNCALIBRATED
+source: "user-request-2026-10-26 (four-strategy playbook; ledger A-244)"
+
+scope:
+  entry_from: "09:20"                  # golden windows 09:20-10:30 and 13:00-15:00 (gap below)
+  last_new_entry: "15:00"              # exclusive; flat 15:15
+  flat_by: "15:15"
+  time_stop_min: 0                     # the playbook's time-outs are in the strategy
+  skip_expiring_index: false
+
+setup:
+  kind: SQUEEZE
+  role: T1
+  candle_min_nifty: 3                  # NIFTY 3-minute candles
+  candle_min_sensex: 5                 # SENSEX 5-minute candles
+  buffer_points_nifty: 5               # "5 points"
+  buffer_points_sensex: 15             # the same distance in % at SENSEX's level
+  gap_from: "10:30"                    # no entries in the mid-day lull
+  gap_until: "13:00"
+  max_trades_per_day: 2                # per index
+
+position:
+  premium_budget: 125000
+  intended_lots: 1
+  strike_offset: 0
+
+exits:
+  premium_stop_pct: 50                 # emergency only; the playbook's stops are on the index

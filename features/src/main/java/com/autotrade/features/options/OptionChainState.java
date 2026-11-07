@@ -235,7 +235,8 @@ public final class OptionChainState {
                 oiZ("CE", ce, windows, nearOi, time), oiZ("PE", pe, windows, nearOi, time),
                 bandShare(time, atm, step, 0), bandShare(time, atm, step, 1), bandShare(time, atm, step, 2),
                 bandSide(time, atm, step, true), bandSide(time, atm, step, false),
-                bandNet(time, atm, step, 3), bandNet(time, atm, step, 5), bandNet(time, atm, step, 10));
+                bandNet(time, atm, step, 3), bandNet(time, atm, step, 5), bandNet(time, atm, step, 10),
+                bandChange(time, atm, step, 2, 0));
     }
 
     /**
@@ -624,7 +625,7 @@ public final class OptionChainState {
         double n = Double.NaN;
         return new OptionsFeatures(expiry == null ? null : expiry.toString(), n, n, contracts.size(), n, n, n, n, n, n, n,
                 n, "UNKNOWN", "UNKNOWN", n, n, n, n, false, false, n, n, n, n, n, n, n, n, n, "NONE", n, n, n, n, n, n,
-                n, n, n, n, n, n, n, n, n, n, n, n, n, n, n);
+                n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n);
     }
 
     static double midPrice(OptionTick tick) {

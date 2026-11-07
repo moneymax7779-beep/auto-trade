@@ -43,7 +43,33 @@ record ExpiryTrendRiderConfig(
          * multiple of the index's high-low range over the last 60 minutes (0 / absent = off). Time value per leg =
          * (ATM straddle − |spot − ATM strike|) / 2; missing data never blocks.
          */
-        double timeValueMaxRangeRatio) {
+        double timeValueMaxRangeRatio,
+        /**
+         * A-227 ({@code scope.dte_max}, absent = {@code scope.dte}): the index trades when its days to expiry are between
+         * {@code scope.dte} and this, inclusive. etr files keep dte 0 only; the {@code trend-rider} key uses dte 1-5 (the
+         * index that does not expire today).
+         */
+        int dteMax,
+        /** The {@code strategy:} key of the file (expiry-trend-rider, or trend-rider for the non-expiring index). */
+        String id,
+        /**
+         * A-229 ({@code scope.skip_other_expiry_day}, absent = false): no entry or add on a day another index in the
+         * session expires (its snapshot shows 0 trading days to expiry), so the expiry strategies keep the capital.
+         */
+        boolean skipOtherExpiryDay) {
+
+    /** v1-v8 shape: dte only, the expiry-trend-rider key. */
+    ExpiryTrendRiderConfig(String hash, String version, int dte, LocalTime entryFrom, LocalTime lastNewEntry, LocalTime flatBy,
+                           double breadthMin, Map<OptionSide, Set<String>> rejectFuturesStates, double ivChange3mMin,
+                           double premiumBudget, int intendedLots, int maxAdds, int strikeOffset, double premiumStopPct,
+                           boolean pyramidRiskCap, int noNewExtremeMin, boolean noReentryAfterTimeStop,
+                           double trailActivationPct, double trailGivebackPct, double profitLockArmPct,
+                           double profitLockFloorPct, double timeValueMaxRangeRatio) {
+        this(hash, version, dte, entryFrom, lastNewEntry, flatBy, breadthMin, rejectFuturesStates, ivChange3mMin,
+                premiumBudget, intendedLots, maxAdds, strikeOffset, premiumStopPct, pyramidRiskCap, noNewExtremeMin,
+                noReentryAfterTimeStop, trailActivationPct, trailGivebackPct, profitLockArmPct, profitLockFloorPct,
+                timeValueMaxRangeRatio, dte, ExpiryTrendRider.ID, false);
+    }
 
     /** v1-v7 shape: no time-value budget. */
     ExpiryTrendRiderConfig(String hash, String version, int dte, LocalTime entryFrom, LocalTime lastNewEntry, LocalTime flatBy,
@@ -74,7 +100,9 @@ record ExpiryTrendRiderConfig(
                 c.has("exits.trail_giveback_pct") ? c.getDouble("exits.trail_giveback_pct") : 0,
                 c.has("exits.profit_lock_arm_pct") ? c.getDouble("exits.profit_lock_arm_pct") : 0,
                 c.has("exits.profit_lock_floor_pct") ? c.getDouble("exits.profit_lock_floor_pct") : 0,
-                c.has("entry.time_value_max_range_ratio") ? c.getDouble("entry.time_value_max_range_ratio") : 0);
+                c.has("entry.time_value_max_range_ratio") ? c.getDouble("entry.time_value_max_range_ratio") : 0,
+                c.has("scope.dte_max") ? c.getInt("scope.dte_max") : c.getInt("scope.dte"), c.strategy(),
+                c.has("scope.skip_other_expiry_day") && c.getBoolean("scope.skip_other_expiry_day"));
     }
 
     @SuppressWarnings("unchecked")

@@ -6,21 +6,21 @@ import com.autotrade.config.ThresholdConfig;
 import com.autotrade.strategy.Strategy;
 import com.autotrade.strategy.StrategyFactory;
 
-/** Builds expiry-trend-rider instances from a versioned strategy file. */
+/** Builds expiry-trend-rider (and A-227's trend-rider) instances from a versioned strategy file. */
 public final class ExpiryTrendRiderFactory implements StrategyFactory {
 
     private final ExpiryTrendRiderConfig config;
 
     public ExpiryTrendRiderFactory(ThresholdConfig config) {
-        if (!ExpiryTrendRider.ID.equals(config.strategy())) {
-            throw new IllegalArgumentException("not an expiry-trend-rider file: " + config.sourceName());
+        if (!ExpiryTrendRider.ID.equals(config.strategy()) && !ExpiryTrendRider.NX_ID.equals(config.strategy())) {
+            throw new IllegalArgumentException("not an expiry-trend-rider / trend-rider file: " + config.sourceName());
         }
         this.config = ExpiryTrendRiderConfig.from(config);
     }
 
     @Override
     public String id() {
-        return ExpiryTrendRider.ID;
+        return config.id();
     }
 
     @Override

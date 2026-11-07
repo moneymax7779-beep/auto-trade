@@ -74,5 +74,7 @@ public record OptionsFeatures(
          */
         double atmBandNet3m,
         double atmBandNet5m,
-        double atmBandNet10m) {
+        double atmBandNet10m,
+        /** A-257: atmBandShare over the last 2 minutes (same band and definition). */
+        double atmBandShare2m) {
 }

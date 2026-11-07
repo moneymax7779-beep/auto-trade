@@ -1,0 +1,36 @@
+# Trend rider on the non-expiring index, v1 (ledger A-227; from the 25 Oct 2026 chart anatomy of the 27 tick days,
+# docs/studies/2026-10-25-chart-anatomy-plan.md). The expiry trend rider's rules (etr-v1, A-029), unchanged, applied to
+# the index that does NOT expire today: 1 to 5 trading days to expiry, the nearest weekly ATM option. The live set has
+# no strategy for a non-expiry mid-session trend (21 Oct 2026 -2 % untraded; 8 Oct NIFTY -380; 1 Oct NIFTY after 12:24);
+# every price-only candidate failed on two years of bars (A-173, A-064, A-081). etr's inputs are flow (breadth, futures
+# OI state, ATM IV rising) plus a new day extreme beyond the opening range, a different kind of input from those.
+# Half of etr's size (its 0DTE gamma is absent here) and one add, so it crowds etr less on expiry afternoons (A-217).
+# Designed from the tick days (reported, not judged); the 2026 bar days with breadth are the out-of-sample read.
+# Every value is etr-v1's or a round number fixed at registration, not tuned.
+version: trr-v1
+strategy: trend-rider
+status: UNCALIBRATED
+source: "chart-anatomy-2026-10-25 (A-227; etr-v1 rules on the non-expiring index, values fixed at registration)"
+
+scope:
+  dte: 1                               # the index that does not expire today ...
+  dte_max: 5                           # ... up to a week out (inclusive); dte 0 stays with expiry-trend-rider
+  entry_from: "11:00"                  # as etr-v1: new entries and adds from ...
+  last_new_entry: "14:30"              # ... until (exclusive)
+  flat_by: "15:15"                     # whole position closed
+
+trend:
+  breadth_min: 50                      # weighted mover breadth <= -50 for puts, >= +50 for calls
+  reject_futures_states:               # futures OI must not oppose the move
+    PE: [FRESH_LONG, SHORT_COVERING]
+    CE: [FRESH_SHORT, LONG_UNWIND]
+  iv_change_3m_min: 0                  # ATM IV rising over 3 minutes (> 0)
+
+position:
+  premium_budget: 250000               # half of etr-v1: the full plan (entry + add) at the entry ask
+  intended_lots: 2                     # 1 plan lot per entry or add (about Rs 1,25,000 each)
+  max_adds: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 40                 # resting emergency stop; the swing exit comes first (as etr-v1)

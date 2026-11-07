@@ -2,6 +2,7 @@ com.autotrade.strategy.egb.ExpiryGammaProvider
 com.autotrade.strategy.egb.ExpiryBreakoutStraddleProvider
 com.autotrade.strategy.egb.OpeningDriveProvider
 com.autotrade.strategy.egb.ExpiryTrendRiderProvider
+com.autotrade.strategy.egb.TrendRiderProvider
 com.autotrade.strategy.egb.TrendPullbackScalperProvider
 com.autotrade.strategy.egb.SetupProviders$OpeningReclaimProvider
 com.autotrade.strategy.egb.SetupProviders$BreakRetestProvider
@@ -22,3 +23,16 @@ com.autotrade.strategy.egb.SetupProviders$AtmOiBurstProvider
 com.autotrade.strategy.egb.SetupProviders$MarketPhaseSqueezeProvider
 com.autotrade.strategy.egb.SetupProviders$MarketPhaseExpansionProvider
 com.autotrade.strategy.egb.SetupProviders$MarketPhaseAvalancheProvider
+com.autotrade.strategy.egb.SetupProviders$PlaybookSqueezeProvider
+com.autotrade.strategy.egb.SetupProviders$PlaybookSqueezeRunnerProvider
+com.autotrade.strategy.egb.SetupProviders$PlaybookAvalancheProvider
+com.autotrade.strategy.egb.SetupProviders$PlaybookAvalancheRunnerProvider
+com.autotrade.strategy.egb.SetupProviders$PlaybookVwapProvider
+com.autotrade.strategy.egb.SetupProviders$PlaybookVwapRunnerProvider
+com.autotrade.strategy.egb.SetupProviders$PlaybookBoxProvider
+com.autotrade.strategy.egb.SetupProviders$PlaybookMacSqueezeProvider
+com.autotrade.strategy.egb.SetupProviders$PlaybookMacSqueezeRunnerProvider
+com.autotrade.strategy.egb.SetupProviders$PlaybookOrlRetestProvider
+com.autotrade.strategy.egb.SetupProviders$PlaybookStandAsideProbeProvider
+com.autotrade.strategy.egb.SetupProviders$OiBurstCrossProvider
+com.autotrade.strategy.egb.SetupProviders$OiBurstAlldayProvider

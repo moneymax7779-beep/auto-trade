@@ -1,0 +1,32 @@
+# "All-weather" matrix (A-246; user 2026-10-27: "I want to test these strategies with replay on tick days"). Rules in
+# Playbook.java and the ledger, fixed before the replay. Low-momentum stand-aside: a probe that never trades and records the 10:15 flags.
+version: pbp-v1
+strategy: playbook-stand-aside-probe
+status: UNCALIBRATED
+source: "user-request-2026-10-27 (all-weather matrix; ledger A-246)"
+
+scope:
+  entry_from: "09:15"
+  last_new_entry: "09:16"              # exclusive; flat 15:15
+  flat_by: "15:15"
+  time_stop_min: 0                     # no time-out in the matrix
+  skip_expiring_index: false
+
+setup:
+  kind: PROBE
+  role: FULL
+  candle_min_nifty: 3                  # NIFTY 3-minute candles
+  candle_min_sensex: 5                 # SENSEX 5-minute candles
+  buffer_points_nifty: 5               # "5 points"
+  buffer_points_sensex: 15             # the same distance in % at SENSEX's level
+  gap_from: "15:15"                    # no mid-day gap (the window is the entry window above)
+  gap_until: "15:15"
+  max_trades_per_day: 0                # per index
+
+position:
+  premium_budget: 1
+  intended_lots: 1
+  strike_offset: 0
+
+exits:
+  premium_stop_pct: 50                 # emergency only; the stops are on the index

@@ -1,0 +1,36 @@
+# "All-weather" matrix (A-246; user 2026-10-27: "I want to test these strategies with replay on tick days"). Rules in
+# Playbook.java and the ledger, fixed before the replay. MAC Squeeze, the 50 % runner (stop to entry after 1R, 5-minute-low trail).
+version: pbmr-v1
+strategy: playbook-mac-squeeze-runner
+status: UNCALIBRATED
+source: "user-request-2026-10-27 (all-weather matrix; ledger A-246)"
+
+scope:
+  entry_from: "11:30"
+  last_new_entry: "13:40"              # exclusive; flat 15:15
+  flat_by: "15:15"
+  time_stop_min: 0                     # no time-out in the matrix
+  skip_expiring_index: false
+
+setup:
+  kind: MAC_SQUEEZE
+  role: RUNNER
+  candle_min_nifty: 3                  # NIFTY 3-minute candles
+  candle_min_sensex: 5                 # SENSEX 5-minute candles
+  buffer_points_nifty: 5               # "5 points"
+  buffer_points_sensex: 15             # the same distance in % at SENSEX's level
+  gap_from: "15:15"                    # no mid-day gap (the window is the entry window above)
+  gap_until: "15:15"
+  max_trades_per_day: 2                # per index
+  box_candles_nifty: 15                # 45 minutes
+  box_candles_sensex: 9                # 45 minutes
+  box_max_atr_nifty: 2.09              # 10th percentile of the 45-min box width, NIFTY bars 23 Jan-31 Aug (A-244 method)
+  box_max_atr_sensex: 1.64             # the same for SENSEX 9 x 5-min candles
+
+position:
+  premium_budget: 125000
+  intended_lots: 1
+  strike_offset: 0
+
+exits:
+  premium_stop_pct: 50                 # emergency only; the stops are on the index
