@@ -35,6 +35,18 @@ import com.autotrade.strategy.Strategy;
  * {@code signal.no_flip_after_loss_min}; {@code exits.wall_recross_exit}: once the index crosses the wall strike recorded
  * at entry, a 3-minute close back through it exits (WALL_LOST); {@code exits.time_stop_min: 0} turns the no-progress
  * exit off.
+ * <p>
+ * A-328 (each off when absent): {@code signal.max_vwap_dist_atr} skips an entry further than that from VWAP on the trade's
+ * side; {@code signal.min_wall_dist_atr} skips an entry whose wall is closer than that to the index;
+ * {@code signal.max_trades_per_day} caps the filled entries of the day.
+ * <p>
+ * A-329 (each off when absent): {@code signal.reentry_after_win_until}: after a winning trade today (its last bid above
+ * its average premium) no new entry from that time; {@code signal.max_entry_iv}: no entry when the ATM IV of the trade's
+ * side is at or above it.
+ * <p>
+ * A-339..A-341 (each off when absent): {@code signal.require_wall_oi_drop: false} drops the wall-OI condition (the index only
+ * has to move toward the wall: the no-OI baseline); {@code signal.require_vwap_side: false} drops the VWAP-side condition;
+ * {@code signal.max_straddle_atr} skips an entry when the ATM straddle is more than that many ATR(3m).
  */
 final class WallBreakRider implements Strategy {
 
@@ -55,7 +67,9 @@ final class WallBreakRider implements Strategy {
     private Instant blockedUntil;
     private double entryWall = Double.NaN;
     private boolean wallCrossed;
-    private double barAtCross = Double.NaN;    // the last 3-minute close when the wall was crossed (bar from before it)
+    private double barAtCross = Double.NaN;
+    private int tradesToday;    // the last 3-minute close when the wall was crossed (bar from before it)
+    private boolean wonToday;
 
     WallBreakRider(WallBreakRiderConfig config) {
         this.config = config;
@@ -76,7 +90,8 @@ final class WallBreakRider implements Strategy {
         Instant now = snapshot.time();
         LocalTime time = now.atZone(MarketTime.IST).toLocalTime();
         StructureFeatures st = snapshot.structure();
-        boolean expiryDay = snapshot.regime().dteTradingDays() == config.dte();
+        // A-338: scope.dte -1 = every day (the nearest expiry's walls and options); otherwise only on that DTE
+        boolean expiryDay = config.dte() < 0 || snapshot.regime().dteTradingDays() == config.dte();
         boolean continuous = SessionPhase.valueOf(snapshot.phase()).isContinuous();
         boolean window = expiryDay && continuous && !time.isBefore(config.entryFrom()) && time.isBefore(config.lastNewEntry());
         double priorMove = priorMove(snapshot);
@@ -97,6 +112,15 @@ final class WallBreakRider implements Strategy {
                 blockedUntil = now.plus(Duration.ofMinutes(config.noFlipAfterLossMin()));
                 conditions.put(blockedSide, conditions(blockedSide, snapshot, expiryDay, window, priorMove, now));
             }
+            if (config.reentryAfterWinUntil() != null && heldSide != null && lastBid > lastAverage) {
+                wonToday = true;
+                for (OptionSide side : OptionSide.values()) {
+                    conditions.put(side, conditions(side, snapshot, expiryDay, window, priorMove, now));
+                }
+            }
+        }
+        if (!wasOpen && position.open()) {
+            tradesToday++;                                   // a filled entry (one strategy instance per session)
         }
         wasOpen = position.open();
         if (position.open()) {
@@ -193,6 +217,9 @@ final class WallBreakRider implements Strategy {
         if (Double.isNaN(config.wallOiDropPct())) {
             return s.options().callWallWeakening();
         }
+        if (!config.requireWallOiDrop()) {
+            return s.structure().spotChange3m() > 0;                    // A-339 baseline: no OI condition
+        }
         double change = s.options().callWallOiChangePct();
         return change <= -config.wallOiDropPct() && s.structure().spotChange3m() > 0;     // NaN compares false
     }
@@ -200,6 +227,9 @@ final class WallBreakRider implements Strategy {
     private boolean putSignal(FeatureSnapshot s) {
         if (Double.isNaN(config.wallOiDropPct())) {
             return s.options().putFloorWeakening();
+        }
+        if (!config.requireWallOiDrop()) {
+            return s.structure().spotChange3m() < 0;                    // A-339 baseline: no OI condition
         }
         double change = s.options().putFloorOiChangePct();
         return change <= -config.wallOiDropPct() && s.structure().spotChange3m() < 0;
@@ -213,7 +243,7 @@ final class WallBreakRider implements Strategy {
         c.put("window", window);
         c.put("wall_weakening", call ? ceStreak >= config.confirmMinutes() : peStreak >= config.confirmMinutes());
         double vwap = s.structure().vwapSpotProxy();
-        c.put("vwap_side", Double.isFinite(vwap) && (call ? s.spot() > vwap : s.spot() < vwap));
+        c.put("vwap_side", !config.requireVwapSide() || Double.isFinite(vwap) && (call ? s.spot() > vwap : s.spot() < vwap));
         String oi = s.futures().oiState();
         c.put("futures_oi_ok", oi == null || !config.rejectFuturesStates().get(side).contains(oi));
         boolean v3 = true;
@@ -222,6 +252,39 @@ final class WallBreakRider implements Strategy {
             boolean ok = !(priorMove * (call ? 1 : -1) > config.maxPriorMoveAtr());
             c.put("not_extended", ok);
             v3 = ok;
+        }
+        double atr = s.structure().atr3m();
+        if (!Double.isNaN(config.maxVwapDistAtr())) {
+            boolean ok = !(Double.isFinite(vwap) && atr > 0 && (s.spot() - vwap) * (call ? 1 : -1) / atr > config.maxVwapDistAtr());
+            c.put("vwap_not_stretched", ok);
+            v3 = v3 && ok;
+        }
+        if (!Double.isNaN(config.minWallDistAtr())) {
+            double wall = call ? s.options().callBarrierStrike() : s.options().putSupportStrike();
+            boolean ok = !(Double.isFinite(wall) && atr > 0 && (wall - s.spot()) * (call ? 1 : -1) / atr < config.minWallDistAtr());
+            c.put("wall_room", ok);
+            v3 = v3 && ok;
+        }
+        if (config.maxTradesPerDay() > 0) {
+            boolean ok = tradesToday < config.maxTradesPerDay();
+            c.put("trades_left", ok);
+            v3 = v3 && ok;
+        }
+        if (config.reentryAfterWinUntil() != null) {
+            boolean ok = !wonToday || now.atZone(MarketTime.IST).toLocalTime().isBefore(config.reentryAfterWinUntil());
+            c.put("no_late_reentry_after_win", ok);
+            v3 = v3 && ok;
+        }
+        if (!Double.isNaN(config.maxEntryIv())) {
+            double iv = call ? s.options().atmCeIv() : s.options().atmPeIv();
+            boolean ok = !(iv >= config.maxEntryIv());                // NaN (no quote yet) does not block
+            c.put("iv_ok", ok);
+            v3 = v3 && ok;
+        }
+        if (!Double.isNaN(config.maxStraddleAtr())) {
+            boolean ok = !(atr > 0 && s.options().straddle() / atr > config.maxStraddleAtr());   // NaN (no quote yet) does not block
+            c.put("straddle_ok", ok);
+            v3 = v3 && ok;
         }
         if (config.noFlipAfterLossMin() > 0) {
             boolean ok = blockedSide != side || blockedUntil == null || !now.isBefore(blockedUntil);
