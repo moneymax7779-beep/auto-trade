@@ -142,7 +142,7 @@ class KiteLoginIT {
         assertThat(login.callback("req-2", "success", state).ok()).as("a state is single-use").isFalse();
 
         // the worker's reads find the day's session (key from the secret store, token from the file); none elsewhere
-        KiteSessionSource sessions = new KiteSessionSource(dataSource, props);
+        KiteSessionSource sessions = new KiteSessionSource(dataSource, props, new BrokerLoginProperties(null, null, null, null, null));
         AccountStore store = new AccountStore(dataSource);
         assertThat(sessions.access(store.byId(account).orElseThrow())).hasValueSatisfying(a -> {
             assertThat(a.apiKey()).isEqualTo("sim-api-key");
