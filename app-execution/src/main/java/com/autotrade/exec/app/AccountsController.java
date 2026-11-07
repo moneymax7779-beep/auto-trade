@@ -99,6 +99,9 @@ class AccountsController {
                 a.displayName() + " is linked to a Kite app: log in with Kite (its session is set by the login, not by hand)");
         accounts.setConnectionStatus(a.id(), status);
         kills.audit(a, user.subject(), "SESSION_" + status, Map.of());
+        if (status.equals("DISCONNECTED")) {
+            new com.autotrade.execution.TradingDay(jdbc.getDataSource()).sessionLost(a, user.subject());
+        }
         return Map.of("account", a.displayName(), "connection", status);
     }
 

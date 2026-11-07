@@ -124,7 +124,7 @@ class UpstoxLogin {
                     expires, detail);
             return new KiteLogin.Result(true, account.displayName(), "Logged in as Upstox client " + user + ", " + funds
                     + ". Session valid until 03:30 IST.");
-        } catch (BrokerHttp.Failure | IllegalArgumentException | IllegalStateException e) {
+        } catch (RuntimeException e) {         // never a 500: the page says why (code review 7 Nov 2026)
             sessions.failed(account, app, p.subject(), e.getMessage());
             return new KiteLogin.Result(false, account.displayName(), "The login could not be completed: " + e.getMessage());
         }

@@ -111,8 +111,8 @@ class WorkspaceController {
         dailySwitch(tenant);
         BrokerAccount chosen = body.accountId() == null ? null : choosable(tenant, body.accountId());
         TradingDay.State before = tx.execute(t -> {
-            lock(tenant);
-            TradingDay.State now = tradingDay.state(tenant, Instant.now());
+            tradingDay.lock(tenant);
+            TradingDay.State now = tradingDay.stateNow(tenant);
             Long id = chosen == null ? null : chosen.id();
             if (java.util.Objects.equals(now.brokerAccountId(), id)) {
                 return now;                                         // already the day's broker: its mode is kept
@@ -153,13 +153,15 @@ class WorkspaceController {
         if (wanted == TradingDay.Mode.PAPER) {
             Access.require(user.emergency(tenant), "read-only role in this workspace");
         } else {
-            Access.require(user.mayAct(tenant), user.support(tenant)
-                    ? "SUPPORT needs the member's grant to switch LIVE" : "read-only role in this workspace");
+            // real money: the workspace's OWNER (or SUPPORT with their grant), as every other money setting (code review
+            // 7 Nov 2026: not a TRADER)
+            Access.require(user.manages(tenant), user.support(tenant)
+                    ? "SUPPORT needs the member's grant to switch LIVE" : "only the workspace's OWNER switches LIVE");
             require("LIVE".equals(body.confirm()), "type LIVE to confirm: real orders go to the broker from the next signal");
         }
         String refused = tx.execute(t -> {
-            lock(tenant);
-            TradingDay.State now = tradingDay.state(tenant, Instant.now());
+            tradingDay.lock(tenant);
+            TradingDay.State now = tradingDay.stateNow(tenant);
             if (now.mode() == wanted) {
                 return null;                                         // already so: nothing to record
             }
@@ -176,7 +178,7 @@ class WorkspaceController {
             throw new ResponseStatusException(HttpStatus.CONFLICT, refused);
         }
         if (refused != null) {
-            TradingDay.State now = tradingDay.state(tenant, Instant.now());
+            TradingDay.State now = tradingDay.stateNow(tenant);
             BrokerAccount a = accounts.byId(now.brokerAccountId()).orElseThrow();
             kills.audit(a, user.subject(), "MODE_" + wanted, detail("since", String.valueOf(now.since())));
             String text = a.displayName() + " is " + wanted + " from " + HHMM.format(Instant.now().atZone(IST)) + " IST (by "
@@ -309,10 +311,10 @@ class WorkspaceController {
             detail.put("strategies", new TreeSet<>(risk.live().strategies()));
         } else {
             int changed = tx.execute(t -> {
-                lock(a.tenantId());
+                tradingDay.lock(a.tenantId());
                 int n = jdbc.update("update acct.broker_account set trade_mode = 'PAPER', live_trading_enabled = false, "
                         + "updated_at = now() where id = ? and live_trading_enabled" + NO_EXPOSURE, id);
-                TradingDay.State now = tradingDay.state(a.tenantId(), Instant.now());
+                TradingDay.State now = tradingDay.stateNow(a.tenantId());
                 if (n == 1 && now.mode() == TradingDay.Mode.LIVE && Long.valueOf(id).equals(now.brokerAccountId())) {
                     tradingDay.append(a.tenantId(), id, TradingDay.Mode.PAPER, "NOT_ELIGIBLE", user.id());
                 }
@@ -435,10 +437,12 @@ class WorkspaceController {
         loss.put("reached", tradingDay.dailyLossReached(tenant, today));
         out.put("lossLimit", loss);
         out.put("killSwitches", jdbc.queryForList("select id, scope, broker_account_id, coalesce(strategy_id, instrument_key) "
-                + "what, reason, engaged_by, engaged_at::text engaged_at from exec.kill_switch where released_at is null "
+                + "what, reason, engaged_by, " + Iso.of("engaged_at") + " engaged_at from exec.kill_switch "
+                + "where released_at is null "
                 + "and (tenant_id = ? or scope = 'GLOBAL_LIVE') order by engaged_at", tenant));
         out.put("support", jdbc.queryForList("select g.id, u.external_subject granted_to, g.break_glass, g.reason, "
-                + "g.granted_at::text granted_at, g.expires_at::text expires_at from acct.support_grant g join acct.app_user u "
+                + Iso.of("g.granted_at") + " granted_at, " + Iso.of("g.expires_at") + " expires_at from acct.support_grant g "
+                + "join acct.app_user u "
                 + "on u.id = g.granted_to where g.tenant_id = ? and g.revoked_at is null and g.expires_at > now() "
                 + "order by g.id", tenant));
         out.put("pending", jdbc.queryForList("select a.id, a.display_name name, case when a.credential_profile_id is null "
@@ -504,11 +508,6 @@ class WorkspaceController {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "this workspace trades each account in its own mode "
                     + "(no daily broker switch)");
         }
-    }
-
-    /** One switch at a time per workspace: the tenant row is locked for the transaction. */
-    private void lock(long tenant) {
-        jdbc.queryForObject("select id from acct.tenant where id = ? for update", Long.class, tenant);
     }
 
     /** A broker the workspace can choose: its own enabled follower, a real broker account or a paper-only one, not a twin. */

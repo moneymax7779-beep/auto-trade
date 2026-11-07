@@ -19,7 +19,7 @@ import org.springframework.web.server.ResponseStatusException;
  * <p>
  * <b>SUPPORT</b> (trader workspaces, 7 Nov 2026, V29): the platform admin in a family member's workspace. Without a grant
  * they see it and may stop trouble at once (engage a kill switch, flatten, exit a position: {@link User#emergency}); with
- * an active grant from the member ({@code acct.support_grant}), or in a workspace that has no active OWNER (a viewer-only
+ * an active grant from the member ({@code acct.support_grant}), or in a workspace that has no OWNER at all (a viewer-only
  * workspace nobody else could run), they act and manage like an OWNER.
  * <p>
  * The user is the {@code X-Autotrade-User} header (the Keycloak subject). Until Keycloak is in front (L3) this is not
@@ -103,10 +103,11 @@ class Access {
         if (roles.containsValue("SUPPORT")) {
             granted = Set.copyOf(jdbc.queryForList("select distinct g.tenant_id from acct.support_grant g "
                     + "where g.granted_to = ? and g.revoked_at is null and g.expires_at > now()", Long.class, id));
+            // no OWNER membership at all (code review 7 Nov 2026: a disabled OWNER still owns it, so disabling a member is
+            // never a way for SUPPORT to run their workspace without a grant)
             ownerless = Set.copyOf(jdbc.queryForList("select m.tenant_id from acct.tenant_membership m where m.app_user_id = ? "
-                    + "and m.role = 'SUPPORT' and not exists (select 1 from acct.tenant_membership o join acct.app_user u "
-                    + "on u.id = o.app_user_id where o.tenant_id = m.tenant_id and o.role = 'OWNER' and u.status = 'ACTIVE')",
-                    Long.class, id));
+                    + "and m.role = 'SUPPORT' and not exists (select 1 from acct.tenant_membership o where o.tenant_id = "
+                    + "m.tenant_id and o.role = 'OWNER')", Long.class, id));
         }
         // the first sign-in accepts a pending invite; last seen at most every 5 minutes (a write per page, not per call)
         if (jdbc.update("update acct.app_user set last_seen_at = now() where id = ? and (last_seen_at is null "

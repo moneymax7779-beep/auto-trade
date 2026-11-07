@@ -148,6 +148,14 @@ class TelegramNotifier {
             if (updates == null) {
                 return out;
             }
+            if (updates.path("result").size() >= 100) {
+                // the oldest 100 are returned first: with a full queue a new code would never be seen; the newest 100
+                // instead (Telegram then forgets the older ones, of no use to a bot that only sends; code review 7 Nov 2026)
+                JsonNode newest = get(token, "getUpdates?offset=-100&allowed_updates=%5B%22message%22%5D");
+                if (newest != null) {
+                    updates = newest;
+                }
+            }
             for (JsonNode u : updates.path("result")) {
                 JsonNode message = u.path("message");
                 String text = message.path("text").asString("");

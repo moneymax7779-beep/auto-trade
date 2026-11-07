@@ -506,7 +506,7 @@ public final class FollowerSimulator {
             return null;
         }
         if (!add || venue.live()) {
-            Long target = tradingDay.entryTarget(day.account.tenantId(), clock.instant());
+            Long target = tradingDay.entryTargetNow(day.account.tenantId());          // the database's clock
             if (!Long.valueOf(day.account.id()).equals(target)) {
                 return "TARGET_CHANGED: the day's broker or PAPER/LIVE switch changed: this account no longer takes "
                         + (add ? "adds" : "entries");

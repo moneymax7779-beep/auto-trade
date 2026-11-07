@@ -327,6 +327,28 @@ class WorkspaceIT {
         assertThat(members.me("eve")).containsEntry("telegramLinked", true);
     }
 
+    /** Code review 7 Nov 2026: LIVE is the OWNER's; disabling the OWNER never hands their workspace to SUPPORT. */
+    @Test
+    void onlyTheOwnerSwitchesLiveAndADisabledOwnerStillOwnsTheWorkspace() {
+        long hina = member("hina", "OWNER");
+        long account = account("hina", hina, "Kite", "ZERODHA", "KL1234");
+        loggedIn(hina, account);
+        workspaces.liveEligible("satya", account, new WorkspaceController.Eligible(true, "Kite"));
+        AccountStore accounts = new AccountStore(dataSource);
+        accounts.ensureMembership(hina, accounts.ensureUser("hina-trader", "t"), "TRADER");
+        assertThat(code(() -> workspaces.mode("hina-trader", hina, new WorkspaceController.Mode("LIVE", "LIVE"))))
+                .as("a TRADER does not switch real money LIVE").isEqualTo(403);
+        assertThat(code(() -> workspaces.broker("hina-trader", hina, new WorkspaceController.Broker(account)))).isEqualTo(200);
+        workspaces.mode("hina", hina, new WorkspaceController.Mode("LIVE", "LIVE"));
+        // disabled: her LIVE day goes back to PAPER, and SUPPORT still needs a grant
+        members.status("satya", "hina", new MembersController.Status("DISABLED"));
+        assertThat(state("satya", hina)).containsEntry("mode", "PAPER");
+        assertThat(code(() -> workspaces.mode("satya", hina, new WorkspaceController.Mode("LIVE", "LIVE")))).isEqualTo(403);
+        assertThat(code(() -> admin.settings("satya", account, new AccountAdminController.Settings(100_000.0, null, null,
+                null, null, null, null, null)))).isEqualTo(403);
+        members.status("satya", "hina", new MembersController.Status("ACTIVE"));
+    }
+
     @Test
     void twoWorkspacesMayNameTheirAccountsAlike() {
         long f1 = member("farah", "OWNER"), f2 = member("gita", "OWNER");

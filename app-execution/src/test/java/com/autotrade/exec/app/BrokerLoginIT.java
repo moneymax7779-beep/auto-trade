@@ -257,6 +257,33 @@ class BrokerLoginIT {
         assertThat(code(() -> logins.logout("pia", acc))).as("another workspace's account").isEqualTo(404);
     }
 
+    /** Code review 7 Nov 2026: a session or app an open position depends on is never taken away. */
+    @Test
+    void anAccountHoldingAPositionKeepsItsSessionAndItsApp() {
+        long t = member("qadir");
+        long id = app("qadir", t, "UPSTOX", "Q app");
+        apps.keys("qadir", id, new BrokerAppController.Keys("q-key-12345", "q-secret-1", null));
+        long acc = account("qadir", t, "Upstox", "UPSTOX", "7AB12C");
+        apps.link("qadir", acc, new BrokerAppController.Link(id));
+        long batch = jdbc.queryForObject("insert into exec.trade_batch (tenant_id, source, idempotency_key, status) values "
+                + "(?, 'MANUAL', 'q1', 'DONE') returning id", Long.class, t);
+        long intent = jdbc.queryForObject("insert into exec.trade_intent (tenant_id, trade_batch_id, broker_account_id, "
+                + "broker_type, execution_mode, strategy_id, priority, underlying, action, option_side, state, "
+                + "idempotency_key) values (?, ?, ?, 'UPSTOX', 'LIVE', 'ma-cross', 1, 'NIFTY', 'ENTER', 'CE', 'EXECUTED', "
+                + "'q1') returning id", Long.class, t, batch, acc);
+        jdbc.update("insert into exec.position (tenant_id, broker_account_id, entry_trade_intent_id, strategy_id, underlying, "
+                + "option_side, instrument_token, symbol, quantity_open, average_entry, opened_at, status) values "
+                + "(?, ?, ?, 'ma-cross', 'NIFTY', 'CE', 77, 'NIFTY 23000 CE', 65, 100, now(), 'OPEN')", t, acc, intent);
+        assertThat(code(() -> logins.logout("qadir", acc))).isEqualTo(409);
+        assertThat(code(() -> apps.status("qadir", id, new BrokerAppController.Status(false)))).isEqualTo(409);
+        assertThat(code(() -> apps.keys("qadir", id, new BrokerAppController.Keys("q-key-99999", "q-secret-2", null))))
+                .isEqualTo(409);
+        assertThat(code(() -> logins.logout("satya", acc))).as("SUPPORT without a grant").isEqualTo(403);
+        jdbc.update("update exec.position set status = 'CLOSED', quantity_open = 0, closed_at = now() where broker_account_id = ?",
+                acc);
+        assertThat(code(() -> logins.logout("qadir", acc))).isEqualTo(200);
+    }
+
     @Test
     void kotakPassesTheCodesThroughAndTrustsOnlyItsOwnBaseUrl() {
         long t = member("neha");

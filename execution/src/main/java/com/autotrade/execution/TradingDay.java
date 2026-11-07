@@ -11,6 +11,8 @@ import java.util.Map;
 import javax.sql.DataSource;
 
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.datasource.DataSourceTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import com.autotrade.account.BrokerAccount;
 import com.autotrade.account.BrokerType;
@@ -46,11 +48,21 @@ public final class TradingDay {
             + "'CANCEL_PENDING', 'UNKNOWN', 'RECONCILIATION_REQUIRED')";
 
     private final JdbcTemplate jdbc;
+    private final TransactionTemplate tx;
     private final KillSwitches audit;
 
     public TradingDay(DataSource dataSource) {
         this.jdbc = new JdbcTemplate(dataSource);
+        this.tx = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
         this.audit = new KillSwitches(dataSource);
+    }
+
+    /**
+     * Locks the workspace's row for the current transaction: every change of its day (a person's switch, the worker's
+     * session-lost fallback) runs one at a time, each reading the state the previous one left (code review 7 Nov 2026).
+     */
+    public void lock(long tenantId) {
+        jdbc.queryForObject("select id from acct.tenant where id = ? for update", Long.class, tenantId);
     }
 
     public boolean dailySwitch(long tenantId) {
@@ -70,6 +82,24 @@ public final class TradingDay {
     /** The account an entry decided at {@code at} goes to; null when none (Off, or nothing chosen). */
     public Long entryTarget(long tenantId, Instant at) {
         return jdbc.queryForObject("select acct.entry_target(?, ?)", Long.class, tenantId, Timestamp.from(at));
+    }
+
+    /**
+     * The entry target now by the database's clock, the clock the day's events are stamped with (code review 7 Nov 2026:
+     * a JVM clock behind the database's would not yet see a switch just made).
+     */
+    public Long entryTargetNow(long tenantId) {
+        return jdbc.queryForObject("select acct.entry_target(?, now())", Long.class, tenantId);
+    }
+
+    /** The state now by the database's clock. */
+    public State stateNow(long tenantId) {
+        return jdbc.query("select broker_account_id, mode, since from acct.trading_state(?, now())", (rs, i) -> {
+            long id = rs.getLong(1);
+            Long account = rs.wasNull() ? null : id;
+            Timestamp since = rs.getTimestamp(3);
+            return new State(account, Mode.valueOf(rs.getString(2)), since == null ? null : since.toInstant());
+        }, tenantId).stream().findFirst().orElse(new State(null, Mode.PAPER, null));
     }
 
     /** Appends one event (a person's choice or switch, or the system's); returns its id. */
@@ -118,29 +148,67 @@ public final class TradingDay {
         if (account.brokerType() == BrokerType.PAPER || !dailySwitch(account.tenantId())) {
             return;
         }
-        State now = state(account.tenantId(), Instant.now());
-        if (now.mode() == Mode.LIVE && Long.valueOf(account.id()).equals(now.brokerAccountId())) {
-            append(account.tenantId(), account.id(), Mode.PAPER, "SESSION_LOST", null);
-            audit.audit(account, actor, "MODE_PAPER_SESSION_LOST", Map.of("since", String.valueOf(now.since())));
+        // under the workspace's lock, read again: a LIVE switch committing meanwhile is seen (and sent back to PAPER), and
+        // a broker change made meanwhile is never undone (code review 7 Nov 2026)
+        State before = tx.execute(t -> {
+            lock(account.tenantId());
+            State now = stateNow(account.tenantId());
+            if (now.mode() == Mode.LIVE && Long.valueOf(account.id()).equals(now.brokerAccountId())) {
+                append(account.tenantId(), account.id(), Mode.PAPER, "SESSION_LOST", null);
+                return now;
+            }
+            return null;
+        });
+        if (before != null) {
+            audit.audit(account, actor, "MODE_PAPER_SESSION_LOST", Map.of("since", String.valueOf(before.since())));
         }
     }
 
     /**
+     * A person was disabled: every DAILY_SWITCH workspace of theirs that is LIVE now goes back to PAPER (they can no longer
+     * sign in to stop it). Returns the workspaces changed.
+     */
+    public List<Long> personDisabled(long appUserId, String actor) {
+        List<Long> changed = new java.util.ArrayList<>();
+        for (long tenant : jdbc.queryForList("select m.tenant_id from acct.tenant_membership m join acct.tenant t on "
+                + "t.id = m.tenant_id where m.app_user_id = ? and t.trading_control = 'DAILY_SWITCH' and m.role in "
+                + "('OWNER', 'TRADER')", Long.class, appUserId)) {
+            Boolean live = tx.execute(t -> {
+                lock(tenant);
+                State now = stateNow(tenant);
+                if (now.mode() == Mode.LIVE) {
+                    append(tenant, now.brokerAccountId(), Mode.PAPER, "MEMBER_DISABLED", null);
+                    return true;
+                }
+                return false;
+            });
+            if (Boolean.TRUE.equals(live)) {
+                audit.audit(tenant, null, actor, "MODE_PAPER_MEMBER_DISABLED", Map.of("appUser", appUserId));
+                changed.add(tenant);
+            }
+        }
+        return changed;
+    }
+
+    /**
      * A real broker account of a DAILY_SWITCH workspace with nothing to do: not today's entry target now, no position
-     * that is not closed, no order working at its broker, no entry or add still pending. The worker leaves it alone.
+     * that is not closed, no order working at its broker (of the last day), no entry still pending today. The worker
+     * leaves it alone. Adds do not count (code review 7 Nov 2026: every add is fanned out to every subscribed account, a
+     * LIVE-eligible one in LIVE mode, and an add needs an open position, which is counted already).
      */
     public boolean idle(BrokerAccount account) {
         if (account.brokerType() == BrokerType.PAPER || !dailySwitch(account.tenantId())) {
             return false;
         }
-        if (Long.valueOf(account.id()).equals(entryTarget(account.tenantId(), Instant.now()))) {
+        if (Long.valueOf(account.id()).equals(entryTargetNow(account.tenantId()))) {
             return false;
         }
         return Boolean.TRUE.equals(jdbc.queryForObject("select not exists (select 1 from exec.position where "
                 + "broker_account_id = ? and status <> 'CLOSED') and not exists (select 1 from exec.order_execution where "
-                + "broker_account_id = ? and status in " + WORKING_ORDER_STATES + ") and not exists (select 1 from "
-                + "exec.trade_intent where broker_account_id = ? and action in ('ENTER', 'ADD') and state in "
-                + "('CREATED', 'VALIDATED', 'EXECUTING', 'RECONCILIATION_REQUIRED') and execution_mode = 'LIVE')",
+                + "broker_account_id = ? and status in " + WORKING_ORDER_STATES + " and created_at > now() - interval "
+                + "'1 day') and not exists (select 1 from exec.trade_intent where broker_account_id = ? and action = 'ENTER' "
+                + "and state in ('CREATED', 'VALIDATED', 'EXECUTING', 'RECONCILIATION_REQUIRED') and execution_mode = 'LIVE' "
+                + "and (created_at at time zone 'Asia/Kolkata')::date = (now() at time zone 'Asia/Kolkata')::date)",
                 Boolean.class, account.id(), account.id(), account.id()));
     }
 

@@ -246,7 +246,9 @@ class AccountAdminController {
                                @RequestBody NewAccount body) {
         Access.User user = access.user(subject);
         long tenant = body.tenantId() != null ? body.tenantId() : user.tenants().size() == 1 ? user.tenants().getFirst() : -1;
-        Access.require(tenant > 0 && user.manages(tenant), "only an OWNER or ADMIN of the tenant may create accounts");
+        Access.require(tenant > 0 && user.manages(tenant), tenant > 0 && user.support(tenant)
+                ? "SUPPORT needs the member's grant (their Settings page) to add accounts"
+                : "only an OWNER or ADMIN of the tenant may create accounts");
         String name = trimmed(body.name());
         require(name != null && NAME.matcher(name).matches(), "name: 2-40 letters, digits, space, _ or -");
         BrokerType broker = parse(BrokerType.class, body.broker(), "broker");
@@ -333,7 +335,9 @@ class AccountAdminController {
                                  @PathVariable long id, @RequestBody Settings body) {
         Access.User user = access.user(subject);
         BrokerAccount a = visible(user, id);
-        Access.require(user.manages(a.tenantId()), "only an OWNER or ADMIN may change an account's settings");
+        Access.require(user.manages(a.tenantId()), user.support(a.tenantId())
+                ? "SUPPORT needs the member's grant (their Settings page) to change settings"
+                : "only an OWNER or ADMIN may change an account's settings");
         require(a.role().name().equals("FOLLOWER_TRADE"), a.displayName() + " is not a follower account");
         require(a.paperOf() == null, a.displayName() + " is a paper twin: change its broker account, the twin follows");
         boolean daily = dailySwitch(a.tenantId());

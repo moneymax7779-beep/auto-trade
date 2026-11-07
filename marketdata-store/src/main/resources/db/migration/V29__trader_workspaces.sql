@@ -127,14 +127,17 @@ create function acct.trading_state(p_tenant bigint, p_at timestamptz)
 $$;
 
 -- Where an entry decided at p_at goes: null (Off, or nothing chosen); a PAPER-broker account itself; the real account
--- when the day is LIVE there and it can trade LIVE now (eligible, enabled, session ACTIVE); otherwise its paper twin.
+-- when the day is LIVE there and it can trade LIVE now (eligible, enabled, session ACTIVE, and the LIVE switch made
+-- during that session: a re-login after a lost session is PAPER until switched LIVE again); otherwise its paper twin.
 create function acct.entry_target(p_tenant bigint, p_at timestamptz)
     returns bigint
     language sql stable as $$
     select case when a.id is null then null
                 when a.broker_type = 'PAPER' then a.id
                 when s.mode = 'LIVE' and a.trade_mode = 'LIVE' and a.live_trading_enabled and a.enabled
-                     and a.connection_status = 'ACTIVE' then a.id
+                     and a.connection_status = 'ACTIVE'
+                     and s.since >= (select max(bs.created_at) from acct.broker_session bs
+                                     where bs.broker_account_id = a.id and bs.status = 'ACTIVE') then a.id
                 else twin.id end
     from acct.trading_state(p_tenant, p_at) s
     left join acct.broker_account a on a.id = s.broker_account_id
@@ -162,12 +165,24 @@ update acct.tenant t set default_broker_account_id = (select min(a.id) from acct
 where t.trading_control = 'DAILY_SWITCH'
   and (select count(*) from acct.broker_account a where a.tenant_id = t.id and a.account_role = 'FOLLOWER_TRADE') = 1;
 
--- A real broker follower already in a family workspace gets its paper twin now (same settings and subscriptions), so a
--- PAPER day has somewhere to trade.
+-- A real broker follower already in a family workspace starts PAPER-only: LIVE eligibility is the platform admin's new
+-- one-time check (not inherited from the old per-account switch); only when it holds nothing.
+update acct.broker_account a set trade_mode = 'PAPER', live_trading_enabled = false, updated_at = now()
+from acct.tenant t
+where t.id = a.tenant_id and t.trading_control = 'DAILY_SWITCH' and a.broker_type <> 'PAPER'
+  and a.account_role = 'FOLLOWER_TRADE' and a.trade_mode <> 'PAPER'
+  and not exists (select 1 from exec.position p where p.broker_account_id = a.id and p.status <> 'CLOSED');
+
+-- ... and gets its paper twin now (same settings and subscriptions), so a PAPER day has somewhere to trade; named
+-- "<name> paper", or "<name> paper <id>" when that name is taken in the workspace.
 insert into acct.broker_account (tenant_id, app_user_id, broker_type, display_name, account_role, connection_status,
                                  trade_mode, allocated_capital, equity_mode, equity_from, risk_file, size_step_pct,
                                  daily_loss_limit, enabled, paper_of_account_id)
-select a.tenant_id, a.app_user_id, 'PAPER', a.display_name || ' paper', 'FOLLOWER_TRADE', 'ACTIVE', 'PAPER',
+select a.tenant_id, a.app_user_id, 'PAPER',
+       case when exists (select 1 from acct.broker_account n where n.tenant_id = a.tenant_id
+                         and n.display_name = a.display_name || ' paper')
+            then a.display_name || ' paper ' || a.id else a.display_name || ' paper' end,
+       'FOLLOWER_TRADE', 'ACTIVE', 'PAPER',
        a.allocated_capital, a.equity_mode, a.equity_from, a.risk_file, a.size_step_pct, a.daily_loss_limit, a.enabled, a.id
 from acct.broker_account a join acct.tenant t on t.id = a.tenant_id
 where t.trading_control = 'DAILY_SWITCH' and a.broker_type <> 'PAPER' and a.account_role = 'FOLLOWER_TRADE'

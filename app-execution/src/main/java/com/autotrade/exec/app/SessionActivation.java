@@ -104,7 +104,31 @@ class SessionActivation {
         Map<String, Object> content = new LinkedHashMap<>(file);
         content.put("accountId", account.id());
         content.put("expiresAt", expires.toString());
-        secrets.writeToken(tokenFile, account.id(), BrokerHttp.JSON.writeValueAsString(content) + "\n");
+        try {
+            secrets.writeToken(tokenFile, account.id(), BrokerHttp.JSON.writeValueAsString(content) + "\n");
+        } catch (RuntimeException e) {
+            throw new IllegalStateException("the session could not be stored on the server (" + e.getClass().getSimpleName()
+                    + ")");
+        }
+        try {
+            record(account, app, tokenFile, acquired, expires);
+        } catch (RuntimeException e) {
+            // no session row: the token file must not stay behind (code review 7 Nov 2026)
+            try {
+                secrets.deleteToken(account.id());
+            } catch (RuntimeException ignored) {
+                // logged below; the sweeper keys on database rows only
+            }
+            log.warn("account {}: session not recorded: {}", account.id(), e.getClass().getSimpleName());
+            throw new IllegalStateException("the session could not be recorded (" + e.getClass().getSimpleName() + ")");
+        }
+        Map<String, Object> audited = new LinkedHashMap<>(detail);
+        audited.put("expiresAt", expires.toString());
+        safeAudit(account, actor, "SESSION_LOGIN", audited);
+        log.info("account {} ({}): {} session ACTIVE until {}", account.id(), account.displayName(), app.broker(), expires);
+    }
+
+    private void record(BrokerAccount account, App app, String tokenFile, Instant acquired, Instant expires) {
         tx.executeWithoutResult(t -> {
             jdbc.update("update acct.broker_session set status = 'EXPIRED' where broker_account_id = ? and status = 'ACTIVE'",
                     account.id());
@@ -115,10 +139,6 @@ class SessionActivation {
             jdbc.update("update acct.broker_credential_profile set verified_at = now(), last_check_error = null, "
                     + "updated_at = now() where id = ?", app.profileId());
         });
-        Map<String, Object> audited = new LinkedHashMap<>(detail);
-        audited.put("expiresAt", expires.toString());
-        safeAudit(account, actor, "SESSION_LOGIN", audited);
-        log.info("account {} ({}): {} session ACTIVE until {}", account.id(), account.displayName(), app.broker(), expires);
     }
 
     /** The login failed: audited, and the broker app's last check says why (never a secret). */

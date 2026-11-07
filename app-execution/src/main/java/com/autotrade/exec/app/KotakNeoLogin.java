@@ -104,7 +104,7 @@ class KotakNeoLogin {
                     "baseUrl", base), now, expires, detail);
             return new KiteLogin.Result(true, account.displayName(), "Logged in as Kotak client " + ucc + ", " + funds
                     + ". Session kept until the end of today.");
-        } catch (BrokerHttp.Failure | IllegalStateException e) {
+        } catch (RuntimeException e) {         // never a 500: the page says why (code review 7 Nov 2026)
             sessions.failed(account, app, user.subject(), e.getMessage());
             return new KiteLogin.Result(false, account.displayName(), "The login could not be completed: " + e.getMessage());
         }
@@ -113,9 +113,12 @@ class KotakNeoLogin {
     private boolean trustedBase(String base) {
         try {
             URI uri = URI.create(base);
+            URI login = URI.create(props.kotakApi());
             String host = uri.getHost() == null ? "" : uri.getHost();
+            // https on Kotak's domain, or the configured login host with its own scheme (https in production; a local
+            // stand-in in tests): never plain http to anywhere else (code review 7 Nov 2026)
             return ("https".equals(uri.getScheme()) && host.endsWith(".kotaksecurities.com"))
-                    || host.equals(URI.create(props.kotakApi()).getHost());
+                    || (host.equals(login.getHost()) && java.util.Objects.equals(uri.getScheme(), login.getScheme()));
         } catch (IllegalArgumentException e) {
             return false;
         }

@@ -83,7 +83,8 @@ class BrokerAppController {
         List<Map<String, Object>> apps = new ArrayList<>();
         for (Map<String, Object> p : jdbc.queryForList("select p.id, p.name, p.broker_type broker, p.status, p.redirect_uri, "
                 + "array_to_string(p.registered_ips, ',') ips, p.settings::text settings, p.key_hint, "
-                + "p.secret_set_at::text secret_set_at, u.external_subject secret_set_by, p.verified_at::text verified_at, "
+                + Iso.of("p.secret_set_at") + " secret_set_at, u.external_subject secret_set_by, " + Iso.of("p.verified_at")
+                + " verified_at, "
                 + "p.last_check_error, p.api_key_ref, (select coalesce(array_agg(a.display_name order by a.id), '{}') "
                 + "from acct.broker_account a where a.credential_profile_id = p.id) accounts "
                 + "from acct.broker_credential_profile p left join acct.app_user u on u.id = p.secret_set_by "
@@ -166,6 +167,7 @@ class BrokerAppController {
         manage(user, tenant);
         BrokerType broker = BrokerType.valueOf((String) p.get("broker_type"));
         String keyRef = (String) p.get("api_key_ref"), secretRef = (String) p.get("api_secret_ref");
+        notInUseLive(id, "its keys cannot change");
         require(keyRef.startsWith("store:"), "this app's keys are kept on the server (" + keyRef.replaceAll(":.*", ":")
                 + "...): they are changed there, not here");
         String key = body.apiKey() == null ? "" : body.apiKey().strip();
@@ -208,6 +210,9 @@ class BrokerAppController {
         long tenant = ((Number) p.get("tenant_id")).longValue();
         manage(user, tenant);
         require(body.active() != null, "active: true or false");
+        if (!body.active()) {
+            notInUseLive(id, "it cannot be disabled");
+        }
         jdbc.update("update acct.broker_credential_profile set status = ?, updated_at = now() where id = ?",
                 body.active() ? "ACTIVE" : "DISABLED", id);
         audit.audit(tenant, null, user.subject(), body.active() ? "BROKER_APP_ENABLED" : "BROKER_APP_DISABLED",
@@ -242,6 +247,22 @@ class BrokerAppController {
     }
 
     // ------------------------------------------------------------------------------------------------- helpers
+
+    /**
+     * Refused while an account using the app holds a live position or has an order working at the broker: its exits and
+     * its stop need the app's key and session (code review 7 Nov 2026). Flatten first.
+     */
+    private void notInUseLive(long profileId, String what) {
+        List<String> busy = jdbc.queryForList("select a.display_name from acct.broker_account a where a.credential_profile_id = ? "
+                + "and (exists (select 1 from exec.position p where p.broker_account_id = a.id and p.status <> 'CLOSED') "
+                + "or exists (select 1 from exec.order_execution e where e.broker_account_id = a.id and e.status in "
+                + "('CREATED', 'SUBMITTED', 'ACKNOWLEDGED', 'OPEN', 'PARTIALLY_FILLED', 'CANCEL_PENDING', 'UNKNOWN', "
+                + "'RECONCILIATION_REQUIRED')))", String.class, profileId);
+        if (!busy.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, String.join(", ", busy) + " holds a position or a "
+                    + "working order through this app: " + what + " until it is flat");
+        }
+    }
 
     /** The broker's redirect URL to register on the app (Kite, Upstox); null for brokers without a redirect. */
     private String redirect(BrokerType broker) {

@@ -43,6 +43,7 @@ class BrokerLoginController {
     private final KotakNeoLogin kotak;
     private final GrowwLogin groww;
     private final SessionActivation sessions;
+    private final DataSource dataSource;
 
     BrokerLoginController(Access access, DataSource dataSource, UpstoxLogin upstox, KotakNeoLogin kotak, GrowwLogin groww,
                           SessionActivation sessions) {
@@ -52,6 +53,7 @@ class BrokerLoginController {
         this.kotak = kotak;
         this.groww = groww;
         this.sessions = sessions;
+        this.dataSource = dataSource;
     }
 
     @GetMapping("/api/execution/accounts/{id}/upstox/login")
@@ -98,7 +100,14 @@ class BrokerLoginController {
         Access.User user = access.user(subject);
         BrokerAccount a = accounts.byId(id).filter(x -> user.sees(x.tenantId()))
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "no such account"));
-        Access.require(user.emergency(a.tenantId()), "no right to act on this account");
+        Access.require(user.mayAct(a.tenantId()), user.support(a.tenantId())
+                ? "SUPPORT needs the member's grant to log out (to stop trouble: PAPER, kill or flatten)"
+                : "no right to act on this account");
+        // never strand a LIVE position: its exits need the session (code review 7 Nov 2026)
+        if (new com.autotrade.execution.TradingDay(dataSource).liveExposure(a.tenantId()).contains(a.id())) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, a.displayName() + " holds a live position or a working "
+                    + "order: flatten it first (its exits need the session)");
+        }
         sessions.logout(a, user.subject());
         return Map.of("account", a.displayName(), "connection", "DISCONNECTED");
     }

@@ -59,7 +59,8 @@ class SupportController {
         Access.User user = access.user(subject);
         seen(user, tenant);
         return jdbc.queryForList("select g.id, u.external_subject granted_to, b.external_subject granted_by, g.reason, "
-                + "g.break_glass, g.granted_at::text granted_at, g.expires_at::text expires_at, g.revoked_at::text revoked_at, "
+                + "g.break_glass, " + Iso.of("g.granted_at") + " granted_at, " + Iso.of("g.expires_at") + " expires_at, "
+                + Iso.of("g.revoked_at") + " revoked_at, "
                 + "g.revoked_at is null and g.expires_at > now() active from acct.support_grant g join acct.app_user u "
                 + "on u.id = g.granted_to join acct.app_user b on b.id = g.granted_by where g.tenant_id = ? "
                 + "order by g.id desc limit 20", tenant);

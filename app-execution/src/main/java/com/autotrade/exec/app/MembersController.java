@@ -67,6 +67,7 @@ class MembersController {
     private final KillSwitches audit;
     private final KeycloakAdmin keycloak;
     private final TelegramNotifier telegram;
+    private final com.autotrade.execution.TradingDay tradingDay;
     private final SecureRandom random = new SecureRandom();
 
     MembersController(Access access, DataSource dataSource, TransactionTemplate tx, KeycloakAdmin keycloak,
@@ -78,6 +79,7 @@ class MembersController {
         this.audit = new KillSwitches(dataSource);
         this.keycloak = keycloak;
         this.telegram = telegram;
+        this.tradingDay = new com.autotrade.execution.TradingDay(dataSource);
     }
 
     @GetMapping("/api/execution/me")
@@ -98,7 +100,8 @@ class MembersController {
             m.put("canStop", user.emergency(id));
             m.put("support", user.support(id));
             m.put("helping", user.helping(id));
-            m.put("grantUntil", user.support(id) ? jdbc.queryForList("select max(expires_at)::text from acct.support_grant "
+            m.put("grantUntil", user.support(id) ? jdbc.queryForList("select " + Iso.of("max(expires_at)")
+                    + " from acct.support_grant "
                     + "where tenant_id = ? and granted_to = ? and revoked_at is null and expires_at > now()", String.class,
                     id, user.id()).stream().filter(java.util.Objects::nonNull).findFirst().orElse(null) : null);
             m.put("follows", follows);
@@ -124,7 +127,8 @@ class MembersController {
             t.put("tenantId", tenant);
             t.put("tenant", jdbc.queryForObject("select name from acct.tenant where id = ?", String.class, tenant));
             t.put("members", jdbc.queryForList("select u.external_subject username, u.display_name, u.status, m.role, "
-                    + "u.relationship, u.last_seen_at::text last_seen, u.telegram_chat_id is not null telegram, "
+                    + "u.relationship, " + Iso.of("u.last_seen_at") + " last_seen, "
+                    + "u.telegram_chat_id is not null telegram, "
                     + "(select i.status from acct.invite i where i.username = u.external_subject order by i.id desc limit 1) "
                     + "invite from acct.tenant_membership m join acct.app_user u on u.id = m.app_user_id where m.tenant_id = ? "
                     + "order by case m.role when 'OWNER' then 0 when 'TRADER' then 1 when 'VIEWER' then 2 else 3 end, "
@@ -242,6 +246,11 @@ class MembersController {
                 + "it is never disabled here");
         List<Long> theirs = memberOf(user, username);
         jdbc.update("update acct.app_user set status = ? where external_subject = ?", status, username);
+        if (status.equals("DISABLED")) {
+            // they can no longer sign in to stop a LIVE day: it goes back to PAPER (code review 7 Nov 2026)
+            Long id = jdbc.queryForObject("select id from acct.app_user where external_subject = ?", Long.class, username);
+            tradingDay.personDisabled(id, user.subject());
+        }
         String login = "not changed (no Keycloak administration)";
         if (keycloak.configured()) {
             try {

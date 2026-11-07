@@ -96,6 +96,10 @@ class TradingDayIT {
         if (liveEligible) {
             jdbc.update("update acct.broker_account set trade_mode = 'LIVE', live_trading_enabled = true, "
                     + "connection_status = 'ACTIVE' where id = ?", real);
+            // the day's login, before any LIVE switch of the tests (LIVE counts only when switched during the session)
+            jdbc.update("insert into acct.broker_session (broker_account_id, token_ref, acquired_at, expires_at, status, "
+                    + "created_at) values (?, 'session-file:kite-x.token', ?, now() + interval '1 day', 'ACTIVE', ?)", real,
+                    Timestamp.from(ist(day, "08:00:00")), Timestamp.from(ist(day, "08:00:00")));
         }
         new FanOut(dataSource).subscribe(group, real, List.of("ma-cross"), 1.0);
         long twin = accounts.ensurePaperTwin(real);
@@ -312,6 +316,57 @@ class TradingDayIT {
         new FanOut(dataSource).fanOut(w.group(), today);
         result = new FollowerSimulator(dataSource, costs, risk, 1e9).run(twin, w.group(), today);
         assertThat(result.executed()).isEqualTo(1);
+    }
+
+    /** Code review 7 Nov 2026: an add fanned out to an idle LIVE-eligible account keeps it idle and is closed. */
+    @Test
+    void anAddToAnIdleLiveEligibleAccountDoesNotWakeIt() {
+        LocalDate today = TradingDay.today();
+        Workspace w = workspace("kavya", today, true);
+        TradingDay td = new TradingDay(dataSource);
+        BrokerAccount real = new AccountStore(dataSource).byId(w.real()).orElseThrow();
+        decide(w, today, Instant.now().minusSeconds(3), SignalDecision.Action.ADD);
+        new FanOut(dataSource).fanOut(w.group(), today);
+        assertThat(jdbc.queryForObject("select execution_mode from exec.trade_intent where broker_account_id = ?",
+                String.class, w.real())).isEqualTo("LIVE");
+        assertThat(td.idle(real)).as("a pending add does not count").isTrue();
+        assertThat(td.closeIdleIntents(w.real())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select state || ':' || reject_code from exec.trade_intent where broker_account_id = ?",
+                String.class, w.real())).isEqualTo("SKIPPED:NOT_HELD");
+        // a LIVE entry left over from another day does not keep it awake either
+        jdbc.update("update exec.trade_intent set state = 'CREATED', action = 'ENTER', created_at = now() - interval "
+                + "'2 days' where broker_account_id = ?", w.real());
+        assertThat(td.idle(real)).isTrue();
+    }
+
+    /** Code review 7 Nov 2026: after a lost session and a new login, the day is PAPER until switched LIVE again. */
+    @Test
+    void aReloginAfterALostSessionIsPaperUntilSwitchedAgainAndABrokerChangeIsNeverUndone() {
+        LocalDate today = TradingDay.today();
+        Workspace w = workspace("lalita", today, true);
+        TradingDay td = new TradingDay(dataSource);
+        BrokerAccount real = new AccountStore(dataSource).byId(w.real()).orElseThrow();
+        td.append(w.tenant(), w.real(), TradingDay.Mode.LIVE, "IT", w.member());
+        assertThat(td.entryTargetNow(w.tenant())).isEqualTo(w.real());
+        // a new session (a re-login) without a new switch: the old LIVE switch does not carry into it
+        jdbc.update("update acct.broker_session set status = 'EXPIRED' where broker_account_id = ?", w.real());
+        jdbc.update("insert into acct.broker_session (broker_account_id, token_ref, acquired_at, expires_at, status) values "
+                + "(?, 'session-file:kite-y.token', now(), now() + interval '1 day', 'ACTIVE')", w.real());
+        assertThat(td.entryTargetNow(w.tenant())).isEqualTo(w.twin());
+        td.append(w.tenant(), w.real(), TradingDay.Mode.LIVE, "IT", w.member());
+        assertThat(td.entryTargetNow(w.tenant())).isEqualTo(w.real());
+        // the member changes broker; a session-lost report for the old broker arriving after it changes nothing
+        Long other = new AccountStore(dataSource).createFollowerAccount(w.tenant(), w.member(), "lalita Upstox",
+                BrokerType.UPSTOX, TradeMode.PAPER, 100_000, EquityMode.FIXED, today, "x", 0);
+        new AccountStore(dataSource).ensurePaperTwin(other);
+        td.append(w.tenant(), other, TradingDay.Mode.PAPER, "BROKER", w.member());
+        td.sessionLost(real, "IT");
+        assertThat(td.stateNow(w.tenant()).brokerAccountId()).isEqualTo(other);
+        // a disabled member's LIVE day goes back to PAPER
+        td.append(w.tenant(), w.real(), TradingDay.Mode.LIVE, "IT", w.member());
+        assertThat(td.personDisabled(w.member(), "IT")).containsExactly(w.tenant());
+        assertThat(td.stateNow(w.tenant()).mode()).isEqualTo(TradingDay.Mode.PAPER);
+        assertThat(td.stateNow(w.tenant()).brokerAccountId()).isEqualTo(w.real());
     }
 
     @Test

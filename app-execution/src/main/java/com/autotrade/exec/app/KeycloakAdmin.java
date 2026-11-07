@@ -141,23 +141,25 @@ class KeycloakAdmin {
 
     /** Enables or disables the login; disabling also ends their sessions. */
     void enabled(String keycloakUserId, boolean on) {
-        JsonNode user = call("GET", "/users/" + keycloakUserId, null);
-        Map<String, Object> update = new java.util.LinkedHashMap<>();
-        update.put("username", user.path("username").asString());
-        update.put("enabled", on);
-        call("PUT", "/users/" + keycloakUserId, update);
+        // the whole representation, changed (code review 7 Nov 2026: a partial PUT can clear the profile's other fields)
+        tools.jackson.databind.node.ObjectNode user = (tools.jackson.databind.node.ObjectNode) call("GET",
+                "/users/" + keycloakUserId, null);
+        user.put("enabled", on);
+        call("PUT", "/users/" + keycloakUserId, user);
         if (!on) {
             call("POST", "/users/" + keycloakUserId + "/logout", null);
         }
     }
 
     private void requireActions(String keycloakUserId, List<String> actions) {
-        JsonNode user = call("GET", "/users/" + keycloakUserId, null);
+        tools.jackson.databind.node.ObjectNode user = (tools.jackson.databind.node.ObjectNode) call("GET",
+                "/users/" + keycloakUserId, null);
         java.util.LinkedHashSet<String> all = new java.util.LinkedHashSet<>();
         user.path("requiredActions").forEach(a -> all.add(a.asString()));
         all.addAll(actions);
-        call("PUT", "/users/" + keycloakUserId, Map.of("username", user.path("username").asString(),
-                "requiredActions", List.copyOf(all)));
+        tools.jackson.databind.node.ArrayNode list = user.putArray("requiredActions");
+        all.forEach(list::add);
+        call("PUT", "/users/" + keycloakUserId, user);
     }
 
     /** True when the realm has an email server (view-realm). */

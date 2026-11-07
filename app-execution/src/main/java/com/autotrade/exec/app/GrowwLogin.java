@@ -80,7 +80,7 @@ class GrowwLogin {
             sessions.activate(account, app, "groww", user.subject(), Map.of("ucc", ucc, "accessToken", token), now, expires,
                     detail);
             return new KiteLogin.Result(true, account.displayName(), "Logged in as Groww client " + ucc + ", " + funds + ".");
-        } catch (BrokerHttp.Failure | IllegalStateException e) {
+        } catch (RuntimeException e) {         // never a 500: the page says why (code review 7 Nov 2026)
             sessions.failed(account, app, user.subject(), e.getMessage());
             return new KiteLogin.Result(false, account.displayName(), "The login could not be completed: " + e.getMessage());
         }

@@ -65,7 +65,10 @@ final class BrokerSecrets {
     void write(String ref, String value) {
         Path file = storeFile(ref);
         try {
-            Files.createDirectories(storeDir);
+            if (!Files.isDirectory(storeDir)) {
+                Files.createDirectories(storeDir, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString(
+                        "rwx------")));
+            }
             Path tmp = Files.createTempFile(storeDir, "w-", ".tmp",
                     PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rw-------")));
             try {
