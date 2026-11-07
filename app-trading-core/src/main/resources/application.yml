@@ -77,6 +77,10 @@ autotrade:
       # +12.36 L vs +10.90 L, both halves better, the 10 early exits all v1 losers; in-sample). Followers copy ma-cross by id,
       # so ZERODHA-1 takes v34's exits too. mac-v1 stays as a shadow control (below). Last, so the others take the capital first.
       - config/strategy/ma-cross.v34.yaml
+      # 2026-11-08 (A-346, user: "make one of this in live" -> v13, "GCP live set (PAPER-1)"): wbr-v13 = wbr-v9 without the
+      # VWAP-side rule (A-340: 12 expiry tick days +33.36 L vs v9 +32.23 L, 3 extra small wins; in-sample; trades only on an
+      # index's expiry day, 10:30-14:30). Last, so the other four take the capital first (A-338: wbr crowds when it goes first).
+      - config/strategy/wall-break-rider.v13.yaml
       # odm-v4 removed 2026-11-01 (A-297 REMOVE, user: "do it"): on the 23 own-capture tick days the live set without it made
       # +Rs 51.09 L vs +Rs 49.17 L with it (+Rs 14.87 L vs +12.93 L from 14 Oct; odm-v9 in its place +46.32 L); thin, but
       # with A-231 (2 years of bars PF 0.99) and live PAPER-1 -Rs 5.23 L to 27 Oct. Live 14 Oct - 2 Nov (A-093); it now runs
