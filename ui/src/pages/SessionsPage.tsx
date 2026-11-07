@@ -338,9 +338,8 @@ export function SessionDetailPage() {
   const tapeInsets = useMemo<TapeInsets>(() => () => ({ L: 0, R: axisWidth }), [axisWidth]);
   const wholeDay = () => { setFocus(null); setView(WHOLE_DAY); };
   // A link to one moment of a trade (user, 7 Nov 2026: a screenshot at every entry and exit): ?position=<id>&moment=entry
-  // or exit opens the position's index with the chart ending 8 minutes after that moment (the price chart's labels cover
-  // its last minutes, so the trade's marker clears them), the moment pinned (a line on the charts, the strike ladder at it)
-  // and the position picked.
+  // or exit opens the position's index on the whole day (user: "on the full day chart") with that moment pinned (a line
+  // on the charts, the strike ladder at it) and the position picked.
   const [linkParams] = useSearchParams();
   const linkPosition = Number(linkParams.get("position")) || null, linkMoment = linkParams.get("moment");
   const linkedPosition = useMemo(() => (positions.data ?? []).find((p) => p.id === linkPosition) ?? null, [positions.data, linkPosition]);
@@ -351,8 +350,7 @@ export function SessionDetailPage() {
     const at = linkMoment === "entry" ? opened : closed;
     setUnderlying(linkedPosition.underlying);
     setPickedPosition(linkedPosition.id ?? null);
-    presetView(session.session_date, linkedPosition.underlying,
-      { a: Math.max(WHOLE_DAY.a, Math.min(opened - 30, at - 75)), b: Math.min(WHOLE_DAY.b, at + 8) });
+    presetView(session.session_date, linkedPosition.underlying, WHOLE_DAY);
     setMoment("pin", session.session_date, linkedPosition.underlying, at);
   }, [linkedPosition, linkMoment, session]);
   const spotAt = useMemo(() => {

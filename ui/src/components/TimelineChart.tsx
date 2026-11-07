@@ -259,12 +259,16 @@ export function TimelineChart({ date, lines, markers = NO_MARKERS, trades = NO_T
     if (u) {
       instance.subscribeCrosshairMove(onMove);
       instance.subscribeClick(onClick);
+      // a crosshair set from outside keeps its place on the screen when the window moves (the first fit, a zoom), so it is
+      // set again then, or a pinned 11:45 would sit wherever 11:45 was before the fit
+      instance.timeScale().subscribeVisibleTimeRangeChange(follow);
       unfollow = subscribeMoments(follow);
       follow();                                 // a rebuilt chart shows the moment already pinned or hovered
     }
     return () => {
       unfollow();
       if (u) {
+        instance.timeScale().unsubscribeVisibleTimeRangeChange(follow);
         instance.unsubscribeCrosshairMove(onMove);
         instance.unsubscribeClick(onClick);
       }
