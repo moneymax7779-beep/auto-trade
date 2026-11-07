@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""A-343 order-flow absorption reversal at a discount (definitions and criteria fixed in the ledger before this was written).
+"""A-344 order-flow absorption reversal at a discount (definitions and criteria fixed in the ledger before this was written).
 
 Near-month NIFTY / SENSEX futures ticks (md.future_tick, own capture). Prior session's volume-at-price value area, value
 migration structure, Fibonacci 0.705-0.886 zone outside value, 5-min bars 09:15-10:45 with aggressor-classified footprints,
 absorption bar A + failed retest bar B -> entry; control C = location only. Local database only.
 
-Usage: python3 2026-11-07-absorption-reversal.py [OUTDIR]   (default .local/a343)
+Usage: python3 2026-11-07-absorption-reversal.py [OUTDIR]   (default .local/a344)
 """
 import csv, io, json, os, statistics, subprocess, sys
 from collections import defaultdict
@@ -317,9 +317,9 @@ def fmt(s):
 
 
 def main():
-    outdir = sys.argv[1] if len(sys.argv) > 1 else ".local/a343"
+    outdir = sys.argv[1] if len(sys.argv) > 1 else ".local/a344"
     os.makedirs(outdir, exist_ok=True)
-    only = os.environ.get("A343_DAYS")
+    only = os.environ.get("A344_DAYS")
     results = defaultdict(list); log = []
     for u in ("NIFTY", "SENSEX"):
         ds = days(u)
@@ -369,9 +369,9 @@ def main():
                  f"(2) both halves avgR>0 {crit2}; (3) beats control both halves {crit3} -> {verdict}")
     report = "\n".join(lines)
     print("\n" + report)
-    with open(f"{outdir}/a343-result.txt", "w") as f:
+    with open(f"{outdir}/a344-result.txt", "w") as f:
         f.write("\n".join(log) + "\n\n" + report + "\n")
-    with open(f"{outdir}/a343-trades.json", "w") as f:
+    with open(f"{outdir}/a344-trades.json", "w") as f:
         json.dump(results, f, indent=1)
 
 
