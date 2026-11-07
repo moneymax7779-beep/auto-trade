@@ -9,7 +9,9 @@ import org.slf4j.LoggerFactory;
 import com.autotrade.config.ThresholdConfig;
 import com.autotrade.features.snapshot.FeatureSnapshot;
 import com.autotrade.features.snapshot.StructureFeatures;
+import com.autotrade.strategy.Decision;
 import com.autotrade.strategy.OptionSide;
+import com.autotrade.strategy.PositionView;
 
 /**
  * EMA9 / EMA20 cross with a swing stop (A-066): the minute the fast average crosses the slow one, buy the ATM option in
@@ -35,6 +37,14 @@ final class MaCross extends SetupStrategy {
     private final double runnerLockR;
     private double entrySpot = Double.NaN, entryRisk = Double.NaN, bestR = Double.NaN;
     private java.time.Instant entryTime;
+    // A-333 (off when absent = v1): an opposite cross while a trade is open closes it ("REVERSE"; "close" = no new trade)
+    // and, for "reverse", enters the new side on the next minute with the cross's swing stop
+    private final String onOppositeCross;
+    private final double reverseOnlyBelowR;
+    private OptionSide openSide;
+    private Entry pendingReverse;
+    private java.time.Instant pendingAt;
+    private boolean oppositeExit;
     private double previousDiff = Double.NaN;
 
     MaCross(ThresholdConfig c) {
@@ -47,6 +57,22 @@ final class MaCross extends SetupStrategy {
         timeStopUnlessR = c.has("exits.cross_time_stop_unless_r") ? c.getDouble("exits.cross_time_stop_unless_r") : Double.NaN;
         runnerTrailR = c.has("exits.runner_trail_r") ? c.getDouble("exits.runner_trail_r") : Double.NaN;
         runnerLockR = c.has("exits.runner_lock_r") ? c.getDouble("exits.runner_lock_r") : Double.NaN;
+        onOppositeCross = c.has("setup.on_opposite_cross") ? c.getString("setup.on_opposite_cross") : "ignore";
+        if (!java.util.Set.of("ignore", "close", "reverse").contains(onOppositeCross)) {
+            throw new IllegalArgumentException("setup.on_opposite_cross must be ignore, close or reverse: " + onOppositeCross);
+        }
+        reverseOnlyBelowR = c.has("setup.opposite_cross_only_below_r") ? c.getDouble("setup.opposite_cross_only_below_r")
+                : Double.NaN;
+    }
+
+    /** A-333: remembers which side is open, so a cross against it can be recognised. */
+    @Override
+    public Decision decide(FeatureSnapshot s, PositionView position) {
+        openSide = position.open() ? position.side() : null;
+        if (openSide == null) {
+            oppositeExit = false;
+        }
+        return super.decide(s, position);
     }
 
     /** A-332: the conditional time stop and the runner, on the index in units of the entry's risk. */
@@ -58,6 +84,9 @@ final class MaCross extends SetupStrategy {
         }
         double r = (side == OptionSide.CE ? spot - entrySpot : entrySpot - spot) / entryRisk;
         bestR = Double.isNaN(bestR) ? r : Math.max(bestR, r);
+        if (oppositeExit) {
+            return "REVERSE";
+        }
         if (Double.isFinite(runnerTrailR) && bestR >= rewardToRisk && r <= Math.max(runnerLockR, bestR - runnerTrailR)) {
             return "RUNNER_STOP";
         }
@@ -93,9 +122,51 @@ final class MaCross extends SetupStrategy {
                     crosses.size(), st.distPdhAtr(), st.distPdlAtr());
             crosses.addLast(s.time());
         }
+        if (!"ignore".equals(onOppositeCross) && openSide != null && (crossUp && openSide == OptionSide.PE
+                || crossDown && openSide == OptionSide.CE) && Boolean.TRUE.equals(c.get("window"))
+                && Boolean.TRUE.equals(c.get("not_expiring_index"))) {
+            // A-333: a cross against the open trade; only when the trade is below the given R (NaN = always)
+            double r = Double.isFinite(entrySpot) && entryRisk > 0
+                    ? (openSide == OptionSide.CE ? s.spot() - entrySpot : entrySpot - s.spot()) / entryRisk : Double.NaN;
+            if (!Double.isFinite(reverseOnlyBelowR) || r < reverseOnlyBelowR) {
+                Entry next = "reverse".equals(onOppositeCross) ? crossEntry(s, crossUp, c) : null;
+                oppositeExit = true;
+                pendingReverse = next;
+                pendingAt = s.time();
+                c.put("opposite_cross_exit", true);
+                return null;
+            }
+        }
+        if (canEnter && pendingReverse != null) {
+            // A-333: the reverse entry, the minute after the old trade closed; stale after 3 minutes or past its stop
+            Entry next = pendingReverse;
+            pendingReverse = null;
+            double risk = next.side() == OptionSide.CE ? s.spot() - next.stop() : next.stop() - s.spot();
+            if (s.time().isBefore(pendingAt.plusSeconds(180)) && risk > 0) {
+                entrySpot = s.spot();
+                entryRisk = risk;
+                entryTime = s.time();
+                bestR = Double.NaN;
+                double target = next.side() == OptionSide.CE ? entrySpot + rewardToRisk * risk : entrySpot - rewardToRisk * risk;
+                return new Entry(next.side(), next.stop(), target, next.reason() + "_REVERSE");
+            }
+        }
         if (!canEnter || !(crossUp || crossDown)) {
             return null;
         }
+        Entry e = crossEntry(s, crossUp, c);
+        if (e != null) {
+            entrySpot = s.spot();
+            entryRisk = crossUp ? entrySpot - e.stop() : e.stop() - entrySpot;
+            entryTime = s.time();
+            bestR = Double.NaN;
+        }
+        return e;
+    }
+
+    /** The cross's entry after its checks (VWAP side, spike, swing stop), or null; no state change. */
+    private Entry crossEntry(FeatureSnapshot s, boolean crossUp, Map<String, Boolean> c) {
+        StructureFeatures st = s.structure();
         double spot = s.spot(), atr = st.atr3m();
         if (requireVwapSide) {
             double vwap = st.vwapSpotProxy();
@@ -121,10 +192,6 @@ final class MaCross extends SetupStrategy {
         if (!stopOk) {
             return null;
         }
-        entrySpot = spot;
-        entryRisk = risk;
-        entryTime = s.time();
-        bestR = Double.NaN;
         double target = crossUp ? spot + rewardToRisk * risk : spot - rewardToRisk * risk;
         return new Entry(crossUp ? OptionSide.CE : OptionSide.PE, stop, target, crossUp ? "EMA_CROSS_UP" : "EMA_CROSS_DOWN");
     }
