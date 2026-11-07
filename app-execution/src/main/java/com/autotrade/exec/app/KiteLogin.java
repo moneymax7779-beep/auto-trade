@@ -70,7 +70,7 @@ class KiteLogin {
     private record Pending(long accountId, String subject, Instant created) {
     }
 
-    private record Profile(String apiKeyRef, String apiSecretRef, String externalUserId) {
+    private record Profile(long id, String apiKeyRef, String apiSecretRef, String externalUserId) {
     }
 
     private final AccountStore accounts;
@@ -84,16 +84,26 @@ class KiteLogin {
     private final SecureRandom random = new SecureRandom();
     private final TelegramNotifier telegram;
     private final TradingDays tradingDays;
+    private final com.autotrade.execution.TradingDay tradingDay;
 
     KiteLogin(DataSource dataSource, TransactionTemplate tx, KiteLoginProperties props, TelegramNotifier telegram,
               TradingDays tradingDays) {
+        this(dataSource, tx, props, new BrokerLoginProperties(null, null, null, null, null), telegram, tradingDays);
+    }
+
+    /** {@code brokers}: the store a member's Kite app keys typed on the Brokers page live in ({@code store:}). */
+    @org.springframework.beans.factory.annotation.Autowired
+    KiteLogin(DataSource dataSource, TransactionTemplate tx, KiteLoginProperties props, BrokerLoginProperties brokers,
+              TelegramNotifier telegram, TradingDays tradingDays) {
         this.telegram = telegram;
         this.tradingDays = tradingDays;
+        this.tradingDay = new com.autotrade.execution.TradingDay(dataSource);
         this.accounts = new AccountStore(dataSource);
         this.jdbc = new JdbcTemplate(dataSource);
         this.tx = tx;
         this.audit = new KillSwitches(dataSource);
-        this.secrets = new BrokerSecrets(Path.of(props.secretsDir()), Path.of(props.sessionsDir()));
+        this.secrets = new BrokerSecrets(Path.of(props.secretsDir()), Path.of(props.sessionsDir()),
+                Path.of(brokers.storeDir()));
         this.props = props;
     }
 
@@ -169,9 +179,19 @@ class KiteLogin {
                             + "last_validated_at, status) values (?, ?, ?, ?, now(), 'ACTIVE')", account.id(),
                             BrokerSecrets.tokenRef(account.id()), Timestamp.from(session.loginTime()), Timestamp.from(expires));
                     accounts.setConnectionStatus(account.id(), "ACTIVE");
+                    // the Brokers page's last check of the app (trader workspaces, V29)
+                    jdbc.update("update acct.broker_credential_profile set verified_at = now(), last_check_error = null "
+                            + "where id = ?", profile.id());
                 });
             } catch (RuntimeException e) {
                 safeAudit(account, p.subject(), "SESSION_LOGIN_FAILED", Map.of("error", e.getClass().getSimpleName()));
+                try {
+                    jdbc.update("update acct.broker_credential_profile p set last_check_error = ? from acct.broker_account a "
+                            + "where a.id = ? and p.id = a.credential_profile_id", "login failed: "
+                            + e.getClass().getSimpleName(), account.id());
+                } catch (RuntimeException ignored) {
+                    // the audit row says it already
+                }
                 log.warn("account {}: Kite login failed: {}", account.id(), e.getMessage());   // never holds a token
                 return new Result(false, account.displayName(), "The login could not be completed: " + e.getMessage());
             }
@@ -180,11 +200,13 @@ class KiteLogin {
             detail.put("equityAvailable", funds);
             detail.put("expiresAt", expires.toString());
             safeAudit(account, p.subject(), "SESSION_LOGIN", detail);
+            boolean backToPaper = tradingDay.sessionStarted(account, p.subject());   // LIVE needs a new switch (V29)
             log.info("account {} ({}): Kite session ACTIVE for {} until {}, equity available {}", account.id(),
                     account.displayName(), session.userId(), expires, Math.round(funds));
             return new Result(true, account.displayName(), "Logged in as Zerodha client " + session.userId()
                     + ". Session valid until " + ZonedDateTime.ofInstant(expires, IST).toLocalDateTime()
-                    + " IST. Equity available: Rs " + String.format("%,.0f", funds) + ".");
+                    + " IST. Equity available: Rs " + String.format("%,.0f", funds) + "."
+                    + (backToPaper ? " Today was LIVE: it is PAPER now, switch LIVE again on the Today page." : ""));
         }
     }
 
@@ -216,7 +238,10 @@ class KiteLogin {
                     });
                     if (Boolean.TRUE.equals(noneLeft)) {
                         secrets.deleteToken(accountId);
-                        accounts.byId(accountId).ifPresent(a -> safeAudit(a, "kite-login", "SESSION_EXPIRED", Map.of()));
+                        accounts.byId(accountId).ifPresent(a -> {
+                            safeAudit(a, "kite-login", "SESSION_EXPIRED", Map.of());
+                            tradingDay.sessionLost(a, "session-expiry");   // a LIVE day on it goes back to PAPER (V29)
+                        });
                         log.info("account {}: Kite session expired", accountId);
                     }
                 }
@@ -227,24 +252,38 @@ class KiteLogin {
         }
     }
 
-    /** 08:30 IST, trading days: the login link of every enabled ZERODHA DRY_RUN / LIVE account without a session. */
+    /**
+     * 08:30 IST, trading days: the login link of every enabled ZERODHA DRY_RUN / LIVE account without a session. In a
+     * family member's workspace (DAILY_SWITCH, V29) only the day's broker, when it is LIVE-eligible, and the link goes to
+     * the member's own chat (they may log in any time; until they do and switch LIVE, the day trades PAPER).
+     */
     @Scheduled(cron = "0 30 8 * * MON-FRI", zone = "Asia/Kolkata")
     void morningLinks() {
         if (!tradingDays.isTradingDay(java.time.LocalDate.now(IST))) {
             return;                                         // an exchange holiday: no session, no login needed
         }
-        for (Map<String, Object> row : jdbc.queryForList("select a.id, a.display_name from acct.broker_account a "
+        for (Map<String, Object> row : jdbc.queryForList("select a.id, a.display_name, a.app_user_id, a.tenant_id, "
+                + "t.trading_control = 'DAILY_SWITCH' daily from acct.broker_account a join acct.tenant t on t.id = a.tenant_id "
                 + "where a.broker_type = 'ZERODHA' and a.enabled and a.trade_mode in ('DRY_RUN', 'LIVE') "
                 + "and a.credential_profile_id is not null and not exists (select 1 from acct.broker_session s "
-                + "where s.broker_account_id = a.id and s.status = 'ACTIVE') order by a.id")) {
+                + "where s.broker_account_id = a.id and s.status = 'ACTIVE') and (t.trading_control <> 'DAILY_SWITCH' "
+                + "or a.id = (select broker_account_id from acct.trading_state(a.tenant_id, now()))) order by a.id")) {
             long id = ((Number) row.get("id")).longValue();
             String name = (String) row.get("display_name");
             if (props.publicBaseUrl() == null) {
                 log.warn("account {} ({}) needs today's Kite login; no public-base-url set for a link", id, name);
                 continue;
             }
-            telegram.send("Kite login for " + name + " (today's session): " + props.publicBaseUrl()
-                    + "/api/execution/accounts/" + id + "/kite/login");
+            String link = props.publicBaseUrl() + "/api/execution/accounts/" + id + "/kite/login";
+            if (Boolean.TRUE.equals(row.get("daily"))) {
+                boolean told = telegram.sendToUser(((Number) row.get("app_user_id")).longValue(), "Kite login for " + name
+                        + " (today's broker; the day trades PAPER until you log in and switch LIVE): " + link);
+                if (!told) {
+                    log.info("account {} ({}): the member has no linked Telegram for the login link", id, name);
+                }
+            } else {
+                telegram.send("Kite login for " + name + " (today's session): " + link);
+            }
         }
     }
 
@@ -264,10 +303,10 @@ class KiteLogin {
     }
 
     private Profile profile(long accountId) {
-        List<Profile> rows = jdbc.query("select p.api_key_ref, p.api_secret_ref, a.external_broker_user_id "
+        List<Profile> rows = jdbc.query("select p.id, p.api_key_ref, p.api_secret_ref, a.external_broker_user_id "
                         + "from acct.broker_account a join acct.broker_credential_profile p on p.id = a.credential_profile_id "
                         + "where a.id = ? and p.status = 'ACTIVE' and p.broker_type = 'ZERODHA'",
-                (rs, i) -> new Profile(rs.getString(1), rs.getString(2), rs.getString(3)), accountId);
+                (rs, i) -> new Profile(rs.getLong(1), rs.getString(2), rs.getString(3), rs.getString(4)), accountId);
         if (rows.isEmpty()) {
             throw new IllegalArgumentException("account " + accountId + " has no active Zerodha credential profile");
         }

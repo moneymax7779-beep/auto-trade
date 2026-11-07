@@ -31,7 +31,7 @@ class ExecutionService implements DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(ExecutionService.class);
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
-    static final int REQUIRED_SCHEMA = 27;          // V27: acct.copy_group_share (the fan-out reads it)
+    static final int REQUIRED_SCHEMA = 29;          // V29: trader workspaces (the fan-out reads acct.entry_target)
 
     private final DataSource dataSource;
     private final ExecutionProperties properties;

@@ -363,14 +363,114 @@ export interface WorkerStatus {
 export interface ExecMe {
   user: string;
   admin: boolean;
-  tenants: { id: number; name: string; role: string; mayAct: boolean; manages: boolean; follows?: string[] }[];
+  tenants: {
+    id: number; name: string; role: string; mayAct: boolean; manages: boolean; follows?: string[];
+    /** trader workspaces (V29): DAILY_SWITCH = a member's workspace with today's broker and PAPER/LIVE switch */
+    control?: "ACCOUNT_MODE" | "DAILY_SWITCH"; canStop?: boolean; support?: boolean; helping?: boolean;
+    grantUntil?: string | null;
+  }[];
+  telegramLinked?: boolean;
+  keycloakAdmin?: boolean;
 }
+
+// ---------------------------------------------------------------- trader workspaces (7 Nov 2026)
+
+export interface DayResult { net: number; trades: number; open: number }
+
+export interface WorkspaceBroker {
+  id: number;
+  name: string;
+  broker: "PAPER" | "ZERODHA" | "UPSTOX" | "KOTAK_NEO" | "GROWW";
+  clientId: string | null;
+  brokerApp: string | null;
+  connection: string | null;
+  sessionUntil: string | null;
+  enabled: boolean;
+  liveCapable: boolean;
+  liveEligible: boolean;
+  paperTwinId: number | null;
+  allocation: number;
+  equityMode: string;
+  sizeStepPct: number;
+  strategies: string[];
+  liveStrategies: string[];
+  chosen: boolean;
+  paper: DayResult;
+  live: DayResult;
+}
+
+/** GET /api/execution/workspaces/{tenant}/today */
+export interface WorkspaceToday {
+  tenantId: number;
+  name: string;
+  control: "ACCOUNT_MODE" | "DAILY_SWITCH";
+  role: string;
+  day: string;
+  members: { username: string; display_name: string; role: string; telegram: boolean; status: string }[];
+  state: null | {
+    brokerAccountId: number | null; broker: string | null; mode: "PAPER" | "LIVE"; since: string | null;
+    targetAccountId: number | null; trading: "OFF" | "PAPER" | "LIVE";
+  };
+  brokers: WorkspaceBroker[];
+  totals: { paperNet: number; liveNet: number; paperOpen: number; liveOpen: number };
+  lossLimit: { dailyLossLimit: number | null; liveNetToday: number; reached: boolean };
+  killSwitches: { id: number; scope: string; broker_account_id: number | null; what: string | null; reason: string;
+    engaged_by: string; engaged_at: string }[];
+  support: { id: number; granted_to: string; break_glass: boolean; reason: string | null; granted_at: string;
+    expires_at: string }[];
+  pending: { id: number; name: string; needs: "BROKER_APP" | "CLIENT_ID" | "LOGIN" }[];
+  events: { at: string; broker: string; mode: string; reason: string; by: string }[];
+  canSwitch: boolean;
+  canStop: boolean;
+  canManage: boolean;
+  platformAdmin: boolean;
+}
+
+/** GET /api/execution/household: one card per family workspace (the platform admin). */
+export type HouseholdCard = Pick<WorkspaceToday, "tenantId" | "name" | "control" | "members" | "state" | "lossLimit"
+  | "killSwitches" | "support" | "pending"> & { today: WorkspaceToday["totals"] };
+
+export interface BrokerApp {
+  id: number;
+  name: string;
+  broker: "ZERODHA" | "UPSTOX" | "KOTAK_NEO" | "GROWW";
+  status: "ACTIVE" | "DISABLED";
+  redirect_uri: string | null;
+  ips: string | null;
+  settings: Record<string, string>;
+  key_hint: string | null;
+  secret_set_at: string | null;
+  secret_set_by: string | null;
+  verified_at: string | null;
+  last_check_error: string | null;
+  keysSet: boolean;
+  accounts: string[];
+}
+
+/** GET /api/execution/workspaces/{tenant}/broker-apps */
+export interface BrokerApps {
+  apps: BrokerApp[];
+  register: Record<string, { redirectUrl: string | null; staticIps: string[]; liveCapable: boolean }>;
+  canManage: boolean;
+}
+
+export interface SupportGrant {
+  id: number; granted_to: string; granted_by: string; reason: string | null; break_glass: boolean; granted_at: string;
+  expires_at: string; revoked_at: string | null; active: boolean;
+}
+
+export interface LoginResult { ok: boolean; account: string | null; message: string }
+
+export const BROKER_NAMES: Record<string, string> = {
+  PAPER: "Paper", ZERODHA: "Zerodha", UPSTOX: "Upstox", KOTAK_NEO: "Kotak Neo", GROWW: "Groww",
+};
 
 /** GET /api/execution/admin/members (ADMIN): each tenant the caller administers, its members and the groups it follows. */
 export interface MemberTenant {
   tenantId: number;
   tenant: string;
-  members: { username: string; display_name: string; status: string; role: string }[];
+  members: { username: string; display_name: string; status: string; role: string; relationship?: string | null;
+    last_seen?: string | null; telegram?: boolean; invite?: string | null }[];
   accounts: number;
   follows: { id: number; name: string; owner: string }[];
 }
@@ -392,7 +492,7 @@ export interface ExecutionAccount {
 export interface KillSwitch {
   id: number;
   tenantId: number | null;
-  scope: "GLOBAL_LIVE" | "ACCOUNT" | "STRATEGY" | "INSTRUMENT";
+  scope: "GLOBAL_LIVE" | "TENANT" | "ACCOUNT" | "STRATEGY" | "INSTRUMENT";
   accountId: number | null;
   strategyId: string | null;
   instrumentKey: string | null;

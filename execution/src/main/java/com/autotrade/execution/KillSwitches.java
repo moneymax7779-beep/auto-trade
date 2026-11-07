@@ -16,9 +16,10 @@ import tools.jackson.databind.json.JsonMapper;
 
 /**
  * The kill switches of live plan section 4 (exec.kill_switch, V24) and the audit log. An engaged switch refuses entries
- * and adds; exits are never blocked. GLOBAL_LIVE covers every LIVE account; ACCOUNT one account; STRATEGY a tenant's
- * strategy on all its accounts; INSTRUMENT one contract on a tenant's accounts (every tenant's when engaged without a
- * tenant, by an ADMIN). Every engage and release is in exec.audit_log.
+ * and adds; exits are never blocked. GLOBAL_LIVE covers every LIVE account; TENANT every account of one workspace (a
+ * member's own switch, V29); ACCOUNT one account; STRATEGY a tenant's strategy on all its accounts; INSTRUMENT one
+ * contract on a tenant's accounts (every tenant's when engaged without a tenant, by an ADMIN). Every engage and release
+ * is in exec.audit_log.
  */
 public final class KillSwitches {
 
@@ -39,12 +40,13 @@ public final class KillSwitches {
     /** Why an entry of {@code strategy} in {@code instrumentKey} is refused for the account, or null. */
     public String engaged(BrokerAccount account, String strategy, String instrumentKey) {
         List<String> reasons = jdbc.queryForList("select scope || ': ' || reason from exec.kill_switch where released_at is null "
-                        + "and ((scope = 'GLOBAL_LIVE' and ?) or (scope = 'ACCOUNT' and broker_account_id = ?) "
+                        + "and ((scope = 'GLOBAL_LIVE' and ?) or (scope = 'TENANT' and tenant_id = ?) "
+                        + "or (scope = 'ACCOUNT' and broker_account_id = ?) "
                         + "or (scope = 'STRATEGY' and tenant_id = ? and strategy_id = ?) "
                         + "or (scope = 'INSTRUMENT' and instrument_key = ? and (tenant_id is null or tenant_id = ?))) "
                         + "order by engaged_at limit 1", String.class,
-                account.tradeMode() == TradeMode.LIVE, account.id(), account.tenantId(), strategy, instrumentKey,
-                account.tenantId());
+                account.tradeMode() == TradeMode.LIVE, account.tenantId(), account.id(), account.tenantId(), strategy,
+                instrumentKey, account.tenantId());
         return reasons.isEmpty() ? null : reasons.getFirst();
     }
 
@@ -65,6 +67,12 @@ public final class KillSwitches {
         }
         audit(account, actor, engaged > 0 ? "KILL_ACCOUNT" : "KILL_ACCOUNT_ALREADY_ENGAGED", Map.of("reason", reason));
         log.error("ACCOUNT KILL {} ({}): {}", account.id(), account.displayName(), reason);
+    }
+
+    /** True when a TENANT switch of the workspace is engaged (the LIVE switch is refused meanwhile). */
+    public boolean tenantEngaged(long tenantId) {
+        return Boolean.TRUE.equals(jdbc.queryForObject("select exists (select 1 from exec.kill_switch where released_at "
+                + "is null and scope = 'TENANT' and tenant_id = ?)", Boolean.class, tenantId));
     }
 
     /** Engages a switch of any scope; returns its id. */

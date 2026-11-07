@@ -85,6 +85,7 @@ public final class FollowerSimulator {
     private final FollowerVenue venue;
     private final QuoteSource quotes;            // null: capital-refused adds are not retried
     private final KillSwitches kills;
+    private final TradingDay tradingDay;
 
     public FollowerSimulator(DataSource dataSource, CostModel costs, FollowerRisk risk, double simulatedBrokerFunds) {
         this(dataSource, costs, risk, simulatedBrokerFunds, null);
@@ -106,6 +107,7 @@ public final class FollowerSimulator {
         this.venue = venue;
         this.quotes = quotes;
         this.kills = new KillSwitches(dataSource);
+        this.tradingDay = new TradingDay(dataSource);
     }
 
     private String workerId;                     // set by an execution worker: claim intents before running them
@@ -447,6 +449,10 @@ public final class FollowerSimulator {
         if (killed != null) {
             return reject(p, "KILL_SWITCH", killed);
         }
+        String switched = dailySwitchRefusal(day, add);
+        if (switched != null) {
+            return reject(p, switched.substring(0, switched.indexOf(':')), switched.substring(switched.indexOf(':') + 2));
+        }
         if ((day.account.tradeMode() == TradeMode.LIVE || TradeMode.LIVE.name().equals(p.mode()))
                 && (risk.live() == null || !risk.live().strategies().contains(p.strategyId()))) {
             return reject(p, "LIVE_STRATEGY", p.strategyId() + " is not one of the risk file's LIVE strategies");
@@ -484,6 +490,30 @@ public final class FollowerSimulator {
         }
         if (!capital.approved()) {
             return reject(p, capital.code(), capital.reason());
+        }
+        return null;
+    }
+
+    /**
+     * A DAILY_SWITCH workspace's checks on today's live session (V29, {@link TradingDay}); null = passes. An entry runs only
+     * on the account that is the workspace's entry target now (the member may have switched broker or mode since the
+     * fan-out: refused, never sent elsewhere); a LIVE add only while the day is still LIVE on this broker; a LIVE entry or
+     * add only while the member's loss limit (LIVE net across all their brokers today) is not reached. Replayed days
+     * (another date than today) are left to the fan-out's decision.
+     */
+    private String dailySwitchRefusal(Day day, boolean add) {
+        if (!day.date.equals(TradingDay.today()) || !tradingDay.dailySwitch(day.account.tenantId())) {
+            return null;
+        }
+        if (!add || venue.live()) {
+            Long target = tradingDay.entryTargetNow(day.account.tenantId());          // the database's clock
+            if (!Long.valueOf(day.account.id()).equals(target)) {
+                return "TARGET_CHANGED: the day's broker or PAPER/LIVE switch changed: this account no longer takes "
+                        + (add ? "adds" : "entries");
+            }
+        }
+        if (venue.live() && tradingDay.dailyLossReached(day.account.tenantId(), day.date)) {
+            return "TENANT_DAILY_LOSS: the member's daily loss limit (LIVE, all brokers) is reached";
         }
         return null;
     }
@@ -945,6 +975,7 @@ public final class FollowerSimulator {
     private void loseSession(BrokerAccount account, String message) {
         protectionChecked.removeIf(k -> k.startsWith(account.id() + ":"));   // stops are verified again after the login
         kills.loseSession(account, "execution", Map.of("message", String.valueOf(message)));
+        tradingDay.sessionLost(account, "execution");      // a DAILY_SWITCH workspace's LIVE day goes back to PAPER
     }
 
     private String done(Pending p, long quantity) {

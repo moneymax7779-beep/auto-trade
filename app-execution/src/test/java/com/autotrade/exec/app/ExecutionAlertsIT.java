@@ -70,7 +70,7 @@ class ExecutionAlertsIT {
         kills.engageAccount(dryRun, "EXIT_NOT_FILLED: 20 of SENSEX 76400 PE still held", "execution");
         kills.engageAccount(dryRun, "EXIT_NOT_FILLED: 20 of SENSEX 76400 PE still held", "execution");
         kills.engageAccount(paper, "a paper account's switch", "execution");
-        List<String> sent = alerts.collect();
+        List<String> sent = alerts.collect().stream().map(ExecutionAlerts.Alert::text).toList();
         assertThat(sent).hasSize(1);
         assertThat(sent.getFirst()).startsWith("ZERODHA-1 (DRY_RUN): KILL_ACCOUNT_ALREADY_ENGAGED")
                 .contains("EXIT_NOT_FILLED").contains("exits continue");
@@ -79,7 +79,7 @@ class ExecutionAlertsIT {
         new JdbcTemplate(dataSource).update("update exec.kill_switch set released_at = now() where broker_account_id = ?",
                 dryRun.id());
         kills.engageAccount(dryRun, "RECONCILIATION: BSE_FO|1134459: ours 20, broker 0", "reconciler");
-        assertThat(alerts.collect()).singleElement().asString().startsWith("ZERODHA-1 (DRY_RUN): KILL_ACCOUNT ")
+        assertThat(alerts.collect().stream().map(ExecutionAlerts.Alert::text).toList()).singleElement().asString().startsWith("ZERODHA-1 (DRY_RUN): KILL_ACCOUNT ")
                 .contains("ours 20, broker 0");
     }
 }

@@ -91,7 +91,9 @@ class FamilyMembersIT {
                 return turns;
             }
         };
-        members = new MembersController(access, dataSource, tx);
+        KiteLoginProperties props = new KiteLoginProperties(null, null, null, null, null, "/nonexistent/bot.env");
+        members = new MembersController(access, dataSource, tx, new KeycloakAdmin(new KeycloakAdminProperties(null, null,
+                null, null)), new TelegramNotifier(props, dataSource));
         admin = new AccountAdminController(access, dataSource, tx, properties);
         api = new AccountsController(access, dataSource, service);
         status = new StatusController(service, properties, access);
@@ -129,12 +131,12 @@ class FamilyMembersIT {
     @SuppressWarnings("unchecked")
     void aFamilyMemberFollowsTheOwnersSignalsInTheirOwnTenantAndSeesOnlyTheirs() {
         // only an ADMIN adds members
-        assertThat(code(() -> members.add("stranger", new MembersController.NewMember("eve", null, "TRADER", null))))
+        assertThat(code(() -> members.add("stranger", new MembersController.NewMember("eve", null, "TRADER", null, "PARENT", null, null))))
                 .isEqualTo(403);
-        Map<String, Object> added = members.add("satya", new MembersController.NewMember("mum", "Mum", "TRADER", null));
+        Map<String, Object> added = members.add("satya", new MembersController.NewMember("mum", "Mum", "TRADER", null, "PARENT", null, null));
         long mumTenant = (Long) added.get("tenantId");
         assertThat(added).containsEntry("follows", List.of(group));
-        assertThat(code(() -> members.add("satya", new MembersController.NewMember("mum", null, "TRADER", null))))
+        assertThat(code(() -> members.add("satya", new MembersController.NewMember("mum", null, "TRADER", null, "PARENT", null, null))))
                 .as("a second time").isEqualTo(400);
 
         // who she is: her tenant only, not an admin; the owner administers both
@@ -144,7 +146,8 @@ class FamilyMembersIT {
         assertThat(((List<Map<String, Object>>) me.get("tenants")).getFirst()).containsEntry("follows", List.of("LIVE-SET"))
                 .containsEntry("role", "TRADER").containsEntry("mayAct", true).containsEntry("manages", false);
         assertThat(code(() -> members.members("mum"))).isEqualTo(403);
-        assertThat(members.members("satya")).extracting(t -> t.get("tenantId")).contains(ownerTenant, mumTenant);
+        assertThat(members.members("satya")).extracting(t -> t.get("tenantId")).as("the family's workspaces, not the "
+                + "admin's own").contains(mumTenant).doesNotContain(ownerTenant);
 
         // a TRADER does not create accounts; the owner creates hers, and it follows the shared group
         assertThat(code(() -> admin.create("mum", account("MUM-1", null)))).isEqualTo(403);
@@ -153,7 +156,7 @@ class FamilyMembersIT {
                 Long.class, mumAccount)).isEqualTo(group);
         assertThat(jdbc.queryForObject("select u.external_subject from acct.broker_account a join acct.app_user u "
                 + "on u.id = a.app_user_id where a.id = ?", String.class, mumAccount)).as("her account is hers").isEqualTo("mum");
-        long dadTenant = (Long) members.add("satya", new MembersController.NewMember("dad", null, "VIEWER", null)).get("tenantId");
+        long dadTenant = (Long) members.add("satya", new MembersController.NewMember("dad", null, "VIEWER", null, "PARENT", null, null)).get("tenantId");
         long dadAccount = ((Number) admin.create("satya", account("DAD-1", dadTenant)).get("id")).longValue();
         assertThat(jdbc.queryForObject("select u.external_subject from acct.broker_account a join acct.app_user u "
                 + "on u.id = a.app_user_id where a.id = ?", String.class, dadAccount)).as("a VIEWER's account is his too")

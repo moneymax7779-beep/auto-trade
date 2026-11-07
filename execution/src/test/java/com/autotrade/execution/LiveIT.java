@@ -180,9 +180,20 @@ class LiveIT {
                 + "where i.broker_account_id = ? order by i.id desc limit 1", String.class, a.id());
     }
 
-    /** The LIVE checks' clock: 10:00 IST, decisions made "now" are never stale or late (code review 3 Nov 2026). */
-    private static final java.time.Clock MORNING = java.time.Clock.fixed(java.time.LocalDate.now(java.time.ZoneId.of(
-            "Asia/Kolkata")).atTime(10, 0).atZone(java.time.ZoneId.of("Asia/Kolkata")).toInstant(), java.time.ZoneId.of("Asia/Kolkata"));
+    /**
+     * The LIVE checks' clock, so decisions made "now" are never stale or late (code review 3 Nov 2026): now while that is
+     * before the 15:10 IST entry cut-off, else 10:00 today (a decision made later is then in the clock's future, never
+     * stale). 7 Nov 2026: a fixed 10:00 made every decision of a run before 09:59 IST stale.
+     */
+    private static final java.time.Clock MORNING = morning();
+
+    private static java.time.Clock morning() {
+        java.time.ZoneId ist = java.time.ZoneId.of("Asia/Kolkata");
+        java.time.ZonedDateTime now = java.time.ZonedDateTime.now(ist);
+        java.time.Instant at = now.toLocalTime().isBefore(java.time.LocalTime.of(15, 10)) ? now.toInstant()
+                : now.toLocalDate().atTime(10, 0).atZone(ist).toInstant();
+        return java.time.Clock.fixed(at, ist);
+    }
 
     @Test
     void aLiveEntryFollowsItsSignalAtOnceOrNotAtAll() {

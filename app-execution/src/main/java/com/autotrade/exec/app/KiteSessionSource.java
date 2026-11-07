@@ -33,9 +33,10 @@ class KiteSessionSource implements BrokerSessions {
     private final JdbcTemplate jdbc;
     private final BrokerSecrets secrets;
 
-    KiteSessionSource(DataSource dataSource, KiteLoginProperties props) {
+    KiteSessionSource(DataSource dataSource, KiteLoginProperties props, BrokerLoginProperties brokers) {
         this.jdbc = new JdbcTemplate(dataSource);
-        this.secrets = new BrokerSecrets(Path.of(props.secretsDir()), Path.of(props.sessionsDir()));
+        this.secrets = new BrokerSecrets(Path.of(props.secretsDir()), Path.of(props.sessionsDir()),
+                Path.of(brokers.storeDir()));
     }
 
     @Override

@@ -22,7 +22,8 @@ import org.springframework.stereotype.Component;
  * end-of-day square-off (and, since this review, exit retries) only into exec.audit_log and the log, so nobody was told. Every {@code alert-ms} the audit rows
  * written since the last look are sent (an "already engaged" repeat once per reason and day), and for LIVE accounts each
  * filled or rejected order. Read-only on the database; a failed send is logged by the notifier, never thrown. Rows
- * before the worker started are not sent.
+ * before the worker started are not sent. An alert about a family member's account (a DAILY_SWITCH workspace, V29) also
+ * goes to that member's own linked chat, and a LIVE day sent back to PAPER by a lost session is one of them.
  */
 @Component
 class ExecutionAlerts {
@@ -30,7 +31,11 @@ class ExecutionAlerts {
     private static final Logger log = LoggerFactory.getLogger(ExecutionAlerts.class);
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     private static final List<String> ACTIONS = List.of("KILL_ACCOUNT", "KILL_ACCOUNT_ALREADY_ENGAGED", "BROKER_SESSION_LOST",
-            "INSTRUMENT_MAPPING_MISMATCH", "EOD_SQUARE_OFF", "FLATTEN", "END_OF_DAY", "EXIT_RETRY");
+            "INSTRUMENT_MAPPING_MISMATCH", "EOD_SQUARE_OFF", "FLATTEN", "END_OF_DAY", "EXIT_RETRY", "MODE_PAPER_SESSION_LOST");
+
+    /** One message, and the member workspace it is also for (null: the admin's only). */
+    record Alert(String text, Long memberTenant) {
+    }
 
     private final JdbcTemplate jdbc;
     private final TelegramNotifier telegram;
@@ -52,8 +57,11 @@ class ExecutionAlerts {
                 sent.clear();
                 sentDay = today;
             }
-            for (String text : collect()) {
-                telegram.send(text);
+            for (Alert alert : collect()) {
+                telegram.send(alert.text());
+                if (alert.memberTenant() != null) {
+                    telegram.sendToMembers(alert.memberTenant(), alert.text());
+                }
             }
         } catch (RuntimeException e) {
             log.warn("execution alerts: {}", e.getMessage());
@@ -61,15 +69,17 @@ class ExecutionAlerts {
     }
 
     /** The messages due now (and the read positions moved past them). */
-    List<String> collect() {
+    List<Alert> collect() {
         if (lastAudit < 0) {                                       // first look: start from now, never replay history
             lastAudit = jdbc.queryForObject("select coalesce(max(id), 0) from exec.audit_log", Long.class);
             lastOrderCheck = jdbc.queryForObject("select coalesce(max(id), 0) from exec.order_execution", Long.class);
             return List.of();
         }
-        List<String> out = new java.util.ArrayList<>();
+        List<Alert> out = new java.util.ArrayList<>();
         for (Map<String, Object> r : jdbc.queryForList("select l.id, l.action, l.detail::text detail, a.display_name, "
-                + "a.trade_mode from exec.audit_log l join acct.broker_account a on a.id = l.broker_account_id "
+                + "a.trade_mode, case when t.trading_control = 'DAILY_SWITCH' then t.id end member_tenant "
+                + "from exec.audit_log l join acct.broker_account a on a.id = l.broker_account_id "
+                + "join acct.tenant t on t.id = a.tenant_id "
                 + "where l.id > ? and l.action = any(?) and a.trade_mode in ('LIVE', 'DRY_RUN') order by l.id", lastAudit,
                 ACTIONS.toArray(new String[0]))) {
             lastAudit = Math.max(lastAudit, ((Number) r.get("id")).longValue());
@@ -82,23 +92,30 @@ class ExecutionAlerts {
             if (action.equals("KILL_ACCOUNT_ALREADY_ENGAGED") && !sent.add(text)) {
                 continue;
             }
-            out.add(text + (action.startsWith("KILL_ACCOUNT") ? "\nNew entries stop; exits continue. Check the Accounts "
-                    + "page and release the switch there once it is understood." : ""));
+            Long member = r.get("member_tenant") == null ? null : ((Number) r.get("member_tenant")).longValue();
+            out.add(new Alert(text + (action.startsWith("KILL_ACCOUNT") ? "\nNew entries stop; exits continue. Check the "
+                    + "Accounts page and release the switch there once it is understood."
+                    : action.equals("MODE_PAPER_SESSION_LOST") ? "\nThe broker session was lost while LIVE: new signals "
+                    + "paper-trade; open LIVE positions keep their broker stop and their exits wait for the next login. "
+                    + "Log in again, then switch LIVE again if you want." : ""), member));
         }
         // today's LIVE orders placed since the worker started that filled or were rejected: one message each
         for (Map<String, Object> r : jdbc.queryForList("select e.id, e.role, e.order_side, e.quantity_filled, "
-                + "e.average_fill_price, e.status, e.raw_error, e.client_tag, a.display_name, coalesce(p.symbol, '') symbol "
+                + "e.average_fill_price, e.status, e.raw_error, e.client_tag, a.display_name, coalesce(p.symbol, '') symbol, "
+                + "case when t.trading_control = 'DAILY_SWITCH' then t.id end member_tenant "
                 + "from exec.order_execution e join acct.broker_account a on a.id = e.broker_account_id "
-                + "left join exec.position p on p.entry_trade_intent_id = e.trade_intent_id and p.broker_account_id = "
+                + "join acct.tenant t on t.id = a.tenant_id left join exec.position p on p.entry_trade_intent_id = e.trade_intent_id and p.broker_account_id = "
                 + "e.broker_account_id where e.id > ? and a.trade_mode = 'LIVE' and e.status in ('FILLED', 'REJECTED') "
                 + "and (e.updated_at at time zone 'Asia/Kolkata')::date = (now() at time zone 'Asia/Kolkata')::date "
                 + "order by e.id", lastOrderCheck)) {
             if (!sent.add("order:" + r.get("id") + ":" + r.get("status"))) {
                 continue;
             }
-            out.add(r.get("display_name") + " (LIVE): " + r.get("role") + " " + r.get("order_side") + " " + r.get("symbol")
-                    + " " + r.get("status") + (r.get("status").equals("FILLED") ? " " + r.get("quantity_filled") + " at "
-                    + r.get("average_fill_price") : ": " + r.get("raw_error")) + " (" + r.get("client_tag") + ")");
+            out.add(new Alert(r.get("display_name") + " (LIVE): " + r.get("role") + " " + r.get("order_side") + " "
+                    + r.get("symbol") + " " + r.get("status") + (r.get("status").equals("FILLED") ? " "
+                    + r.get("quantity_filled") + " at " + r.get("average_fill_price") : ": " + r.get("raw_error")) + " ("
+                    + r.get("client_tag") + ")", r.get("member_tenant") == null ? null
+                    : ((Number) r.get("member_tenant")).longValue()));
         }
         return out;
     }

@@ -52,3 +52,11 @@ autotrade:
       api-base: ${AUTOTRADE_KITE_API_BASE:https://api.kite.trade}
       login-base: ${AUTOTRADE_KITE_LOGIN_BASE:https://kite.zerodha.com}
       telegram-file: ${AUTOTRADE_TELEGRAM_FILE:/app/telegram/bot.env}
+    # Family members' Keycloak logins (trader workspaces, 7 Nov 2026): the autotrade-admin service account on the realm's
+    # internal address (bin/keycloak/bootstrap.sh --admin-secret-file); blank url or secret = members' logins stay a
+    # console job. The secret comes from the VM's root-only .env, never this file.
+    keycloak:
+      url: ${AUTOTRADE_EXECUTION_KEYCLOAK_URL:}
+      realm: ${AUTOTRADE_EXECUTION_KEYCLOAK_REALM:autotrade}
+      client-id: ${AUTOTRADE_EXECUTION_KEYCLOAK_CLIENT_ID:autotrade-admin}
+      client-secret: ${AUTOTRADE_EXECUTION_KEYCLOAK_CLIENT_SECRET:}
