@@ -462,7 +462,8 @@ function Tag({ children, strategy }: { children: ReactNode; strategy?: boolean }
 }
 
 const REASONS: Record<string, string> = { STOP: "stop", MANUAL: "sold by hand", TARGET: "target", FLAT_BY: "end of day",
-  TRAIL: "trail", EOD_SQUARE_OFF: "square-off", FLATTEN: "flattened", TIME_60: "60-min time stop", TRADER_EXIT: "exited by you" };
+  TRAIL: "trail", EOD_SQUARE_OFF: "square-off", FLATTEN: "flattened", TIME_60: "60-min time stop", TRADER_EXIT: "exited by you",
+  EARLY_FAIL_15: "15-min early exit" };
 
 function ClosedTable({ rows, showDay }: { rows: ClosedView[]; showDay: boolean }) {
   const heads = ["Day", "Contract", "Strategy", "Lots · qty", "Entry → exit", "Exit", "In → out", "P&L %", "Charges", "Net"];

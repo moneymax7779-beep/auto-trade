@@ -20,6 +20,11 @@ import com.autotrade.strategy.PositionView;
  * <p>
  * v2 (A-079, {@code setup.require_vwap_side: true}): a cross up enters only with the index above the session VWAP, a
  * cross down only below it (a cross against the VWAP is a bounce inside the day's trend). Absent = v1.
+ * <p>
+ * v34 (A-334, live from A-335, {@code exits.early_fail_min / early_fail_pct}): one look at the option N minutes after
+ * entry; a bid more than the given % under the average premium exits ({@code EARLY_FAIL_N}). v20 / v37: the time stop only
+ * for a trade whose index never reached +1R. The other A-332..A-334 keys (runner, spike skip, opposite-cross exit,
+ * stretch exit) failed their tests and stay only for their versioned files. Every key absent = v1.
  */
 final class MaCross extends SetupStrategy {
 
@@ -51,6 +56,7 @@ final class MaCross extends SetupStrategy {
     private final double earlyFailPct;
     private final double stretchAtr;
     private boolean earlyChecked;
+    private static final int EARLY_FAIL_GRACE_MIN = 5;
     private double previousDiff = Double.NaN;
 
     MaCross(ThresholdConfig c) {
@@ -72,6 +78,19 @@ final class MaCross extends SetupStrategy {
         stretchAtr = c.has("exits.stretch_atr") ? c.getDouble("exits.stretch_atr") : Double.NaN;
         reverseOnlyBelowR = c.has("setup.opposite_cross_only_below_r") ? c.getDouble("setup.opposite_cross_only_below_r")
                 : Double.NaN;
+        // a key whose partner is missing would turn its exit silently off (NaN compares false): refuse the file instead
+        requirePair(c, "exits.early_fail_min", "exits.early_fail_pct");
+        requirePair(c, "exits.cross_time_stop_min", "exits.cross_time_stop_unless_r");
+        requirePair(c, "exits.runner_trail_r", "exits.runner_lock_r");
+        if (c.has("exits.early_fail_min") && !(earlyFailMin >= 1 && Double.isFinite(earlyFailPct))) {
+            throw new IllegalArgumentException("exits.early_fail_min must be >= 1 and early_fail_pct a number");
+        }
+    }
+
+    private static void requirePair(ThresholdConfig c, String a, String b) {
+        if (c.has(a) != c.has(b)) {
+            throw new IllegalArgumentException(a + " and " + b + " go together: set both or neither");
+        }
     }
 
     /** A-333: remembers which side is open, so a cross against it can be recognised. */
@@ -84,15 +103,21 @@ final class MaCross extends SetupStrategy {
         return super.decide(s, position);
     }
 
-    /** A-334: the early-fail exit (needs the position's premium and bid), then the index exits below. */
+    /**
+     * A-334: the early-fail exit, then the index exits below. The one look happens at the first minute from N with a quote
+     * (no bid = no look yet); a trade with no quote until N + {@value #EARLY_FAIL_GRACE_MIN} minutes is not looked at.
+     */
     @Override
     protected String customExit(FeatureSnapshot s, PositionView position, LocalTime time) {
-        if (earlyFailMin > 0 && !earlyChecked && entryTime != null
-                && java.time.Duration.between(entryTime, s.time()).toMinutes() >= earlyFailMin) {
-            earlyChecked = true;
-            if (position.averagePremium() > 0 && position.bid() > 0
-                    && (position.bid() / position.averagePremium() - 1) * 100.0 < earlyFailPct) {
-                return "EARLY_FAIL_" + earlyFailMin;
+        if (earlyFailMin > 0 && !earlyChecked && entryTime != null) {
+            long held = java.time.Duration.between(entryTime, s.time()).toMinutes();
+            if (held > earlyFailMin + EARLY_FAIL_GRACE_MIN) {
+                earlyChecked = true;
+            } else if (held >= earlyFailMin && position.averagePremium() > 0 && position.bid() > 0) {
+                earlyChecked = true;
+                if ((position.bid() / position.averagePremium() - 1) * 100.0 < earlyFailPct) {
+                    return "EARLY_FAIL_" + earlyFailMin;
+                }
             }
         }
         return super.customExit(s, position, time);
