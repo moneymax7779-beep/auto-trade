@@ -358,6 +358,30 @@ class BrokerVenueIT {
     }
 
     @Test
+    void aLostSessionIsAuditedOnceNotOnEveryCheck() {
+        // 7 Nov 2026: a LIVE account nobody logged in to wrote BROKER_SESSION_LOST (each one sent on Telegram) on every
+        // 30 s reconciliation; now once when the session goes, once a day while it stays gone, and again after a login
+        Setup s = setup(false);
+        KillSwitches kills = new KillSwitches(dataSource);
+        java.util.function.IntSupplier rows = () -> jdbc.queryForObject("select count(*) from exec.audit_log where "
+                + "broker_account_id = ? and action = 'BROKER_SESSION_LOST'", Integer.class, s.broker().id());
+        assertThat(kills.loseSession(s.broker(), "test", Map.of("during", "reconciliation"))).isTrue();
+        assertThat(kills.loseSession(s.broker(), "test", Map.of("during", "reconciliation"))).isFalse();
+        assertThat(kills.loseSession(s.broker(), "test", Map.of("during", "reconciliation"))).isFalse();
+        assertThat(rows.getAsInt()).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select connection_status from acct.broker_account where id = ?", String.class,
+                s.broker().id())).isEqualTo("TOKEN_EXPIRED");
+        // yesterday's row only (no login since): told again today, once
+        jdbc.update("update exec.audit_log set at = at - interval '1 day' where broker_account_id = ?", s.broker().id());
+        assertThat(kills.loseSession(s.broker(), "test", Map.of())).isTrue();
+        assertThat(kills.loseSession(s.broker(), "test", Map.of())).isFalse();
+        // a login, then the session goes again the same day: told again
+        jdbc.update("update acct.broker_account set connection_status = 'ACTIVE' where id = ?", s.broker().id());
+        assertThat(kills.loseSession(s.broker(), "test", Map.of())).isTrue();
+        assertThat(rows.getAsInt()).isEqualTo(3);
+    }
+
+    @Test
     void aRefusedStopExitsThePositionAtOnce() throws Exception {
         Setup s = setup(false);
         decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
