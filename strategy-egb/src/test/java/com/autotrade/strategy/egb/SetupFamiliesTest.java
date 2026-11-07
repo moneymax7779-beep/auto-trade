@@ -203,6 +203,86 @@ class SetupFamiliesTest {
     }
 
     /**
+     * A-334 mac-v34: the v1 entry, then one look at the option 15 minutes in: more than 7.5 % under the premium = out; a
+     * trade that passes that look is never early-failed later, whatever its bid.
+     */
+    @Test
+    void maCrossV34ExitsOnceFifteenMinutesInWhenTheOptionIsDownMoreThanSevenAndAHalfPercent() {
+        Map<String, Object> swings = Map.of("structure.lastSwingLow", 22580.0, "structure.lastSwingHigh", 22700.0);
+        Day fails = new Day("ma-cross.v34.yaml", swings);
+        fails.at("10:00", 22600, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22602.0);
+        assertThat(fails.at("10:01", 22610, PositionView.FLAT, "structure.ema9", 22605.0, "structure.ema20", 22601.0).orders())
+                .singleElement().extracting(OrderIntent::side).isEqualTo(OptionSide.CE);
+        assertThat(fails.at("10:10", 22600, new PositionView(true, OptionSide.CE, 1, 50, null, 44),
+                "structure.ema9", 22604.0, "structure.ema20", 22601.0).orders()).as("-12 % but only 9 minutes in").isEmpty();
+        assertThat(fails.at("10:16", 22600, new PositionView(true, OptionSide.CE, 1, 50, null, 46),
+                "structure.ema9", 22604.0, "structure.ema20", 22601.0).orders())
+                .as("-8 % at 15 minutes").singleElement().extracting(OrderIntent::reason).isEqualTo("EARLY_FAIL_15");
+
+        Day holds = new Day("ma-cross.v34.yaml", swings);
+        holds.at("10:00", 22600, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22602.0);
+        holds.at("10:01", 22610, PositionView.FLAT, "structure.ema9", 22605.0, "structure.ema20", 22601.0);
+        assertThat(holds.at("10:16", 22605, new PositionView(true, OptionSide.CE, 1, 50, null, 48),
+                "structure.ema9", 22604.0, "structure.ema20", 22601.0).orders()).as("-4 % at 15 minutes: keep").isEmpty();
+        assertThat(holds.at("10:20", 22600, new PositionView(true, OptionSide.CE, 1, 50, null, 40),
+                "structure.ema9", 22604.0, "structure.ema20", 22601.0).orders()).as("checked once only").isEmpty();
+
+        Day gap = new Day("ma-cross.v34.yaml", swings);
+        gap.at("10:00", 22600, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22602.0);
+        gap.at("10:01", 22610, PositionView.FLAT, "structure.ema9", 22605.0, "structure.ema20", 22601.0);
+        assertThat(gap.at("10:16", 22600, new PositionView(true, OptionSide.CE, 1, 50, null, Double.NaN),
+                "structure.ema9", 22604.0, "structure.ema20", 22601.0).orders()).as("no quote: no look yet").isEmpty();
+        assertThat(gap.at("10:17", 22600, new PositionView(true, OptionSide.CE, 1, 50, null, 45),
+                "structure.ema9", 22604.0, "structure.ema20", 22601.0).orders())
+                .as("the first quoted minute is the look").singleElement().extracting(OrderIntent::reason)
+                .isEqualTo("EARLY_FAIL_15");
+
+        Day late = new Day("ma-cross.v34.yaml", swings);
+        late.at("10:00", 22600, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22602.0);
+        late.at("10:01", 22610, PositionView.FLAT, "structure.ema9", 22605.0, "structure.ema20", 22601.0);
+        assertThat(late.at("10:22", 22600, new PositionView(true, OptionSide.CE, 1, 50, null, 40),
+                "structure.ema9", 22604.0, "structure.ema20", 22601.0).orders())
+                .as("first quote 21 minutes in: past the 5-minute grace, no look").isEmpty();
+    }
+
+    /** A-332 mac-v20: past 60 minutes the time stop closes only a trade whose index never reached +1R. */
+    @Test
+    void maCrossV20TimeStopsOnlyATradeThatNeverReachedOneR() {
+        Map<String, Object> swings = Map.of("structure.lastSwingLow", 22580.0, "structure.lastSwingHigh", 22700.0);
+        PositionView holding = new PositionView(true, OptionSide.CE, 1, 50, null, 52);
+        Day reached = new Day("ma-cross.v20.yaml", swings);
+        reached.at("10:00", 22600, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22602.0);
+        reached.at("10:01", 22610, PositionView.FLAT, "structure.ema9", 22605.0, "structure.ema20", 22601.0);  // risk 30
+        reached.at("10:20", 22641, holding, "structure.ema9", 22620.0, "structure.ema20", 22605.0);              // +1.03R
+        assertThat(reached.at("11:05", 22625, holding, "structure.ema9", 22620.0, "structure.ema20", 22610.0).orders())
+                .as("64 minutes, but it reached +1R: hold").isEmpty();
+
+        Day never = new Day("ma-cross.v20.yaml", swings);
+        never.at("10:00", 22600, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22602.0);
+        never.at("10:01", 22610, PositionView.FLAT, "structure.ema9", 22605.0, "structure.ema20", 22601.0);
+        never.at("10:20", 22630, holding, "structure.ema9", 22620.0, "structure.ema20", 22605.0);              // +0.67R
+        assertThat(never.at("11:01", 22625, holding, "structure.ema9", 22620.0, "structure.ema20", 22610.0).orders())
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("TIME_60");
+    }
+
+    /** Every ma-cross file loads; a file with one key of an exit pair is refused rather than left silently off. */
+    @Test
+    void everyMaCrossFileLoadsAndAHalfPairIsRefused(@org.junit.jupiter.api.io.TempDir Path dir) throws Exception {
+        try (var files = java.nio.file.Files.list(Path.of("..", "config", "strategy"))) {
+            List<Path> mac = files.filter(p -> p.getFileName().toString().startsWith("ma-cross.v")).toList();
+            assertThat(mac).hasSizeGreaterThanOrEqualTo(20);
+            for (Path p : mac) {
+                assertThat(Strategies.load(p).create("NIFTY", Snapshots.SESSION)).as(p.toString()).isNotNull();
+            }
+        }
+        String v34 = java.nio.file.Files.readString(Path.of("..", "config", "strategy", "ma-cross.v34.yaml"));
+        Path half = dir.resolve("ma-cross.v34.yaml");
+        java.nio.file.Files.writeString(half, v34.replaceAll("(?m)^\\s*early_fail_pct:.*\\n", ""));
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> Strategies.load(half).create("NIFTY", Snapshots.SESSION))
+                .hasStackTraceContaining("early_fail_min and exits.early_fail_pct go together");
+    }
+
+    /**
      * A-158 aob-v1: a quiet morning (3-minute share 0.001, 1,000 futures a minute), then at 09:41 a 4x share with the last
      * three minutes at 2,000 a minute (2x the day's median window): buy the call. Held through ordinary flow against it, out
      * on a 3x burst the other way. The same burst without the volume does not enter.

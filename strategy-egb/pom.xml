@@ -11,6 +11,7 @@
     <artifactId>strategy-egb</artifactId>
     <description>Expiry-day gamma breakout -> retest -> runner (user design, 2026-09-26).</description>
     <dependencies>
+        <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId></dependency>
         <dependency>
             <groupId>com.autotrade</groupId>
             <artifactId>strategy-api</artifactId>

@@ -1,0 +1,30 @@
+# EMA9 / EMA20 cross with a swing stop, v1 (user's request 2026-10-09: "register and test it", after a YouTube EMA9/SMA21
+# strategy). Rules registered before any replay in docs/studies/2026-10-09-ma-cross.md (ledger A-066). A 5-day screen on
+# option mids (28 Sep-5 Oct) showed PF 2.41 with the swing stop and 0.89 with an ATR stop: those days are in the test set,
+# so the held-out days decide. Never trades an index on the day it expires. Every value is a round number, not fitted.
+version: mac-v27
+strategy: ma-cross
+status: UNCALIBRATED
+source: "A-332.8 sensitivity of mac-v20 (unless 1.5R); registered before its replay, a robustness check of v20, not a selection"
+
+scope:
+  entry_from: "09:30"
+  last_new_entry: "14:30"              # exclusive
+  flat_by: "15:15"
+  time_stop_min: 0                     # A-332: the frame's time stop off; see exits.cross_time_stop_*
+  skip_expiring_index: true
+
+setup:
+  max_stop_atr: 3.0                    # skip a cross whose swing stop is more than 3 ATR(3m) away (or unknown / wrong side)
+  reward_to_risk: 2.0                  # target = entry + 2 x (entry - stop)
+  # the averages are the features' EMA9 and EMA20 of 3-minute bars (structure.ema9 / ema20)
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  cross_time_stop_min: 60               # A-332: the 60-minute time stop, only for a trade whose index never reached +1R
+  cross_time_stop_unless_r: 1.5
+  premium_stop_pct: 25                 # emergency only; the index-level stop comes first
