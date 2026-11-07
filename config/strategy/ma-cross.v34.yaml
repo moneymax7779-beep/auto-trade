@@ -1,3 +1,7 @@
+# mac-v34 = mac-v1 + an early-fail exit (A-334): once, 15 minutes after entry, exit when the option bid is more than
+# 7.5 % below the average premium. 28 tick days: +12.36 L vs v1 +10.90 L, better in both halves; its 10 early exits were
+# all v1 losers (+1.56 L direct). Threshold chosen after seeing all 28 days (in-sample). LIVE from 2026-11-09 (A-335, user).
+# The lines below describe the v1 rules this file builds on.
 # EMA9 / EMA20 cross with a swing stop, v1 (user's request 2026-10-09: "register and test it", after a YouTube EMA9/SMA21
 # strategy). Rules registered before any replay in docs/studies/2026-10-09-ma-cross.md (ledger A-066). A 5-day screen on
 # option mids (28 Sep-5 Oct) showed PF 2.41 with the swing stop and 0.89 with an ATR stop: those days are in the test set,

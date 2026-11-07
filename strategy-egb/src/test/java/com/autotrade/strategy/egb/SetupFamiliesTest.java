@@ -203,6 +203,32 @@ class SetupFamiliesTest {
     }
 
     /**
+     * A-334 mac-v34: the v1 entry, then one look at the option 15 minutes in: more than 7.5 % under the premium = out; a
+     * trade that passes that look is never early-failed later, whatever its bid.
+     */
+    @Test
+    void maCrossV34ExitsOnceFifteenMinutesInWhenTheOptionIsDownMoreThanSevenAndAHalfPercent() {
+        Map<String, Object> swings = Map.of("structure.lastSwingLow", 22580.0, "structure.lastSwingHigh", 22700.0);
+        Day fails = new Day("ma-cross.v34.yaml", swings);
+        fails.at("10:00", 22600, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22602.0);
+        assertThat(fails.at("10:01", 22610, PositionView.FLAT, "structure.ema9", 22605.0, "structure.ema20", 22601.0).orders())
+                .singleElement().extracting(OrderIntent::side).isEqualTo(OptionSide.CE);
+        assertThat(fails.at("10:10", 22600, new PositionView(true, OptionSide.CE, 1, 50, null, 44),
+                "structure.ema9", 22604.0, "structure.ema20", 22601.0).orders()).as("-12 % but only 9 minutes in").isEmpty();
+        assertThat(fails.at("10:16", 22600, new PositionView(true, OptionSide.CE, 1, 50, null, 46),
+                "structure.ema9", 22604.0, "structure.ema20", 22601.0).orders())
+                .as("-8 % at 15 minutes").singleElement().extracting(OrderIntent::reason).isEqualTo("EARLY_FAIL_15");
+
+        Day holds = new Day("ma-cross.v34.yaml", swings);
+        holds.at("10:00", 22600, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22602.0);
+        holds.at("10:01", 22610, PositionView.FLAT, "structure.ema9", 22605.0, "structure.ema20", 22601.0);
+        assertThat(holds.at("10:16", 22605, new PositionView(true, OptionSide.CE, 1, 50, null, 48),
+                "structure.ema9", 22604.0, "structure.ema20", 22601.0).orders()).as("-4 % at 15 minutes: keep").isEmpty();
+        assertThat(holds.at("10:20", 22600, new PositionView(true, OptionSide.CE, 1, 50, null, 40),
+                "structure.ema9", 22604.0, "structure.ema20", 22601.0).orders()).as("checked once only").isEmpty();
+    }
+
+    /**
      * A-158 aob-v1: a quiet morning (3-minute share 0.001, 1,000 futures a minute), then at 09:41 a 4x share with the last
      * three minutes at 2,000 a minute (2x the day's median window): buy the call. Held through ordinary flow against it, out
      * on a 3x burst the other way. The same burst without the volume does not enter.
