@@ -18,6 +18,12 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * account's live flag. An ENTER or ADD reaches a follower only when its subscription was enabled before the decision
  * ({@code enabled_at}, V27: no entry hours late at the signal's old price); exits always do. A subscription made after
  * the session's day (a replay, a back-test of followers) takes the whole day.
+ * <p>
+ * <b>DAILY_SWITCH workspaces</b> (trader workspaces, V29, {@link TradingDay}): an ENTER goes to one account only, the
+ * workspace's entry target as of the decision's own time ({@code acct.entry_target}: the chosen broker's real account on
+ * a LIVE day with a session, else its paper twin, none when Off), and at most one ENTER intent is ever made for the
+ * workspace's batch, so a switch landing between two ticks cannot send the same entry to both. ADD and EXIT go to every
+ * subscribed account as above (an account holding nothing skips them).
  */
 public final class FanOut {
 
@@ -45,6 +51,7 @@ public final class FanOut {
                 + "d.priority, d.underlying, d.action, d.option_side, d.instrument_token, d.symbol, 'CREATED', "
                 + "d.idempotency_key || ':' || a.id "
                 + "from exec.trade_batch b join exec.signal_decision d on d.id = b.signal_decision_id "
+                + "join acct.tenant tn on tn.id = b.tenant_id "
                 + "join acct.strategy_subscription s on s.copy_group_id = d.copy_group_id and s.strategy_id = d.strategy_id "
                 + "and s.enabled join acct.broker_account a on a.id = s.broker_account_id "
                 + "where d.copy_group_id = ? and d.session_date = ? and a.account_role = 'FOLLOWER_TRADE' and a.enabled "
@@ -52,6 +59,11 @@ public final class FanOut {
                 + "and (coalesce(s.mode_override, a.trade_mode) <> 'LIVE' or a.live_trading_enabled) "
                 + "and (d.action = 'EXIT' or s.enabled_at <= d.decided_at "
                 + "or (s.enabled_at at time zone 'Asia/Kolkata')::date > d.session_date) "
+                // a DAILY_SWITCH workspace's entry: its target as of the decision, once per batch
+                + "and (tn.trading_control <> 'DAILY_SWITCH' or d.action <> 'ENTER' "
+                + "or (a.id = acct.entry_target(b.tenant_id, d.decided_at) and not exists (select 1 from exec.trade_intent x "
+                + "where x.trade_batch_id = b.id and x.action = 'ENTER'))) "
+                + "order by d.decided_at, d.priority, d.id, a.id "                 // intent ids in decision order
                 + "on conflict (tenant_id, broker_account_id, idempotency_key) do nothing", copyGroupId, date);
         jdbc.update("update exec.trade_batch b set status = 'FANNED_OUT' from exec.signal_decision d "
                 + "where d.id = b.signal_decision_id and d.copy_group_id = ? and d.session_date = ? and b.status = 'CREATED'",

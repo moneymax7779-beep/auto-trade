@@ -93,6 +93,60 @@ public final class AccountStore {
         return jdbc.queryForObject("select id from acct.broker_account where legacy_account_label = ?", Long.class, label);
     }
 
+    /**
+     * A new follower account of a tenant (role FOLLOWER_TRADE), never LIVE, without a legacy label: names are unique per
+     * tenant only, and a label is unique across all tenants (code review 7 Nov 2026: creating "ZERODHA-2" by name as a
+     * label in a second tenant matched the first tenant's account and the caller then changed that one). Returns its id.
+     */
+    public long createFollowerAccount(long tenantId, long appUserId, String name, BrokerType broker, TradeMode mode,
+                                      double allocatedCapital, EquityMode equityMode, LocalDate equityFrom, String riskFile,
+                                      double sizeStepPct) {
+        if (mode == TradeMode.LIVE) {
+            throw new IllegalArgumentException("a follower is never created live");
+        }
+        return jdbc.queryForObject("insert into acct.broker_account (tenant_id, app_user_id, broker_type, display_name, "
+                        + "account_role, connection_status, trade_mode, allocated_capital, equity_mode, equity_from, risk_file, "
+                        + "size_step_pct, enabled) values (?, ?, ?, ?, 'FOLLOWER_TRADE', ?, ?, ?, ?, ?, ?, ?, true) returning id",
+                Long.class, tenantId, appUserId, broker.name(), name,
+                broker == BrokerType.PAPER ? "ACTIVE" : "PENDING_CONNECT", mode.name(), allocatedCapital, equityMode.name(),
+                Date.valueOf(equityFrom), riskFile, sizeStepPct);
+    }
+
+    /**
+     * The paper twin of a real broker account (trader workspaces, V29): a PAPER-broker follower of the same tenant and
+     * owner, named "<name> paper", with the account's capital, equity mode, limits, size step, risk file and enabled flag.
+     * Created once; returns its id.
+     */
+    public long ensurePaperTwin(long realAccountId) {
+        jdbc.update("insert into acct.broker_account (tenant_id, app_user_id, broker_type, display_name, account_role, "
+                + "connection_status, trade_mode, allocated_capital, equity_mode, equity_from, risk_file, size_step_pct, "
+                + "daily_loss_limit, enabled, paper_of_account_id) select a.tenant_id, a.app_user_id, 'PAPER', "
+                + "a.display_name || ' paper', 'FOLLOWER_TRADE', 'ACTIVE', 'PAPER', a.allocated_capital, a.equity_mode, "
+                + "a.equity_from, a.risk_file, a.size_step_pct, a.daily_loss_limit, a.enabled, a.id from acct.broker_account a "
+                + "where a.id = ? and a.broker_type <> 'PAPER' and not exists (select 1 from acct.broker_account x "
+                + "where x.paper_of_account_id = a.id)", realAccountId);
+        return jdbc.queryForObject("select id from acct.broker_account where paper_of_account_id = ?", Long.class,
+                realAccountId);
+    }
+
+    /**
+     * Keeps a real account's paper twin in step: capital, equity mode and date, daily loss limit, size step, risk file and
+     * enabled flag, and its strategy subscriptions (each with the real one's enabled flag, multiplier and time). Nothing
+     * when the account has no twin.
+     */
+    public void syncPaperTwin(long realAccountId) {
+        jdbc.update("update acct.broker_account t set allocated_capital = a.allocated_capital, equity_mode = a.equity_mode, "
+                + "equity_from = a.equity_from, daily_loss_limit = a.daily_loss_limit, size_step_pct = a.size_step_pct, "
+                + "risk_file = a.risk_file, enabled = a.enabled, updated_at = now() from acct.broker_account a "
+                + "where a.id = ? and t.paper_of_account_id = a.id", realAccountId);
+        jdbc.update("insert into acct.strategy_subscription (copy_group_id, broker_account_id, strategy_id, enabled, "
+                + "size_multiplier, enabled_at) select s.copy_group_id, t.id, s.strategy_id, s.enabled, s.size_multiplier, "
+                + "s.enabled_at from acct.strategy_subscription s join acct.broker_account t on t.paper_of_account_id = "
+                + "s.broker_account_id where s.broker_account_id = ? on conflict (copy_group_id, broker_account_id, strategy_id) "
+                + "do update set enabled = excluded.enabled, size_multiplier = excluded.size_multiplier, "
+                + "enabled_at = excluded.enabled_at", realAccountId);
+    }
+
     /** Enabled follower accounts subscribed to a copy group (any strategy). */
     public List<BrokerAccount> followers(long copyGroupId) {
         return jdbc.query("select " + ACCOUNT_COLUMNS + " from acct.broker_account a where a.account_role = 'FOLLOWER_TRADE' "

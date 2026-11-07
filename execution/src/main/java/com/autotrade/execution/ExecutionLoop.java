@@ -40,6 +40,10 @@ import com.autotrade.sim.CostModel;
  * user switched LIVE, on a risk file with live limits, trades the real Kite behind a {@link LiveGuard}, today only.
  * An account trades only under its {@link AccountLease}. A broker-routed account is reconciled against its broker when
  * the lease is taken and every {@link #RECONCILE_EVERY} (a difference kills its entries).
+ * <p>
+ * <b>Idle accounts</b> (DAILY_SWITCH workspaces, V29): a real broker account that is not the day's entry target and holds
+ * nothing ({@link TradingDay#idle}) gets no turn: no broker connection, no lease, no reconciliation (a member's own hand
+ * trades on a PAPER day are not ours to reconcile), and its exits and adds are closed as NOT_HELD.
  */
 public final class ExecutionLoop implements AutoCloseable {
 
@@ -64,6 +68,7 @@ public final class ExecutionLoop implements AutoCloseable {
     private final QuoteSource quotes;
     private final BrokerConnections connections;
     private final BrokerReconciler reconciler;
+    private final TradingDay tradingDay;
     private final Map<Long, ExecutorService> lanes = new ConcurrentHashMap<>();
     private final Map<Long, Future<?>> busy = new ConcurrentHashMap<>();
     private final Map<Long, AccountLease> leases = new ConcurrentHashMap<>();
@@ -100,6 +105,7 @@ public final class ExecutionLoop implements AutoCloseable {
         this.connections = new BrokerConnections(dataSource, brokerFunds,
                 List.of(new ZerodhaDryRunAdapter(dataSource, brokerFunds, sessions, kiteApiBase)));
         this.reconciler = new BrokerReconciler(dataSource, costs);
+        this.tradingDay = new TradingDay(dataSource);
     }
 
     /** The copy groups this worker serves now (ids). */
@@ -173,6 +179,12 @@ public final class ExecutionLoop implements AutoCloseable {
                 log.info("account {} ({}) changed ({} -> {}): route rebuilt", account.id(), account.displayName(), before,
                         signature);
             }
+            if (tradingDay.idle(account)) {
+                int closed = tradingDay.closeIdleIntents(account.id());
+                record(account, null, null, "IDLE", "not the day's broker and holds nothing; no broker connection"
+                        + (closed > 0 ? " (" + closed + " exit/add closed NOT_HELD)" : ""));
+                return;
+            }
             FollowerRisk risk = risks.computeIfAbsent(account.id(), id -> FollowerRisk.load(Path.of(account.riskFile())));
             if ((account.tradeMode() == TradeMode.LIVE || risk.orders() != null && risk.orders().brokerMarket())
                     && !day.equals(LocalDate.now(java.time.ZoneId.of("Asia/Kolkata")))) {
@@ -225,6 +237,7 @@ public final class ExecutionLoop implements AutoCloseable {
                                 + "where id = ?", account.id());
                         new KillSwitches(dataSource).audit(account, workerId, "BROKER_SESSION_LOST",
                                 Map.of("message", String.valueOf(e.getMessage()), "during", "reconciliation"));
+                        tradingDay.sessionLost(account, workerId);     // a DAILY_SWITCH LIVE day goes back to PAPER
                         check = ", BROKER SESSION LOST (" + e.getMessage() + ")";
                     }
                     reconciled.put(account.id(), Instant.now());
