@@ -31,7 +31,8 @@ class ExecutionAlerts {
     private static final Logger log = LoggerFactory.getLogger(ExecutionAlerts.class);
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     private static final List<String> ACTIONS = List.of("KILL_ACCOUNT", "KILL_ACCOUNT_ALREADY_ENGAGED", "BROKER_SESSION_LOST",
-            "INSTRUMENT_MAPPING_MISMATCH", "EOD_SQUARE_OFF", "FLATTEN", "END_OF_DAY", "EXIT_RETRY", "MODE_PAPER_SESSION_LOST");
+            "INSTRUMENT_MAPPING_MISMATCH", "EOD_SQUARE_OFF", "FLATTEN", "END_OF_DAY", "EXIT_RETRY", "MODE_PAPER_SESSION_LOST",
+            "LATE_FILL", "SELLS_CUT");            // review 8 Nov 2026: a fill adopted late, our sells cut to the broker's holding
 
     /** One message, and the member workspace it is also for (null: the admin's only). */
     record Alert(String text, Long memberTenant) {
@@ -106,6 +107,8 @@ class ExecutionAlerts {
                 + "from exec.order_execution e join acct.broker_account a on a.id = e.broker_account_id "
                 + "join acct.tenant t on t.id = a.tenant_id left join exec.position p on p.entry_trade_intent_id = e.trade_intent_id and p.broker_account_id = "
                 + "e.broker_account_id where e.id > ? and a.trade_mode = 'LIVE' and e.status in ('FILLED', 'REJECTED') "
+                // review 8 Nov 2026: a stop our own guard refused was never sent (the stop's state is alerted elsewhere)
+                + "and not (e.role = 'STOP' and e.status = 'REJECTED' and coalesce(e.raw_error, '') like 'LIVE guard:%') "
                 + "and (e.updated_at at time zone 'Asia/Kolkata')::date = (now() at time zone 'Asia/Kolkata')::date "
                 + "order by e.id", lastOrderCheck)) {
             if (!sent.add("order:" + r.get("id") + ":" + r.get("status"))) {

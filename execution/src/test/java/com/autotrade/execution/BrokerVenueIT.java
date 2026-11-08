@@ -234,8 +234,13 @@ class BrokerVenueIT {
         Setup s = setup(false);
         decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
         FollowerSimulator kite = brokerFollower();
-        sim.failNext("place", Fault.TIMEOUT_PROCESSED);
+        // review 8 Nov 2026: processed, then a 500 (TIMEOUT_PROCESSED stalls 1.5 s here, inside the client's 2 s read
+        // timeout, so the place used to succeed normally and this test never exercised the unknown outcome)
+        sim.failNext("place", Fault.HTTP_500_PROCESSED);
         kite.run(s.broker(), s.group(), DAY);
+        assertThat(orders(s.broker()).stream().filter(r -> r.get("role").equals("STOP")).count()).isEqualTo(2);
+        assertThat(sim.requests("place")).as("2 entry slices (the uncertain one found by its tag, never placed again) "
+                + "and 2 stop slices: a second entry place would make 5").isEqualTo(4);
         assertThat(position(s.broker()).get("quantity_open")).isEqualTo(2600L);
         assertThat(orders(s.broker()).stream().filter(r -> r.get("role").equals("ENTRY")).count()).isEqualTo(2);
         assertThat(sim.netQuantities()).containsEntry("NIFTY26O2023100PE", 2600L);
@@ -547,21 +552,400 @@ class BrokerVenueIT {
     }
 
     @Test
-    void aHandSaleWhileAStopIsStillLiveIsNotBookedAndTheKillIsAuditedOnce() throws Exception {
+    void aHandSaleWhileAStopIsStillLiveCutsTheStopsSoTheyCannotSellShortAndIsBooked() throws Exception {
+        // review 8 Nov 2026: a hand sale in Kite with our stops still resting left them live (only a kill), so a later
+        // fall through the trigger sold 2,600 the account no longer held: a short. Now the first check cuts our working
+        // sells to what the broker holds, and the next books the hand sale
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        FollowerSimulator kite = brokerFollower();
+        kite.run(s.broker(), s.group(), DAY);
+        sellByHand("HANDX", 4, 90);                                   // the stops still rest: they could sell again
+        BrokerReconciler reconciler = new BrokerReconciler(dataSource, costs);
+        assertThat(reconciler.check(s.broker(), gateway).matched()).isFalse();
+        assertThat(gateway.orders()).filteredOn(o -> o.clientTag() != null && o.clientTag().matches("F\\d+S.*"))
+                .hasSize(2).allSatisfy(o -> assertThat(o.status()).isEqualTo(com.autotrade.broker.OrderStatus.CANCELLED));
+        sim.quote(KEY, 72, 1_000_000, 72.05, 1_000_000, 72);         // through the 75 trigger, above the 71.25 limit
+        assertThat(sim.netQuantities()).as("never short").containsEntry("NIFTY26O2023100PE", 0L);
+        assertThat(reconciler.check(s.broker(), gateway).matched()).isTrue();
+        assertThat(position(s.broker())).satisfies(p -> {
+            assertThat(p.get("status")).isEqualTo("CLOSED");
+            assertThat(p.get("exit_reason")).isEqualTo("MANUAL");
+        });
+        assertThat(new KillSwitches(dataSource).engaged(s.broker(), "opening-drive", KEY)).isNull();
+        assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? "
+                + "and action = 'SELLS_CUT'", Integer.class, s.broker().id())).isEqualTo(1);
+        kite.run(s.broker(), s.group(), DAY);                          // the turn after: nothing re-armed, still flat
+        assertThat(sim.netQuantities()).containsEntry("NIFTY26O2023100PE", 0L);
+    }
+
+    @Test
+    void theSameReconciliationDifferenceEveryCheckWritesOneKillRow() throws Exception {
+        // 6 Nov 2026: the same difference every 30 s wrote 1,076 audit rows (each one an alert)
         Setup s = setup(false);
         decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
         brokerFollower().run(s.broker(), s.group(), DAY);
-        sellByHand("HANDX", 4, 90);                                   // the stops still rest: they could sell again
+        sim.quote(KEY, 100, 1_000_000, 100, 1_000_000, 100);
+        gateway.place(new OrderRequest("MANUALB1", 3000047168L, KEY, SYMBOL, "NSE_FO", OrderSide.BUY, OrderType.LIMIT, 65,
+                100.2, 0, "MANUALB1"));                                 // bought by hand: the broker holds more
         BrokerReconciler reconciler = new BrokerReconciler(dataSource, costs);
         for (int i = 0; i < 4; i++) {
             assertThat(reconciler.check(s.broker(), gateway).matched()).isFalse();
         }
-        assertThat(position(s.broker()).get("status")).isEqualTo("OPEN");
         assertThat(new KillSwitches(dataSource).engaged(s.broker(), "opening-drive", KEY)).startsWith("ACCOUNT: RECONCILIATION");
         assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? and action like "
                 + "'KILL_ACCOUNT%'", Integer.class, s.broker().id())).as("the same difference every check: one row").isEqualTo(1);
+    }
+
+    @Test
+    void aCutOfOurSellsThatFailsIsAuditedOnceNotAtEveryCheck() throws Exception {
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        brokerFollower().run(s.broker(), s.group(), DAY);
+        sellByHand("HANDC", 4, 90);
+        for (int i = 0; i < 4; i++) {
+            sim.failNext("cancel", Fault.HTTP_500);                      // two stops, two checks: no cancel goes through
+        }
+        BrokerReconciler reconciler = new BrokerReconciler(dataSource, costs);
+        reconciler.check(s.broker(), gateway);
+        reconciler.check(s.broker(), gateway);
         assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? "
-                + "and action = 'MANUAL_EXIT'", Integer.class, s.broker().id())).isZero();
+                + "and action = 'SELLS_CUT'", Integer.class, s.broker().id())).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select detail::text from exec.audit_log where broker_account_id = ? "
+                + "and action = 'SELLS_CUT'", String.class, s.broker().id())).contains("NOT cut");
+    }
+
+    @Test
+    void aResumeWhoseBookReadFailsIsWatchedAndItsUnbookedFillIsAdopted() throws Exception {
+        // review 8 Nov 2026 (second review): the resumed order whose read failed kept its status, so nothing watched it,
+        // and a fill recorded before the lost session (never booked) was taken as booked
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        jdbc.update("update exec.signal_decision set premium_budget = 130000 where copy_group_id = ?", s.group());
+        FollowerSimulator kite = brokerFollower();
+        sim.partialFills(0.5);
+        sim.failNext("orders", Fault.NONE);                            // the first read records 650 filled
+        sim.failNext("orders", Fault.TOKEN_EXPIRED);                   // then the session goes
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(intentState(s.broker(), "ENTER")).isEqualTo("CREATED");
+        assertThat(orders(s.broker())).singleElement().satisfies(r -> assertThat(r.get("quantity_filled")).isEqualTo(650L));
+        sim.quote(KEY, 100, 1_000_000, 100, 1_000_000, 100);           // the rest fills meanwhile: 1,300 held
+        jdbc.update("update acct.broker_account set connection_status = 'ACTIVE' where id = ?", s.broker().id());
+        sim.failNext("orders", Fault.HTTP_500);                        // the resume's read fails
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(intentState(s.broker(), "ENTER")).isEqualTo("RECONCILIATION_REQUIRED_ORDER_UNKNOWN");
+        assertThat(orders(s.broker())).singleElement().satisfies(r -> assertThat(r.get("status")).isEqualTo("UNKNOWN"));
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(position(s.broker()).get("quantity_open")).isEqualTo(1300L);
+        assertThat(orders(s.broker())).filteredOn(r -> r.get("role").equals("STOP"))
+                .extracting(r -> r.get("quantity_requested")).containsExactly(1300L);
+        assertThat(sim.netQuantities()).containsEntry("NIFTY26O2023100PE", 1300L);
+    }
+
+    @Test
+    void anEntryWithOrdersAtTheBrokerWaitsWhileTheSessionIsLostAndIsResumedAfterTheLogin() throws Exception {
+        // review 8 Nov 2026 (second review): a turn with the session still lost refused it (BROKER_SESSION), and a
+        // refusal written before resuming left it refused when the session went again mid-resume
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        jdbc.update("update exec.signal_decision set premium_budget = 130000 where copy_group_id = ?", s.group());
+        FollowerSimulator kite = brokerFollower();
+        sim.failNext("orders", Fault.TOKEN_EXPIRED);                   // placed, then the first read fails
+        kite.run(s.broker(), s.group(), DAY);
+        kite.run(s.broker(), s.group(), DAY);                          // still logged out
+        assertThat(intentState(s.broker(), "ENTER")).isEqualTo("CREATED");
+        new KillSwitches(dataSource).engageAccount(s.broker(), "drill: killed while logged out", "it");
+        jdbc.update("update acct.broker_account set connection_status = 'ACTIVE' where id = ?", s.broker().id());
+        sim.failNext("orders", Fault.TOKEN_EXPIRED);                   // the session goes again while it is resumed
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(intentState(s.broker(), "ENTER")).isEqualTo("CREATED");
+        jdbc.update("update acct.broker_account set connection_status = 'ACTIVE' where id = ?", s.broker().id());
+        int before = sim.orderCount();
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(intentState(s.broker(), "ENTER")).isEqualTo("EXECUTED");
+        assertThat(position(s.broker()).get("quantity_open")).isEqualTo(1300L);
+        assertThat(sim.orderCount() - before).as("only the stop is new").isEqualTo(1);
+    }
+
+    @Test
+    void aRecordedOrderPlacedAgainThatFailsIsOfUnknownOutcomeNeverRejected() throws Exception {
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        jdbc.update("update exec.signal_decision set premium_budget = 130000 where copy_group_id = ?", s.group());
+        FollowerSimulator kite = brokerFollower();
+        long intent = jdbc.queryForObject("select id from exec.trade_intent where broker_account_id = ?", Long.class,
+                s.broker().id());
+        // a worker stopped after recording the order: not in the broker's book, so it is placed again (by its tag)
+        jdbc.update("insert into exec.order_execution (tenant_id, trade_intent_id, broker_account_id, broker_type, role, "
+                + "client_tag, attempt_no, order_side, order_type, quantity_requested, status) values (?, ?, ?, 'ZERODHA', "
+                + "'ENTRY', ?, 1, 'BUY', 'LIMIT', 1300, 'SUBMITTED')", s.broker().tenantId(), intent, s.broker().id(),
+                "F" + intent + "E1");
+        sim.failNext("place", Fault.INPUT_ERROR);
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(orders(s.broker())).singleElement().satisfies(r -> assertThat(r.get("status")).isEqualTo("UNKNOWN"));
+        assertThat(intentState(s.broker(), "ENTER")).isEqualTo("RECONCILIATION_REQUIRED_ORDER_UNKNOWN");
+    }
+
+    @Test
+    void aDryRunRestartThatLostTheBookDoesNotLeaveAnUnresolvedSellBlockingTheExit() throws Exception {
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        jdbc.update("update exec.signal_decision set premium_budget = 130000 where copy_group_id = ?", s.group());
+        FollowerSimulator kite = brokerFollower();
+        kite.run(s.broker(), s.group(), DAY);
+        long intent = jdbc.queryForObject("select id from exec.trade_intent where broker_account_id = ?", Long.class,
+                s.broker().id());
+        // an emergency exit whose cancel was not confirmed, in a simulator a restart has since replaced
+        jdbc.update("insert into exec.order_execution (tenant_id, trade_intent_id, broker_account_id, broker_type, role, "
+                + "client_tag, broker_order_id, attempt_no, order_side, order_type, quantity_requested, status) values "
+                + "(?, ?, ?, 'ZERODHA', 'EMERGENCY_EXIT', ?, ?, 9, 'SELL', 'LIMIT', 1300, 'RECONCILIATION_REQUIRED')",
+                s.broker().tenantId(), intent, s.broker().id(), "F" + intent + "X9", "lost-" + intent);
+        decide(s, "10:00:00", SignalDecision.Action.EXIT, 120);
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(intentState(s.broker(), "EXIT")).isEqualTo("EXECUTED");
+        assertThat(position(s.broker()).get("status")).isEqualTo("CLOSED");
+        assertThat(sim.netQuantities()).containsEntry("NIFTY26O2023100PE", 0L);
+    }
+
+    @Test
+    void positionsThatLagAFillNeverCutAStop() throws Exception {
+        // Kite's positions can lag its order book: a fresh entry not yet in them is no reason to cut its stop
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        brokerFollower().run(s.broker(), s.group(), DAY);
+        com.autotrade.broker.BrokerConnection lagging = (com.autotrade.broker.BrokerConnection) java.lang.reflect.Proxy
+                .newProxyInstance(getClass().getClassLoader(), new Class<?>[] {com.autotrade.broker.BrokerConnection.class},
+                        (proxy, m, args) -> {
+                            if (m.getName().equals("positions")) {
+                                return List.of();
+                            }
+                            try {
+                                return m.invoke(gateway, args);
+                            } catch (java.lang.reflect.InvocationTargetException e) {
+                                throw e.getCause();
+                            }
+                        });
+        BrokerReconciler reconciler = new BrokerReconciler(dataSource, costs);
+        assertThat(reconciler.check(s.broker(), lagging).differences()).singleElement().asString()
+                .contains("ours 2600, broker 0");
+        assertThat(gateway.orders()).filteredOn(o -> o.clientTag() != null && o.clientTag().matches("F\\d+S.*"))
+                .hasSize(2).allSatisfy(o -> assertThat(o.status().isTerminal()).isFalse());
+        assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? "
+                + "and action = 'SELLS_CUT'", Integer.class, s.broker().id())).isZero();
+    }
+
+    @Test
+    void aPartialHandSaleReducesTheStopToWhatIsStillHeld() throws Exception {
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        jdbc.update("update exec.signal_decision set premium_budget = 130000 where copy_group_id = ?", s.group());
+        brokerFollower().run(s.broker(), s.group(), DAY);              // 1,300 with one stop of 1,300
+        sellByHand("HANDP", 1, 90);                                    // 650 sold by hand: 650 still held
+        BrokerReconciler reconciler = new BrokerReconciler(dataSource, costs);
+        assertThat(reconciler.check(s.broker(), gateway).matched()).isFalse();
+        assertThat(gateway.orders()).filteredOn(o -> o.clientTag() != null && o.clientTag().matches("F\\d+S.*"))
+                .singleElement().satisfies(o -> {
+                    assertThat(o.status().isTerminal()).isFalse();
+                    assertThat(o.quantity()).isEqualTo(650L);
+                });
+        sim.quote(KEY, 72, 1_000_000, 72.05, 1_000_000, 72);         // through the 75 trigger, above the 71.25 limit
+        assertThat(sim.netQuantities()).as("the reduced stop sold what was held, no more").containsEntry("NIFTY26O2023100PE", 0L);
+    }
+
+    @Test
+    void aFilledEntryIsNotCancelledAsUnseenWhileTheOrderBookCannotBeRead() throws Exception {
+        // review 8 Nov 2026: a read that failed counted as "not in the book"; Kite's read timeout is 5 s, so one slow read
+        // cancelled a filled entry as never seen and left it at the broker with no position and no stop
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        jdbc.update("update exec.signal_decision set premium_budget = 130000 where copy_group_id = ?", s.group());
+        FollowerSimulator kite = brokerFollower();
+        for (int i = 0; i < 4; i++) {
+            sim.failNext("orders", Fault.TIMEOUT);                     // 4 x 1.5 s: the book unreadable for 6 s
+        }
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(intentState(s.broker(), "ENTER")).isEqualTo("EXECUTED");
+        assertThat(position(s.broker()).get("quantity_open")).isEqualTo(1300L);
+        assertThat(orders(s.broker())).filteredOn(r -> r.get("role").equals("STOP"))
+                .extracting(r -> r.get("quantity_requested")).containsExactly(1300L);
+        assertThat(new KillSwitches(dataSource).engaged(s.broker(), "opening-drive", KEY)).isNull();
+    }
+
+    @Test
+    void anEntryCutShortByALostSessionIsStillResumedWhenTheAccountWasKilledMeanwhile() throws Exception {
+        // review 8 Nov 2026: the resumed entry ran its checks first (kill switch, and LIVE: signal age, time) and was
+        // refused, so its filled order at the broker never became a position and had no stop
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        jdbc.update("update exec.signal_decision set premium_budget = 130000 where copy_group_id = ?", s.group());
+        FollowerSimulator kite = brokerFollower();
+        sim.failNext("orders", Fault.TOKEN_EXPIRED);                  // placed, then the first order-book read fails
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(intentState(s.broker(), "ENTER")).isEqualTo("CREATED");
+        new KillSwitches(dataSource).engageAccount(s.broker(), "drill: killed while logged out", "it");
+        jdbc.update("update acct.broker_account set connection_status = 'ACTIVE' where id = ?", s.broker().id());
+        int before = sim.orderCount();
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(intentState(s.broker(), "ENTER")).isEqualTo("EXECUTED");
+        assertThat(position(s.broker()).get("quantity_open")).isEqualTo(1300L);
+        assertThat(sim.orderCount() - before).as("no second entry: only the stop is new").isEqualTo(1);
+        assertThat(orders(s.broker())).filteredOn(r -> r.get("role").equals("STOP"))
+                .extracting(r -> r.get("quantity_requested")).containsExactly(1300L);
+    }
+
+    @Test
+    void anEntryWhoseCancelWasNotConfirmedIsAdoptedWhenItFillsLater() throws Exception {
+        // review 8 Nov 2026: the rest of an entry whose cancel failed filled later and was never booked or protected
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        jdbc.update("update exec.signal_decision set premium_budget = 130000 where copy_group_id = ?", s.group());
+        FollowerSimulator kite = brokerFollower();
+        sim.partialFills(0.5);                                        // 650 of 1,300 fill, the rest rests
+        sim.failNext("cancel", Fault.HTTP_500);                       // the timeout's cancel does not go through
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(position(s.broker()).get("quantity_open")).isEqualTo(650L);
+        assertThat(new KillSwitches(dataSource).engaged(s.broker(), "opening-drive", KEY)).contains("ORDER_UNKNOWN");
+        sim.quote(KEY, 100, 1_000_000, 100, 1_000_000, 100);           // the resting rest of the entry fills
+        assertThat(sim.netQuantities()).containsEntry("NIFTY26O2023100PE", 1300L);
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(position(s.broker())).satisfies(p -> {
+            assertThat(p.get("quantity_open")).isEqualTo(1300L);
+            assertThat((Double) p.get("average_entry")).isEqualTo(100.0, org.assertj.core.data.Offset.offset(0.01));
+        });
+        assertThat(orders(s.broker())).filteredOn(r -> r.get("role").equals("STOP") && r.get("status").equals("OPEN"))
+                .extracting(r -> r.get("quantity_requested")).containsExactly(1300L);
+        assertThat(orders(s.broker())).filteredOn(r -> r.get("role").equals("ENTRY"))
+                .extracting(r -> r.get("status")).containsExactly("FILLED");
+        assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? "
+                + "and action = 'LATE_FILL'", Integer.class, s.broker().id())).isEqualTo(1);
+        kite.run(s.broker(), s.group(), DAY);                          // booked once
+        assertThat(position(s.broker()).get("quantity_open")).isEqualTo(1300L);
+    }
+
+    @Test
+    void anEntryOfUnknownOutcomeThatShowsUpFilledLaterBecomesAPositionWithItsStop() throws Exception {
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        jdbc.update("update exec.signal_decision set premium_budget = 130000 where copy_group_id = ?", s.group());
+        FollowerSimulator kite = brokerFollower();
+        sim.failNext("place", Fault.TIMEOUT);                         // not processed: looked up, not found: unknown
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(intentState(s.broker(), "ENTER")).isEqualTo("RECONCILIATION_REQUIRED_ORDER_UNKNOWN");
+        assertThat(jdbc.queryForObject("select count(*) from exec.position where broker_account_id = ?", Integer.class,
+                s.broker().id())).isZero();
+        // Kite's book shows the order after all, filled
+        long intent = jdbc.queryForObject("select id from exec.trade_intent where broker_account_id = ?", Long.class,
+                s.broker().id());
+        sim.quote(KEY, 100, 1_000_000, 100, 1_000_000, 100);
+        gateway.place(new OrderRequest("F" + intent + "E1", 3000047168L, KEY, SYMBOL, "NSE_FO", OrderSide.BUY,
+                OrderType.LIMIT, 1300, 100.2, 0, "F" + intent + "E1"));
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(position(s.broker())).satisfies(p -> {
+            assertThat(p.get("status")).isEqualTo("OPEN");
+            assertThat(p.get("quantity_open")).isEqualTo(1300L);
+        });
+        assertThat(orders(s.broker())).filteredOn(r -> r.get("role").equals("STOP"))
+                .extracting(r -> r.get("quantity_requested")).containsExactly(1300L);
+        assertThat(intentState(s.broker(), "ENTER")).isEqualTo("EXECUTED_LATE_FILL");
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(position(s.broker()).get("quantity_open")).as("booked once").isEqualTo(1300L);
+    }
+
+    @Test
+    void aStopWhosePlaceHasAnUnknownOutcomeIsTriedAgainNotAnEmergencyExit() throws Exception {
+        // review 8 Nov 2026: any non-session error placing the stop (a 5xx, a timeout, a failed read) sold the whole
+        // position at once and killed the account; now only a stop the broker refused does
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        jdbc.update("update exec.signal_decision set premium_budget = 130000 where copy_group_id = ?", s.group());
+        FollowerSimulator kite = brokerFollower();
+        sim.failNext("place", Fault.NONE);
+        sim.failNext("place", Fault.HTTP_500);                         // the stop: not processed, outcome unknown
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(position(s.broker()).get("status")).isEqualTo("OPEN");
+        assertThat(orders(s.broker())).noneMatch(r -> r.get("role").equals("EMERGENCY_EXIT"));
+        assertThat(new KillSwitches(dataSource).engaged(s.broker(), "opening-drive", KEY)).isNull();
+        int before = sim.orderCount();
+        kite.run(s.broker(), s.group(), DAY);                          // backed off: nothing placed every turn
+        assertThat(sim.orderCount()).isEqualTo(before);
+        kite.withProtectBackOff(java.time.Duration.ZERO);
+        kite.run(s.broker(), s.group(), DAY);                          // the next try arms it
+        assertThat(orders(s.broker())).filteredOn(r -> r.get("role").equals("STOP") && r.get("status").equals("OPEN"))
+                .extracting(r -> r.get("quantity_requested")).containsExactly(1300L);
+        assertThat(sim.netQuantities()).containsEntry("NIFTY26O2023100PE", 1300L);
+    }
+
+    @Test
+    void aStopCheckThatFailsAfterARestartIsTriedAgainNextTurn() throws Exception {
+        // review 8 Nov 2026: the account was marked checked before its stops were, so one failed read after a redeploy
+        // left the positions without a broker stop for the day
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        brokerFollower().run(s.broker(), s.group(), DAY);
+        sim.close();
+        FollowerSimulator restarted = brokerFollower();
+        sim.holding(KEY, 2600, 100);
+        sim.failNext("orders", Fault.NONE);                            // the stop-fill read
+        sim.failNext("orders", Fault.HTTP_500);                        // the stop check's read
+        restarted.run(s.broker(), s.group(), DAY);
+        restarted.run(s.broker(), s.group(), DAY);
+        assertThat(gateway.orders()).filteredOn(o -> o.clientTag() != null && o.clientTag().matches("F\\d+S.*")
+                && !o.status().isTerminal()).extracting(o -> o.quantity()).containsExactlyInAnyOrder(1755L, 845L);
+        assertThat(new KillSwitches(dataSource).engaged(s.broker(), "opening-drive", KEY)).isNull();
+    }
+
+    @Test
+    void everyEmergencyExitGetsItsOwnTagSoALaterOneIsReallySent() throws Exception {
+        // review 8 Nov 2026: the emergency exit's tag restarted at X1 on every call, so the second exit attempt's
+        // emergency sell "resumed" the first one's refused order and sent nothing
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        jdbc.update("update exec.signal_decision set premium_budget = 130000 where copy_group_id = ?", s.group());
+        FollowerSimulator kite = brokerFollower();
+        kite.run(s.broker(), s.group(), DAY);
+        decide(s, "10:00:00", SignalDecision.Action.EXIT, 120);
+        for (int i = 0; i < 3; i++) {
+            sim.failNext("place", Fault.INPUT_ERROR);                  // the exit, the re-armed stop, the emergency exit
+        }
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(position(s.broker()).get("status")).isEqualTo("OPEN");
+        jdbc.update("update exec.trade_intent set updated_at = now() - interval '1 minute' where broker_account_id = ? "
+                + "and action = 'EXIT'", s.broker().id());
+        sim.failNext("place", Fault.INPUT_ERROR);                      // the second exit
+        sim.failNext("place", Fault.INPUT_ERROR);                      // its stop; the emergency exit goes through
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(position(s.broker())).satisfies(p -> {
+            assertThat(p.get("status")).isEqualTo("CLOSED");
+            assertThat(p.get("exit_reason")).isEqualTo("STOP_PLACEMENT_FAILED");
+        });
+        assertThat(orders(s.broker())).filteredOn(r -> r.get("role").equals("EMERGENCY_EXIT"))
+                .extracting(r -> r.get("client_tag").toString().replaceAll("^F\\d+", "") + ":" + r.get("status"))
+                .containsExactly("X1:REJECTED", "X2:FILLED");
+        assertThat(sim.netQuantities()).containsEntry("NIFTY26O2023100PE", 0L);
+    }
+
+    @Test
+    void aStopReplacedAfterAnAddWaitsForItsCancelsToShow() throws Exception {
+        // review 8 Nov 2026: replacing several stops looked each cancel up once; a cancel that showed a read later
+        // was STOP_CANCEL_UNCONFIRMED and the whole position was sold as an emergency
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        jdbc.update("update exec.signal_decision set premium_budget = 182000 where copy_group_id = ?", s.group());
+        FollowerSimulator kite = brokerFollower();
+        kite.run(s.broker(), s.group(), DAY);                          // 28 lots = 1,820: stops of 1,755 and 65
+        assertThat(orders(s.broker())).filteredOn(r -> r.get("role").equals("STOP")).hasSize(2);
+        decide(s, "09:40:00", SignalDecision.Action.ADD, 100);
+        sim.cancelLag(2);
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(intentState(s.broker(), "ADD")).isEqualTo("EXECUTED");
+        assertThat(orders(s.broker())).noneMatch(r -> r.get("role").equals("EMERGENCY_EXIT"));
+        long open = (Long) position(s.broker()).get("quantity_open");
+        assertThat(open).isGreaterThan(1820L);
+        assertThat(gateway.orders()).filteredOn(o -> o.clientTag() != null && o.clientTag().matches("F\\d+S.*")
+                && !o.status().isTerminal()).extracting(o -> o.quantity()).asInstanceOf(
+                        org.assertj.core.api.InstanceOfAssertFactories.list(Long.class))
+                .satisfies(q -> assertThat(q.stream().mapToLong(Long::longValue).sum()).isEqualTo(open));
+        assertThat(new KillSwitches(dataSource).engaged(s.broker(), "opening-drive", KEY)).isNull();
     }
 
     @Test
@@ -635,6 +1019,40 @@ class BrokerVenueIT {
         assertThat(intentState(s.broker(), "ENTER")).isEqualTo("EXECUTED");
         assertThat(position(s.broker()).get("quantity_open")).isEqualTo(1300L);
         assertThat(sim.orderCount() - before).as("no second entry: only the stop is new").isEqualTo(1);
+    }
+
+    @Test
+    void aSessionLostWhileAnUnknownPlaceIsLookedUpIsNeverRejectedAndTheFillIsAdoptedWithItsStopAfterTheLogin()
+            throws Exception {
+        // review 8 Nov 2026: the gateway rethrew the lookup's SESSION, so the row was written REJECTED although the order
+        // had reached Kite (and filled); nothing watched it
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        jdbc.update("update exec.signal_decision set premium_budget = 130000 where copy_group_id = ?", s.group());
+        FollowerSimulator kite = brokerFollower();
+        // processed, then a 500 (this simulator's 1.5 s TIMEOUT is inside the client's 2 s read timeout)
+        sim.failNext("place", Fault.HTTP_500_PROCESSED);
+        sim.failNext("orders", Fault.TOKEN_EXPIRED);                   // the token expires as it is looked up by tag
+        FollowerSimulator.DayResult r = kite.run(s.broker(), s.group(), DAY);
+        assertThat(r.reasons()).containsKey("PENDING_BROKER_SESSION");
+        assertThat(jdbc.queryForObject("select connection_status from acct.broker_account where id = ?", String.class,
+                s.broker().id())).as("the session loss is noticed").isEqualTo("TOKEN_EXPIRED");
+        assertThat(orders(s.broker())).singleElement().satisfies(o -> assertThat(o.get("status")).isEqualTo("UNKNOWN"));
+        assertThat(intentState(s.broker(), "ENTER")).isEqualTo("CREATED");
+        assertThat(sim.netQuantities()).containsEntry("NIFTY26O2023100PE", 1300L);
+        kite.run(s.broker(), s.group(), DAY);                          // still logged out: it waits
+        assertThat(intentState(s.broker(), "ENTER")).isEqualTo("CREATED");
+        jdbc.update("update acct.broker_account set connection_status = 'ACTIVE' where id = ?", s.broker().id());
+        int before = sim.orderCount();
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(intentState(s.broker(), "ENTER")).isEqualTo("EXECUTED");
+        assertThat(position(s.broker()).get("quantity_open")).isEqualTo(1300L);
+        assertThat(orders(s.broker())).filteredOn(o -> o.get("role").equals("STOP")).singleElement().satisfies(o -> {
+            assertThat(o.get("quantity_requested")).isEqualTo(1300L);
+            assertThat(o.get("status")).isEqualTo("OPEN");
+        });
+        assertThat(sim.orderCount() - before).as("no second entry: only the stop is new").isEqualTo(1);
+        assertThat(sim.netQuantities()).containsEntry("NIFTY26O2023100PE", 1300L);
     }
 
     @Test

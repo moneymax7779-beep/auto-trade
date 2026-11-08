@@ -160,7 +160,10 @@ public final class KiteGateway implements BrokerConnection {
                 }
             } catch (BrokerException e) {
                 if (e.kind() == Kind.SESSION) {
-                    throw e;
+                    // review 8 Nov 2026: the place may have reached the broker (why we look): its outcome is unknown,
+                    // never a refusal (the caller wrote REJECTED and nothing watched it); the lost session is the cause
+                    throw new BrokerException(Kind.UNKNOWN, "place " + tag + ": outcome unknown, the session was lost "
+                            + "looking it up by tag", e);
                 }
             }
         }

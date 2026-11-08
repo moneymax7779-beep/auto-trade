@@ -359,4 +359,151 @@ class ExecutionLoopIT {
             jdbc.update("update acct.copy_group set enabled = false where id = ?", group);   // not served by "*" workers
         }
     }
+
+    /** A ZERODHA DRY_RUN follower of a new tenant {@code name} on opening-drive, entered at 100 two minutes ago. */
+    private record Kite(long group, long follower, CostModel costs) {
+    }
+
+    private Kite enteredKiteFollower(String name, LocalDate today) {
+        AccountStore accounts = new AccountStore(dataSource);
+        CostModel costs = CostModel.from(ThresholdConfig.load(Path.of("..", "config", "costs",
+                "india-index-options-costs.v2.yaml")));
+        jdbc.update("insert into ref.instrument_snapshot (id, snapshot_date, source, file_sha256, instruments) values "
+                + "(900, ?, 'it', 'it', 1) on conflict do nothing", java.sql.Date.valueOf(today));
+        jdbc.update("insert into ref.instrument (snapshot_id, instrument_key, exchange_token, segment, exchange, type, "
+                + "underlying, trading_symbol, expiry, strike, lot_size, tick_size, freeze_quantity, weekly) values (900, "
+                + "'NSE_FO|47168', '47168', 'NSE_FO', 'NSE', 'PE', 'NIFTY', 'NIFTY 23100 PE', ?, 23100, 65, 0.05, 1755, true) "
+                + "on conflict do nothing", java.sql.Date.valueOf(today.plusDays(4)));
+        long tenant = accounts.ensureTenant("t-" + name);
+        long user = accounts.ensureUser("kc-" + name, name);
+        accounts.ensureMembership(tenant, user, "OWNER");
+        long signal = accounts.ensureSignalSourceAccount(tenant, user, "SIG-" + name, 500_000, today,
+                "config/risk/signal-source.v2.yaml");
+        long group = accounts.ensureCopyGroup(tenant, "SET-" + name, signal);
+        long follower = accounts.ensureFollowerAccount(tenant, user, name.toUpperCase() + "-KITE", BrokerType.ZERODHA,
+                TradeMode.DRY_RUN, 500_000, EquityMode.FIXED, today, "../config/risk/follower-risk.v3.yaml", 100);
+        new FanOut(dataSource).subscribe(group, follower, List.of("opening-drive"), 1.0);
+        jdbc.update("update acct.strategy_subscription set enabled_at = now() - interval '1 hour' where copy_group_id = ?",
+                group);
+        new SignalDecisionStore(dataSource).insert(new SignalDecision(group, 9500, today, Instant.now().minusSeconds(120),
+                "opening-drive", 2, "NIFTY", SignalDecision.Action.ENTER, "PE", null, "CONFIRMED", "IT", 3000047168L,
+                "NSE_FO|47168", "NIFTY 23100 PE", 65, 100, 130_000, 500_000, 20, name + ":enter",
+                Map.of("strategy_lots", 1.0, "intended_lots", 1.0, "stop_pct", 25.0)));
+        return new Kite(group, follower, costs);
+    }
+
+    private static String positionState(long follower) {
+        return jdbc.queryForObject("select status || coalesce(':' || exit_reason, '') from exec.position where "
+                + "broker_account_id = ?", String.class, follower);
+    }
+
+    @Test
+    void anEndOfDayThatFailsForOneAccountStillWritesTheOthersLedgerDay() {
+        // review 8 Nov 2026: an exception from one account's reconciliation ended the loop, so another account (a LIVE
+        // one, whose ledger row must be acknowledged before its next start) could get no ledger_day row
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
+        Kite k = enteredKiteFollower("hal", today);
+        AccountStore accounts = new AccountStore(dataSource);
+        long other = accounts.ensureFollowerAccount(accounts.ensureTenant("t-hal"), accounts.ensureUser("kc-hal", "hal"),
+                "HAL2-KITE", BrokerType.ZERODHA, TradeMode.DRY_RUN, 500_000, EquityMode.FIXED, today,
+                "../config/risk/follower-risk.v3.yaml", 100);
+        new FanOut(dataSource).subscribe(k.group(), other, List.of("opening-drive"), 1.0);
+        jdbc.update("update acct.strategy_subscription set enabled_at = now() - interval '1 hour' where copy_group_id = ?",
+                k.group());
+        QuoteSource none = (d, u, t, at) -> Double.NaN;
+        try (ExecutionLoop loop = new ExecutionLoop(dataSource, "t-hal", "SET-hal", "worker-H", k.costs(), none, 1e9)) {
+            loop.tick(today, 20_000);
+            assertThat(loop.status()).extracting(ExecutionLoop.AccountStatus::accountId).contains(k.follower(), other);
+            loop.connections().simulator(k.follower()).expireToken();      // its end-of-day trades read fails (SESSION)
+            List<BrokerReconciler.EndOfDay> eod = loop.endOfDay(today);
+            assertThat(eod).singleElement().satisfies(d -> assertThat(d.ledger().brokerAccountId()).isEqualTo(other));
+            assertThat(jdbc.queryForObject("select count(*) from acct.ledger_day where broker_account_id = ? "
+                    + "and session_date = ?", Integer.class, other, java.sql.Date.valueOf(today))).isEqualTo(1);
+            assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? "
+                    + "and action = 'END_OF_DAY_FAILED'", Integer.class, k.follower())).isEqualTo(1);
+        } finally {
+            jdbc.update("update acct.copy_group set enabled = false where id = ?", k.group());
+        }
+    }
+
+    @Test
+    void aReconciliationReadThatFailsDoesNotKeepTheExitFromGoingOut() {
+        // review 8 Nov 2026: a non-session error of the reconciliation (its positions read) was rethrown, so the turn
+        // skipped the simulator: while the read kept failing no exit went out
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
+        Kite k = enteredKiteFollower("erin", today);
+        QuoteSource none = (d, u, t, at) -> Double.NaN;
+        try (ExecutionLoop loop = new ExecutionLoop(dataSource, "t-erin", "SET-erin", "worker-E", k.costs(), none, 1e9)) {
+            loop.tick(today, 20_000);
+            assertThat(positionState(k.follower())).isEqualTo("OPEN");
+            new SignalDecisionStore(dataSource).insert(new SignalDecision(k.group(), 9501, today,
+                    Instant.now().minusSeconds(5), "opening-drive", 2, "NIFTY", SignalDecision.Action.EXIT, "PE", null,
+                    "EXIT", "TARGET", 3000047168L, "NSE_FO|47168", "NIFTY 23100 PE", 65, 120, 0, 500_000, 20, "erin:exit",
+                    Map.of()));
+            loop.reconcileNextTurn(k.follower());
+            loop.connections().simulator(k.follower()).failNext("positions", com.autotrade.zerodha.KiteSimulator.Fault.HTTP_500);
+            loop.tick(today, 20_000);
+            assertThat(positionState(k.follower())).isEqualTo("CLOSED:TARGET");
+            assertThat(loop.status()).filteredOn(st -> st.accountId() == k.follower()).singleElement()
+                    .satisfies(st -> assertThat(st.lastResult()).contains("RECONCILIATION NOT DONE"));
+        } finally {
+            jdbc.update("update acct.copy_group set enabled = false where id = ?", k.group());
+        }
+    }
+
+    @Test
+    void theEndOfDaySquareOffIsTriedAgainUntilNothingIsOpen() throws Exception {
+        // review 8 Nov 2026: the 15:20 square-off was one attempt; a stop cancel that failed left the position open
+        // overnight with only a log line
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
+        Kite k = enteredKiteFollower("fay", today);
+        QuoteSource none = (d, u, t, at) -> Double.NaN;
+        try (ExecutionLoop loop = new ExecutionLoop(dataSource, "t-fay", "SET-fay", "worker-F", k.costs(), none, 1e9)) {
+            loop.tick(today, 20_000);
+            assertThat(positionState(k.follower())).isEqualTo("OPEN");
+            loop.connections().simulator(k.follower()).failNext("cancel", com.autotrade.zerodha.KiteSimulator.Fault.HTTP_500);
+            assertThat(loop.squareOff(today)).singleElement().asString().contains("NOT flattened");
+            assertThat(positionState(k.follower())).isEqualTo("OPEN");
+            loop.squareOffRetry(java.time.Duration.ZERO);
+            loop.tick(today, 20_000);
+            awaitState(k.follower(), "CLOSED:EOD_SQUARE_OFF");              // retried off the tick
+            assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? "
+                    + "and action = 'EOD_SQUARE_OFF'", Integer.class, k.follower())).isEqualTo(2);
+            loop.tick(today, 20_000);                                    // flat: no more attempts
+            Thread.sleep(500);
+            assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? "
+                    + "and action = 'EOD_SQUARE_OFF'", Integer.class, k.follower())).isEqualTo(2);
+        } finally {
+            jdbc.update("update acct.copy_group set enabled = false where id = ?", k.group());
+        }
+    }
+
+    private static void awaitState(long follower, String state) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 30_000;
+        while (!state.equals(positionState(follower)) && System.currentTimeMillis() < deadline) {
+            Thread.sleep(100);
+        }
+        assertThat(positionState(follower)).isEqualTo(state);
+    }
+
+    @Test
+    void aSquareOffRetryDoesNotHoldUpTheTick() throws Exception {
+        // review 8 Nov 2026 (second review): the retry ran inside the tick, so a slow flatten stalled every account's
+        // turns from 15:20 to 15:29
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
+        Kite k = enteredKiteFollower("gus", today);
+        QuoteSource none = (d, u, t, at) -> Double.NaN;
+        try (ExecutionLoop loop = new ExecutionLoop(dataSource, "t-gus", "SET-gus", "worker-G", k.costs(), none, 1e9)) {
+            loop.tick(today, 20_000);
+            loop.connections().simulator(k.follower()).cancelLag(1_000_000);   // its stop's cancel never shows
+            assertThat(loop.squareOff(today)).singleElement().asString().contains("NOT flattened");
+            loop.squareOffRetry(java.time.Duration.ZERO);
+            long start = System.nanoTime();
+            loop.tick(today, 20_000);
+            assertThat((System.nanoTime() - start) / 1e9).as("the tick does not wait for the retry's flatten (2 s or more)")
+                    .isLessThan(1.5);
+        } finally {
+            jdbc.update("update acct.copy_group set enabled = false where id = ?", k.group());
+        }
+    }
 }

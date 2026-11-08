@@ -49,7 +49,7 @@ public final class LiveGuard implements BrokerConnection {
 
     @Override
     public void place(OrderRequest r) {
-        List<BrokerOrder> book = broker.orders();
+        List<BrokerOrder> book = book(r.clientOrderId());
         if (book.stream().anyMatch(o -> r.clientOrderId().equals(o.clientTag()))) {
             return;                 // code review 3 Nov 2026: this tag is already at the broker (a place that timed out
         }                           // and showed up late, a restart): never a second order with the same tag
@@ -80,7 +80,7 @@ public final class LiveGuard implements BrokerConnection {
 
     @Override
     public void modify(String clientOrderId, long quantity, double limitPrice, double triggerPrice) {
-        List<BrokerOrder> book = broker.orders();
+        List<BrokerOrder> book = book(clientOrderId);
         BrokerOrder o = book.stream().filter(b -> clientOrderId.equals(b.clientTag())).findFirst().orElse(null);
         if (o != null && quantity > o.quantity()) {                     // a lower quantity only reduces risk
             if (o.side() == OrderSide.BUY) {
@@ -95,6 +95,23 @@ public final class LiveGuard implements BrokerConnection {
             }
         }
         broker.modify(clientOrderId, quantity, limitPrice, triggerPrice);
+    }
+
+    /**
+     * The order book the checks read. Review 8 Nov 2026: a read that fails (a timeout is UNKNOWN at the HTTP layer) means
+     * nothing was sent, so it is rethrown as RETRYABLE "not sent", never as an order of unknown outcome (which kills the
+     * account and abandons an exit). A lost session stays SESSION.
+     */
+    private List<BrokerOrder> book(String clientOrderId) {
+        try {
+            return broker.orders();
+        } catch (BrokerException e) {
+            if (e.kind() == BrokerException.Kind.SESSION) {
+                throw e;
+            }
+            throw new BrokerException(BrokerException.Kind.RETRYABLE, "LIVE guard: the order book could not be read, "
+                    + clientOrderId + " not sent: " + e.getMessage(), e);
+        }
     }
 
     private void checkBuyQuantity(String instrumentKey, long quantity) {
@@ -135,7 +152,18 @@ public final class LiveGuard implements BrokerConnection {
     }
 
     private static BrokerException refused(String why) {
-        return new BrokerException(BrokerException.Kind.TERMINAL, "LIVE guard: " + why);
+        return new Refusal("LIVE guard: " + why);
+    }
+
+    /**
+     * An order the guard refused (TERMINAL, nothing sent). Review 8 Nov 2026: told apart from a broker's own refusal, so
+     * a protective stop the guard refuses (the broker holds less than our book) is not answered with an emergency sell,
+     * which the guard would refuse too.
+     */
+    public static final class Refusal extends BrokerException {
+        Refusal(String message) {
+            super(BrokerException.Kind.TERMINAL, message);
+        }
     }
 
     @Override

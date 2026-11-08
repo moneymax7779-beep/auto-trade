@@ -148,6 +148,22 @@ class KiteGatewayTest {
     }
 
     @Test
+    void aSessionLostWhileAnUnknownPlaceIsLookedUpIsAnUnknownOutcomeNotASessionRefusal() {
+        // review 8 Nov 2026: the lookup's SESSION was rethrown as is, so the caller recorded REJECTED an order that was
+        // working (or filled) at the broker, and nothing watched it
+        sim.failNext("place", Fault.TIMEOUT_PROCESSED);             // processed, the response never came
+        sim.failNext("orders", Fault.TOKEN_EXPIRED);                // the token expires as it is looked up
+        assertThatThrownBy(() -> gateway.place(buy("F11E1", 65, 100.2))).isInstanceOfSatisfying(BrokerException.class,
+                e -> {
+                    assertThat(e.kind()).isEqualTo(Kind.UNKNOWN);
+                    assertThat(e.getCause()).isInstanceOfSatisfying(BrokerException.class,
+                            c -> assertThat(c.kind()).isEqualTo(Kind.SESSION));
+                });
+        assertThat(sim.orderCount()).as("placed once, never again").isEqualTo(1);
+        assertThat(gateway.orderByTag("F11E1")).isPresent();
+    }
+
+    @Test
     void errorsAreClassified() {
         sim.failNext("place", Fault.TOKEN_EXPIRED);
         assertThatThrownBy(() -> gateway.place(buy("F6E1", 65, 100.2)))
@@ -266,5 +282,25 @@ class KiteGatewayTest {
         assertThat(KiteConfig.simulator(sim.baseUri()).isRealBroker()).isFalse();
         assertThat(new KiteConfig("k", KiteConfig.REAL_API, KiteConfig.REAL_LOGIN, "MIS", null, 8, null).isRealBroker())
                 .isTrue();
+    }
+
+    @Test
+    void aClosedSimulatorLeavesNoThreadsRunning() throws Exception {
+        // review 8 Nov 2026: close() stopped the server but not its handler pool, so every closed simulator (one per
+        // failed DRY_RUN open, once a tick) kept its threads
+        java.util.Set<Thread> before = java.util.Set.copyOf(Thread.getAllStackTraces().keySet());
+        KiteSimulator other = new KiteSimulator(0, "sim-api-key", "sim-secret", 2_500);
+        KiteHttp otherHttp = new KiteHttp(KiteConfig.simulator(other.baseUri()));
+        otherHttp.accessToken("any");
+        assertThat(new KiteGateway(KiteConfig.simulator(other.baseUri()), otherHttp, KiteInstruments.load(otherHttp))
+                .availableFunds()).isEqualTo(1e9);                   // its handler threads have started
+        List<Thread> started = Thread.getAllStackTraces().keySet().stream().filter(t -> !before.contains(t))
+                .filter(t -> t.getName().startsWith("kite-sim-") || t.getName().startsWith("HTTP-Dispatcher")).toList();
+        assertThat(started).isNotEmpty();
+        other.close();
+        for (Thread t : started) {
+            t.join(5_000);
+        }
+        assertThat(started).as("no thread of the closed simulator still runs").noneMatch(Thread::isAlive);
     }
 }

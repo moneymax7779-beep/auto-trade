@@ -32,6 +32,7 @@ class LiveGuardTest {
 
     private final List<BrokerOrder> book = new ArrayList<>();
     private final List<OrderRequest> sent = new ArrayList<>();
+    private BrokerException nextRead;                          // the next order-book read fails with this
     private final LiveGuard guard = new LiveGuard(new Book(), new FollowerRisk.LiveLimits(1, 2, Set.of("ma-cross")),
             key -> LOT);
 
@@ -71,6 +72,30 @@ class LiveGuardTest {
         assertThat(sent).isEmpty();
     }
 
+    @Test
+    void aBookReadThatFailsBeforeAPlaceIsRetryableNotSentNeverUnknown() {
+        // review 8 Nov 2026: a read timeout here was UNKNOWN, so the venue recorded ORDER_UNKNOWN for an order never sent
+        book.add(order("F1", CE, OrderSide.BUY, OrderStatus.FILLED, LOT, LOT));
+        nextRead = new BrokerException(BrokerException.Kind.UNKNOWN, "GET /orders timed out");
+        assertThatThrownBy(() -> guard.place(sell("F1X1", CE, LOT)))
+                .isInstanceOfSatisfying(BrokerException.class, e -> assertThat(e.kind()).isEqualTo(BrokerException.Kind.RETRYABLE))
+                .hasMessageContaining("not sent");
+        nextRead = new BrokerException(BrokerException.Kind.RETRYABLE, "HTTP 500");
+        assertThatThrownBy(() -> guard.modify("F1S1", LOT, 70, 75))
+                .isInstanceOfSatisfying(BrokerException.class, e -> assertThat(e.kind()).isEqualTo(BrokerException.Kind.RETRYABLE));
+        nextRead = new BrokerException(BrokerException.Kind.SESSION, "token expired");
+        assertThatThrownBy(() -> guard.place(sell("F1X1", CE, LOT)))
+                .isInstanceOfSatisfying(BrokerException.class, e -> assertThat(e.kind()).isEqualTo(BrokerException.Kind.SESSION));
+        assertThat(sent).isEmpty();
+        guard.place(sell("F1X1", CE, LOT));                                       // the book is back: sent
+        assertThat(sent).hasSize(1);
+    }
+
+    @Test
+    void aGuardRefusalIsToldApartFromTheBrokers() {
+        assertThatThrownBy(() -> guard.place(sell("F9S1", CE, LOT))).isInstanceOf(LiveGuard.Refusal.class);
+    }
+
     private static BrokerOrder order(String tag, String key, OrderSide side, OrderStatus status, long quantity, long filled) {
         return new BrokerOrder(tag, "B" + key + side + quantity, key, "SYM", side, OrderType.LIMIT, quantity, filled, 100,
                 100, 0, status, status.name(), null, Instant.now());
@@ -88,6 +113,11 @@ class LiveGuardTest {
 
         @Override
         public List<BrokerOrder> orders() {
+            BrokerException e = nextRead;
+            nextRead = null;
+            if (e != null) {
+                throw e;
+            }
             return List.copyOf(book);
         }
 
