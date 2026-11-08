@@ -314,6 +314,45 @@ class BrokerLoginIT {
                 .isEqualTo(1);
     }
 
+    /** User, 8 Nov 2026: the app is set up from the account's row (created, linked, keys stored) in one step. */
+    @Test
+    void anAccountSetsUpItsOwnAppInOneStep() {
+        long t = member("uma");
+        long acc = account("uma", t, "Uma Kotak", "KOTAK_NEO", "V7001");
+        // keys that would fail create nothing
+        assertThat(code(() -> apps.setup("uma", acc, new BrokerAppController.Keys("neo-token-uma", null, "12345"))))
+                .isEqualTo(400);
+        assertThat(jdbc.queryForObject("select count(*) from acct.broker_credential_profile where tenant_id = ?", Integer.class,
+                t)).isZero();
+        Map<String, Object> r = apps.setup("uma", acc, new BrokerAppController.Keys("neo-token-uma", null, "98765 43210"));
+        assertThat(r).containsEntry("name", "Uma Kotak app").containsEntry("created", true).containsEntry("keyHint", "...-uma");
+        long app = ((Number) r.get("app")).longValue();
+        assertThat(jdbc.queryForObject("select credential_profile_id from acct.broker_account where id = ?", Long.class, acc))
+                .isEqualTo(app);
+        assertThat(jdbc.queryForObject("select settings->>'mobileNumber' from acct.broker_credential_profile where id = ?",
+                String.class, app)).isEqualTo("+919876543210");
+        assertThat(dir.resolve("store").resolve("t" + t + "-p" + app + "-key")).exists();
+        // again: the linked app's keys are replaced, no second app
+        assertThat(apps.setup("uma", acc, new BrokerAppController.Keys("neo-token-new2", null, "9876543210")))
+                .containsEntry("created", false).containsEntry("app", app);
+        assertThat(jdbc.queryForObject("select count(*) from acct.broker_credential_profile where tenant_id = ?", Integer.class,
+                t)).isEqualTo(1);
+        // a second account gets its own app name; another workspace and SUPPORT without a grant are refused
+        long acc2 = account("uma", t, "Uma Upstox", "UPSTOX", "7XY12Z");
+        assertThat(code(() -> apps.setup("uma", acc2, new BrokerAppController.Keys("up-key-1", "up-key-1", null))))
+                .isEqualTo(400);
+        assertThat(apps.setup("uma", acc2, new BrokerAppController.Keys("up-key-uma1", "up-secret-1", null)))
+                .containsEntry("name", "Uma Upstox app");
+        member("vani");
+        assertThat(code(() -> apps.setup("vani", acc, new BrokerAppController.Keys("x-key-1234", null, "9876543210"))))
+                .isEqualTo(404);
+        assertThat(code(() -> apps.setup("satya", acc, new BrokerAppController.Keys("x-key-1234", null, "9876543210"))))
+                .isEqualTo(403);
+        Long paper = jdbc.queryForObject("select id from acct.broker_account where paper_of_account_id = ?", Long.class, acc);
+        assertThat(code(() -> apps.setup("uma", paper, new BrokerAppController.Keys("x-key-1234", "x-secret-1", null))))
+                .isEqualTo(400);
+    }
+
     @Test
     void upstoxLogsInThePinnedClientOnceAndLogoutEndsALiveDay() {
         long t = member("mala");

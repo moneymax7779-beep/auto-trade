@@ -56,7 +56,7 @@ function BrokersFor({ tenant }: { tenant: number }) {
         <div className="space-y-3">
           {t.brokers.length === 0 && <p className="text-sm text-muted">No broker account yet: add one below.</p>}
           {t.brokers.map((b) => (
-            <BrokerRow key={b.id} b={b} apps={apps.data!.apps} t={t} onDone={done} onError={fail}
+            <BrokerRow key={b.id} b={b} apps={apps.data!.apps} register={apps.data!.register} t={t} onDone={done} onError={fail}
               onManage={() => setOpen(open === b.id ? null : b.id)} open={open === b.id} />
           ))}
         </div>
@@ -69,14 +69,26 @@ function BrokersFor({ tenant }: { tenant: number }) {
   );
 }
 
-function BrokerRow({ b, apps, t, open, onManage, onDone, onError }: {
-  b: WorkspaceBroker; apps: BrokerApp[]; t: WorkspaceToday; open: boolean; onManage: () => void;
+/** Where each broker's key comes from (user, 8 Nov 2026: set up on the account's own row). */
+const KEY_SOURCE: Record<string, string> = {
+  ZERODHA: "developers.kite.trade → Create new app (Kite Connect): its API key and API secret",
+  UPSTOX: "account.upstox.com/developer/apps → New app: its API key and API secret",
+  KOTAK_NEO: "NEO app → More → Trade API: the application's TOKEN is the consumer key",
+  GROWW: "Groww → Profile → Settings → Trading APIs → Generate API key (key and secret, not TOTP)",
+};
+
+function BrokerRow({ b, apps, register, t, open, onManage, onDone, onError }: {
+  b: WorkspaceBroker; apps: BrokerApp[]; register: BrokerApps["register"]; t: WorkspaceToday; open: boolean;
+  onManage: () => void;
   onDone: (text: string, ok?: boolean) => void; onError: (e: unknown) => void;
 }) {
   const [clientId, setClientId] = useState(b.clientId ?? "");
   const [totp, setTotp] = useState("");
   const [mpin, setMpin] = useState("");
   const [eligibleName, setEligibleName] = useState("");
+  const [setupKey, setSetupKey] = useState("");
+  const [setupSecret, setSetupSecret] = useState("");
+  const [setupMobile, setSetupMobile] = useState("");
   const mine = apps.filter((a) => a.broker === b.broker && a.status === "ACTIVE");
   const call = useMutation({
     mutationFn: ({ path, body }: { path: string; body: unknown; ok: string }) => postJson<unknown>(path, body),
@@ -96,10 +108,19 @@ function BrokerRow({ b, apps, t, open, onManage, onDone, onError }: {
   // no login can start without an enabled app with keys: say what is missing instead of offering the login
   const linked = apps.find((a) => a.broker === b.broker && a.name === b.brokerApp);
   const loginBlocked = !real ? null : !linked
-    ? `Before logging in: create a ${BROKER_NAMES[b.broker]} app under Broker apps (API keys) at the bottom of this page, `
-      + "set its keys, then pick it in Broker app above."
+    ? `Before logging in, add your ${BROKER_NAMES[b.broker]} API key${b.broker === "KOTAK_NEO" ? "" : " and secret"} here.`
     : linked.status !== "ACTIVE" ? `${linked.name} is disabled: enable it under Broker apps (API keys).`
-    : !linked.keysSet ? `Set the keys of ${linked.name} under Broker apps (API keys) first.` : null;
+    : !linked.keysSet ? `Before logging in, add the keys of ${linked.name} here.` : null;
+  const needsKeys = real && t.canManage && !isLogged && (!linked || (linked.status === "ACTIVE" && !linked.keysSet));
+  const kotak = b.broker === "KOTAK_NEO";
+  const setup = useMutation({
+    mutationFn: () => postJson<{ name: string; keyHint: string; created: boolean }>(`/api/execution/accounts/${b.id}/broker-app/setup`,
+      { apiKey: setupKey, apiSecret: kotak ? null : setupSecret, mobileNumber: kotak ? setupMobile : null }),
+    onSuccess: (r) => { setSetupKey(""); setSetupSecret(""); setSetupMobile("");
+      onDone(`${b.name}: ${r.created ? `app ${r.name} created and linked, ` : ""}keys stored (${r.keyHint}); you can log in now`); },
+    onError: (e) => { setSetupSecret(""); onError(e); },
+  });
+  const reg = register[b.broker];
   return (
     <div className="rounded border border-line p-3 text-sm">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -140,6 +161,25 @@ function BrokerRow({ b, apps, t, open, onManage, onDone, onError }: {
       )}
       {real && t.canSwitch && loginBlocked && !isLogged && (
         <p className="mt-2 text-xs text-warn">{loginBlocked}</p>
+      )}
+      {needsKeys && (
+        <form className="mt-2 flex flex-wrap items-end gap-2 rounded border border-line p-2" autoComplete="off"
+          onSubmit={(e) => { e.preventDefault(); setup.mutate(); }}>
+          <span className="w-full text-xs text-muted">From {KEY_SOURCE[b.broker]}
+            {reg?.redirectUrl ? <>; register the redirect URL <code>{reg.redirectUrl}</code> on that app</> : null}.
+            Keys go to the server's secret store and are never shown again.</span>
+          <label className="flex flex-col gap-1 text-xs text-muted">{kotak ? "Consumer key (TOKEN)" : "API key"}
+            <input className={`${input} w-56`} type="password" autoComplete="new-password" value={setupKey}
+              onChange={(e) => setSetupKey(e.target.value)} /></label>
+          {kotak ? <label className="flex flex-col gap-1 text-xs text-muted">Mobile number registered with Kotak
+            <input className={`${input} w-40`} inputMode="tel" value={setupMobile} placeholder="98765 43210"
+              onChange={(e) => setSetupMobile(e.target.value)} /></label>
+            : <label className="flex flex-col gap-1 text-xs text-muted">API secret
+              <input className={`${input} w-56`} type="password" autoComplete="new-password" value={setupSecret}
+                onChange={(e) => setSetupSecret(e.target.value)} /></label>}
+          <button className={primary} type="submit" disabled={setup.isPending || setupKey.trim().length < 6
+            || (kotak ? setupMobile.replace(/\D/g, "").length < 10 : setupSecret.trim().length < 6)}>Save keys</button>
+        </form>
       )}
       {real && t.canSwitch && (!loginBlocked || isLogged) && (
         <div className="mt-2 flex flex-wrap items-center gap-2">

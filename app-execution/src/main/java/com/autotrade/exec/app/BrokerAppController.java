@@ -180,6 +180,26 @@ class BrokerAppController {
         notLoggedIn(id, "its session belongs to the current key");
         require(keyRef.startsWith("store:"), "this app's keys are kept on the server (" + keyRef.replaceAll(":.*", ":")
                 + "...): they are changed there, not here");
+        Checked c = checked(broker, body);
+        String key = c.key(), secret = c.secret(), mobile = c.mobile();
+        secrets.write(keyRef, key);
+        if (broker != BrokerType.KOTAK_NEO) {
+            secrets.write(secretRef, secret);
+        }
+        String hint = "..." + key.substring(key.length() - 4);
+        String settings = mobile == null ? null : BrokerHttp.JSON.writeValueAsString(Map.of("mobileNumber", mobile));
+        jdbc.update("update acct.broker_credential_profile set secret_set_at = now(), secret_set_by = ?, key_hint = ?, "
+                + "verified_at = null, last_check_error = null, settings = coalesce(?::jsonb, settings), updated_at = now() "
+                + "where id = ?", user.id(), hint, settings, id);
+        audit.audit(tenant, null, user.subject(), "BROKER_APP_KEYS_SET", Map.of("app", id, "keyHint", hint));
+        return Map.of("id", id, "keyHint", hint, "verified", false);
+    }
+
+    /** Keys as typed, checked for the broker: Kotak Neo has a consumer key and a mobile number, the others a key and secret. */
+    private record Checked(String key, String secret, String mobile) {
+    }
+
+    private static Checked checked(BrokerType broker, Keys body) {
         String key = body.apiKey() == null ? "" : body.apiKey().strip();
         require(VALUE.matcher(key).matches(), broker == BrokerType.KOTAK_NEO
                 ? "consumer key: the token from the NEO app (Trade API card), 6-4096 characters without spaces"
@@ -196,17 +216,42 @@ class BrokerAppController {
             require(VALUE.matcher(secret).matches(), "API secret: 6-4096 characters without spaces");
             require(!secret.equals(key), "the API secret cannot be the API key");
         }
-        secrets.write(keyRef, key);
-        if (broker != BrokerType.KOTAK_NEO) {
-            secrets.write(secretRef, secret);
+        return new Checked(key, secret, mobile);
+    }
+
+    /**
+     * The broker app set up from the account's own row (user, 8 Nov 2026: the app had to be created at the bottom of the
+     * page, its keys set there, then linked back up here, and was not found): the keys as typed are checked first; an
+     * account without an app gets one named after it, linked, then the keys are stored (a retry after a failed store
+     * finds the linked app); an account with an app gets that app's keys replaced.
+     */
+    @PostMapping("/api/execution/accounts/{id}/broker-app/setup")
+    Map<String, Object> setup(@RequestHeader(value = Access.HEADER, required = false) String subject, @PathVariable long id,
+                              @RequestBody Keys body) {
+        Access.User user = access.user(subject);
+        BrokerAccount a = accounts.byId(id).filter(x -> user.sees(x.tenantId()))
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "no such account"));
+        manage(user, a.tenantId());
+        require(BROKERS.contains(a.brokerType()), a.displayName() + " is a paper account: it has no broker app");
+        checked(a.brokerType(), body);                                   // nothing is created for keys that would fail
+        Long linked = jdbc.queryForObject("select credential_profile_id from acct.broker_account where id = ?", Long.class, id);
+        long app;
+        if (linked != null) {
+            app = linked;
+        } else {
+            String base = (a.displayName().length() > 36 ? a.displayName().substring(0, 36).strip() : a.displayName()) + " app";
+            String name = base;
+            for (int n = 2; jdbc.queryForObject("select count(*) from acct.broker_credential_profile where tenant_id = ? "
+                    + "and name = ?", Integer.class, a.tenantId(), name) > 0; n++) {
+                name = base.substring(0, Math.min(base.length(), 37)).strip() + " " + n;
+            }
+            app = ((Number) create(subject, a.tenantId(), new NewApp(a.brokerType().name(), name)).get("id")).longValue();
+            link(subject, id, new Link(app));
         }
-        String hint = "..." + key.substring(key.length() - 4);
-        String settings = mobile == null ? null : BrokerHttp.JSON.writeValueAsString(Map.of("mobileNumber", mobile));
-        jdbc.update("update acct.broker_credential_profile set secret_set_at = now(), secret_set_by = ?, key_hint = ?, "
-                + "verified_at = null, last_check_error = null, settings = coalesce(?::jsonb, settings), updated_at = now() "
-                + "where id = ?", user.id(), hint, settings, id);
-        audit.audit(tenant, null, user.subject(), "BROKER_APP_KEYS_SET", Map.of("app", id, "keyHint", hint));
-        return Map.of("id", id, "keyHint", hint, "verified", false);
+        Map<String, Object> stored = keys(subject, app, body);
+        String name = jdbc.queryForObject("select name from acct.broker_credential_profile where id = ?", String.class, app);
+        return Map.of("account", a.displayName(), "app", app, "name", name, "keyHint", stored.get("keyHint"),
+                "created", linked == null);
     }
 
     record Status(Boolean active) {
