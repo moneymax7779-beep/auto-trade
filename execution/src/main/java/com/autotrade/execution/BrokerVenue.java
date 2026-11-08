@@ -276,8 +276,9 @@ public final class BrokerVenue implements FollowerVenue {
                 } else {
                     setStatus(o.account().id(), tag, "REJECTED", e.getMessage());
                 }
-                if (e.kind() == Kind.SESSION) {
-                    throw e;
+                BrokerException session = sessionLost(e);
+                if (session != null) {
+                    throw session;                     // the account's session-lost handling (the intent waits, resumed by tag)
                 }
                 c.code = unknown ? "ORDER_UNKNOWN" : "BROKER_REJECTED";
                 c.reason = e.getMessage();
@@ -547,8 +548,9 @@ public final class BrokerVenue implements FollowerVenue {
                             OrderType.STOP_LIMIT, quantity, limit, trigger, tag));
                 } catch (BrokerException e) {
                     setStatus(account.id(), tag, e.kind() == Kind.UNKNOWN ? "UNKNOWN" : "REJECTED", e.getMessage());
-                    if (e.kind() == Kind.SESSION) {
-                        throw e;
+                    BrokerException session = sessionLost(e);
+                    if (session != null) {
+                        throw session;
                     }
                     if (e.kind() == Kind.TERMINAL && !(e instanceof LiveGuard.Refusal)) {
                         return Protection.failed("STOP_" + e.kind() + ": " + e.getMessage());   // the broker refused it
@@ -908,6 +910,17 @@ public final class BrokerVenue implements FollowerVenue {
 
     private static String exchange(String instrumentKey) {
         return instrumentKey != null && instrumentKey.startsWith("BSE_FO") ? "BSE_FO" : "NSE_FO";
+    }
+
+    /**
+     * Review 8 Nov 2026: the lost session behind a failed place: the failure itself, or the cause of a place of unknown
+     * outcome (the session went while the gateway looked it up by tag); null when the session is not lost.
+     */
+    private static BrokerException sessionLost(BrokerException e) {
+        if (e.kind() == Kind.SESSION) {
+            return e;
+        }
+        return e.kind() == Kind.UNKNOWN && e.getCause() instanceof BrokerException c && c.kind() == Kind.SESSION ? c : null;
     }
 
     private static void sleep(long ms) {

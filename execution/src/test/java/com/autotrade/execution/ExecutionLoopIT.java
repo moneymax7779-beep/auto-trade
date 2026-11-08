@@ -398,6 +398,35 @@ class ExecutionLoopIT {
     }
 
     @Test
+    void anEndOfDayThatFailsForOneAccountStillWritesTheOthersLedgerDay() {
+        // review 8 Nov 2026: an exception from one account's reconciliation ended the loop, so another account (a LIVE
+        // one, whose ledger row must be acknowledged before its next start) could get no ledger_day row
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
+        Kite k = enteredKiteFollower("hal", today);
+        AccountStore accounts = new AccountStore(dataSource);
+        long other = accounts.ensureFollowerAccount(accounts.ensureTenant("t-hal"), accounts.ensureUser("kc-hal", "hal"),
+                "HAL2-KITE", BrokerType.ZERODHA, TradeMode.DRY_RUN, 500_000, EquityMode.FIXED, today,
+                "../config/risk/follower-risk.v3.yaml", 100);
+        new FanOut(dataSource).subscribe(k.group(), other, List.of("opening-drive"), 1.0);
+        jdbc.update("update acct.strategy_subscription set enabled_at = now() - interval '1 hour' where copy_group_id = ?",
+                k.group());
+        QuoteSource none = (d, u, t, at) -> Double.NaN;
+        try (ExecutionLoop loop = new ExecutionLoop(dataSource, "t-hal", "SET-hal", "worker-H", k.costs(), none, 1e9)) {
+            loop.tick(today, 20_000);
+            assertThat(loop.status()).extracting(ExecutionLoop.AccountStatus::accountId).contains(k.follower(), other);
+            loop.connections().simulator(k.follower()).expireToken();      // its end-of-day trades read fails (SESSION)
+            List<BrokerReconciler.EndOfDay> eod = loop.endOfDay(today);
+            assertThat(eod).singleElement().satisfies(d -> assertThat(d.ledger().brokerAccountId()).isEqualTo(other));
+            assertThat(jdbc.queryForObject("select count(*) from acct.ledger_day where broker_account_id = ? "
+                    + "and session_date = ?", Integer.class, other, java.sql.Date.valueOf(today))).isEqualTo(1);
+            assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? "
+                    + "and action = 'END_OF_DAY_FAILED'", Integer.class, k.follower())).isEqualTo(1);
+        } finally {
+            jdbc.update("update acct.copy_group set enabled = false where id = ?", k.group());
+        }
+    }
+
+    @Test
     void aReconciliationReadThatFailsDoesNotKeepTheExitFromGoingOut() {
         // review 8 Nov 2026: a non-session error of the reconciliation (its positions read) was rethrown, so the turn
         // skipped the simulator: while the read kept failing no exit went out

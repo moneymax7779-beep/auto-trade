@@ -234,8 +234,13 @@ class BrokerVenueIT {
         Setup s = setup(false);
         decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
         FollowerSimulator kite = brokerFollower();
-        sim.failNext("place", Fault.TIMEOUT_PROCESSED);
+        // review 8 Nov 2026: processed, then a 500 (TIMEOUT_PROCESSED stalls 1.5 s here, inside the client's 2 s read
+        // timeout, so the place used to succeed normally and this test never exercised the unknown outcome)
+        sim.failNext("place", Fault.HTTP_500_PROCESSED);
         kite.run(s.broker(), s.group(), DAY);
+        assertThat(orders(s.broker()).stream().filter(r -> r.get("role").equals("STOP")).count()).isEqualTo(2);
+        assertThat(sim.requests("place")).as("2 entry slices (the uncertain one found by its tag, never placed again) "
+                + "and 2 stop slices: a second entry place would make 5").isEqualTo(4);
         assertThat(position(s.broker()).get("quantity_open")).isEqualTo(2600L);
         assertThat(orders(s.broker()).stream().filter(r -> r.get("role").equals("ENTRY")).count()).isEqualTo(2);
         assertThat(sim.netQuantities()).containsEntry("NIFTY26O2023100PE", 2600L);
@@ -1014,6 +1019,40 @@ class BrokerVenueIT {
         assertThat(intentState(s.broker(), "ENTER")).isEqualTo("EXECUTED");
         assertThat(position(s.broker()).get("quantity_open")).isEqualTo(1300L);
         assertThat(sim.orderCount() - before).as("no second entry: only the stop is new").isEqualTo(1);
+    }
+
+    @Test
+    void aSessionLostWhileAnUnknownPlaceIsLookedUpIsNeverRejectedAndTheFillIsAdoptedWithItsStopAfterTheLogin()
+            throws Exception {
+        // review 8 Nov 2026: the gateway rethrew the lookup's SESSION, so the row was written REJECTED although the order
+        // had reached Kite (and filled); nothing watched it
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        jdbc.update("update exec.signal_decision set premium_budget = 130000 where copy_group_id = ?", s.group());
+        FollowerSimulator kite = brokerFollower();
+        // processed, then a 500 (this simulator's 1.5 s TIMEOUT is inside the client's 2 s read timeout)
+        sim.failNext("place", Fault.HTTP_500_PROCESSED);
+        sim.failNext("orders", Fault.TOKEN_EXPIRED);                   // the token expires as it is looked up by tag
+        FollowerSimulator.DayResult r = kite.run(s.broker(), s.group(), DAY);
+        assertThat(r.reasons()).containsKey("PENDING_BROKER_SESSION");
+        assertThat(jdbc.queryForObject("select connection_status from acct.broker_account where id = ?", String.class,
+                s.broker().id())).as("the session loss is noticed").isEqualTo("TOKEN_EXPIRED");
+        assertThat(orders(s.broker())).singleElement().satisfies(o -> assertThat(o.get("status")).isEqualTo("UNKNOWN"));
+        assertThat(intentState(s.broker(), "ENTER")).isEqualTo("CREATED");
+        assertThat(sim.netQuantities()).containsEntry("NIFTY26O2023100PE", 1300L);
+        kite.run(s.broker(), s.group(), DAY);                          // still logged out: it waits
+        assertThat(intentState(s.broker(), "ENTER")).isEqualTo("CREATED");
+        jdbc.update("update acct.broker_account set connection_status = 'ACTIVE' where id = ?", s.broker().id());
+        int before = sim.orderCount();
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(intentState(s.broker(), "ENTER")).isEqualTo("EXECUTED");
+        assertThat(position(s.broker()).get("quantity_open")).isEqualTo(1300L);
+        assertThat(orders(s.broker())).filteredOn(o -> o.get("role").equals("STOP")).singleElement().satisfies(o -> {
+            assertThat(o.get("quantity_requested")).isEqualTo(1300L);
+            assertThat(o.get("status")).isEqualTo("OPEN");
+        });
+        assertThat(sim.orderCount() - before).as("no second entry: only the stop is new").isEqualTo(1);
+        assertThat(sim.netQuantities()).containsEntry("NIFTY26O2023100PE", 1300L);
     }
 
     @Test

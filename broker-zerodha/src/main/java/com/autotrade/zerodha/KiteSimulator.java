@@ -18,6 +18,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
@@ -112,6 +113,7 @@ public final class KiteSimulator implements AutoCloseable {
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 
     private final HttpServer server;
+    private final ExecutorService executor;
     private final JsonMapper json = JsonMapper.builder().build();
     private final String apiKey;
     private final String apiSecret;
@@ -141,7 +143,8 @@ public final class KiteSimulator implements AutoCloseable {
         this.apiSecret = apiSecret;
         this.timeoutMillis = timeoutMillis;
         this.server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
-        server.setExecutor(Executors.newFixedThreadPool(4, Thread.ofPlatform().daemon(true).name("kite-sim-", 0).factory()));
+        this.executor = Executors.newFixedThreadPool(4, Thread.ofPlatform().daemon(true).name("kite-sim-", 0).factory());
+        server.setExecutor(executor);
         server.createContext("/", this::handle);
         server.start();
     }
@@ -153,6 +156,7 @@ public final class KiteSimulator implements AutoCloseable {
     @Override
     public void close() {
         server.stop(0);
+        executor.shutdownNow();                 // review 8 Nov 2026: its handler threads outlived every closed simulator
     }
 
     // ------------------------------------------------------------------ set-up and faults

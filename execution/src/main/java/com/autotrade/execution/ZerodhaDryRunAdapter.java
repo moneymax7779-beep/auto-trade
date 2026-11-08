@@ -86,11 +86,18 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
 
     @Override
     public DryRun dryRun(BrokerAccount account, OrderRules rules) throws IOException {
-        return rules.brokerMarket() ? brokerMarket(account) : storedMarket(account);
+        KiteSimulator sim = new KiteSimulator(0, "sim-api-key", "sim-secret", 3_000);
+        try {
+            return rules.brokerMarket() ? brokerMarket(account, sim) : storedMarket(account, sim);
+        } catch (RuntimeException e) {
+            // review 8 Nov 2026: a failed open (seeding the holdings) is tried again next tick; its server and threads
+            // are closed, not left running once per tick
+            sim.close();
+            throw e;
+        }
     }
 
-    private DryRun storedMarket(BrokerAccount account) throws IOException {
-        KiteSimulator sim = new KiteSimulator(0, "sim-api-key", "sim-secret", 3_000);
+    private DryRun storedMarket(BrokerAccount account, KiteSimulator sim) {
         sim.funds(simulatedBrokerFunds);
         KiteConfig config = KiteConfig.simulator(sim.baseUri());
         KiteHttp http = new KiteHttp(config);
@@ -102,8 +109,7 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
         return new DryRun(gateway, market, "Kite simulator " + sim.baseUri(), sim);
     }
 
-    private DryRun brokerMarket(BrokerAccount account) throws IOException {
-        KiteSimulator sim = new KiteSimulator(0, "sim-api-key", "sim-secret", 3_000);
+    private DryRun brokerMarket(BrokerAccount account, KiteSimulator sim) {
         sim.funds(UNLIMITED_FUNDS);
         KiteConfig config = KiteConfig.simulator(sim.baseUri());
         KiteHttp http = new KiteHttp(config);

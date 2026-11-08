@@ -518,11 +518,26 @@ public final class ExecutionLoop implements AutoCloseable {
     public List<BrokerReconciler.EndOfDay> endOfDay(LocalDate day) {
         List<BrokerReconciler.EndOfDay> days = new ArrayList<>();
         for (long accountId : leases.keySet()) {
-            BrokerAccount account = accounts.byId(accountId).orElse(null);
-            BrokerConnections.Route route = account == null ? null
-                    : connections.route(account, FollowerRisk.load(Path.of(account.riskFile())));
-            if (route != null && route.connection() != null) {
-                days.add(reconciler.endOfDay(account, route.connection(), day));
+            BrokerAccount account = null;
+            try {
+                account = accounts.byId(accountId).orElse(null);
+                BrokerConnections.Route route = account == null ? null
+                        : connections.route(account, FollowerRisk.load(Path.of(account.riskFile())));
+                if (route != null && route.connection() != null) {
+                    days.add(reconciler.endOfDay(account, route.connection(), day));
+                }
+            } catch (RuntimeException e) {
+                // review 8 Nov 2026: one account's failure (a lost session, a failed read) stopped the loop, so the
+                // accounts after it got no ledger row (which a LIVE account needs acknowledged before its next start)
+                log.error("account {}: end-of-day reconciliation failed", accountId, e);
+                if (account != null) {
+                    try {
+                        new KillSwitches(dataSource).audit(account, workerId, "END_OF_DAY_FAILED", Map.of("day",
+                                day.toString(), "error", String.valueOf(e.getMessage())));
+                    } catch (RuntimeException a) {
+                        log.error("account {}: END_OF_DAY_FAILED not audited: {}", accountId, a.getMessage());
+                    }
+                }
             }
         }
         return days;
