@@ -274,6 +274,46 @@ class BrokerLoginIT {
                 + "or detail::text like '%kite-key-nila%'", Integer.class)).isZero();
     }
 
+    /** User, 8 Nov 2026: an account added by mistake is removed with its twin; one that has history stays. */
+    @Test
+    void anUnusedAccountIsRemovedWithItsTwinAndAClientIsUsedOnce() {
+        long t = member("ravi");
+        long first = account("ravi", t, "Kotak", "KOTAK_NEO", "V502G");
+        assertThat(code(() -> account("ravi", t, "Kotak Neo", "KOTAK_NEO", "V502G"))).as("same client twice").isEqualTo(400);
+        long second = account("ravi", t, "Kotak Neo", "KOTAK_NEO", "V502H");
+        assertThat(code(() -> admin.settings("ravi", second, new AccountAdminController.Settings(null, null, null, null, null,
+                null, "v502g", null)))).as("a client id taken by another account").isEqualTo(400);
+        long firstTwin = jdbc.queryForObject("select id from acct.broker_account where paper_of_account_id = ?", Long.class, first);
+        assertThat(jdbc.queryForObject("select default_broker_account_id from acct.tenant where id = ?", Long.class, t))
+                .isEqualTo(first);
+        // refused: a wrong name, the twin itself, another workspace, SUPPORT without a grant
+        assertThat(code(() -> admin.remove("ravi", first, new AccountAdminController.Remove("kotak")))).isEqualTo(400);
+        assertThat(code(() -> admin.remove("ravi", firstTwin, new AccountAdminController.Remove("Kotak paper"))))
+                .isEqualTo(400);
+        member("sita");
+        assertThat(code(() -> admin.remove("sita", first, new AccountAdminController.Remove("Kotak")))).isEqualTo(404);
+        assertThat(code(() -> admin.remove("satya", first, new AccountAdminController.Remove("Kotak")))).isEqualTo(403);
+        // removed with its twin; the default broker moves on; the audit rows stay, marked
+        assertThat(admin.remove("ravi", first, new AccountAdminController.Remove("Kotak"))).containsEntry("removed", true);
+        assertThat(jdbc.queryForObject("select count(*) from acct.broker_account where id in (?, ?)", Integer.class, first,
+                firstTwin)).isZero();
+        assertThat(jdbc.queryForObject("select default_broker_account_id from acct.tenant where id = ?", Long.class, t))
+                .isEqualTo(second);
+        assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where detail->>'removedAccountId' = ? and "
+                + "detail->>'removedAccountName' = 'Kotak' and broker_account_id is null", Integer.class, String.valueOf(first)))
+                .isPositive();
+        assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where action = 'ACCOUNT_REMOVED' and tenant_id = ?",
+                Integer.class, t)).isEqualTo(1);
+        // the client is free again
+        account("ravi", t, "Kotak again", "KOTAK_NEO", "V502G");
+        // an account that logged in keeps its record
+        jdbc.update("insert into acct.broker_session (broker_account_id, token_ref, acquired_at, expires_at, status) values "
+                + "(?, 'session-file:kotak-x.token', now() - interval '1 day', now() - interval '20 hours', 'EXPIRED')", second);
+        assertThat(code(() -> admin.remove("ravi", second, new AccountAdminController.Remove("Kotak Neo")))).isEqualTo(409);
+        assertThat(jdbc.queryForObject("select count(*) from acct.broker_account where id = ?", Integer.class, second))
+                .isEqualTo(1);
+    }
+
     @Test
     void upstoxLogsInThePinnedClientOnceAndLogoutEndsALiveDay() {
         long t = member("mala");

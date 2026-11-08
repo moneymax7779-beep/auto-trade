@@ -61,7 +61,7 @@ function BrokersFor({ tenant }: { tenant: number }) {
           ))}
         </div>
       </Panel>
-      {open != null && <AccountDetailPanel accountId={open} canManage={t.canManage} canAct={t.canSwitch} dailySwitch
+      {open != null && t.brokers.some((x) => x.id === open) && <AccountDetailPanel accountId={open} canManage={t.canManage} canAct={t.canSwitch} dailySwitch
         onClose={() => setOpen(null)} onDone={(text, ok) => (ok ? done(text) : setMessage({ ok, text }))} />}
       {t.canManage && <AddBroker tenant={tenant} onDone={done} onError={fail} />}
       <AppsPanel tenant={tenant} data={apps.data} onDone={done} onError={fail} />
@@ -83,13 +83,23 @@ function BrokerRow({ b, apps, t, open, onManage, onDone, onError }: {
     onSuccess: (_d, v) => onDone(v.ok),
     onError,
   });
+  // a login's outcome is shown on its own row too: the page's message bar is far above a lower row (user, 8 Nov)
+  const [loginNote, setLoginNote] = useState<{ ok: boolean; text: string } | null>(null);
   const login = useMutation({
     mutationFn: ({ path, body }: { path: string; body: unknown }) => postJson<LoginResult>(path, body),
-    onSuccess: (r) => { onDone(r.message, r.ok); setTotp(""); setMpin(""); },
-    onError: (e) => { onError(e); setTotp(""); setMpin(""); },
+    onSuccess: (r) => { setLoginNote({ ok: r.ok, text: r.message }); onDone(r.message, r.ok); setTotp(""); setMpin(""); },
+    onError: (e) => { setLoginNote({ ok: false, text: e instanceof Error ? e.message : String(e) }); onError(e);
+      setTotp(""); setMpin(""); },
   });
   const isLogged = loggedIn(b);
   const real = b.broker !== "PAPER";
+  // no login can start without an enabled app with keys: say what is missing instead of offering the login
+  const linked = apps.find((a) => a.broker === b.broker && a.name === b.brokerApp);
+  const loginBlocked = !real ? null : !linked
+    ? `Before logging in: create a ${BROKER_NAMES[b.broker]} app under Broker apps (API keys) at the bottom of this page, `
+      + "set its keys, then pick it in Broker app above."
+    : linked.status !== "ACTIVE" ? `${linked.name} is disabled: enable it under Broker apps (API keys).`
+    : !linked.keysSet ? `Set the keys of ${linked.name} under Broker apps (API keys) first.` : null;
   return (
     <div className="rounded border border-line p-3 text-sm">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
@@ -101,6 +111,15 @@ function BrokerRow({ b, apps, t, open, onManage, onDone, onError }: {
         {real && !b.liveCapable && <span className="text-xs text-muted">PAPER only (no LIVE adapter for {BROKER_NAMES[b.broker]} yet)</span>}
         {b.liveEligible && <span className="text-xs text-up">LIVE-eligible</span>}
         <button className={`${button} ml-auto`} onClick={onManage}>{open ? "Close" : "Capital & strategies"}</button>
+        {t.canManage && <button className={button} disabled={call.isPending || isLogged}
+          title={isLogged ? "log out first" : "only an account that never logged in or traded can be removed"}
+          onClick={() => {
+            const typed = window.prompt(`Remove ${b.name}${real ? " and its paper twin" : ""}? This cannot be undone, and is `
+              + "refused if it ever logged in or traded. Type the account's name to confirm:");
+            if (typed === null) return;
+            call.mutate({ path: `/api/execution/accounts/${b.id}/remove`, body: { confirm: typed.trim() },
+              ok: `${b.name} removed` });
+          }}>Remove</button>}
       </div>
       {real && (
         <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -119,7 +138,10 @@ function BrokerRow({ b, apps, t, open, onManage, onDone, onError }: {
             </select></label>
         </div>
       )}
-      {real && t.canSwitch && (
+      {real && t.canSwitch && loginBlocked && !isLogged && (
+        <p className="mt-2 text-xs text-warn">{loginBlocked}</p>
+      )}
+      {real && t.canSwitch && (!loginBlocked || isLogged) && (
         <div className="mt-2 flex flex-wrap items-center gap-2">
           {loginUrl(b) && <a className={primary} href={loginUrl(b)!} target="_blank" rel="noreferrer">
             {isLogged ? "Log in again" : "Log in"} at {BROKER_NAMES[b.broker]}</a>}
@@ -140,6 +162,7 @@ function BrokerRow({ b, apps, t, open, onManage, onDone, onError }: {
           {isLogged && <button className={button} disabled={call.isPending}
             onClick={() => call.mutate({ path: `/api/execution/accounts/${b.id}/logout`, body: {}, ok: `${b.name} logged out here` })}>
             Log out here</button>}
+          {loginNote && <span className={`w-full text-xs ${loginNote.ok ? "text-up" : "text-down"}`}>{loginNote.text}</span>}
         </div>
       )}
       {real && b.liveCapable && t.platformAdmin && (

@@ -45,7 +45,9 @@ import com.autotrade.execution.KillSwitches;
  *   <li>{@code GET /api/execution/credential-profiles}, {@code GET /api/execution/strategy-ids}: what a form offers;</li>
  *   <li>{@code POST /api/execution/accounts}: a new follower account (OWNER / ADMIN);</li>
  *   <li>{@code POST /api/execution/accounts/{id}/settings}: allocation, equity mode, daily loss limit, mode, enabled,
- *       client id, strategies (OWNER / ADMIN).</li>
+ *       client id, strategies (OWNER / ADMIN);</li>
+ *   <li>{@code POST /api/execution/accounts/{id}/remove} {@code {"confirm": name}}: removes an account added by mistake,
+ *       with its paper twin, only while neither ever logged in, traded or was a day's broker (OWNER / ADMIN).</li>
  * </ul>
  * Nothing here makes an account LIVE: the mode is PAPER or DRY_RUN only, and {@code live_trading_enabled} is never
  * touched (LIVE stays a separate, explicit step, and is refused by the broker registry in this build).
@@ -281,6 +283,9 @@ class AccountAdminController {
             Integer taken = jdbc.queryForObject("select count(*) from acct.broker_account where tenant_id = ? and display_name = ?",
                     Integer.class, tenant, name);
             require(taken != null && taken == 0, "an account named " + name + " already exists");
+            if (daily && clientId != null) {
+                sameClient(tenant, broker, clientId, null);
+            }
             if (daily && broker != BrokerType.PAPER) {
                 Integer twinName = jdbc.queryForObject("select count(*) from acct.broker_account where tenant_id = ? "
                         + "and display_name = ?", Integer.class, tenant, name + " paper");
@@ -392,6 +397,9 @@ class AccountAdminController {
             if (body.clientId() != null) {
                 String clientId = clientId(a.brokerType(), body.clientId());
                 require(clientId != null, "client id: required");
+                if (daily) {
+                    sameClient(a.tenantId(), a.brokerType(), clientId, id);
+                }
                 Integer sessions = jdbc.queryForObject("select count(*) from acct.broker_session where broker_account_id = ? "
                         + "and status = 'ACTIVE'", Integer.class, id);
                 require(sessions == null || sessions == 0 || clientId.equals(before.get("clientId")),
@@ -470,6 +478,98 @@ class AccountAdminController {
         new com.autotrade.execution.TradingDay(jdbc.getDataSource()).sessionLost(a, "eligibility");
         audit.audit(a, "execution", "LIVE_ELIGIBLE_OFF", Map.of("reason", why));
         return true;
+    }
+
+    record Remove(String confirm) {
+    }
+
+    /**
+     * Removes an account added by mistake (user, 8 Nov 2026), with its paper twin. Only while neither has any history
+     * (a broker session, an order, a position, a ledger day, a kill switch, a day's choice): an account that traded keeps
+     * its record and is turned off instead. Its configuration (subscriptions, capital entries, lease) goes with it; its
+     * audit rows stay, marked with the removed account's id and name.
+     */
+    @PostMapping("/api/execution/accounts/{id}/remove")
+    Map<String, Object> remove(@RequestHeader(value = Access.HEADER, required = false) String subject, @PathVariable long id,
+                               @RequestBody Remove body) {
+        Access.User user = access.user(subject);
+        BrokerAccount a = visible(user, id);
+        Access.require(user.manages(a.tenantId()), user.support(a.tenantId())
+                ? "SUPPORT needs the member's grant (their Settings page) to remove accounts"
+                : "only an OWNER or ADMIN may remove an account");
+        require(a.paperOf() == null, a.displayName() + " is a paper twin: remove its broker account, the twin goes with it");
+        require(body != null && a.displayName().equals(body.confirm()), "confirm: type the account's name (" + a.displayName()
+                + ")");
+        String legacy = jdbc.queryForObject("select legacy_account_label from acct.broker_account where id = ?", String.class, id);
+        require(legacy == null, a.displayName() + " is set up on the server (" + legacy + "): it is not removed here");
+        Long twin = jdbc.queryForList("select id from acct.broker_account where paper_of_account_id = ?", Long.class, id)
+                .stream().findFirst().orElse(null);
+        List<Long> ids = twin == null ? List.of(id) : List.of(id, twin);
+        String in = String.join(", ", java.util.Collections.nCopies(ids.size(), "?"));
+        Object[] args = ids.toArray();
+        tx.executeWithoutResult(t -> {
+            // locked first: a login, a fill or a day's choice racing this waits on the rows (their foreign key checks)
+            jdbc.queryForList("select id from acct.broker_account where id in (" + in + ") order by id for update", Long.class,
+                    args);
+            List<String> history = new ArrayList<>();
+            for (String[] check : new String[][] {
+                    {"acct.broker_session", "logged in"}, {"exec.trade_intent", "took a signal"},
+                    {"exec.order_execution", "sent an order"}, {"exec.position", "held a position"},
+                    {"acct.ledger_day", "has a ledger day"}, {"exec.kill_switch", "has a kill switch"},
+                    {"acct.trading_day_event", "was a day's broker"}}) {
+                Integer n = jdbc.queryForObject("select count(*) from " + check[0] + " where broker_account_id in (" + in + ")",
+                        Integer.class, args);
+                if (n != null && n > 0) {
+                    history.add(check[1]);
+                }
+            }
+            Integer source = jdbc.queryForObject("select count(*) from acct.copy_group where signal_source_account_id in ("
+                    + in + ")", Integer.class, args);
+            if (source != null && source > 0) {
+                history.add("is a copy group's signal source");
+            }
+            if (!history.isEmpty()) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, a.displayName() + " " + String.join(", ", history)
+                        + ": it keeps its record; turn it off in Capital & strategies instead");
+            }
+            // the workspace's default broker moves to another of its broker accounts (none: unset)
+            jdbc.update("update acct.tenant t set default_broker_account_id = (select min(x.id) from acct.broker_account x "
+                    + "where x.tenant_id = t.id and x.broker_type <> 'PAPER' and x.paper_of_account_id is null and x.id <> ?) "
+                    + "where t.id = ? and t.default_broker_account_id in (" + in + ")", concat(id, a.tenantId(), args));
+            for (String table : List.of("acct.strategy_subscription", "acct.capital_movement", "exec.account_lease")) {
+                jdbc.update("delete from " + table + " where broker_account_id in (" + in + ")", args);
+            }
+            jdbc.update("update exec.audit_log set detail = detail || jsonb_build_object('removedAccountId', broker_account_id, "
+                    + "'removedAccountName', ?::text), tenant_id = coalesce(tenant_id, ?), broker_account_id = null "
+                    + "where broker_account_id in (" + in + ")", concat(a.displayName(), a.tenantId(), args));
+            if (twin != null) {
+                jdbc.update("delete from acct.broker_account where id = ?", twin);
+            }
+            jdbc.update("delete from acct.broker_account where id = ?", id);
+        });
+        Map<String, Object> detail = new LinkedHashMap<>();
+        detail.put("account", id);
+        detail.put("name", a.displayName());
+        detail.put("broker", a.brokerType().name());
+        detail.put("paperTwin", twin);
+        audit.audit(a.tenantId(), null, user.subject(), "ACCOUNT_REMOVED", detail);
+        return Map.of("id", id, "removed", true);
+    }
+
+    private static Object[] concat(Object first, Object second, Object[] rest) {
+        Object[] all = new Object[rest.length + 2];
+        all[0] = first;
+        all[1] = second;
+        System.arraycopy(rest, 0, all, 2, rest.length);
+        return all;
+    }
+
+    /** One broker account per broker client in a member's workspace (two Kotak rows for V502G, user 8 Nov 2026). */
+    private void sameClient(long tenant, BrokerType broker, String clientId, Long except) {
+        List<String> taken = jdbc.queryForList("select display_name from acct.broker_account where tenant_id = ? and broker_type = ? "
+                + "and upper(external_broker_user_id) = ? and id <> coalesce(?, -1)", String.class, tenant, broker.name(),
+                clientId, except);
+        require(taken.isEmpty(), (taken.isEmpty() ? "" : taken.getFirst()) + " already uses " + broker + " client " + clientId);
     }
 
     private boolean dailySwitch(long tenant) {
