@@ -27,7 +27,8 @@ import tools.jackson.databind.JsonNode;
  *       buying balance, read once;</li>
  *   <li>the session ends at the token's own expiry (else the next 06:00 IST).</li>
  * </ol>
- * No TOTP or password passes here. Groww has no LIVE order adapter in this build: the account trades PAPER.
+ * No TOTP or password passes here. Groww has a DRY_RUN order adapter only in this build (no LIVE one): the session is
+ * read by READ_LIVE ({@link GrowwSessionSource}); orders go to a simulator.
  */
 @Component
 class GrowwLogin {
