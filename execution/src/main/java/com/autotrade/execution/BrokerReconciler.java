@@ -62,6 +62,8 @@ public final class BrokerReconciler {
      * time of the check before it first differed (null: none since the start): a hand sale came after that.
      */
     private final Map<Long, Map<String, Instant>> lastDifferences = new java.util.concurrent.ConcurrentHashMap<>();
+    /** Review 8 Nov 2026: the last SELLS_CUT audited per account and contract (the same one is not audited again). */
+    private final Map<String, String> lastCut = new java.util.concurrent.ConcurrentHashMap<>();
     /** Each account's last check. */
     private final Map<Long, Instant> lastCheck = new java.util.concurrent.ConcurrentHashMap<>();
     /** Our order tags: F, the trade intent, the role letter (FollowerSimulator / BrokerVenue). */
@@ -97,6 +99,9 @@ public final class BrokerReconciler {
             long o = ours.getOrDefault(key, 0L), t = theirs.getOrDefault(key, 0L);
             if (o == t) {
                 continue;
+            }
+            if (t < o) {
+                cutOurSells(account, broker, books, key);
             }
             boolean again = before.containsKey(key);
             Instant since = again ? before.get(key) : previous;
@@ -200,6 +205,64 @@ public final class BrokerReconciler {
                     "rule", "broker holds none, no stop live, sold by hand"));
         }
         return true;
+    }
+
+    /**
+     * Review 8 Nov 2026: the broker's positions show less of a contract than our book (a hand sale in Kite, the broker's
+     * own square-off): our working sells there (a resting stop, an exit) could then sell what is no longer held, a short,
+     * and a live stop also kept the hand sale from being booked. When the order book agrees (what it shows held, filled
+     * buys less filled sells as {@link LiveGuard} counts it, is less than what our working sells could still sell: never
+     * so in our own flows, and not fooled by positions that lag a fill), their total is cut to what is held, at once:
+     * cancelled, or the one that crosses it reduced (cancelling only reduces risk). Audited SELLS_CUT. The position is
+     * then booked by {@link #bookHandSale} at the next check (no stop live), or stays a reconciliation difference.
+     */
+    private void cutOurSells(BrokerAccount account, BrokerConnection broker, BrokerBooks books, String key) {
+        long held = Math.max(0, LiveGuard.held(books.orders(), key));
+        List<BrokerOrder> working = books.orders().stream().filter(o -> key.equals(o.instrumentKey())
+                && o.side() == OrderSide.SELL && !o.status().isTerminal() && o.clientTag() != null
+                && OUR_TAG.matcher(o.clientTag()).matches()).toList();
+        if (working.stream().mapToLong(o -> o.quantity() - o.filledQuantity()).sum() <= held) {
+            return;
+        }
+        long allowed = held;
+        List<String> cut = new ArrayList<>();
+        List<String> outcome = new ArrayList<>();                    // what was cut, without the broker's messages
+        for (BrokerOrder o : working) {
+            long rest = o.quantity() - o.filledQuantity();
+            if (rest <= allowed) {
+                allowed -= rest;
+                continue;
+            }
+            try {
+                if (allowed > 0) {
+                    try {
+                        broker.modify(o.clientTag(), o.filledQuantity() + allowed, 0, 0);
+                        cut.add(o.clientTag() + " reduced to " + allowed);
+                        outcome.add(cut.getLast());
+                        allowed = 0;
+                        continue;
+                    } catch (com.autotrade.broker.BrokerException e) {
+                        if (e.kind() == com.autotrade.broker.BrokerException.Kind.SESSION) {
+                            throw e;
+                        }                                            // not reduced: cancelled instead
+                    }
+                }
+                broker.cancel(o.clientTag());
+                cut.add(o.clientTag() + " cancelled");
+                outcome.add(cut.getLast());
+            } catch (com.autotrade.broker.BrokerException e) {
+                if (e.kind() == com.autotrade.broker.BrokerException.Kind.SESSION) {
+                    throw e;
+                }
+                cut.add(o.clientTag() + " NOT cut: " + e.getMessage());
+                outcome.add(o.clientTag() + " NOT cut");
+            }
+        }
+        // a cut that failed is tried at every check; the same outcome is audited (and alerted) once a day
+        String said = java.time.LocalDate.now(IST) + " " + held + " " + outcome;
+        if (!said.equals(lastCut.put(account.id() + ":" + key, said))) {
+            kills.audit(account, "reconciler", "SELLS_CUT", Map.of("contract", key, "broker_holds", held, "orders", cut));
+        }
     }
 
     /** The broker's order and trade books, each read once per check and only when needed. */

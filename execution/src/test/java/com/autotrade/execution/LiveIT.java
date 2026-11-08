@@ -130,6 +130,9 @@ class LiveIT {
         jdbc.update("update acct.broker_account set credential_profile_id = ?, trade_mode = 'LIVE', "
                 + "live_trading_enabled = ? where id = ?", profile, live, id);
         new FanOut(dataSource).subscribe(group, id, List.of(strategies), 1.0);
+        // the test's clock (decided_at) and the database's (enabled_at) differ by up to a second in Docker: a
+        // subscription made a moment before its decision must not count as made after it (full-suite flake, 8 Nov 2026)
+        jdbc.update("update acct.strategy_subscription set enabled_at = now() - interval '1 hour' where copy_group_id = ?", group);
         return accounts.byId(id).orElseThrow();
     }
 
@@ -327,6 +330,172 @@ class LiveIT {
                     .satisfies(s -> assertThat(s.lastResult()).contains("only today's session"));
         }
         assertThat(kite.requests("place")).isZero();
+    }
+
+    @Test
+    void aStopMissingFromOneLiveBookReadIsNotTakenAsCancelledAndNothingIsSoldBesideIt() throws Exception {
+        // review 8 Nov 2026: a stop absent from one order-book read was marked CANCELLED, so the exit went out beside
+        // it (refused by the guard), the stop was "re-armed" (refused) and the account was emergency-killed
+        long group = group();
+        BrokerAccount a = account(group, true, "ma-cross");
+        long session = signalSession(group);
+        enter(group, session, "ma-cross", 0);
+        HidingStops book = new HidingStops(rawKite());
+        FollowerSimulator f = liveFollower(new LiveGuard(book, FollowerRisk.load(Path.of(V7)).live(), k -> LOT));
+        f.run(a, group, DAY);
+        assertThat(kite.requests("place")).as("the entry and its stop").isEqualTo(2);
+        exit(group, session, 0);
+        book.hideOnRead = 3;            // the stop-fill and broker-holding reads see it, the exit's release does not
+        f.run(a, group, DAY);
+        assertThat(intentState(a)).as("left for the next turn").isEqualTo("CREATED");
+        assertThat(jdbc.queryForObject("select status from exec.order_execution where broker_account_id = ? and role = "
+                + "'STOP'", String.class, a.id())).isEqualTo("OPEN");
+        assertThat(kite.requests("place")).as("no exit beside the stop").isEqualTo(2);
+        assertThat(new KillSwitches(dataSource).engaged(a, "ma-cross", KEYS[0])).isNull();
+        f.run(a, group, DAY);
+        assertThat(intentState(a)).isEqualTo("EXECUTED");
+        assertThat(jdbc.queryForObject("select status from exec.position where broker_account_id = ?", String.class,
+                a.id())).isEqualTo("CLOSED");
+        assertThat(kite.netQuantities()).containsEntry(KITE_SYMBOLS[0], 0L);
+    }
+
+    @Test
+    void aHandSaleThenTheStrategysExitSendNoRefusedOrderAndKillNothingAndTheSaleIsBooked() throws Exception {
+        // review 8 Nov 2026 (second review): after a hand sale in Kite the stop is cut; a strategy exit or a stop check
+        // before the next reconciliation then wrote an order our guard refused (a REJECTED row, a Telegram alert) every
+        // turn, and STOP_NOT_ARMED killed the account after 5 turns
+        long group = group();
+        BrokerAccount a = account(group, true, "ma-cross");
+        long session = signalSession(group);
+        enter(group, session, "ma-cross", 0);
+        com.autotrade.zerodha.KiteGateway raw = rawKite();
+        LiveGuard guard = new LiveGuard(raw, FollowerRisk.load(Path.of(V7)).live(), k -> LOT);
+        FollowerSimulator f = liveFollower(guard);
+        f.run(a, group, DAY);
+        raw.place(new OrderRequest("HAND1", 3_000_000_000L + 47168, KEYS[0], SYMBOLS[0], "NFO", OrderSide.SELL,
+                OrderType.LIMIT, LOT, 99.0, 0, "HAND1"));                 // sold by hand in Kite (no tag of ours)
+        BrokerReconciler reconciler = new BrokerReconciler(dataSource, costs);
+        assertThat(reconciler.check(a, guard).matched()).isFalse();       // our stop is cut
+        exit(group, session, 0);                                            // the strategy's exit, before the next check
+        for (int i = 0; i < 6; i++) {
+            f.run(a, group, DAY);
+        }
+        FollowerSimulator restarted = liveFollower(guard);                 // a redeploy: its stops are checked again
+        for (int i = 0; i < 6; i++) {
+            restarted.run(a, group, DAY);
+        }
+        assertThat(kite.requests("place")).as("the entry, its stop, the hand sale: nothing refused").isEqualTo(3);
+        assertThat(jdbc.queryForList("select role || ':' || status from exec.order_execution where broker_account_id = ? "
+                + "order by id", String.class, a.id())).containsExactly("ENTRY:FILLED", "STOP:CANCELLED");
+        assertThat(new KillSwitches(dataSource).engaged(a, "ma-cross", KEYS[0])).isNull();
+        assertThat(reconciler.check(a, guard).matched()).isTrue();         // the next check books the hand sale
+        assertThat(jdbc.queryForObject("select status || ':' || exit_reason from exec.position where broker_account_id = ?",
+                String.class, a.id())).isEqualTo("CLOSED:MANUAL");
+        f.run(a, group, DAY);
+        assertThat(intentState(a)).isEqualTo("SKIPPED_NOT_HELD");
+        assertThat(new KillSwitches(dataSource).engaged(a, "ma-cross", KEYS[0])).isNull();
+        assertThat(kite.netQuantities()).containsEntry(KITE_SYMBOLS[0], 0L);
+    }
+
+    /** A Kite gateway of its own to the simulator standing for Kite (below any guard). */
+    private com.autotrade.zerodha.KiteGateway rawKite() throws java.io.IOException {
+        com.autotrade.zerodha.KiteConfig config = new com.autotrade.zerodha.KiteConfig("real-key", kite.baseUri(),
+                kite.baseUri(), "MIS", java.time.Duration.ofSeconds(2), 8, java.time.Duration.ofMillis(50));
+        com.autotrade.zerodha.KiteHttp http = new com.autotrade.zerodha.KiteHttp(config);
+        http.accessToken("day-token");
+        return new com.autotrade.zerodha.KiteGateway(config, http, com.autotrade.zerodha.KiteInstruments.load(http));
+    }
+
+    /** A LIVE follower on v7 over {@code guard}, with the waits shortened. */
+    private FollowerSimulator liveFollower(LiveGuard guard) {
+        FollowerRisk risk = FollowerRisk.load(Path.of(V7));
+        return new FollowerSimulator(dataSource, costs, risk, new BrokerVenue(dataSource, guard, risk.orders().fast(),
+                (k, u) -> 1755L, o -> { }), null).withClock(MORNING);
+    }
+
+    /** The strategy's EXIT of contract {@code i}, decided now, fanned out. */
+    private void exit(long group, long session, int i) {
+        long token = 3_000_000_000L + Long.parseLong(KEYS[i].substring(7));
+        int n = jdbc.queryForObject("select count(*) from exec.signal_decision where copy_group_id = ?", Integer.class,
+                group) + 1;
+        new SignalDecisionStore(dataSource).insert(new SignalDecision(group, session, DAY, Instant.now(), "ma-cross", 2,
+                "NIFTY", SignalDecision.Action.EXIT, "PE", null, "EXIT", "IT", token, KEYS[i], SYMBOLS[i], LOT, 100,
+                Double.NaN, 500_000, 0, group + ":" + session + ":" + n, Map.of()));
+        new FanOut(dataSource).fanOut(group, DAY);
+    }
+
+    /** Kite, except that one order-book read ({@code hideOnRead}: the n-th from now) leaves out the stop orders. */
+    private static final class HidingStops implements com.autotrade.broker.BrokerConnection {
+        private final com.autotrade.broker.BrokerConnection kite;
+        int hideOnRead;
+
+        HidingStops(com.autotrade.broker.BrokerConnection kite) {
+            this.kite = kite;
+        }
+
+        @Override
+        public java.util.List<com.autotrade.broker.BrokerOrder> orders() {
+            java.util.List<com.autotrade.broker.BrokerOrder> book = kite.orders();
+            if (hideOnRead > 0 && --hideOnRead == 0) {
+                return book.stream().filter(o -> o.type() != OrderType.STOP_LIMIT).toList();
+            }
+            return book;
+        }
+
+        @Override
+        public void place(OrderRequest r) {
+            kite.place(r);
+        }
+
+        @Override
+        public void modify(String tag, long quantity, double limit, double trigger) {
+            kite.modify(tag, quantity, limit, trigger);
+        }
+
+        @Override
+        public void cancel(String tag) {
+            kite.cancel(tag);
+        }
+
+        @Override
+        public String name() {
+            return kite.name();
+        }
+
+        @Override
+        public com.autotrade.broker.BrokerCapabilities capabilities() {
+            return kite.capabilities();
+        }
+
+        @Override
+        public void onUpdate(java.util.function.Consumer<com.autotrade.broker.OrderUpdate> listener) {
+            kite.onUpdate(listener);
+        }
+
+        @Override
+        public java.util.List<com.autotrade.broker.BrokerPosition> positions() {
+            return kite.positions();
+        }
+
+        @Override
+        public double availableFunds() {
+            return kite.availableFunds();
+        }
+
+        @Override
+        public Quote quote(String instrumentKey) {
+            return kite.quote(instrumentKey);
+        }
+
+        @Override
+        public java.util.List<com.autotrade.broker.BrokerTrade> trades() {
+            return kite.trades();
+        }
+
+        @Override
+        public int poll() {
+            return kite.poll();
+        }
     }
 
     private static OrderRequest buy(String tag, int i, long quantity) {

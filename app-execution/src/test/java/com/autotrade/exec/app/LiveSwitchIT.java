@@ -160,6 +160,9 @@ class LiveSwitchIT {
                 "config/risk/signal-source.v2.yaml");
         long group = accounts.ensureCopyGroup(tenant, "G-" + accountId, signal);
         new FanOut(dataSource).subscribe(group, accountId, List.of("ma-cross"), 1.0);
+        // the test's clock (decided_at) and the database's (enabled_at) differ by up to a second in Docker: a
+        // subscription made a moment before its decision must not count as made after it (full-suite flake, 8 Nov 2026)
+        jdbc.update("update acct.strategy_subscription set enabled_at = now() - interval '1 hour' where copy_group_id = ?", group);
         long session = jdbc.queryForObject("insert into trade.session (account, mode, session_date, feed, strategy_id, "
                 + "strategy_hash, configs, code_version, status) values (?, 'PAPER_REPLAY', current_date, 'it', 'live-set', "
                 + "'sha256:it', '{}'::jsonb, 'it', 'DONE') returning id", Long.class, "SIG-" + accountId);

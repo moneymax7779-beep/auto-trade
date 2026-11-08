@@ -50,6 +50,13 @@ public final class ExecutionLoop implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(ExecutionLoop.class);
     private static final int FANOUT_LOCK_CLASS = 7102;
     static final java.time.Duration RECONCILE_EVERY = java.time.Duration.ofSeconds(30);
+    /**
+     * Review 8 Nov 2026: the end-of-day square-off was one attempt (a stop whose cancel did not show, an exit the chase
+     * could not fill: only logged). It is tried again at the end of every tick, this far apart, until nothing this worker
+     * holds is open, for at most {@link #SQUARE_OFF_RETRY_FOR} after the first attempt (then a last EOD_SQUARE_OFF alert).
+     */
+    static final java.time.Duration SQUARE_OFF_RETRY = java.time.Duration.ofSeconds(30);
+    static final java.time.Duration SQUARE_OFF_RETRY_FOR = java.time.Duration.ofMinutes(9);
 
     /** One account's last turn, for the status page. */
     public record AccountStatus(long accountId, long tenantId, String account, String mode, String broker, String route,
@@ -77,6 +84,14 @@ public final class ExecutionLoop implements AutoCloseable {
     private final Map<Long, FollowerRisk> risks = new ConcurrentHashMap<>();
     private final Map<Long, String> signatures = new ConcurrentHashMap<>();
     private final Map<Long, AccountStatus> status = new ConcurrentHashMap<>();
+    private volatile LocalDate squareOffDay;                 // the day whose square-off has not left everything flat
+    private volatile Instant squareOffStarted;
+    private volatile Instant squareOffLast;
+    private java.time.Duration squareOffRetry = SQUARE_OFF_RETRY;
+    /** Review 8 Nov 2026: square-off retries run here, one at a time, never on the tick (a flatten can take minutes). */
+    private final ExecutorService squareOffs = Executors.newSingleThreadExecutor(
+            Thread.ofPlatform().name("exec-square-off").daemon(true).factory());
+    private final java.util.concurrent.atomic.AtomicBoolean squareOffRunning = new java.util.concurrent.atomic.AtomicBoolean();
 
     public ExecutionLoop(DataSource dataSource, String tenant, String copyGroups, String workerId, CostModel costs,
                          QuoteSource quotes, double brokerFunds) {
@@ -163,7 +178,65 @@ public final class ExecutionLoop implements AutoCloseable {
                 // a slow or failed turn is reported by the account's status, never stops the others
             }
         }
+        squareOffAgain(day);
         return turns.size();
+    }
+
+    /** The square-off tried again when the last one did not leave everything flat (see {@link #SQUARE_OFF_RETRY}). */
+    private void squareOffAgain(LocalDate day) {
+        if (!day.equals(squareOffDay) || squareOffLast.plus(squareOffRetry).isAfter(Instant.now())
+                || !squareOffRunning.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            squareOffs.submit(() -> {
+                try {
+                    retrySquareOff(day);
+                } catch (RuntimeException e) {
+                    log.error("end-of-day square-off retry failed", e);
+                } finally {
+                    squareOffRunning.set(false);
+                }
+            });
+        } catch (java.util.concurrent.RejectedExecutionException e) {
+            squareOffRunning.set(false);                            // closed
+        }
+    }
+
+    private void retrySquareOff(LocalDate day) {
+        if (Instant.now().isAfter(squareOffStarted.plus(SQUARE_OFF_RETRY_FOR))) {
+            squareOffDay = null;
+            for (long accountId : List.copyOf(leases.keySet())) {
+                BrokerAccount account = accounts.byId(accountId).orElse(null);
+                int open = account == null ? 0 : openPositions(accountId);
+                if (open > 0) {
+                    new KillSwitches(dataSource).audit(account, workerId, "EOD_SQUARE_OFF", Map.of("positions",
+                            List.of(open + " position(s) STILL OPEN after " + SQUARE_OFF_RETRY_FOR.toMinutes()
+                                    + " min of square-off attempts: close them in the broker's app")));
+                    log.error("account {} ({}): {} position(s) still open after the square-off attempts", accountId,
+                            account.displayName(), open);
+                }
+            }
+            return;
+        }
+        squareOff(day).forEach(line -> log.warn("end-of-day square-off (again): {}", line));
+    }
+
+    /** Tests: the square-off retry interval. */
+    ExecutionLoop squareOffRetry(java.time.Duration every) {
+        this.squareOffRetry = every;
+        return this;
+    }
+
+    /** Tests: the account is reconciled at its next turn. */
+    void reconcileNextTurn(long accountId) {
+        reconciled.remove(accountId);
+    }
+
+    private int openPositions(long accountId) {
+        Integer open = jdbc.queryForObject("select count(*) from exec.position where broker_account_id = ? "
+                + "and status = 'OPEN' and quantity_open > 0", Integer.class, accountId);
+        return open == null ? 0 : open;
     }
 
     private void turn(BrokerAccount account, List<Long> groupIds, LocalDate day) {
@@ -229,14 +302,19 @@ public final class ExecutionLoop implements AutoCloseable {
                         BrokerReconciler.Check c = reconciler.check(account, route.connection());
                         check = c.matched() ? "" : ", RECONCILIATION " + c.differences();
                     } catch (BrokerException e) {
-                        if (e.kind() != BrokerException.Kind.SESSION) {
-                            throw e;
+                        if (e.kind() == BrokerException.Kind.SESSION) {
+                            // the session is gone: the simulator below refuses entries and keeps exits for the next login
+                            new KillSwitches(dataSource).loseSession(account, workerId,
+                                    Map.of("message", String.valueOf(e.getMessage()), "during", "reconciliation"));
+                            tradingDay.sessionLost(account, workerId);     // a DAILY_SWITCH LIVE day goes back to PAPER
+                            check = ", BROKER SESSION LOST (" + e.getMessage() + ")";
+                        } else {
+                            // review 8 Nov 2026: a failed read (positions, orders) was rethrown, so the turn skipped the
+                            // simulator and no exit went out while the read kept failing. Now it is noted and the turn
+                            // goes on; the next check is RECONCILE_EVERY later
+                            log.warn("account {}: reconciliation not done ({}): {}", account.id(), e.kind(), e.getMessage());
+                            check = ", RECONCILIATION NOT DONE (" + e.kind() + ": " + e.getMessage() + ")";
                         }
-                        // the session is gone: the simulator below refuses entries and keeps exits for the next login
-                        new KillSwitches(dataSource).loseSession(account, workerId,
-                                Map.of("message", String.valueOf(e.getMessage()), "during", "reconciliation"));
-                        tradingDay.sessionLost(account, workerId);     // a DAILY_SWITCH LIVE day goes back to PAPER
-                        check = ", BROKER SESSION LOST (" + e.getMessage() + ")";
                     }
                     reconciled.put(account.id(), Instant.now());
                 }
@@ -283,15 +361,22 @@ public final class ExecutionLoop implements AutoCloseable {
      * when the signal source stopped mid-day its positions would stay open overnight (and block the next day's entries
      * for that strategy). At the square-off time every account this worker holds that still has an open position is
      * flattened like the Flatten button, but without a kill switch (the next day trades normally); audited
-     * EOD_SQUARE_OFF. Every strategy of the live set is flat by 15:15, so this is a safety net.
+     * EOD_SQUARE_OFF. Every strategy of the live set is flat by 15:15, so this is a safety net. Review 8 Nov 2026: tried
+     * again from each tick until flat ({@link #SQUARE_OFF_RETRY}).
      */
     public List<String> squareOff(LocalDate day) {
+        // the times first, then the day: a tick reading the day always finds its times set
+        if (!day.equals(squareOffDay)) {
+            squareOffStarted = Instant.now();
+        }
+        squareOffLast = Instant.now();
+        squareOffDay = day;
         List<String> lines = new ArrayList<>();
+        boolean flat = true;
         for (long accountId : List.copyOf(leases.keySet())) {
             BrokerAccount account = accounts.byId(accountId).orElse(null);
-            Integer open = account == null ? 0 : jdbc.queryForObject("select count(*) from exec.position where "
-                    + "broker_account_id = ? and status = 'OPEN' and quantity_open > 0", Integer.class, accountId);
-            if (open == null || open == 0) {
+            int open = account == null ? 0 : openPositions(accountId);
+            if (open == 0) {
                 continue;
             }
             try {
@@ -301,6 +386,10 @@ public final class ExecutionLoop implements AutoCloseable {
             } catch (Exception e) {
                 lines.add(account.displayName() + ": square-off failed (" + e.getMessage() + ")");
             }
+            flat &= openPositions(accountId) == 0;
+        }
+        if (flat) {
+            squareOffDay = null;                                    // done: no more attempts today
         }
         return lines;
     }
@@ -456,6 +545,7 @@ public final class ExecutionLoop implements AutoCloseable {
 
     @Override
     public void close() {
+        squareOffs.shutdownNow();
         lanes.values().forEach(ExecutorService::shutdownNow);
         leases.values().forEach(AccountLease::close);
         leases.clear();
