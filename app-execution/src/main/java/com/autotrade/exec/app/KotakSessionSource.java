@@ -37,6 +37,7 @@ class KotakSessionSource implements BrokerSessions {
     private final JdbcTemplate jdbc;
     private final BrokerSecrets secrets;
 
+    @org.springframework.beans.factory.annotation.Autowired      // two constructors: Spring must be told which
     KotakSessionSource(DataSource dataSource, KiteLoginProperties props, BrokerLoginProperties brokers) {
         this(dataSource, new BrokerSecrets(Path.of(props.secretsDir()), Path.of(props.sessionsDir()),
                 Path.of(brokers.storeDir())));
