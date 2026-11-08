@@ -93,11 +93,33 @@ public interface FollowerVenue {
      * Protecting a position: armed (failure null, nothing sold), or its stop had sold first (book {@code soldQuantity},
      * then protect again), or the stop could not be placed ({@code failure}: the caller exits at once).
      */
-    record Protection(String failure, List<Part> sold, Instant at) {
-        static final Protection ARMED = new Protection(null, List.of(), null);
+    record Protection(String failure, List<Part> sold, Instant at, Later later) {
+        static final Protection ARMED = new Protection(null, List.of(), null, Later.NO);
+
+        /**
+         * Review 8 Nov 2026: why a stop is not confirmed armed when nothing says the broker refused it; never answered
+         * with an emergency sell. NEXT_TURN: looked at again next turn (a failed read, a stop not yet in the book, a sell
+         * of unknown outcome). BACK_OFF: a place that failed (not sent, unknown, refused by our guard): tried again after
+         * a pause, so no order row is written every turn. BROKER_HOLDS_LESS: the broker's order book holds less of the
+         * contract than our book (a hand sale): no stop row is written; reconciliation books or kills it, so it does not
+         * count towards STOP_NOT_ARMED.
+         */
+        enum Later { NO, NEXT_TURN, BACK_OFF, BROKER_HOLDS_LESS }
 
         static Protection failed(String failure) {
-            return new Protection(failure, List.of(), null);
+            return new Protection(failure, List.of(), null, Later.NO);
+        }
+
+        static Protection later(String why) {
+            return new Protection(why, List.of(), null, Later.NEXT_TURN);
+        }
+
+        static Protection later(Later kind, String why) {
+            return new Protection(why, List.of(), null, kind);
+        }
+
+        boolean isLater() {
+            return later != Later.NO;
         }
 
         long soldQuantity() {
@@ -118,5 +140,42 @@ public interface FollowerVenue {
     /** Protective stops that sold at the broker since the last call. */
     default List<StopFill> stopFills(BrokerAccount account) {
         return List.of();
+    }
+
+    /**
+     * Review 8 Nov 2026: what an entry, exit or emergency exit whose end was not known (its place timed out, it never
+     * showed in the book, its cancel was not confirmed) filled at the broker beyond what was booked from it. Each turn;
+     * such an order still working is cancelled (its turn had ended).
+     */
+    record LateFill(long intentId, String role, String tag, long quantity, double price, Instant at) {
+    }
+
+    default List<LateFill> lateFills(BrokerAccount account) {
+        return List.of();
+    }
+
+    /**
+     * Review 8 Nov 2026: resumes an intent's orders already recorded (a session lost or a worker stopped mid-order) by
+     * their tags, never placing anything new: what they filled.
+     */
+    default Fill resume(OrderSpec order) {
+        return Fill.none("NOT_RESUMABLE", "this venue has no orders to resume", order.at());
+    }
+
+    /**
+     * Review 8 Nov 2026: the tag of a sell (exit or emergency exit) of the position's contract whose outcome is not known
+     * yet (it may have sold), other than {@code exceptExitIntent}'s own exit (resumed by its tag); null when none. No
+     * other sell or stop is sent over it.
+     */
+    default String unresolvedSell(BrokerAccount account, long positionId, Long exceptExitIntent) {
+        return null;
+    }
+
+    /**
+     * Review 8 Nov 2026: what the broker's own order book shows held of a contract (filled buys less filled sells, ours
+     * and by hand), on a LIVE venue; null when not known (another venue, or the book could not be read).
+     */
+    default Long brokerHolds(BrokerAccount account, String instrumentKey) {
+        return null;
     }
 }

@@ -75,6 +75,15 @@ public final class FollowerSimulator {
     /** A LIVE entry older than this, or from this time of day, is refused (code review 3 Nov 2026). */
     static final java.time.Duration LIVE_ENTRY_MAX_AGE = java.time.Duration.ofSeconds(60);
     static final java.time.LocalTime LIVE_LAST_ENTRY = java.time.LocalTime.of(15, 10);
+    /**
+     * Review 8 Nov 2026: a position whose broker stop is not confirmed armed this many times in a row (it is tried again
+     * every turn) stops the account's entries (an alert); a stop the broker refused is tried again after
+     * {@link #PROTECT_RETRY_AFTER}.
+     */
+    static final int UNARMED_KILL_AFTER = 5;
+    static final java.time.Duration PROTECT_RETRY_AFTER = java.time.Duration.ofSeconds(60);
+    /** Review 8 Nov 2026: a stop place that failed (not refused by the broker) is tried again after this. */
+    static final java.time.Duration PROTECT_BACK_OFF = java.time.Duration.ofSeconds(30);
     /** The wall clock of the LIVE entry checks (tests set their own). */
     private java.time.Clock clock = java.time.Clock.systemUTC();
 
@@ -114,11 +123,22 @@ public final class FollowerSimulator {
     private Long leaseEpoch;                     // the worker's lease epoch, recorded on every order (fencing)
     private final Map<String, Day> days = new java.util.HashMap<>();   // per account and date, across worker ticks
     private final Set<String> protectionChecked = new HashSet<>();       // account:date whose stops were verified
+    private final Map<Long, Integer> unarmedTries = new java.util.HashMap<>();   // position -> stop not confirmed, in a row
+    private final Map<Long, Instant> protectRetryAt = new java.util.HashMap<>(); // position -> its stop's next try
 
     /** Makes this an execution worker's simulator: intents are claimed by {@code id} and orders carry the epoch. */
     public FollowerSimulator asWorker(String id, long epoch) {
         this.workerId = id;
         this.leaseEpoch = epoch;
+        return this;
+    }
+
+    private java.time.Duration protectBackOff = PROTECT_BACK_OFF;
+
+    /** Tests: how long a stop place that failed waits before it is tried again (the waits now running end). */
+    FollowerSimulator withProtectBackOff(java.time.Duration backOff) {
+        this.protectBackOff = backOff;
+        protectRetryAt.clear();
         return this;
     }
 
@@ -189,8 +209,28 @@ public final class FollowerSimulator {
                 }
             }
         }
-        if (venue.broker() && !sessionLost && protectionChecked.add(account.id() + ":" + date)) {
-            sessionLost = ensureProtected(day);             // recovery: every open position has its broker stop
+        if (venue.broker() && !sessionLost) {
+            try {
+                adoptLateFills(day);
+            } catch (BrokerException e) {
+                if (e.kind() == BrokerException.Kind.SESSION) {
+                    sessionLost = true;
+                    loseSession(account, e.getMessage());
+                } else {
+                    reasons.merge("LATE_FILL_READ_" + e.kind(), 1, Integer::sum);
+                }
+            }
+        }
+        // review 8 Nov 2026: marked checked only once every open position's stop is confirmed armed (it was marked
+        // before the check, so a position whose stop failed after a redeploy stayed without one all day); tried each turn
+        String checked = account.id() + ":" + date;
+        if (venue.broker() && !sessionLost && !protectionChecked.contains(checked)) {
+            int unarmed = ensureProtected(day);             // recovery: every open position has its broker stop
+            if (unarmed < 0) {
+                sessionLost = true;
+            } else if (unarmed == 0) {
+                protectionChecked.add(checked);
+            }
         }
         List<Pending> pending = pending(account.id(), copyGroupId, date);
         Set<Long> handled = new HashSet<>();
@@ -200,7 +240,9 @@ public final class FollowerSimulator {
             }
             List<String> outcomes = new ArrayList<>();
             if (sessionLost) {
-                if (!p.action().equals("EXIT")) {                   // entries refused; exits wait for the next login
+                // entries refused; exits wait for the next login. Review 8 Nov 2026: so does an entry with orders already at
+                // the broker (it is resumed by tag after the login; refused, its fill would have no position or stop)
+                if (!p.action().equals("EXIT") && !(venue.broker() && hasOrders(p.intentId(), "ENTRY"))) {
                     outcomes.add(reject(p, "BROKER_SESSION", "the broker session is not valid: log in again"));
                 } else {
                     outcomes.add("PENDING_BROKER_SESSION");
@@ -291,8 +333,10 @@ public final class FollowerSimulator {
     // ---------------------------------------------------------------- entries
 
     private String enter(Day day, Pending p) {
+        boolean resumable = venue.broker() && hasOrders(p.intentId(), "ENTRY");
         if (openPosition(day.account.id(), p.strategyId(), p.underlying(), null) != null) {
-            return skip(p, "ALREADY_HELD", "the account already holds this strategy's position");
+            return resumable ? resumeEntry(day, p)
+                    : skip(p, "ALREADY_HELD", "the account already holds this strategy's position");
         }
         double price = buyPrice(p.price());
         double budget = scaledBudget(day, p);
@@ -302,7 +346,8 @@ public final class FollowerSimulator {
             budget = Math.max(budget, Math.min(budget * boost, 0.97 * free));          // risk v17: spare capital only
         }
         if (!(price > 0) || budget < p.lotSize() * price) {
-            return reject(p, "SIZE", String.format("budget %.0f is under one lot (%.0f)", budget, p.lotSize() * price));
+            return resumable ? resumeEntry(day, p) : reject(p, "SIZE", String.format("budget %.0f is under one lot (%.0f)",
+                    budget, p.lotSize() * price));
         }
         double scale = p.intendedLots() > 0 && p.strategyLots() > 0
                 ? budget / (p.intendedLots() * p.lotSize() * price) : Double.NaN;
@@ -318,28 +363,59 @@ public final class FollowerSimulator {
         if (p.liquidityLots() > 0) {
             lots = Math.min(lots, (long) Math.floor(p.liquidityLots() * liquidityShare(day, p)));   // what the book allowed
             if (lots < 1) {
-                return reject(p, "LIQUIDITY_SHARE", "this account's share of the book is under one lot");
+                return resumable ? resumeEntry(day, p) : reject(p, "LIQUIDITY_SHARE",
+                        "this account's share of the book is under one lot");
             }
         }
         if (p.bookQuantity() >= 0) {                                                    // replay depth ceiling
             if (p.bookQuantity() < p.lotSize()) {
-                return skip(p, "BOOK_EMPTY", "the signal account got no fill in this book");
+                return resumable ? resumeEntry(day, p) : skip(p, "BOOK_EMPTY", "the signal account got no fill in this book");
             }
             lots = Math.min(lots, (long) p.bookQuantity() / p.lotSize());
         }
         if (lots < 1) {
-            return reject(p, "SIZE", "under one lot after the size step");
+            return resumable ? resumeEntry(day, p) : reject(p, "SIZE", "under one lot after the size step");
         }
         long quantity = lots * p.lotSize();
         String refused = check(day, p, false, 1, lots, quantity * price);
         if (refused != null) {
-            return refused;
+            return resumable ? resumeEntry(day, p) : refused;          // check() wrote it: resumeEntry undoes it
         }
         FollowerVenue.Fill fill = order(day.account, p, "ENTRY", "BUY", quantity, price, 1);
         if (fill.quantity() == 0) {
             return notFilled(day, p, fill);
         }
         long positionId = insertPosition(day, p, p.side(), fill, step == 0 ? Double.NaN : scale);
+        protect(day, p, positionId);
+        reconcileIfUnknown(day, p, fill);
+        return done(p, fill.quantity());
+    }
+
+    /**
+     * Review 8 Nov 2026: an entry refused before any order this turn (a stale signal, the time, an engaged kill switch,
+     * its size) whose orders already reached the broker before its turn was cut short (a session lost while it worked, a
+     * stopped worker) is not dropped: its orders are resumed by their tags without any check (they were checked when
+     * sent), and what filled there is a position with its stop. Nothing new is placed; a child not found at the broker is
+     * left to {@link #adoptLateFills}. Its own position already booked (a worker stopped just after) is kept. An entry that
+     * passes its checks again resumes them through its order as before (and sends the children not sent).
+     */
+    private String resumeEntry(Day day, Pending p) {
+        // a refusal check() already wrote is undone: if the session goes while resuming, the intent stays resumable
+        jdbc.update("update exec.trade_intent set state = 'CREATED', reject_code = null, reject_reason = null, "
+                + "updated_at = now() where id = ? and state in ('REJECTED', 'SKIPPED')", p.intentId());
+        if (!jdbc.queryForList("select id from exec.position where entry_trade_intent_id = ? and broker_account_id = ?",
+                Long.class, p.intentId(), day.account.id()).isEmpty()) {
+            return skip(p, "ALREADY_HELD", "the entry's own position is already booked");
+        }
+        Long requested = jdbc.queryForObject("select sum(quantity_requested) from exec.order_execution where "
+                + "trade_intent_id = ? and broker_account_id = ? and role = 'ENTRY'", Long.class, p.intentId(),
+                day.account.id());
+        FollowerVenue.Fill fill = venue.resume(spec(day.account, p, "ENTRY", "BUY", requested == null ? 0 : requested,
+                buyPrice(p.price()), 1));
+        if (fill.quantity() == 0) {
+            return notFilled(day, p, fill);
+        }
+        long positionId = insertPosition(day, p, p.side(), fill, Double.NaN);
         protect(day, p, positionId);
         reconcileIfUnknown(day, p, fill);
         return done(p, fill.quantity());
@@ -620,6 +696,20 @@ public final class FollowerSimulator {
         if (venue.broker() && attempts > 0 && Boolean.TRUE.equals(tries.get("recent"))) {
             return "PENDING_EXIT_RETRY";                               // the last attempt failed moments ago: wait
         }
+        String unresolved = venue.unresolvedSell(day.account, positionId, p.intentId());
+        if (unresolved != null) {
+            // review 8 Nov 2026: an earlier sell of this contract may have sold already (its end is not known yet):
+            // nothing more is sold until it is (adoptLateFills books it, or finds it never reached the broker)
+            return "PENDING_UNRESOLVED_SELL";
+        }
+        Long brokerHolds = venue.brokerHolds(day.account, InstrumentKeys.normalize((String) position.get("instrument_key"),
+                heldToken));
+        if (brokerHolds != null && brokerHolds < quantity) {
+            // review 8 Nov 2026: the broker's book holds less than our position (sold by hand in Kite): our guard would
+            // refuse the sell (a refused order and an alert every retry, then a kill); its stop stays as it is, nothing is
+            // sent, and the reconciliation books the hand sale (or engages the kill switch)
+            return "PENDING_BROKER_HOLDS_LESS";
+        }
         // plan section 3, exit sequencing: the broker stop comes off first; if it already sold, nothing more is sent
         FollowerVenue.Release release = venue.release(day.account, positionId);
         if (release.retryLater()) {
@@ -641,8 +731,13 @@ public final class FollowerSimulator {
                 // the rest keeps a broker stop. Code review 3 Nov 2026: a broker exit is tried again (a quote that failed
                 // once, a refused place, a chase that ran out), EXIT_ATTEMPTS times in all, EXIT_RETRY_AFTER apart, each
                 // audited (an alert); only then is it given up and the account's entries stopped. An order of unknown
-                // outcome is not retried (a second sell could be a short): the account is reconciled.
-                protect(day, p, positionId);
+                // outcome is not retried (a second sell could be a short): the account is reconciled. Review 8 Nov 2026:
+                // nor is a stop re-armed beside it (both could sell); ensureProtected arms it once its end is known
+                if (fill.unknown()) {
+                    protectionChecked.remove(day.account.id() + ":" + day.date);
+                } else {
+                    protect(day, p, positionId);
+                }
                 String left = (quantity - fill.quantity()) + " of " + p.symbol() + " still held (" + fill.code() + ": "
                         + fill.reason() + ")";
                 if (venue.broker() && !fill.unknown() && attempts + 1 < EXIT_ATTEMPTS) {
@@ -758,6 +853,13 @@ public final class FollowerSimulator {
             gross += (part.price() - average) * q;
             charges += charge(day.date, underlying, Side.SELL, part.price(), q);
         }
+        long total = parts.stream().mapToLong(FollowerVenue.Part::quantity).sum();
+        if (total > open) {
+            // review 8 Nov 2026: a sale over what our book holds of the position (the broker may now be short, or our book
+            // is wrong) was capped silently: booked up to what is held, and the account's entries stop (an alert)
+            kills.engageAccount(day.account, "SELL_OVER_POSITION: " + total + " sold (" + reason + ") of position "
+                    + positionId + " holding " + open, "execution");
+        }
         if (sold <= 0) {
             return;
         }
@@ -800,42 +902,67 @@ public final class FollowerSimulator {
 
     /**
      * Every open position of the account has its broker stop (after a restart, a takeover or a login): stops are
-     * re-armed where missing, sales by stops booked. Returns true when the session turned out to be lost.
+     * re-armed where missing, sales by stops booked. Returns -1 when the session turned out to be lost, else how many
+     * open positions have no confirmed stop (review 8 Nov 2026: the check is repeated each turn until none).
      */
-    private boolean ensureProtected(Day day) {
+    private int ensureProtected(Day day) {
+        int unarmed = 0;
         for (Map<String, Object> pos : jdbc.queryForList("select id, symbol from exec.position where broker_account_id = ? "
                 + "and status = 'OPEN' and quantity_open > 0 order by id", day.account.id())) {
+            long id = ((Number) pos.get("id")).longValue();
+            Instant retryAt = protectRetryAt.get(id);
+            if (retryAt != null && retryAt.isAfter(Instant.now())) {
+                unarmed++;                                  // its stop failed a moment ago: not every turn
+                continue;
+            }
             try {
-                protect(day, null, ((Number) pos.get("id")).longValue(), (String) pos.get("symbol"));
+                if (!protect(day, null, id, (String) pos.get("symbol"))) {
+                    unarmed++;
+                }
             } catch (BrokerException e) {
                 if (e.kind() != BrokerException.Kind.SESSION) {
                     throw e;
                 }
                 loseSession(day.account, e.getMessage());
-                return true;
+                return -1;
             }
         }
-        return false;
+        return unarmed;
     }
 
     private boolean hasOrders(long intentId) {
-        Integer n = jdbc.queryForObject("select count(*) from exec.order_execution where trade_intent_id = ?", Integer.class,
-                intentId);
+        return hasOrders(intentId, null);
+    }
+
+    /** The intent has order rows (of {@code role}, null = any). */
+    private boolean hasOrders(long intentId, String role) {
+        Integer n = jdbc.queryForObject("select count(*) from exec.order_execution where trade_intent_id = ? "
+                + "and (?::text is null or role = ?)", Integer.class, intentId, role, role);
         return n != null && n > 0;
     }
 
-    /** {@code p} null (flatten): a stop that cannot be placed is reported, not followed by another exit. */
-    private void protect(Day day, Pending p, long positionId, String symbol) {
+    /**
+     * {@code p} null (flatten, recovery): a stop that cannot be placed is reported, not followed by another exit. Returns
+     * true when the position's stop is confirmed armed (or nothing is left to protect).
+     */
+    private boolean protect(Day day, Pending p, long positionId, String symbol) {
         if (p == null) {
             FollowerVenue.Protection r = venue.protect(day.account, positionId, leaseEpoch);
             if (r.soldQuantity() > 0) {
                 book(day, positionId, r.sold(), r.at(), "BROKER_STOP");
+                protectionChecked.remove(day.account.id() + ":" + day.date);   // the rest is protected next turn
+                return false;
+            }
+            if (r.isLater()) {
+                return unarmed(day, positionId, symbol, r);
             }
             if (r.failure() != null) {
+                protectRetryAt.put(positionId, Instant.now().plus(PROTECT_RETRY_AFTER));
                 kills.engageAccount(day.account, "flatten left " + symbol + " without a broker stop: " + r.failure(),
                         "flatten");
+                return false;
             }
-            return;
+            return armed(positionId);
         }
         for (int round = 0; round < 3; round++) {
             FollowerVenue.Protection r = venue.protect(day.account, positionId, leaseEpoch);
@@ -843,36 +970,133 @@ public final class FollowerSimulator {
                 book(day, positionId, r.sold(), r.at(), "BROKER_STOP");
                 continue;
             }
+            if (r.isLater()) {
+                // review 8 Nov 2026: a read or place that failed, a stop not yet in the book, a sell of unknown outcome:
+                // not a refused stop, so no emergency sell; tried again later (ensureProtected)
+                return unarmed(day, positionId, p.symbol(), r);
+            }
             if (r.failure() == null) {
-                return;
+                return armed(positionId);
             }
             FollowerVenue.Release release = venue.release(day.account, positionId);
             if (release.retryLater()) {
                 kills.engageAccount(day.account, "STOP_PLACEMENT_FAILED on " + p.symbol() + " (" + r.failure()
                         + ") and the stop's state is not confirmed: " + release.reason(), "execution");
-                return;
+                return unarmed(day, positionId, p.symbol(), FollowerVenue.Protection.later(release.reason()));
             }
             if (release.soldQuantity() > 0) {
                 book(day, positionId, release.sold(), release.at(), "BROKER_STOP");
             }
             long open = jdbc.queryForObject("select quantity_open from exec.position where id = ?", Long.class, positionId);
+            // review 8 Nov 2026: each emergency exit gets its own tag (the round restarted at 1 on every call, so a later
+            // one met the earlier order's row and "resumed" it: nothing was sent)
+            int attempt = jdbc.queryForObject("select coalesce(max(attempt_no), 0) + 1 from exec.order_execution "
+                    + "where trade_intent_id = ? and role = 'EMERGENCY_EXIT'", Integer.class, p.intentId());
             FollowerVenue.Fill fill = open <= 0 ? null
-                    : order(day.account, p, "EMERGENCY_EXIT", "SELL", open, sellPrice(p.price()), 1 + round);
+                    : order(day.account, p, "EMERGENCY_EXIT", "SELL", open, sellPrice(p.price()), attempt);
             if (fill != null && fill.quantity() > 0) {
                 book(day, positionId, fill.parts(), fill.at(), "STOP_PLACEMENT_FAILED");
             }
             long left = open - (fill == null ? 0 : fill.quantity());
             kills.engageAccount(day.account, "STOP_PLACEMENT_FAILED on " + p.symbol() + ": " + r.failure()
                     + (left > 0 ? "; " + left + " still held" : "; exited"), "execution");
-            return;
+            if (left > 0) {
+                protectRetryAt.put(positionId, Instant.now().plus(PROTECT_RETRY_AFTER));
+                protectionChecked.remove(day.account.id() + ":" + day.date);     // tried again (ensureProtected)
+            }
+            return left <= 0;
         }
         kills.engageAccount(day.account, "the stop of " + p.symbol() + " kept selling while being re-armed", "execution");
+        protectionChecked.remove(day.account.id() + ":" + day.date);
+        return false;
+    }
+
+    /** The position's stop is confirmed: its not-armed count is cleared. */
+    private boolean armed(long positionId) {
+        unarmedTries.remove(positionId);
+        protectRetryAt.remove(positionId);
+        return true;
+    }
+
+    /**
+     * Review 8 Nov 2026: the position's stop is not confirmed armed: checked again by ensureProtected, next turn or, when
+     * a place failed or the broker holds less than our book, after {@link #PROTECT_BACK_OFF} (no order row every turn).
+     * After {@link #UNARMED_KILL_AFTER} such tries in a row the account's entries stop (an alert); the broker holding less
+     * does not count (reconciliation books the hand sale or engages the kill switch). Returns false.
+     */
+    private boolean unarmed(Day day, long positionId, String symbol, FollowerVenue.Protection r) {
+        protectionChecked.remove(day.account.id() + ":" + day.date);
+        if (r.later() != FollowerVenue.Protection.Later.NEXT_TURN) {
+            protectRetryAt.put(positionId, Instant.now().plus(protectBackOff));
+        }
+        if (r.later() == FollowerVenue.Protection.Later.BROKER_HOLDS_LESS) {
+            return false;
+        }
+        int tries = unarmedTries.merge(positionId, 1, Integer::sum);
+        if (tries == UNARMED_KILL_AFTER) {
+            kills.engageAccount(day.account, "STOP_NOT_ARMED: " + symbol + " has no confirmed broker stop after " + tries
+                    + " tries (" + r.failure() + ")", "execution");
+        }
+        return false;
+    }
+
+    /**
+     * Review 8 Nov 2026: fills of orders whose end was not known when their turn ended ({@link FollowerVenue#lateFills}):
+     * an entry's becomes (or adds to) the position of its intent, which gets its broker stop at once; an exit's or
+     * emergency exit's is booked as a sale of the open position of its contract (its stop is re-sized next turn). Each is
+     * audited LATE_FILL (an alert); the kill switch the unknown order engaged stays until the user releases it.
+     */
+    private void adoptLateFills(Day day) {
+        for (FollowerVenue.LateFill f : venue.lateFills(day.account)) {
+            FollowerVenue.Fill fill = FollowerVenue.Fill.of(List.of(new FollowerVenue.Part(f.quantity(), f.price())),
+                    f.at(), "FILLED", null);
+            Long positionId = null;
+            if (f.role().equals("ENTRY")) {
+                Pending p = query(PENDING + "where i.id = ?", f.intentId()).getFirst();
+                List<Map<String, Object>> held = jdbc.queryForList("select id, quantity_open, average_entry from exec.position "
+                        + "where broker_account_id = ? and status = 'OPEN' and (entry_trade_intent_id = ? or (? = 'ADD' "
+                        + "and strategy_id = ? and underlying = ? and instrument_token = ?)) order by id desc limit 1",
+                        day.account.id(), f.intentId(), p.action(), p.strategyId(), p.underlying(), p.token());
+                if (held.isEmpty()) {
+                    positionId = insertPosition(day, p, p.side(), fill, Double.NaN);
+                } else {
+                    positionId = ((Number) held.getFirst().get("id")).longValue();
+                    addToPosition(day, p, positionId, ((Number) held.getFirst().get("quantity_open")).longValue(),
+                            ((Number) held.getFirst().get("average_entry")).doubleValue(), fill);
+                }
+                jdbc.update("update exec.trade_intent set state = 'EXECUTED', quantity = coalesce(quantity, 0) + ?, "
+                        + "reject_code = 'LATE_FILL', reject_reason = ?, updated_at = now() where id = ?", f.quantity(),
+                        f.tag() + " filled " + f.quantity() + " after its turn ended", f.intentId());
+                protect(day, p, positionId);
+            } else {
+                List<Long> ids = jdbc.queryForList("select p.id from exec.position p join exec.trade_intent i on i.id = ? "
+                        + "where p.broker_account_id = ? and p.status = 'OPEN' and (p.entry_trade_intent_id = i.id "
+                        + "or p.instrument_token = i.instrument_token) order by (p.entry_trade_intent_id = i.id) desc, p.id "
+                        + "limit 1", Long.class, f.intentId(), day.account.id());
+                if (ids.isEmpty()) {
+                    kills.engageAccount(day.account, "LATE_FILL: sell " + f.tag() + " filled " + f.quantity()
+                            + " with no open position of its contract", "execution");
+                } else {
+                    positionId = ids.getFirst();
+                    book(day, positionId, f.quantity(), f.price(), f.at(), "LATE_" + f.role());
+                    protectionChecked.remove(day.account.id() + ":" + day.date);   // the stop re-sized (ensureProtected)
+                }
+            }
+            kills.audit(day.account, "execution", "LATE_FILL", Map.of("tag", f.tag(), "role", f.role(), "quantity",
+                    f.quantity(), "price", Math.round(f.price() * 100) / 100.0, "position",
+                    positionId == null ? "none" : positionId));
+        }
     }
 
     private FollowerVenue.Fill order(BrokerAccount account, Pending p, String role, String side, long quantity, double price,
                                      int attempt) {
-        return venue.execute(new FollowerVenue.OrderSpec(account, p.intentId(), p.mode(), role, side, p.underlying(),
-                p.token(), p.instrumentKey(), p.symbol(), p.lotSize(), quantity, price, p.at(), attempt, leaseEpoch));
+        return venue.execute(spec(account, p, role, side, quantity, price, attempt));
+    }
+
+    private FollowerVenue.OrderSpec spec(BrokerAccount account, Pending p, String role, String side, long quantity,
+                                         double price, int attempt) {
+        return new FollowerVenue.OrderSpec(account, p.intentId(), p.mode(), role, side, p.underlying(), p.token(),
+                p.instrumentKey(), p.symbol(), p.lotSize(), quantity, price, p.at(), attempt, leaseEpoch);
     }
 
     /** An order that filled nothing: refused (its code), or unknown at the broker (the account must be reconciled). */
@@ -913,6 +1137,21 @@ public final class FollowerSimulator {
                 onlyPosition, onlyPosition)) {
             long positionId = ((Number) pos.get("id")).longValue();
             String symbol = (String) pos.get("symbol");
+            String unresolved = venue.unresolvedSell(account, positionId, null);
+            if (unresolved != null) {
+                // review 8 Nov 2026: an earlier sell of the contract may have sold it already: its stop stays, nothing sold
+                lines.add(symbol + ": NOT flattened, sell " + unresolved + " has an unknown outcome (looked at each turn)");
+                continue;
+            }
+            Long brokerHolds = venue.brokerHolds(account, InstrumentKeys.normalize((String) pos.get("instrument_key"),
+                    ((Number) pos.get("instrument_token")).longValue()));
+            long held = ((Number) pos.get("quantity_open")).longValue();
+            if (brokerHolds != null && brokerHolds < held) {
+                // review 8 Nov 2026: sold by hand in Kite: the guard would refuse the sell; the stop stays as it is
+                lines.add(symbol + ": NOT flattened, the broker holds " + brokerHolds + " of our " + held
+                        + " (sold by hand? reconciliation books it)");
+                continue;
+            }
             FollowerVenue.Release release = venue.release(account, positionId);
             if (release.retryLater()) {
                 lines.add(symbol + ": NOT flattened, " + release.reason());
@@ -1017,7 +1256,8 @@ public final class FollowerSimulator {
     /** The open position of a strategy on an underlying; {@code side} narrows to one straddle leg. */
     private Map<String, Object> openPosition(long accountId, String strategyId, String underlying, String side) {
         List<Map<String, Object>> rows = jdbc.queryForList("select id, entry_trade_intent_id, quantity_open, average_entry, "
-                + "sizing_scale, instrument_token from exec.position where broker_account_id = ? and strategy_id = ? and underlying = ? "
+                + "sizing_scale, instrument_token, instrument_key from exec.position where broker_account_id = ? and strategy_id = ? "
+                + "and underlying = ? "
                 + "and status = 'OPEN' and (?::text is null or option_side = ?) order by id limit 1", accountId, strategyId,
                 underlying, side, side);
         return rows.isEmpty() ? null : rows.getFirst();
