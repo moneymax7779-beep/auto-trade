@@ -18,6 +18,7 @@
         <dependency><groupId>com.autotrade</groupId><artifactId>broker-api</artifactId></dependency>
         <dependency><groupId>com.autotrade</groupId><artifactId>broker-zerodha</artifactId></dependency>
         <dependency><groupId>com.autotrade</groupId><artifactId>broker-kotak</artifactId></dependency>
+        <dependency><groupId>com.autotrade</groupId><artifactId>broker-upstox-orders</artifactId></dependency>
         <dependency><groupId>com.autotrade</groupId><artifactId>instrument-master</artifactId></dependency>
         <dependency>
             <groupId>com.autotrade</groupId>

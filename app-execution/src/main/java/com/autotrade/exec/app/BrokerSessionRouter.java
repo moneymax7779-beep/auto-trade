@@ -9,7 +9,8 @@ import com.autotrade.execution.BrokerSessions;
 
 /**
  * The worker's broker sessions, by the account's broker (8 Nov 2026): ZERODHA from {@link KiteSessionSource} (as
- * before), KOTAK_NEO from {@link KotakSessionSource}; any other broker has none.
+ * before), KOTAK_NEO from {@link KotakSessionSource}, UPSTOX from {@link UpstoxSessionSource} (the member's own Upstox
+ * login, never zt-tiger-v2's token); any other broker has none.
  */
 final class BrokerSessionRouter implements BrokerSessions {
 

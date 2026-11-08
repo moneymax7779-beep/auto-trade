@@ -37,22 +37,24 @@ class ExecutionService implements DisposableBean {
     private final ExecutionProperties properties;
     private final KiteSessionSource kiteSessions;
     private final KotakSessionSource kotakSessions;
+    private final UpstoxSessionSource upstoxSessions;
     private final KiteLoginProperties kite;
     private volatile ExecutionLoop loop;
     private volatile java.time.Instant lastTick;
 
     /** Tests: no real broker sessions. */
     ExecutionService(DataSource dataSource, ExecutionProperties properties) {
-        this(dataSource, properties, null, null, null);
+        this(dataSource, properties, null, null, null, null);
     }
 
     @org.springframework.beans.factory.annotation.Autowired
     ExecutionService(DataSource dataSource, ExecutionProperties properties, KiteSessionSource kiteSessions,
-                     KotakSessionSource kotakSessions, KiteLoginProperties kite) {
+                     KotakSessionSource kotakSessions, UpstoxSessionSource upstoxSessions, KiteLoginProperties kite) {
         this.dataSource = dataSource;
         this.properties = properties;
         this.kiteSessions = kiteSessions;
         this.kotakSessions = kotakSessions;
+        this.upstoxSessions = upstoxSessions;
         this.kite = kite;
     }
 
@@ -78,6 +80,36 @@ class ExecutionService implements DisposableBean {
                 new com.autotrade.execution.KotakDryRunAdapter(dataSource, brokerFunds, sessions));
     }
 
+    /**
+     * The worker's adapters: Zerodha and Kotak Neo as above, and Upstox (8 Nov 2026, DRY_RUN only: its {@code live()} is
+     * null and it is not in LiveBrokers; its READ_LIVE reads go to {@code upstox}, Upstox's own hosts when null, with the
+     * member's own session, never zt-tiger-v2's).
+     */
+    static java.util.List<com.autotrade.execution.BrokerAdapter> adapters(DataSource dataSource, double brokerFunds,
+                                                                         KiteSessionSource kiteSessions,
+                                                                         KotakSessionSource kotakSessions,
+                                                                         UpstoxSessionSource upstoxSessions,
+                                                                         java.net.URI kiteApiBase,
+                                                                         com.autotrade.upstox.orders.UpstoxConfig upstox) {
+        java.util.Map<com.autotrade.account.BrokerType, com.autotrade.execution.BrokerSessions> byBroker =
+                new java.util.EnumMap<>(com.autotrade.account.BrokerType.class);
+        if (kiteSessions != null) {
+            byBroker.put(com.autotrade.account.BrokerType.ZERODHA, kiteSessions);
+        }
+        if (kotakSessions != null) {
+            byBroker.put(com.autotrade.account.BrokerType.KOTAK_NEO, kotakSessions);
+        }
+        if (upstoxSessions != null) {
+            byBroker.put(com.autotrade.account.BrokerType.UPSTOX, upstoxSessions);
+        }
+        com.autotrade.execution.BrokerSessions sessions = new BrokerSessionRouter(byBroker);
+        return java.util.List.of(
+                new com.autotrade.execution.ZerodhaDryRunAdapter(dataSource, brokerFunds, sessions, kiteApiBase),
+                new com.autotrade.execution.KotakDryRunAdapter(dataSource, brokerFunds, sessions),
+                new com.autotrade.execution.UpstoxDryRunAdapter(dataSource, brokerFunds, sessions,
+                        upstox == null ? com.autotrade.upstox.orders.UpstoxConfig.real() : upstox));
+    }
+
     @EventListener(ApplicationReadyEvent.class)
     void start() {
         Integer version = new JdbcTemplate(dataSource).queryForObject(
@@ -89,8 +121,8 @@ class ExecutionService implements DisposableBean {
         CostModel costs = CostModel.from(ThresholdConfig.load(Path.of(properties.costsFile())));
         loop = new ExecutionLoop(dataSource, properties.tenant(), properties.copyGroup(), properties.workerId(), costs,
                 new StoredQuotes(dataSource, null), properties.brokerFunds(), adapters(dataSource,
-                properties.brokerFunds(), kiteSessions, kotakSessions,
-                kite == null ? com.autotrade.zerodha.KiteConfig.REAL_API : java.net.URI.create(kite.apiBase())));
+                properties.brokerFunds(), kiteSessions, kotakSessions, upstoxSessions,
+                kite == null ? com.autotrade.zerodha.KiteConfig.REAL_API : java.net.URI.create(kite.apiBase()), null));
         log.info("execution worker {} serving copy group {} (tenant {}), every {} ms", properties.workerId(),
                 properties.copyGroup(), properties.tenant(), properties.pollMs());
         if (properties.day() != null) {

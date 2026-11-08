@@ -33,7 +33,8 @@ import tools.jackson.databind.JsonNode;
  *       noted); the session ends at the next 03:30 IST, Upstox's own expiry.</li>
  * </ol>
  * Never zt-tiger-v2's Upstox app (a new login of that app would end zt's token): a member's account uses its own app.
- * Upstox has no LIVE order adapter in this build: the session proves the connection and the account trades PAPER.
+ * Upstox has a DRY_RUN order adapter only in this build (no LIVE one): the session is read by READ_LIVE
+ * ({@link UpstoxSessionSource}); orders go to a simulator.
  */
 @Component
 class UpstoxLogin {
