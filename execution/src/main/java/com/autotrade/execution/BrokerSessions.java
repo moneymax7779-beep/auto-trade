@@ -16,7 +16,7 @@ public interface BrokerSessions {
 
     /**
      * An app key and an access token, plus what else a broker's session carries ({@code extra}: Kotak's sid and base URL;
-     * empty for Kite); {@link #toString()} never shows the token or the extras' values.
+     * empty for Kite); {@link #toString()} never shows the app key, the token or the extras' values.
      */
     record Access(String apiKey, String accessToken, java.util.Map<String, String> extra) {
 
@@ -30,7 +30,7 @@ public interface BrokerSessions {
 
         @Override
         public String toString() {
-            return "Access[apiKey=" + apiKey + ", accessToken=<redacted>, extra=" + extra.keySet() + "]";
+            return "Access[apiKey=<redacted>, accessToken=<redacted>, extra=" + extra.keySet() + "]";
         }
     }
 

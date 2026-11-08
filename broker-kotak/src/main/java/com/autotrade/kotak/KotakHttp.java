@@ -5,6 +5,7 @@ import java.net.ConnectException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
+import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
@@ -19,6 +20,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.function.BiConsumer;
 
 import com.autotrade.broker.BrokerException.Kind;
 
@@ -32,14 +34,19 @@ import tools.jackson.databind.node.ObjectNode;
  * trade token) and {@code neo-fin-key: neotradeapi}; POST bodies form-encoded with one field {@code jData} holding a JSON
  * object whose every value is a string; answers {@code {"stat": "Ok" | "Not_Ok", "stCode": N, "emsg"|"errMsg": ...}}.
  * <p>
+ * Success is {@code stat: Ok}, or (no {@code stat} at all) a {@code data} node: a 2xx answer that is neither is not
+ * Kotak's answer (a proxy's page, a cut-off body), never an empty book (code review 8 Nov 2026).
+ * <p>
  * Errors onto {@link Kind} ({@link #kind}): an invalid session (stCode 1003, HTTP 401/403), a session made from another IP
- * (1037) and an IP not whitelisted (100008) are SESSION; insufficient balance (1004), invalid symbol (1007), invalid
- * quantity (1009) and a modify or cancel of a finished order (1006, 1021) are TERMINAL; 1005, HTTP 5xx, a timeout or a
- * dropped connection are UNKNOWN for an order call (it may have been processed: look it up by tag) and RETRYABLE for a
- * read; HTTP 429 and a refused connection are RETRYABLE and never reached the broker; anything else Kotak refuses is
- * TERMINAL. The token, the sid, the consumer key and request or response bodies are never logged or put in a message.
+ * (1037) and an IP not whitelisted (100008) are SESSION; for an order call, insufficient balance (1004), invalid symbol
+ * (1007), invalid quantity (1009) and a modify or cancel of a finished order (1006, 1021) are TERMINAL; 1005, HTTP 5xx, a
+ * timeout after connecting or a dropped connection are UNKNOWN for an order call (it may have been processed: look it up
+ * by tag); HTTP 429, a refused connection and a connect timeout are RETRYABLE and never reached the broker; anything else
+ * Kotak refuses is TERMINAL for an order call. Every failed read that is not SESSION is RETRYABLE (a read changes
+ * nothing; an error must never read as an empty book). The token, the sid, the consumer key and request or response
+ * bodies are never logged or put in a message.
  */
-public final class KotakHttp {
+public final class KotakHttp implements AutoCloseable {
 
     /** A read (book, positions, limits: safe to retry) or an order call (place, modify, cancel). */
     public enum Call { READ, ORDER }
@@ -80,6 +87,7 @@ public final class KotakHttp {
     private final JsonMapper json = JsonMapper.builder().build();
     private volatile String token;
     private volatile String sid;
+    private volatile BiConsumer<String, String> tap;
 
     public KotakHttp(KotakConfig config) {
         this.config = config;
@@ -94,6 +102,20 @@ public final class KotakHttp {
 
     public KotakConfig config() {
         return config;
+    }
+
+    /**
+     * Sees every answer's body ({@code "GET /quick/user/orders"}, body) after it arrives: the READ_LIVE probe's raw
+     * record. Never the request's headers (the token and sid). A tap that fails is ignored; null = none.
+     */
+    public void tap(BiConsumer<String, String> tap) {
+        this.tap = tap;
+    }
+
+    /** Ends the client's connections and threads (a session replaced by a new base URL, a closed route). */
+    @Override
+    public void close() {
+        client.close();
     }
 
     JsonNode get(String path, Call call) {
@@ -149,7 +171,7 @@ public final class KotakHttp {
             }
             return response.body();
         } catch (IOException e) {
-            throw new KotakException(Kind.RETRYABLE, "GET scrip file: " + e.getClass().getSimpleName(), 0, 0, true, e);
+            throw failure(e, Call.READ, "GET scrip file", uri.getHost());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new KotakException(Kind.UNKNOWN, "interrupted", 0, 0, true, e);
@@ -176,16 +198,20 @@ public final class KotakHttp {
         HttpResponse<String> response;
         try {
             response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        } catch (HttpTimeoutException e) {
-            throw new KotakException(call == Call.ORDER ? Kind.UNKNOWN : Kind.RETRYABLE, what + " timed out", 0, 0, true, e);
-        } catch (ConnectException e) {
-            throw new KotakException(Kind.RETRYABLE, "cannot connect to " + config.baseUrl().getHost(), 0, 0, false, e);
         } catch (IOException e) {
-            throw new KotakException(call == Call.ORDER ? Kind.UNKNOWN : Kind.RETRYABLE, what + ": "
-                    + e.getClass().getSimpleName(), 0, 0, true, e);
+            throw failure(e, call, what, config.baseUrl().getHost());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new KotakException(Kind.UNKNOWN, "interrupted", 0, 0, true, e);
+        }
+        BiConsumer<String, String> t = tap;
+        if (t != null) {
+            try {
+                t.accept(request.method() + " " + request.uri().getRawPath()
+                        + (request.uri().getRawQuery() == null ? "" : "?" + request.uri().getRawQuery()), response.body());
+            } catch (RuntimeException e) {
+                // the probe's record never affects a call
+            }
         }
         JsonNode body;
         try {
@@ -195,25 +221,49 @@ public final class KotakHttp {
         }
         int code = response.statusCode();
         String stat = body == null ? "" : body.path("stat").asString("");
-        if (code >= 200 && code < 300 && body != null && body.isObject() && (stat.isEmpty() || stat.equalsIgnoreCase("Ok"))) {
+        boolean twoHundred = code >= 200 && code < 300;
+        if (twoHundred && body != null && body.isObject() && (stat.equalsIgnoreCase("Ok")
+                || (stat.isEmpty() && (body.path("data").isArray() || body.path("data").isObject())))) {
             return body;
         }
-        if ((body == null || !body.isObject()) && code >= 200 && code < 300) {
-            // not Kotak's envelope (a proxy's page, a cut-off body): the call may have been processed
+        if (twoHundred && (body == null || !body.isObject() || stat.isEmpty())) {
+            // not Kotak's envelope (a proxy's page, a cut-off body, an object without stat or data): the call may have
+            // been processed; a read of it is no book at all, never an empty one
             throw new KotakException(call == Call.ORDER ? Kind.UNKNOWN : Kind.RETRYABLE, what + ": HTTP " + code
                     + " without Kotak's answer", code, 0, true, null);
         }
         int stCode = body == null ? 0 : (int) KotakHttp.number(body.path("stCode"), 0);
         String message = body == null ? "" : firstText(body, "emsg", "errMsg", "message", "error");
         Kind kind = kind(code, stCode, call);
+        boolean notOk = body != null && body.isObject() && stat.equalsIgnoreCase("Not_Ok");
         throw new KotakException(kind, what + ": " + explain(code, stCode, message), code, stCode,
-                code != 429, null);
+                code != 429, null, notOk ? message : null);
+    }
+
+    /**
+     * A call that got no answer onto {@link Kind}: a connect timeout or a refused connection never reached Kotak
+     * (RETRYABLE; checked before the timeout it is a kind of); any other timeout or I/O failure may have (UNKNOWN for an
+     * order call, RETRYABLE for a read).
+     */
+    static KotakException failure(IOException e, Call call, String what, String host) {
+        if (e instanceof HttpConnectTimeoutException || e instanceof ConnectException) {
+            return new KotakException(Kind.RETRYABLE, "cannot connect to " + host + " (" + e.getClass().getSimpleName()
+                    + ")", 0, 0, false, e);
+        }
+        Kind kind = call == Call.ORDER ? Kind.UNKNOWN : Kind.RETRYABLE;
+        if (e instanceof HttpTimeoutException) {
+            return new KotakException(kind, what + " timed out", 0, 0, true, e);
+        }
+        return new KotakException(kind, what + ": " + e.getClass().getSimpleName(), 0, 0, true, e);
     }
 
     /** Kotak's answer onto {@link Kind}; the order of the checks matters (a body code is more precise than HTTP). */
     static Kind kind(int httpCode, int stCode, Call call) {
         if (stCode == SESSION_INVALID || stCode == WRONG_IP || stCode == IP_NOT_WHITELISTED) {
             return Kind.SESSION;
+        }
+        if (call == Call.READ) {                                        // a read changed nothing: never TERMINAL
+            return httpCode == 401 || httpCode == 403 ? Kind.SESSION : Kind.RETRYABLE;
         }
         if (TERMINAL_CODES.contains(stCode)) {
             return Kind.TERMINAL;

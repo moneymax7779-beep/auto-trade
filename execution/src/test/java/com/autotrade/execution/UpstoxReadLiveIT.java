@@ -19,6 +19,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -121,8 +122,8 @@ class UpstoxReadLiveIT {
     @AfterEach
     void close() throws Exception {
         upstox.close();
-        if (dryRun != null && dryRun.resource() != null) {
-            dryRun.resource().close();
+        if (dryRun != null) {
+            dryRun.closeAll();
         }
     }
 
@@ -354,5 +355,43 @@ class UpstoxReadLiveIT {
             assertThat(route.description()).isEqualTo("LIVE refused: no LIVE adapter for UPSTOX");
         }
         assertThat(upstox.requests()).as("nothing reached Upstox").isZero();
+    }
+
+    // ------------------------------------------------------------------ the READ_LIVE probe (code review 8 Nov 2026)
+
+    @Test
+    void aReadLiveRouteProbesTheRealBooksAndSavesThemRedactedWithoutAnOrderCall(@TempDir Path dir) throws Exception {
+        Setup s = setup();
+        UpstoxDryRunAdapter adapter = new UpstoxDryRunAdapter(dataSource, 1e9, a -> session.get(),
+                UpstoxConfig.at(upstox.baseUri()), new CapturedQuotes(dataSource),
+                new ReadLiveProbe.Settings(java.time.Duration.ofHours(1), dir));
+        dryRun = adapter.dryRun(s.broker(), FollowerRisk.load(Path.of(V6)).orders());
+        var json = tools.jackson.databind.json.JsonMapper.builder().build();
+        String detail = null;
+        for (int i = 0; i < 150 && detail == null; i++) {
+            List<String> rows = jdbc.queryForList("select detail::text from exec.audit_log where broker_account_id = ? "
+                    + "and action = 'READ_LIVE_PROBE'", String.class, s.broker().id());
+            detail = rows.isEmpty() ? null : rows.getFirst();
+            Thread.sleep(100);
+        }
+        assertThat(detail).as("audited at the route's open").isNotNull();
+        var d = json.readTree(detail);
+        assertThat(d.path("broker").asString()).isEqualTo("UPSTOX");
+        assertThat(d.path("errors").size()).as(detail).isZero();
+        assertThat(d.path("clean").asBoolean()).as(detail).isTrue();
+        assertThat(upstox.requests("orders")).as("the real order book was read").isPositive();
+        assertThat(upstox.requests("positions")).isPositive();
+        assertThat(orderCalls()).as("the probe never places, modifies or cancels").isZero();
+        assertThat(upstox.requests("instruments")).as("NSE and BSE files downloaded by the route's warm-up, before any order")
+                .isEqualTo(2);
+        String token = session.get().orElseThrow().accessToken();
+        try (var files = java.nio.file.Files.walk(dir)) {
+            List<Path> saved = files.filter(java.nio.file.Files::isRegularFile).toList();
+            assertThat(saved).as("the answers kept for contract tests").isNotEmpty()
+                    .allMatch(f -> f.toString().contains("/upstox/" + s.broker().id() + "/"));
+            for (Path f : saved) {
+                assertThat(java.nio.file.Files.readString(f)).doesNotContain(token).doesNotContain("member-api-key");
+            }
+        }
     }
 }

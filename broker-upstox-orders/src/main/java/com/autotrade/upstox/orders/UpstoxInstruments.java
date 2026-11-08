@@ -151,12 +151,32 @@ public final class UpstoxInstruments {
 
     /**
      * Today's list from Upstox: the NSE and BSE files (public, no token; tens of MB unpacked; once a day). Fails when
-     * either is missing, so a partial list is never used.
+     * either is missing, so a partial list is never used, and when the files are not today's ({@link #load(UpstoxHttp,
+     * LocalDate)}).
      */
     public static UpstoxInstruments load(UpstoxHttp http) throws IOException {
+        return load(http, LocalDate.now(IST));
+    }
+
+    /**
+     * The list as of {@code today} (IST): refused as stale (review 8 Nov 2026: yesterday's file would map tokens that
+     * may be reused) when a file's {@code Last-Modified} is before {@code today}, or when no listed option expires on or
+     * after {@code today} (a file of past contracts only; an empty list also has none). UNCONFIRMED: when Upstox publishes
+     * the day's file (around 06:00 IST per its docs); a load before then fails and is retried later in the day.
+     */
+    public static UpstoxInstruments load(UpstoxHttp http, LocalDate today) throws IOException {
         List<Contract> all = new ArrayList<>();
         for (String exchange : List.of("NSE", "BSE")) {
-            all.addAll(parse(new ByteArrayInputStream(http.instrumentFile(exchange))));
+            UpstoxHttp.File file = http.instrumentFileWithDate(exchange);
+            if (file.lastModified() != null && file.lastModified().atZone(IST).toLocalDate().isBefore(today)) {
+                throw new IOException("stale Upstox instrument file " + exchange + ": last modified "
+                        + file.lastModified().atZone(IST).toLocalDate() + ", before " + today);
+            }
+            all.addAll(parse(new ByteArrayInputStream(file.bytes())));
+        }
+        if (all.stream().noneMatch(c -> c.expiry() != null && !c.expiry().isBefore(today))) {
+            throw new IOException("stale Upstox instrument file: no option expires on or after " + today + " ("
+                    + all.size() + " listed)");
         }
         return new UpstoxInstruments(all);
     }

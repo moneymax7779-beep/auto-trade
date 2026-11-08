@@ -53,7 +53,8 @@ public record KotakConfig(String consumerKey, URI baseUrl, String product, Durat
 
     /**
      * Where a token may be sent: HTTPS on Kotak's domain, or this host's loopback (the simulator; a token sent there never
-     * leaves the machine). Plain HTTP to anywhere else, or any other host, is refused.
+     * leaves the machine). Plain HTTP to anywhere else, or any other host, is refused. The one rule for a Kotak base URL:
+     * the login (KotakNeoLogin) stores only a base URL this accepts, and the adapter uses only such a one.
      */
     public static boolean trustedBase(URI base) {
         String host = base.getHost() == null ? "" : base.getHost().toLowerCase(java.util.Locale.ROOT);
@@ -61,6 +62,13 @@ public record KotakConfig(String consumerKey, URI baseUrl, String product, Durat
             return "http".equals(base.getScheme()) || "https".equals(base.getScheme());
         }
         return "https".equals(base.getScheme()) && host.endsWith(REAL_DOMAIN);
+    }
+
+    /** Never shows the consumer key (code review 8 Nov 2026: a record's own toString would). */
+    @Override
+    public String toString() {
+        return "KotakConfig[consumerKey=<redacted>, baseUrl=" + baseUrl + ", product=" + product + ", timeout=" + timeout
+                + ", maxOrdersPerSecond=" + maxOrdersPerSecond + ", placeLookupWait=" + placeLookupWait + "]";
     }
 
     public boolean isRealBroker() {

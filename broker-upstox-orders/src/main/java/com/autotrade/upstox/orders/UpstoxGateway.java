@@ -118,9 +118,13 @@ public final class UpstoxGateway implements BrokerConnection {
 
     // ------------------------------------------------------------------ orders
 
-    /** This build sends no order to Upstox itself (DRY_RUN only; LIVE needs READ_LIVE, the static IP and the canary). */
+    /**
+     * This build sends no order to Upstox itself (DRY_RUN only; LIVE needs READ_LIVE, the static IP and the canary): an
+     * order call is allowed only on a config made by {@link UpstoxConfig#simulator} (review 8 Nov 2026: a marker, not the
+     * host, so a read config pointed anywhere can never send one).
+     */
     private void refuseRealOrders(String call) {
-        if (config.ordersReachUpstox()) {
+        if (!config.ordersAllowed()) {
             throw new BrokerException(Kind.TERMINAL, call + " refused: this build has no LIVE Upstox connection (orders "
                     + "go only to a simulator)");
         }
@@ -180,7 +184,18 @@ public final class UpstoxGateway implements BrokerConnection {
                     continue;
                 }
                 if (e.kind() == Kind.UNKNOWN || (e.kind() == Kind.RETRYABLE && mayHaveReached(e))) {
-                    Optional<BrokerOrder> found = lookUp(tag);
+                    Optional<BrokerOrder> found;
+                    try {
+                        found = lookUp(tag);
+                    } catch (BrokerException lookup) {
+                        // the session ended while the order was being looked up (review 8 Nov 2026, as the Kite hotfix):
+                        // the place may still have reached Upstox, so it is UNKNOWN (the caller reconciles), never SESSION
+                        // (which reads as "nothing was sent")
+                        BrokerException unknown = new BrokerException(Kind.UNKNOWN, "place " + tag + ": outcome unknown; "
+                                + "the order could not be looked up (" + lookup.getMessage() + ")", e);
+                        unknown.addSuppressed(lookup);
+                        throw unknown;
+                    }
                     if (found.isPresent()) {
                         brokerIdByTag.put(tag, found.get().brokerOrderId());
                         log.warn("place {} had an unknown outcome; found at Upstox as {}", tag, found.get().brokerOrderId());
@@ -226,6 +241,13 @@ public final class UpstoxGateway implements BrokerConnection {
     public void modify(String clientOrderId, long quantity, double limitPrice, double triggerPrice) {
         refuseRealOrders("modify");
         BrokerOrder order = known(clientOrderId);
+        if (order.filledQuantity() > 0 && quantity > 0 && quantity != order.quantity()) {
+            // whether Upstox's modify quantity is the order's total or what remains is not proven (canary first): a
+            // partly filled order is never re-sized by modify (review 8 Nov 2026); the venue cancels and re-places it
+            throw new BrokerException(Kind.TERMINAL, "modify " + clientOrderId + " refused: resize a partly filled order "
+                    + "by cancel and re-place (" + order.filledQuantity() + " of " + order.quantity() + " filled, asked "
+                    + quantity + ")");
+        }
         UpstoxInstruments.Contract c = contract(order.instrumentKey());
         boolean stop = order.type() == OrderType.STOP_LIMIT;
         ObjectNode body = http.object();
@@ -269,17 +291,37 @@ public final class UpstoxGateway implements BrokerConnection {
      */
     @Override
     public double availableFunds() {
-        JsonNode data = http.get(UpstoxHttp.FUNDS).path("data");
+        double funds;
+        try {
+            funds = availableFrom(http.get(UpstoxHttp.FUNDS).path("data"));
+        } catch (UpstoxException e) {
+            if (e.httpStatus() != 404) {
+                throw e;
+            }
+            funds = Double.NaN;                     // no v3 funds here: v2 below (review 8 Nov 2026)
+        }
+        if (Double.isNaN(funds)) {
+            // v3 missing or of an unknown shape: v2, the call the login reads (one parse for both: availableFrom)
+            funds = availableFrom(http.get(UpstoxHttp.FUNDS_V2).path("data"));
+        }
+        if (Double.isNaN(funds)) {
+            throw new BrokerException(Kind.TERMINAL, "Upstox funds answer has neither available_to_trade.total nor "
+                    + "equity.available_margin (v3 and v2)");
+        }
+        return funds;
+    }
+
+    /**
+     * The funds available to trade in a funds answer's {@code data}: v3 {@code available_to_trade.total}, else v2
+     * {@code equity.available_margin}; NaN when it has neither (never zero, never unlimited). The one reading of Upstox's
+     * funds, used by this gateway and by the daily login.
+     */
+    public static double availableFrom(JsonNode data) {
+        if (data == null) {
+            return Double.NaN;
+        }
         double v3 = UpstoxHttp.number(data.path("available_to_trade").path("total"), Double.NaN);
-        if (!Double.isNaN(v3)) {
-            return v3;
-        }
-        double v2 = UpstoxHttp.number(data.path("equity").path("available_margin"), Double.NaN);
-        if (!Double.isNaN(v2)) {
-            return v2;
-        }
-        throw new BrokerException(Kind.TERMINAL, "Upstox funds answer has neither available_to_trade.total nor "
-                + "equity.available_margin");
+        return !Double.isNaN(v3) ? v3 : UpstoxHttp.number(data.path("equity").path("available_margin"), Double.NaN);
     }
 
     @Override
@@ -371,12 +413,24 @@ public final class UpstoxGateway implements BrokerConnection {
             long buy = UpstoxHttp.whole(p.path("day_buy_quantity")), sell = UpstoxHttp.whole(p.path("day_sell_quantity"));
             double buyValue = UpstoxHttp.number(p.path("day_buy_value"), Double.NaN);
             double sellValue = UpstoxHttp.number(p.path("day_sell_value"), Double.NaN);
-            double average = buy > 0 && !Double.isNaN(buyValue) ? buyValue / buy
-                    : UpstoxHttp.number(p.path("average_price"), 0);
-            positions.add(new BrokerPosition(token(key), symbol(p), UpstoxHttp.whole(p.path("quantity")), average, key, buy,
-                    sell, buyValue, sellValue));
+            long net = UpstoxHttp.whole(p.path("quantity"));
+            positions.add(new BrokerPosition(token(key), symbol(p), net, average(p, net, buy, sell, buyValue, sellValue),
+                    key, buy, sell, buyValue, sellValue));
         }
         return positions;
+    }
+
+    /**
+     * A position's average entry: a long is entered by its buys (the day's buy value / quantity), a short by its sells
+     * (review 8 Nov 2026: the buy side was used for a net short too); Upstox's own {@code average_price} when the day's
+     * side is missing.
+     */
+    static double average(JsonNode p, long net, long buy, long sell, double buyValue, double sellValue) {
+        if (net < 0) {
+            return sell > 0 && !Double.isNaN(sellValue) ? sellValue / sell
+                    : UpstoxHttp.number(p.path("sell_price"), UpstoxHttp.number(p.path("average_price"), 0));
+        }
+        return buy > 0 && !Double.isNaN(buyValue) ? buyValue / buy : UpstoxHttp.number(p.path("average_price"), 0);
     }
 
     /** A book's rows ({@code data}); an absent or null {@code data} is no rows. */
@@ -459,9 +513,14 @@ public final class UpstoxGateway implements BrokerConnection {
                 updated != null ? updated : UpstoxHttp.time(o.path("order_timestamp").asString("")));
     }
 
-    private static OrderSide side(String raw) {
-        String s = raw.trim().toUpperCase(Locale.ROOT);
-        return s.startsWith("S") ? OrderSide.SELL : OrderSide.BUY;
+    /** BUY or SELL; a missing or unrecognised side is null (never read as a buy), for the READ_LIVE probe to flag. */
+    static OrderSide side(String raw) {
+        String s = raw == null ? "" : raw.trim().toUpperCase(Locale.ROOT);
+        return switch (s) {
+            case "BUY", "B" -> OrderSide.BUY;
+            case "SELL", "S" -> OrderSide.SELL;
+            default -> null;
+        };
     }
 
     /**
@@ -484,6 +543,11 @@ public final class UpstoxGateway implements BrokerConnection {
                     : OrderStatus.OPEN;
             default -> filled > 0 ? OrderStatus.PARTIALLY_FILLED : OrderStatus.PENDING;
         };
+    }
+
+    /** True when {@code raw} is one of Upstox's documented order statuses (any case and spacing around it). */
+    public static boolean knownStatus(String raw) {
+        return raw != null && KNOWN_STATUSES.contains(raw.trim().toLowerCase(Locale.ROOT));
     }
 
     static boolean terminal(String raw) {

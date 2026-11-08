@@ -66,6 +66,7 @@ public final class GrowwDryRunAdapter implements BrokerAdapter {
     private final GrowwConfig groww;
     private final Function<String, Quote> liveQuotes;
     private final DailyFile files;
+    private final ReadLiveProbe.Settings probe;
 
     public GrowwDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds) {
         this(dataSource, simulatedBrokerFunds, BrokerSessions.NONE);
@@ -85,6 +86,13 @@ public final class GrowwDryRunAdapter implements BrokerAdapter {
     /** @param liveQuotes the book of now by our key, for BROKER-market routes (our live capture; a stand-in in tests) */
     public GrowwDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
                                GrowwConfig groww, Function<String, Quote> liveQuotes) {
+        this(dataSource, simulatedBrokerFunds, sessions, groww, liveQuotes, ReadLiveProbe.Settings.OFF);
+    }
+
+    /** @param probe how often a READ_LIVE route's {@link ReadLiveProbe} reads the real books, and where it saves them */
+    public GrowwDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
+                               GrowwConfig groww, Function<String, Quote> liveQuotes, ReadLiveProbe.Settings probe) {
+        this.probe = probe == null ? ReadLiveProbe.Settings.OFF : probe;
         this.dataSource = dataSource;
         this.simulatedBrokerFunds = simulatedBrokerFunds;
         this.sessions = sessions;
@@ -111,26 +119,54 @@ public final class GrowwDryRunAdapter implements BrokerAdapter {
 
     private DryRun storedMarket(BrokerAccount account) throws IOException {
         GrowwSimulator sim = new GrowwSimulator(0, 3_000);
-        sim.funds(simulatedBrokerFunds);
-        GrowwInstruments instruments = new GrowwInstruments(List.of());
-        GrowwGateway gateway = simulatorGateway(sim, instruments);
-        Market market = new Market(sim, instruments, dataSource);
-        seedHoldings(account, sim, market);
-        return new DryRun(gateway, market, "Groww simulator " + sim.baseUri(), sim);
+        try {
+            sim.funds(simulatedBrokerFunds);
+            GrowwInstruments instruments = new GrowwInstruments(List.of());
+            GrowwGateway gateway = simulatorGateway(sim, instruments);
+            Market market = new Market(sim, instruments, dataSource);
+            seedHoldings(account, sim, market);
+            return new DryRun(gateway, market, "Groww simulator " + sim.baseUri(), sim);
+        } catch (RuntimeException e) {
+            sim.close();                                                // the route did not open: nothing keeps it
+            throw e;
+        }
     }
 
     private DryRun brokerMarket(BrokerAccount account) throws IOException {
         GrowwSimulator sim = new GrowwSimulator(0, 3_000);
-        sim.funds(UNLIMITED_FUNDS);
-        GrowwInstruments simInstruments = new GrowwInstruments(List.of());
-        GrowwGateway simulator = simulatorGateway(sim, simInstruments);
-        Market listings = new Market(sim, simInstruments, dataSource);
-        seedHoldings(account, sim, listings);
-        GrowwReads reads = new GrowwReads(account);
-        ReadLiveConnection connection = new ReadLiveConnection(reads, simulator, q -> book(q, reads, sim, simInstruments),
-                sim::usedMargin);
-        return new DryRun(connection, o -> { }, "Groww simulator " + sim.baseUri() + ", funds and instrument file read "
-                + "from Groww, book from our live capture", sim);
+        GrowwReads reads = null;
+        ReadLiveProbe readProbe = null;
+        try {
+            sim.funds(UNLIMITED_FUNDS);
+            GrowwInstruments simInstruments = new GrowwInstruments(List.of());
+            GrowwGateway simulator = simulatorGateway(sim, simInstruments);
+            Market listings = new Market(sim, simInstruments, dataSource);
+            seedHoldings(account, sim, listings);
+            reads = new GrowwReads(account);
+            GrowwReads r = reads;
+            readProbe = new ReadLiveProbe(dataSource, account, "GROWW", reads, GrowwGateway::knownStatus, probe,
+                    () -> sessions.access(account).map(a -> java.util.Arrays.asList(a.apiKey(), a.accessToken()))
+                            .orElse(List.of()));
+            reads.tap(readProbe.tap());
+            ReadLiveConnection connection = new ReadLiveConnection(reads, simulator, q -> book(q, r, sim, simInstruments),
+                    sim::usedMargin);
+            readProbe.start(reads::warmUp);
+            ReadLiveProbe p = readProbe;
+            return new DryRun(connection, o -> { }, "Groww simulator " + sim.baseUri() + ", funds and instrument file read "
+                + "from Groww, book from our live capture", sim, () -> {
+                p.close();
+                r.close();
+            });
+        } catch (RuntimeException e) {
+            if (readProbe != null) {
+                readProbe.close();
+            }
+            if (reads != null) {
+                reads.close();
+            }
+            sim.close();                                                // the route did not open: nothing keeps it
+            throw e;
+        }
     }
 
     private static GrowwGateway simulatorGateway(GrowwSimulator sim, GrowwInstruments instruments) {
@@ -226,6 +262,7 @@ public final class GrowwDryRunAdapter implements BrokerAdapter {
         private final GrowwInstruments instruments = new GrowwInstruments(List.of());
         private final GrowwHttp http = new GrowwHttp(groww);
         private final GrowwGateway gateway = new GrowwGateway(groww, http, instruments, liveQuotes);
+        private final Object dayLock = new Object();
         private LocalDate loadedDay;
         private Instant lastAttempt = Instant.EPOCH;
 
@@ -233,8 +270,14 @@ public final class GrowwDryRunAdapter implements BrokerAdapter {
             this.account = account;
         }
 
+        void tap(java.util.function.BiConsumer<String, String> tap) {
+            http.tap(tap);
+        }
+
+        /** The contract as the checked list has it (loaded here on first use when the warm-up has not). */
         GrowwInstruments.Contract contract(String key) {
             gateway();
+            loadToday();
             return instruments.byInstrumentKey(key).orElseThrow(() -> new BrokerException(Kind.TERMINAL, "instrument "
                     + key + " is not in Groww's checked instrument list"));
         }
@@ -247,12 +290,36 @@ public final class GrowwDryRunAdapter implements BrokerAdapter {
                         + " has no token: log in again");
             }
             http.session(access.accessToken());
-            loadToday();
-            return gateway;
+            return gateway;                                             // no download under this lock
         }
 
-        /** Today's checked list, once a day (a failure is retried after a minute; the old day's list is not kept). */
+        /** The route's first work, on its own thread: today's list, so no order waits for the download. */
+        void warmUp() {
+            try {
+                gateway();
+                loadToday();
+            } catch (BrokerException e) {
+                log.info("account {} ({}): Groww instrument CSV not warmed up: {}", account.id(), account.displayName(),
+                        e.getMessage());
+            }
+        }
+
+        @Override
+        public void close() {
+            http.close();
+        }
+
+        /**
+         * Today's checked list, once a day, outside the session's lock (the shared download has its own): a failure is
+         * retried after a minute; the old day's list is not kept.
+         */
         private void loadToday() {
+            synchronized (dayLock) {
+                loadTodayLocked();
+            }
+        }
+
+        private void loadTodayLocked() {
             LocalDate today = LocalDate.now(IST);
             if (today.equals(loadedDay) || Instant.now().isBefore(lastAttempt.plus(RELOAD_RETRY))) {
                 return;
@@ -296,9 +363,14 @@ public final class GrowwDryRunAdapter implements BrokerAdapter {
             return gateway().availableFunds();
         }
 
+        /** Our live capture: no Groww call and no session needed (code review 8 Nov 2026). */
         @Override
         public Quote quote(String instrumentKey) {
-            return gateway().quote(instrumentKey);
+            Quote q = liveQuotes.apply(instrumentKey);
+            if (q == null) {
+                throw new BrokerException(Kind.RETRYABLE, "no quote for " + instrumentKey);
+            }
+            return q;
         }
 
         @Override

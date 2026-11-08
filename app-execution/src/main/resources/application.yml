@@ -42,6 +42,13 @@ autotrade:
     # autotrade.trading.exchange-file: a new exchange file version is changed in both places.
     exchange-file: config/exchange/nse-bse-sessions.v3.yaml
     broker-funds: 1000000000         # DRY_RUN in L1: simulated broker funds (L2 reads the broker)
+    # READ_LIVE probe (code review 8 Nov 2026): a Kotak / Upstox / Groww DRY_RUN route on dry_run_market BROKER reads the
+    # real session's orders, trades and positions at its open and every `every` (ISO-8601; blank = off), audits a
+    # READ_LIVE_PROBE row per account, and saves the answers redacted (no token, sid or keys) under `dir` (blank = none)
+    # as material for contract tests. Reads only; a failure never affects trading.
+    read-live-probe:
+      every: ${AUTOTRADE_READ_LIVE_PROBE_EVERY:PT5M}
+      dir: ${AUTOTRADE_READ_LIVE_PROBE_DIR:/app/broker-sessions/read-live-probes}
     # The daily Kite login (live L3, user go-ahead 24 Oct 2026): the app's key and secret as files in secrets-dir (read
     # only; the credential profile names them file:<name>), the day's access token per account in sessions-dir (owner
     # only), the 08:30 IST login link by Telegram to public-base-url/api/execution/accounts/{id}/kite/login.
@@ -60,3 +67,12 @@ autotrade:
       realm: ${AUTOTRADE_EXECUTION_KEYCLOAK_REALM:autotrade}
       client-id: ${AUTOTRADE_EXECUTION_KEYCLOAK_CLIENT_ID:autotrade-admin}
       client-secret: ${AUTOTRADE_EXECUTION_KEYCLOAK_CLIENT_SECRET:}
+
+  # Never zt-tiger-v2's Upstox app or Upstox user (review 8 Nov 2026): a login of zt's app ends zt's token, and a static IP
+  # registered for zt's user logs zt out. Refused when an app key is saved, at the Upstox login and when the worker reads a
+  # session. Comma-separated, case-insensitive. BM6462 is the user zt-tiger-v2 reads its token for (26 Sep 2026); zt's app
+  # key is not in this repo: set AUTOTRADE_UPSTOX_DENIED_API_KEYS on the host.
+  brokers:
+    upstox:
+      denied-api-keys: ${AUTOTRADE_UPSTOX_DENIED_API_KEYS:}
+      denied-user-ids: ${AUTOTRADE_UPSTOX_DENIED_USER_IDS:BM6462}

@@ -26,7 +26,15 @@ import com.autotrade.account.BrokerAccount;
 import com.autotrade.account.BrokerType;
 import com.autotrade.account.EquityMode;
 import com.autotrade.account.TradeMode;
+import com.autotrade.broker.BrokerCapabilities;
+import com.autotrade.broker.BrokerConnection;
+import com.autotrade.broker.BrokerException;
+import com.autotrade.broker.BrokerOrder;
+import com.autotrade.broker.BrokerPosition;
+import com.autotrade.broker.BrokerTrade;
 import com.autotrade.broker.OrderRequest;
+import com.autotrade.broker.OrderUpdate;
+import com.autotrade.broker.Quote;
 import com.autotrade.broker.OrderSide;
 import com.autotrade.broker.OrderType;
 import com.autotrade.config.ThresholdConfig;
@@ -45,7 +53,8 @@ import com.zaxxer.hikari.HikariDataSource;
  * KotakGateway, HTTP, the local Kotak simulator), against a PAPER follower on the same day, and the essential cases of
  * {@link BrokerVenueIT}'s failure matrix: an unknown place outcome adopted not duplicated, a partial entry and its stop,
  * a stop that sells as its cancel arrives, an expired session (and Kotak's wrong-IP refusal), an exit retried, a restart
- * resumed by tag; and the adapter's own STORED route.
+ * resumed by tag, a restart with an empty broker book, a stop cancel that shows late, a refused stop, a hand sale booked
+ * as MANUAL, a stop modify the adapter refuses (replaced by cancel and place); and the adapter's own STORED route.
  */
 @Testcontainers(disabledWithoutDocker = true)
 class KotakVenueIT {
@@ -97,8 +106,8 @@ class KotakVenueIT {
         if (sim != null) {
             sim.close();
         }
-        if (dryRun != null && dryRun.resource() != null) {
-            dryRun.resource().close();
+        if (dryRun != null) {
+            dryRun.closeAll();
         }
     }
 
@@ -305,6 +314,7 @@ class KotakVenueIT {
         decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
         jdbc.update("update exec.signal_decision set premium_budget = 130000 where copy_group_id = ?", s.group());
         FollowerSimulator kotak = brokerFollower();
+        sim.failNext("orders", Fault.NONE);                            // the gateway's check of the tag before the place
         sim.failNext("orders", Fault.WRONG_IP);                        // placed, then Kotak's 1037 on the book read
         FollowerSimulator.DayResult r = kotak.run(s.broker(), s.group(), DAY);
         assertThat(r.reasons()).containsKey("PENDING_BROKER_SESSION");
@@ -404,7 +414,7 @@ class KotakVenueIT {
         assertThat(own.netQuantities()).containsValue(2600L);
 
         // a restart: a new simulator is given the open position, so the exit sells what the account holds
-        dryRun.resource().close();
+        dryRun.closeAll();
         dryRun = adapter.dryRun(s.broker(), risk.orders());
         assertThat(((KotakSimulator) dryRun.resource()).netQuantities()).containsValue(2600L);
         decide(s, "10:00:00", SignalDecision.Action.EXIT, 120);
@@ -413,5 +423,185 @@ class KotakVenueIT {
         assertThat(position(s.broker()).get("status")).isEqualTo("CLOSED");
         assertThat(((KotakSimulator) dryRun.resource()).netQuantities()).containsValue(0L);
         assertThat(adapter.live(s.broker(), null)).as("no LIVE Kotak connection in this build").isNull();
+    }
+
+    // ------------------------------------------------------------------ code review 8 Nov 2026: the rest of the matrix
+
+    @Test
+    void aRestartWithAnEmptyBrokerBookReArmsTheStopsAndTheExitStillGoesOut() throws Exception {
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        brokerFollower().run(s.broker(), s.group(), DAY);
+        sim.close();
+        // a new process: a fresh simulator that holds the position (as the adapter seeds it), but none of the old stops;
+        // the old stop rows still say OPEN
+        FollowerSimulator restarted = brokerFollower();
+        sim.holding(KEY, 2600, 100);
+        decide(s, "10:00:00", SignalDecision.Action.EXIT, 120);
+        restarted.run(s.broker(), s.group(), DAY);
+        assertThat(intentState(s.broker(), "EXIT")).isEqualTo("EXECUTED");
+        assertThat(position(s.broker()).get("status")).isEqualTo("CLOSED");
+        assertThat(orders(s.broker())).filteredOn(r -> r.get("role").equals("STOP"))
+                .allSatisfy(r -> assertThat(r.get("status")).isEqualTo("CANCELLED"))
+                .hasSize(4);                                             // two stale, two re-armed then taken off
+        assertThat(sim.netQuantities()).containsEntry(KOTAK_SYMBOL, 0L);
+    }
+
+    @Test
+    void anExitWaitsInTheSameTurnForItsStopCancelToShow() throws Exception {
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        FollowerSimulator kotak = brokerFollower();
+        kotak.run(s.broker(), s.group(), DAY);
+        sim.quote(KEY, 74.0, 1_000_000, 74.5, 1_000_000, 76.0);         // above the trigger: still resting
+        sim.cancelLag(3);                                               // Kotak's book shows the cancel three reads late
+        decide(s, "10:00:00", SignalDecision.Action.EXIT, 74);
+        kotak.run(s.broker(), s.group(), DAY);
+        assertThat(intentState(s.broker(), "EXIT")).as("exited in one turn").isEqualTo("EXECUTED");
+        assertThat(position(s.broker()).get("status")).isEqualTo("CLOSED");
+        assertThat(orders(s.broker())).filteredOn(r -> r.get("role").equals("STOP"))
+                .allSatisfy(r -> assertThat(r.get("status")).isEqualTo("CANCELLED"));
+        assertThat(sim.netQuantities()).as("flat, never short").containsEntry(KOTAK_SYMBOL, 0L);
+    }
+
+    @Test
+    void aRefusedStopExitsThePositionAtOnce() throws Exception {
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        FollowerSimulator kotak = brokerFollower();
+        // one entry child (20 lots, under the freeze quantity), then the stop's place is refused (Kotak: circuit limits)
+        jdbc.update("update exec.signal_decision set premium_budget = 130000 where copy_group_id = ?", s.group());
+        sim.failNext("place", Fault.NONE);
+        sim.failNext("place", Fault.INPUT_ERROR);
+        kotak.run(s.broker(), s.group(), DAY);
+        Map<String, Object> p = position(s.broker());
+        assertThat(p.get("status")).isEqualTo("CLOSED");
+        assertThat(p.get("exit_reason")).isEqualTo("STOP_PLACEMENT_FAILED");
+        assertThat(orders(s.broker())).extracting(r -> r.get("role") + ":" + r.get("status"))
+                .containsExactly("ENTRY:FILLED", "STOP:REJECTED", "EMERGENCY_EXIT:FILLED");
+        assertThat(sim.netQuantities()).containsEntry(KOTAK_SYMBOL, 0L);
+        assertThat(new KillSwitches(dataSource).engaged(s.broker(), "opening-drive", KEY))
+                .startsWith("ACCOUNT: STOP_PLACEMENT_FAILED");
+    }
+
+    @Test
+    void aPositionSoldByHandAfterItsStopsWereCancelledIsBookedAsAManualExitNotAKill() throws Exception {
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        FollowerSimulator kotak = brokerFollower();
+        kotak.run(s.broker(), s.group(), DAY);
+        assertThat(position(s.broker()).get("quantity_open")).isEqualTo(2600L);
+        // the user cancels the bot's stops in the Neo app and sells the position by hand (other apps' tags: not ours)
+        orders(s.broker()).stream().filter(r -> r.get("role").equals("STOP"))
+                .forEach(r -> gateway.cancel((String) r.get("client_tag")));
+        sim.quote(KEY, 90, 1_000_000, 90.05, 1_000_000, 90);
+        for (int i = 1; i <= 4; i++) {
+            gateway.place(new OrderRequest("HAND" + i, 3000047168L, KEY, SYMBOL, "NSE_FO", OrderSide.SELL, OrderType.LIMIT,
+                    650, 90, 0, "HAND" + i));
+        }
+        assertThat(gateway.orders()).filteredOn(o -> o.side() == OrderSide.SELL && o.type() == OrderType.LIMIT)
+                .extracting(BrokerOrder::clientTag).as("the Neo app's orders are not ours").containsOnlyNulls();
+
+        BrokerReconciler reconciler = new BrokerReconciler(dataSource, costs);
+        assertThat(reconciler.check(s.broker(), gateway).differences()).singleElement().asString()
+                .contains("ours 2600, broker 0");
+        assertThat(position(s.broker()).get("status")).as("one check alone books nothing").isEqualTo("OPEN");
+        assertThat(reconciler.check(s.broker(), gateway).matched()).isTrue();
+        Map<String, Object> p = position(s.broker());
+        assertThat(p.get("status")).isEqualTo("CLOSED");
+        assertThat(p.get("exit_reason")).isEqualTo("MANUAL");
+        assertThat((Double) p.get("realised_gross")).isEqualTo(-10.0 * 2600);
+        assertThat(new KillSwitches(dataSource).engaged(s.broker(), "opening-drive", KEY)).isNull();
+        assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? "
+                + "and action = 'MANUAL_EXIT'", Integer.class, s.broker().id())).isEqualTo(1);
+    }
+
+    @Test
+    void aStopModifyTheAdapterRefusesIsCancelledAndPlacedAgain() throws Exception {
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        jdbc.update("update exec.signal_decision set premium_budget = 130000 where copy_group_id = ?", s.group());
+        FollowerSimulator kotak = brokerFollower();
+        kotak.run(s.broker(), s.group(), DAY);                          // 1,300 bought, one stop at 75
+        long positionId = jdbc.queryForObject("select id from exec.position where broker_account_id = ?", Long.class,
+                s.broker().id());
+        jdbc.update("update exec.position set stop_pct = 10 where id = ?", positionId);
+        // the adapter refuses the change (as the Kotak, Upstox and Groww gateways refuse to re-size a partly filled
+        // order): the venue must not give up on the stop, nor leave the position without one
+        BrokerConnection refusing = new Refusing(gateway);
+        BrokerVenue venue = new BrokerVenue(dataSource, refusing, FollowerRisk.load(Path.of(V3)).orders().fast(),
+                (k, u) -> FREEZE, o -> { });
+        FollowerVenue.Protection p = venue.protect(s.broker(), positionId, null);
+        assertThat(p.failure()).isNull();
+        assertThat(p.sold()).isEmpty();
+        List<Map<String, Object>> stops = orders(s.broker()).stream().filter(r -> r.get("role").equals("STOP")).toList();
+        assertThat(stops).extracting(r -> r.get("status")).containsExactly("CANCELLED", "OPEN");
+        assertThat(((Number) stops.get(1).get("trigger_price")).doubleValue()).isEqualTo(90.0);
+        assertThat(gateway.orders()).filteredOn(o -> o.type() == OrderType.STOP_LIMIT && !o.status().isTerminal())
+                .singleElement().satisfies(o -> {
+                    assertThat(o.quantity()).isEqualTo(1300L);
+                    assertThat(o.triggerPrice()).isEqualTo(90.0);
+                });
+        assertThat(new KillSwitches(dataSource).engaged(s.broker(), "opening-drive", KEY)).isNull();
+    }
+
+    /** The gateway, whose modify is refused as TERMINAL. */
+    private static final class Refusing implements BrokerConnection {
+        private final BrokerConnection c;
+
+        Refusing(BrokerConnection c) {
+            this.c = c;
+        }
+
+        @Override public String name() { return c.name(); }
+        @Override public BrokerCapabilities capabilities() { return c.capabilities(); }
+        @Override public void onUpdate(java.util.function.Consumer<OrderUpdate> l) { c.onUpdate(l); }
+        @Override public void place(OrderRequest r) { c.place(r); }
+        @Override public void cancel(String tag) { c.cancel(tag); }
+        @Override public double availableFunds() { return c.availableFunds(); }
+        @Override public Quote quote(String k) { return c.quote(k); }
+        @Override public List<BrokerOrder> orders() { return c.orders(); }
+        @Override public List<BrokerTrade> trades() { return c.trades(); }
+        @Override public List<BrokerPosition> positions() { return c.positions(); }
+        @Override public int poll() { return c.poll(); }
+
+        @Override
+        public void modify(String tag, long quantity, double limit, double trigger) {
+            throw new BrokerException(BrokerException.Kind.TERMINAL, "resize a partly filled order by cancel and re-place: "
+                    + tag);
+        }
+    }
+
+    @Test
+    void aRouteThatFailsToOpenClosesItsSimulator() throws Exception {
+        Setup s = setup(false);
+        javax.sql.DataSource broken = new com.zaxxer.hikari.HikariDataSource() {
+            @Override
+            public java.sql.Connection getConnection() throws java.sql.SQLException {
+                throw new java.sql.SQLException("database gone");
+            }
+        };
+        java.net.URI nowhere = java.net.URI.create("http://127.0.0.1:1");
+        List<BrokerAdapter> adapters = List.of(new KotakDryRunAdapter(broken, 1e9),
+                new UpstoxDryRunAdapter(broken, 1e9, BrokerSessions.NONE, com.autotrade.upstox.orders.UpstoxConfig.at(nowhere)),
+                new GrowwDryRunAdapter(broken, 1e9, BrokerSessions.NONE, com.autotrade.groww.GrowwConfig.at(nowhere)));
+        long servers = dispatchers();
+        for (BrokerAdapter adapter : adapters) {
+            for (String risk : List.of(V3, "../config/risk/follower-risk.v6.yaml")) {
+                OrderRules rules = FollowerRisk.load(Path.of(risk)).orders();
+                org.assertj.core.api.Assertions.assertThatThrownBy(() -> adapter.dryRun(s.broker(), rules))
+                        .as(adapter.broker() + " " + risk).isInstanceOf(RuntimeException.class);
+            }
+        }
+        for (int i = 0; i < 50 && dispatchers() > servers; i++) {
+            Thread.sleep(50);
+        }
+        assertThat(dispatchers()).as("no simulator left listening").isEqualTo(servers);
+    }
+
+    /** Live HTTP server dispatcher threads (one per started simulator) in this JVM. */
+    private static long dispatchers() {
+        return Thread.getAllStackTraces().keySet().stream().filter(t -> t.isAlive()
+                && t.getName().startsWith("HTTP-Dispatcher")).count();
     }
 }

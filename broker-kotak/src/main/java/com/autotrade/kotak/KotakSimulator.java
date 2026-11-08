@@ -20,6 +20,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
@@ -49,13 +50,18 @@ import tools.jackson.databind.node.ObjectNode;
  * processed, a timeout before processing, an expired token (HTTP 401), an input error, a funds rejection), plus Kotak's
  * session failures: {@code WRONG_IP} (stCode 1037), {@code IP_NOT_WHITELISTED} (100008), {@code SESSION_INVALID}
  * (1003), and {@code ERROR_1005} (Kotak's internal error, not processed); {@link #partialFills}, {@link #fillStopOnCancel},
- * {@link #cancelLag}, {@link #staleOrderBookOnce}, {@link #expireSession}.
+ * {@link #cancelLag}, {@link #staleOrderBookOnce}, {@link #expireSession}, {@link #refuseDuplicateTags}.
+ * <p>
+ * A repeated {@code ig} is <b>accepted</b> by default (a second order with the same tag): whether Kotak refuses one, and
+ * with which words, is UNCONFIRMED, so the gateway's idempotency is proven by its book lookup, not by this refusal.
  */
 public final class KotakSimulator implements AutoCloseable {
 
     public enum Fault {
         NONE, HTTP_429, HTTP_500, HTTP_500_PROCESSED, TIMEOUT, TIMEOUT_PROCESSED, TOKEN_EXPIRED, INPUT_ERROR,
-        REJECT_FUNDS, WRONG_IP, IP_NOT_WHITELISTED, SESSION_INVALID, ERROR_1005
+        REJECT_FUNDS, WRONG_IP, IP_NOT_WHITELISTED, SESSION_INVALID, ERROR_1005,
+        /** HTTP 200, Not_Ok with a message other than "No Data" (a read that failed: never an empty book). */
+        NOT_OK_OTHER
     }
 
     /** One contract the simulator lists (as its scrip master row): segment {@code nse_fo} or {@code bse_fo}. */
@@ -124,6 +130,7 @@ public final class KotakSimulator implements AutoCloseable {
     private static final DateTimeFormatter FILL_TIME = DateTimeFormatter.ofPattern("HH:mm:ss");
 
     private final HttpServer server;
+    private final ExecutorService executor;
     private final JsonMapper json = JsonMapper.builder().build();
     private final String consumerKey;
     private final Map<String, Listing> listings = new LinkedHashMap<>();     // segment:symbol
@@ -142,6 +149,7 @@ public final class KotakSimulator implements AutoCloseable {
     private boolean fillStopOnCancel;
     private int cancelLagReads;
     private boolean staleOnce;
+    private boolean refuseDuplicates;
     private List<Order> previousBook = List.of();
     private int requests;
     private final Map<String, Integer> requestsByOperation = new HashMap<>();
@@ -151,8 +159,8 @@ public final class KotakSimulator implements AutoCloseable {
         this.consumerKey = consumerKey;
         this.timeoutMillis = timeoutMillis;
         this.server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
-        server.setExecutor(Executors.newFixedThreadPool(4, Thread.ofPlatform().daemon(true).name("kotak-sim-", 0)
-                .factory()));
+        this.executor = Executors.newFixedThreadPool(4, Thread.ofPlatform().daemon(true).name("kotak-sim-", 0).factory());
+        server.setExecutor(executor);
         server.createContext("/", this::handle);
         server.start();
     }
@@ -161,9 +169,16 @@ public final class KotakSimulator implements AutoCloseable {
         return URI.create("http://127.0.0.1:" + server.getAddress().getPort());
     }
 
+    /** Stops the server and its threads. */
     @Override
     public void close() {
         server.stop(0);
+        executor.shutdownNow();
+    }
+
+    /** Whether {@link #close} has run (its threads are stopping). */
+    public boolean closed() {
+        return executor.isShutdown();
     }
 
     // ------------------------------------------------------------------ set-up and faults
@@ -265,6 +280,11 @@ public final class KotakSimulator implements AutoCloseable {
 
     public synchronized void staleOrderBookOnce() {
         this.staleOnce = true;
+    }
+
+    /** A repeated {@code ig} is refused (Not_Ok, the wording OpenAlgo users report; UNCONFIRMED) instead of accepted. */
+    public synchronized void refuseDuplicateTags(boolean on) {
+        this.refuseDuplicates = on;
     }
 
     /** The session ends (Kotak's answer is HTTP 401) until the next {@link #login}. */
@@ -405,6 +425,10 @@ public final class KotakSimulator implements AutoCloseable {
                 respond(ex, 200, notOk(KotakHttp.IP_NOT_WHITELISTED, "IP not whitelisted"));
                 return;
             }
+            if (fault == Fault.NOT_OK_OTHER) {
+                respond(ex, 200, notOk(5000, "Service temporarily unavailable"));
+                return;
+            }
             if (fault == Fault.INPUT_ERROR) {
                 respond(ex, 200, notOk(1001, "Price is outside the circuit limits"));
                 return;
@@ -531,7 +555,7 @@ public final class KotakSimulator implements AutoCloseable {
             return notOk(KotakHttp.INVALID_QUANTITY, "Quantity should be a multiple of lot size");
         }
         String tag = j.get("ig");
-        if (tag != null && orders.values().stream().anyMatch(o -> tag.equals(o.tag))) {
+        if (refuseDuplicates && tag != null && orders.values().stream().anyMatch(o -> tag.equals(o.tag))) {
             return notOk(400, "Client OrderID already exists");
         }
         Order o = new Order();

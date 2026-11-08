@@ -72,6 +72,8 @@ public final class GrowwGateway implements BrokerConnection {
     static final int REFERENCE_MIN = 8, REFERENCE_MAX = 20;
     /** The padding of a short tag: tag + "-" + zeros ({@link #referenceId}). */
     private static final Pattern PADDING = Pattern.compile("-0+$");
+    /** The OMS's own tags (BrokerReconciler.OUR_TAG): only such a reference id is read back as one of ours. */
+    private static final Pattern OUR_TAG = Pattern.compile("F\\d+[A-Z].*");
     /** Groww: at most 25 modifications of one order (docs). */
     static final int MAX_MODIFICATIONS = 25;
     private static final int LOOKUPS = 3;
@@ -149,8 +151,25 @@ public final class GrowwGateway implements BrokerConnection {
                 && reference.chars().filter(ch -> ch == '-').count() <= 2;
     }
 
-    /** Groww's {@code order_reference_id} back to our tag (the padding stripped); null for none. */
+    /**
+     * Groww's {@code order_reference_id} back to our tag: the padding stripped, and only when the result is one of the
+     * OMS's tags ({@code F\d+[A-Z]...}) whose own reference id is exactly this one (review 8 Nov 2026: any reference, a
+     * hand order's or another app's, was read as a tag of ours); null otherwise.
+     */
     public static String tagOf(String referenceId) {
+        String candidate = unpadded(referenceId);
+        if (candidate == null || !ours(candidate)) {
+            return null;
+        }
+        try {
+            return referenceId(candidate).equals(referenceId.trim()) ? candidate : null;
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    /** The reference id with its padding stripped (no check that it is ours); null for none. */
+    static String unpadded(String referenceId) {
         if (referenceId == null) {
             return null;
         }
@@ -159,6 +178,11 @@ public final class GrowwGateway implements BrokerConnection {
             return null;
         }
         return PADDING.matcher(r).replaceFirst("");
+    }
+
+    /** One of the OMS's tags (1-20 alphanumerics of the form {@code F<intent><letter>...}). */
+    static boolean ours(String tag) {
+        return tag != null && TAG.matcher(tag).matches() && OUR_TAG.matcher(tag).matches();
     }
 
     // ------------------------------------------------------------------ orders
@@ -229,8 +253,21 @@ public final class GrowwGateway implements BrokerConnection {
                     continue;
                 }
                 boolean duplicate = GrowwHttp.DUPLICATE_REFERENCE.equals(e.errorCode());
+                if (duplicate && !ours(tag)) {
+                    // not one of the OMS's tags: the order holding this reference cannot be told to be ours
+                    throw new BrokerException(Kind.TERMINAL, "place " + tag + ": Groww refused the reference id as a "
+                            + "duplicate (GA007) and the tag is not one of ours: not adopted", e);
+                }
                 if (duplicate || e.kind() == Kind.UNKNOWN || (e.kind() == Kind.RETRYABLE && e.mayHaveReached())) {
-                    Optional<BrokerOrder> found = lookUp(tag);
+                    Optional<BrokerOrder> found;
+                    try {
+                        found = lookUp(tag);
+                    } catch (BrokerException lost) {
+                        // the session went during the look-up (as the Kite hotfix): the place itself may have happened,
+                        // so it is never reported as not sent
+                        throw new BrokerException(Kind.UNKNOWN, "place " + tag + ": outcome unknown; the look-up by "
+                                + "reference failed (" + lost.kind() + ": " + lost.getMessage() + ")", lost);
+                    }
                     if (found.isPresent()) {
                         brokerIdByTag.put(tag, found.get().brokerOrderId());
                         log.warn("place {} {}; found at Groww as {}", tag, duplicate ? "refused as a duplicate reference"
@@ -266,9 +303,11 @@ public final class GrowwGateway implements BrokerConnection {
     }
 
     /**
-     * Changes a working order: the order id, segment, order type, price and (for a stop) trigger, and the quantity only
-     * when the caller changes it (quantity 0 keeps the order's; Groww's {@code quantity} is taken to be the order's total,
-     * not what remains: UNCONFIRMED). The {@link #MAX_MODIFICATIONS}+1st modification of an order is refused here.
+     * Changes a working order: the order id, segment, order type, price and (for a stop) trigger, and always a quantity
+     * (quantity 0 sends the order's own; review 8 Nov 2026: none was sent). Groww's {@code quantity} is taken to be the
+     * order's total, not what remains (UNCONFIRMED), so a partly filled order is never re-sized here: that is refused
+     * ({@link Kind#TERMINAL}, cancel and re-place) until the canary proves which. The {@link #MAX_MODIFICATIONS}+1st
+     * modification of an order is refused here.
      */
     @Override
     public void modify(String clientOrderId, long quantity, double limitPrice, double triggerPrice) {
@@ -278,15 +317,22 @@ public final class GrowwGateway implements BrokerConnection {
                     + MAX_MODIFICATIONS + " modifications of an order");
         }
         BrokerOrder order = known(clientOrderId);
+        if (order.filledQuantity() > 0 && quantity > 0 && quantity != order.quantity()) {
+            // whether Groww's quantity is the total or what remains is UNCONFIRMED until the canary: never guessed
+            throw new BrokerException(Kind.TERMINAL, "modify " + clientOrderId + " refused: resize a partly filled order "
+                    + "by cancel and re-place (" + order.filledQuantity() + " of " + order.quantity() + " filled)");
+        }
         GrowwInstruments.Contract c = contract(order.instrumentKey());
         boolean stop = order.type() == OrderType.STOP_LIMIT;
         ObjectNode body = http.object();
         body.put("groww_order_id", order.brokerOrderId());
         body.put("order_type", stop ? "SL" : "LIMIT");
         body.put("segment", GrowwHttp.SEGMENT);
-        if (quantity > 0) {
-            body.put("quantity", (int) quantity);
+        long sent = quantity > 0 ? quantity : order.quantity();         // Groww's modify carries the quantity
+        if (sent > Integer.MAX_VALUE || sent <= 0) {
+            throw new BrokerException(Kind.TERMINAL, "modify " + clientOrderId + ": no valid quantity (" + sent + ")");
         }
+        body.put("quantity", (int) sent);
         body.put("price", price(limitPrice > 0 ? limitPrice : order.limitPrice(), c.tickSize(), order.side()));
         if (stop) {
             body.put("trigger_price", price(triggerPrice > 0 ? triggerPrice : order.triggerPrice(), c.tickSize(), null));
@@ -351,10 +397,14 @@ public final class GrowwGateway implements BrokerConnection {
         return q;
     }
 
-    /** The day's FNO orders, every page (a page shorter than asked is the last; at most {@link #MAX_PAGES}). */
+    /**
+     * The day's FNO orders, every page until an empty one (review 8 Nov 2026: a page shorter than asked was taken as the
+     * last, but Groww may serve fewer than asked; at most {@link #MAX_PAGES}); a row seen on an earlier page (the list
+     * moved while it was read) is kept once, by {@code groww_order_id}.
+     */
     @Override
     public List<BrokerOrder> orders() {
-        List<BrokerOrder> orders = new ArrayList<>();
+        Map<String, BrokerOrder> orders = new java.util.LinkedHashMap<>();
         String firstOfPrevious = null;
         for (int page = 0; page < MAX_PAGES; page++) {
             JsonNode list = http.get(GrowwHttp.LIST + "?segment=" + GrowwHttp.SEGMENT + "&page=" + page + "&page_size="
@@ -369,50 +419,45 @@ public final class GrowwGateway implements BrokerConnection {
             }
             firstOfPrevious = first;
             for (JsonNode o : list) {
-                orders.add(order(o, null));
-            }
-            if (list.size() < config.pageSize()) {
-                break;
+                BrokerOrder row = order(o, null);
+                orders.putIfAbsent(row.brokerOrderId().isEmpty() ? "#" + orders.size() : row.brokerOrderId(), row);
             }
             if (page == MAX_PAGES - 1) {
                 log.warn("Groww order list: more than {} pages; the rest is not read", MAX_PAGES);
             }
         }
-        return orders;
+        return new ArrayList<>(orders.values());
     }
 
     /**
-     * Our order with this tag: the day's order list first; if it is not there (yet), Groww's status by reference id and
-     * then the order's detail. Not found (GA004) is no order.
+     * Our order with this tag: Groww's status by reference id, then the order's detail (two reads; review 8 Nov 2026: the
+     * whole paged list was read first); when Groww does not know the reference (GA004), the day's order list as well (an
+     * index that lags). A tag that is not one of the OMS's is never ours at Groww.
      */
     @Override
     public Optional<BrokerOrder> orderByTag(String clientTag) {
-        Optional<BrokerOrder> inBook = orders().stream().filter(o -> clientTag.equals(o.clientTag())).findFirst();
-        if (inBook.isPresent()) {
-            return inBook;
+        if (!ours(clientTag)) {
+            return Optional.empty();
         }
-        String reference;
-        try {
-            reference = referenceId(clientTag);
-        } catch (IllegalArgumentException e) {
-            return Optional.empty();                                // not one of our tags: never at Groww by reference
-        }
+        String reference = referenceId(clientTag);
         try {
             JsonNode status = http.get(GrowwHttp.STATUS_BY_REFERENCE + GrowwHttp.encode(reference) + "?segment="
                     + GrowwHttp.SEGMENT).path("payload");
             String id = status.path("groww_order_id").asString("").trim();
-            if (id.isEmpty()) {
-                return Optional.empty();
+            if (!id.isEmpty()) {
+                JsonNode detail = http.get(GrowwHttp.DETAIL + GrowwHttp.encode(id) + "?segment=" + GrowwHttp.SEGMENT)
+                        .path("payload");
+                BrokerOrder o = order(detail, null);
+                if (clientTag.equals(o.clientTag())) {
+                    return Optional.of(o);
+                }
             }
-            JsonNode detail = http.get(GrowwHttp.DETAIL + GrowwHttp.encode(id) + "?segment=" + GrowwHttp.SEGMENT)
-                    .path("payload");
-            return Optional.of(order(detail, clientTag));
         } catch (GrowwException e) {
-            if (GrowwHttp.NOT_FOUND.equals(e.errorCode()) || e.httpStatus() == 404) {
-                return Optional.empty();
+            if (!(GrowwHttp.NOT_FOUND.equals(e.errorCode()) || e.httpStatus() == 404)) {
+                throw e;
             }
-            throw e;
         }
+        return orders().stream().filter(o -> clientTag.equals(o.clientTag())).findFirst();
     }
 
     /**
@@ -433,7 +478,9 @@ public final class GrowwGateway implements BrokerConnection {
                 continue;
             }
             List<BrokerTrade> read = tradesOf(o);
-            if (o.status().isTerminal()) {
+            long traded = read.stream().mapToLong(BrokerTrade::quantity).sum();
+            if (o.status().isTerminal() && traded == o.filledQuantity()) {
+                // kept only when complete (review 8 Nov 2026: a trade list read before Groww had all the fills was kept)
                 tradesOfFinished.put(o.brokerOrderId(), List.copyOf(read));
             }
             trades.addAll(read);
@@ -453,6 +500,10 @@ public final class GrowwGateway implements BrokerConnection {
             }
             for (JsonNode t : list) {
                 String side = t.path("transaction_type").asString("");
+                String id = t.path("groww_trade_id").asString("");
+                if (!id.isEmpty() && out.stream().anyMatch(x -> id.equals(x.tradeId()))) {
+                    continue;                                       // the same fill on two pages: once
+                }
                 out.add(new BrokerTrade(t.path("groww_trade_id").asString(""), o.brokerOrderId(), key,
                         o.symbol(), side.isBlank() ? o.side() : side(side), GrowwHttp.whole(t.path("quantity")),
                         GrowwHttp.number(t.path("price"), 0), GrowwHttp.time(t.path("trade_date_time").asString(""))));
@@ -467,7 +518,9 @@ public final class GrowwGateway implements BrokerConnection {
     /**
      * Today's positions of the configured product: {@code quantity} is the net, {@code credit_*} the day's buys and
      * {@code debit_*} its sells (UNCONFIRMED; prices typed int in Groww's schema but rupees in its examples: read as
-     * decimals).
+     * decimals). The net is checked against the buys less the sells (with or without the carried-forward quantities):
+     * a row where they disagree refuses the read ({@link Kind#RETRYABLE}; review 8 Nov 2026), so a misread field never
+     * becomes a position.
      */
     @Override
     public List<BrokerPosition> positions() {
@@ -479,13 +532,21 @@ public final class GrowwGateway implements BrokerConnection {
             }
             String key = key(p);
             long buy = GrowwHttp.whole(p.path("credit_quantity")), sell = GrowwHttp.whole(p.path("debit_quantity"));
+            long net = GrowwHttp.whole(p.path("quantity"));
+            long carried = GrowwHttp.whole(p.path("carry_forward_credit_quantity"))
+                    - GrowwHttp.whole(p.path("carry_forward_debit_quantity"));
+            if (net != buy - sell && net != buy - sell + carried) {
+                throw new BrokerException(Kind.RETRYABLE, "Groww position " + p.path("trading_symbol").asString("")
+                        + ": quantity " + net + " is not credit " + buy + " less debit " + sell
+                        + (carried != 0 ? " (carried " + carried + ")" : "") + "; positions not read");
+            }
             double buyPrice = GrowwHttp.number(p.path("credit_price"), Double.NaN);
             double sellPrice = GrowwHttp.number(p.path("debit_price"), Double.NaN);
             double buyValue = Double.isNaN(buyPrice) ? Double.NaN : buyPrice * buy;
             double sellValue = Double.isNaN(sellPrice) ? Double.NaN : sellPrice * sell;
             double average = buy > 0 && !Double.isNaN(buyPrice) ? buyPrice : GrowwHttp.number(p.path("net_price"), 0);
-            positions.add(new BrokerPosition(token(key), p.path("trading_symbol").asString(""),
-                    GrowwHttp.whole(p.path("quantity")), average, key, buy, sell, buyValue, sellValue));
+            positions.add(new BrokerPosition(token(key), p.path("trading_symbol").asString(""), net, average, key, buy,
+                    sell, buyValue, sellValue));
         }
         return positions;
     }
@@ -551,9 +612,11 @@ public final class GrowwGateway implements BrokerConnection {
         String raw = o.path("order_status").asString("").trim();
         long filled = GrowwHttp.whole(o.path("filled_quantity"));
         String tag = tagOf(o.path("order_reference_id").asString(""));
-        if (tag == null) {
+        if (tag == null && knownTag != null && ours(knownTag)
+                && referenceId(knownTag).equals(o.path("order_reference_id").asString("").trim())) {
             tag = knownTag;
         }
+        long quantity = GrowwHttp.whole(o.path("quantity"));
         String type = o.path("order_type").asString("LIMIT").trim().toUpperCase(Locale.ROOT);
         String exchange = o.path("exchange").asString("").trim().toUpperCase(Locale.ROOT);
         String symbol = o.path("trading_symbol").asString("").trim();
@@ -564,15 +627,26 @@ public final class GrowwGateway implements BrokerConnection {
                 key != null || exchange.isEmpty() ? symbol : exchange + ":" + symbol,
                 side(o.path("transaction_type").asString("")),
                 type.startsWith("SL") || type.startsWith("STOP") ? OrderType.STOP_LIMIT : OrderType.LIMIT,
-                GrowwHttp.whole(o.path("quantity")), filled, GrowwHttp.number(o.path("average_fill_price"), 0),
-                GrowwHttp.number(o.path("price"), 0), GrowwHttp.number(o.path("trigger_price"), 0), status(raw, filled),
+                quantity, filled, GrowwHttp.number(o.path("average_fill_price"), 0),
+                GrowwHttp.number(o.path("price"), 0), GrowwHttp.number(o.path("trigger_price"), 0),
+                status(raw, filled, quantity),
                 raw, remark.isEmpty() || remark.equalsIgnoreCase("null") ? null : remark,
                 updated != null ? updated : GrowwHttp.time(o.path("created_at").asString("")));
     }
 
-    private static OrderSide side(String raw) {
-        String s = raw.trim().toUpperCase(Locale.ROOT);
-        return s.startsWith("S") ? OrderSide.SELL : OrderSide.BUY;
+    /** Groww's {@code transaction_type}: BUY or SELL; anything else (missing, unknown) is no side (null), never a buy. */
+    static OrderSide side(String raw) {
+        String s = raw == null ? "" : raw.trim().toUpperCase(Locale.ROOT);
+        return switch (s) {
+            case "BUY", "B" -> OrderSide.BUY;
+            case "SELL", "S" -> OrderSide.SELL;
+            default -> null;
+        };
+    }
+
+    /** Whether the gateway recognises this raw Groww order status (the READ_LIVE probe counts the others). */
+    public static boolean knownStatus(String raw) {
+        return raw != null && KNOWN_STATUSES.contains(raw.trim().toUpperCase(Locale.ROOT));
     }
 
     /**
@@ -580,8 +654,21 @@ public final class GrowwGateway implements BrokerConnection {
      * rejected, CANCELLED cancelled (all terminal); TRIGGER_PENDING is a waiting stop; OPEN, ACKED and the requested
      * modification or cancellation are working; NEW, APPROVED and DELIVERY_AWAITED are pending. A partial fill is a
      * filled quantity on any of the live ones. An unknown status is never taken as terminal: it is pending (or partial)
-     * and logged once.
+     * and logged once. Whatever the status word, an order whose filled quantity reaches its quantity is filled (review
+     * 8 Nov 2026: DELIVERY_AWAITED and unknown words with everything filled read as partial).
      */
+    static OrderStatus status(String raw, long filled, long quantity) {
+        if (quantity > 0 && filled >= quantity) {
+            String s = raw == null ? "" : raw.trim().toUpperCase(Locale.ROOT);
+            if (!KNOWN_STATUSES.contains(s) && loggedUnknownStatuses.add(s)) {
+                log.warn("Groww order status '{}' is not known: everything filled, taken as filled", s);
+            }
+            return OrderStatus.FILLED;
+        }
+        return status(raw, filled);
+    }
+
+    /** {@link #status(String, long, long)} without the order's quantity (no all-filled rule). */
     static OrderStatus status(String raw, long filled) {
         String s = raw == null ? "" : raw.trim().toUpperCase(Locale.ROOT);
         if (!KNOWN_STATUSES.contains(s) && loggedUnknownStatuses.add(s)) {

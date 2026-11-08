@@ -291,7 +291,7 @@ class ReadLiveIT {
         List<Quote.Level> asks = List.of(new Quote.Level(100.0, 650), new Quote.Level(100.15, 650), new Quote.Level(100.5, 650));
         assertThat(ZerodhaDryRunAdapter.less(asks, Map.of(100.0, 650L, 100.15, 130L)))
                 .containsExactly(new Quote.Level(100.15, 520), new Quote.Level(100.5, 650));
-        assertThat(BrokerSessionsAccess.redacted()).doesNotContain("day-token");
+        assertThat(BrokerSessionsAccess.redacted()).doesNotContain("day-token").doesNotContain("real-key");
     }
 
     /** A stand-in connection whose reads answer and whose order calls would succeed (so only the wrapper can refuse). */

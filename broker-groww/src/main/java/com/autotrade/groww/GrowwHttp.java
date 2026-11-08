@@ -5,6 +5,7 @@ import java.net.ConnectException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
+import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
@@ -20,9 +21,12 @@ import java.time.format.DateTimeParseException;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.function.BiConsumer;
+
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import com.autotrade.broker.BrokerException.Kind;
-import com.autotrade.broker.RateLimiter;
 
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.json.JsonMapper;
@@ -42,10 +46,13 @@ import tools.jackson.databind.node.ObjectNode;
  * refuses are TERMINAL (the gateway adopts a GA007 place by reference). A refused connection never reached Groww. The
  * token and request or response bodies are never logged or put in a message.
  * <p>
- * Reads are throttled here ({@link GrowwConfig#READS_PER_SECOND} a second and {@link GrowwConfig#READS_PER_MINUTE} a
- * minute: Groww allows 20 and 500); order calls by the gateway's own limiter.
+ * Reads to Groww's own host are throttled here ({@link GrowwConfig#READS_PER_SECOND} a second and
+ * {@link GrowwConfig#READS_PER_MINUTE} a minute: Groww allows 20 and 500); reads of a local simulator are not (review
+ * 8 Nov 2026: the simulator's reads waited for Groww's limits); order calls by the gateway's own limiter.
  */
-public final class GrowwHttp {
+public final class GrowwHttp implements AutoCloseable {
+
+    private static final Logger log = LoggerFactory.getLogger(GrowwHttp.class);
 
     /** A read (list, status, detail, trades, positions, margins: safe to retry) or an order call. */
     public enum Call { READ, ORDER }
@@ -60,10 +67,13 @@ public final class GrowwHttp {
     static final String DUPLICATE_REFERENCE = "GA007";
     private static final Set<String> SESSION_CODES = Set.of(NOT_AUTHORISED);
     private static final Set<String> MAYBE_PROCESSED_CODES = Set.of(INTERNAL, UNAVAILABLE);
-    /** What an HTTP 403 is taken to mean (UNCONFIRMED: Groww's docs do not describe the static-IP refusal). */
-    static final String STATIC_IP_MESSAGE = "Groww refused the request (HTTP 403): a static IP or authorisation refusal. "
-            + "Orders must come from the static IP registered for this Groww client; check the IP and the API "
-            + "subscription, then log in again";
+    /**
+     * What an HTTP 403 or GA005 is taken to mean (UNCONFIRMED: Groww's docs do not describe the static-IP refusal): still
+     * {@link Kind#SESSION} (nothing more is sent), but a new login alone may not cure it.
+     */
+    static final String STATIC_IP_MESSAGE = "Groww refused the request: permission/static IP/subscription - logging in "
+            + "again may not help. Orders must come from the static IP registered for this Groww client, and the account "
+            + "needs an active Trade API subscription";
 
     // paths (docs' curl examples)
     static final String PLACE = "/v1/order/create";
@@ -88,13 +98,36 @@ public final class GrowwHttp {
     private final GrowwConfig config;
     private final HttpClient client;
     private final JsonMapper json = JsonMapper.builder().build();
-    private final Limiter reads = new Limiter(GrowwConfig.READS_PER_SECOND, GrowwConfig.READS_PER_MINUTE,
-            Duration.ofMinutes(1));
+    /** Groww's read limits; null for a local simulator (its reads are not throttled). */
+    private final Limiter reads;
     private volatile String token;
+    private volatile BiConsumer<String, String> tap;
 
     public GrowwHttp(GrowwConfig config) {
         this.config = config;
         this.client = HttpClient.newBuilder().connectTimeout(config.timeout()).build();
+        this.reads = config.readsReachGroww() ? new Limiter(GrowwConfig.READS_PER_SECOND, GrowwConfig.READS_PER_MINUTE,
+                Duration.ofMinutes(1)) : null;
+    }
+
+    /** Ends the client's connections and threads (a closed route). */
+    @Override
+    public void close() {
+        client.close();
+    }
+
+    /**
+     * Hears every answer of Groww's JSON API ({@code "GET /v1/order/list?segment=FNO&page=0..."} and the body; one call
+     * per page): the READ_LIVE probe keeps them as contract fixtures. Never given a header or the token; a tap that fails
+     * changes nothing for the call. Null = none. The instrument CSV (public, tens of MB) is not tapped.
+     */
+    public void tap(BiConsumer<String, String> tap) {
+        this.tap = tap;
+    }
+
+    /** Whether reads are throttled to Groww's limits (only toward Groww's own host). */
+    boolean throttlesReads() {
+        return reads != null;
     }
 
     /** The day's access token (from the member's own Groww login); never logged. */
@@ -112,7 +145,9 @@ public final class GrowwHttp {
 
     /** A read ({@code pathAndQuery} already encoded), throttled. */
     JsonNode get(String pathAndQuery) {
-        reads.acquire();
+        if (reads != null) {
+            reads.acquire();
+        }
         return send(request(config.apiBase(), pathAndQuery).GET(), Call.READ);
     }
 
@@ -168,17 +203,20 @@ public final class GrowwHttp {
         HttpResponse<String> response;
         try {
             response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        } catch (HttpTimeoutException e) {
-            throw new GrowwException(call == Call.ORDER ? Kind.UNKNOWN : Kind.RETRYABLE, what + " timed out", 0, "", true,
-                    e);
-        } catch (ConnectException e) {
-            throw new GrowwException(Kind.RETRYABLE, "cannot connect to " + request.uri().getHost(), 0, "", false, e);
         } catch (IOException e) {
-            throw new GrowwException(call == Call.ORDER ? Kind.UNKNOWN : Kind.RETRYABLE, what + ": "
-                    + e.getClass().getSimpleName(), 0, "", true, e);
+            throw failure(e, call, what, request.uri().getHost());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new GrowwException(Kind.UNKNOWN, "interrupted", 0, "", true, e);
+        }
+        BiConsumer<String, String> t = tap;
+        if (t != null) {
+            try {
+                String q = request.uri().getRawQuery();
+                t.accept(request.method() + " " + request.uri().getRawPath() + (q == null ? "" : "?" + q), response.body());
+            } catch (RuntimeException e) {
+                log.debug("Groww tap failed: {}", e.getClass().getSimpleName());
+            }
         }
         JsonNode body;
         try {
@@ -204,6 +242,28 @@ public final class GrowwHttp {
         throw new GrowwException(kind, what + ": " + explain(code, errorCode, message), code, errorCode, reached, null);
     }
 
+    /**
+     * A call that got no answer onto {@link Kind}: a connect timeout or a refused connection never reached Groww
+     * (RETRYABLE, safe to send again; review 8 Nov 2026: {@link HttpConnectTimeoutException} is an
+     * {@link HttpTimeoutException}, so it is checked first); any other timeout or dropped connection may have reached it
+     * (UNKNOWN for an order call, RETRYABLE for a read).
+     */
+    static GrowwException failure(IOException e, Call call, String what, String host) {
+        if (e instanceof HttpConnectTimeoutException) {
+            return new GrowwException(Kind.RETRYABLE, "cannot connect to " + host + " (connect timed out)", 0, "", false,
+                    e);
+        }
+        if (e instanceof ConnectException) {
+            return new GrowwException(Kind.RETRYABLE, "cannot connect to " + host, 0, "", false, e);
+        }
+        if (e instanceof HttpTimeoutException) {
+            return new GrowwException(call == Call.ORDER ? Kind.UNKNOWN : Kind.RETRYABLE, what + " timed out", 0, "", true,
+                    e);
+        }
+        return new GrowwException(call == Call.ORDER ? Kind.UNKNOWN : Kind.RETRYABLE, what + ": "
+                + e.getClass().getSimpleName(), 0, "", true, e);
+    }
+
     /** Groww's answer onto {@link Kind}; HTTP 401 / 403 / 429 first, then Groww's code, then the HTTP class. */
     static Kind kind(int httpCode, String errorCode, Call call) {
         String c = errorCode == null ? "" : errorCode.trim().toUpperCase(Locale.ROOT);
@@ -223,7 +283,7 @@ public final class GrowwHttp {
         String m = message == null || message.isBlank() ? "" : message.length() > 200 ? message.substring(0, 200) : message;
         String prefix;
         if (httpCode == 403) {
-            prefix = STATIC_IP_MESSAGE + (errorCode.isEmpty() ? "" : " (" + errorCode + ")");
+            prefix = STATIC_IP_MESSAGE + " (HTTP 403" + (errorCode.isEmpty() ? "" : ", " + errorCode) + ")";
         } else if (httpCode == 401) {
             prefix = "Groww token invalid or expired (HTTP 401" + (errorCode.isEmpty() ? "" : ", " + errorCode)
                     + "): log in again";
@@ -232,7 +292,7 @@ public final class GrowwHttp {
         } else if (errorCode.equals(DUPLICATE_REFERENCE)) {
             prefix = "Groww: duplicate order reference id (GA007)";
         } else if (errorCode.equals(NOT_AUTHORISED)) {
-            prefix = "Groww: not authorised (GA005): log in again (and check the API subscription)";
+            prefix = STATIC_IP_MESSAGE + " (GA005)";
         } else {
             prefix = !errorCode.isEmpty() ? "Groww " + errorCode : "HTTP " + httpCode;
         }
@@ -296,37 +356,57 @@ public final class GrowwHttp {
 
     /**
      * At most {@code perSecond} permits in any rolling second and {@code perWindow} in any rolling {@code window} (Groww
-     * limits both a second and a minute). Callers wait, one at a time.
+     * limits both a second and a minute). A caller reserves its slot under the lock and waits for it outside the lock
+     * (review 8 Nov 2026: the lock was held through the sleep, so every other caller, and anything synchronising on the
+     * limiter, waited behind it); slots are handed out in order.
      */
     static final class Limiter {
 
-        private final RateLimiter second;
-        private final long[] stamps;
+        private static final long SECOND = 1_000_000_000L;
+        private final long[] secondStamps;
+        private final long[] windowStamps;
         private final long windowNanos;
-        private int next;
+        private int nextSecond;
+        private int nextWindow;
+        private long lastSlot = Long.MIN_VALUE;
 
         Limiter(int perSecond, int perWindow, Duration window) {
-            this.second = new RateLimiter(perSecond);
-            this.stamps = new long[perWindow];
+            this.secondStamps = new long[perSecond];
+            this.windowStamps = new long[perWindow];
             this.windowNanos = window.toNanos();
-            java.util.Arrays.fill(stamps, Long.MIN_VALUE);
+            java.util.Arrays.fill(secondStamps, Long.MIN_VALUE);
+            java.util.Arrays.fill(windowStamps, Long.MIN_VALUE);
         }
 
-        synchronized void acquire() {
-            second.acquire();
-            long now = System.nanoTime();
-            long oldest = stamps[next];
-            long wait = oldest == Long.MIN_VALUE ? 0 : oldest + windowNanos - now;
+        void acquire() {
+            long wait = reserve(System.nanoTime());
             if (wait > 0) {
                 try {
                     Thread.sleep(wait / 1_000_000, (int) (wait % 1_000_000));
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                 }
-                now = System.nanoTime();
             }
-            stamps[next] = now;
-            next = (next + 1) % stamps.length;
+        }
+
+        /** Takes the next free slot at or after {@code now}; returns how long to wait for it (nanoseconds). */
+        synchronized long reserve(long now) {
+            long slot = now;
+            if (lastSlot != Long.MIN_VALUE) {
+                slot = Math.max(slot, lastSlot);
+            }
+            if (secondStamps[nextSecond] != Long.MIN_VALUE) {
+                slot = Math.max(slot, secondStamps[nextSecond] + SECOND);
+            }
+            if (windowStamps[nextWindow] != Long.MIN_VALUE) {
+                slot = Math.max(slot, windowStamps[nextWindow] + windowNanos);
+            }
+            secondStamps[nextSecond] = slot;
+            nextSecond = (nextSecond + 1) % secondStamps.length;
+            windowStamps[nextWindow] = slot;
+            nextWindow = (nextWindow + 1) % windowStamps.length;
+            lastSlot = slot;
+            return slot - now;
         }
     }
 }

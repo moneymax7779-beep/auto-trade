@@ -64,6 +64,7 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
     private final UpstoxConfig upstox;
     private final Function<String, Quote> liveQuotes;
     private final DailyFile files;
+    private final ReadLiveProbe.Settings probe;
 
     public UpstoxDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds) {
         this(dataSource, simulatedBrokerFunds, BrokerSessions.NONE);
@@ -83,6 +84,13 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
     /** @param liveQuotes the book of now by our key, for BROKER-market routes (our live capture; a stand-in in tests) */
     public UpstoxDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
                                UpstoxConfig upstox, Function<String, Quote> liveQuotes) {
+        this(dataSource, simulatedBrokerFunds, sessions, upstox, liveQuotes, ReadLiveProbe.Settings.OFF);
+    }
+
+    /** @param probe how often a READ_LIVE route's {@link ReadLiveProbe} reads the real books, and where it saves them */
+    public UpstoxDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
+                               UpstoxConfig upstox, Function<String, Quote> liveQuotes, ReadLiveProbe.Settings probe) {
+        this.probe = probe == null ? ReadLiveProbe.Settings.OFF : probe;
         this.dataSource = dataSource;
         this.simulatedBrokerFunds = simulatedBrokerFunds;
         this.sessions = sessions;
@@ -109,26 +117,54 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
 
     private DryRun storedMarket(BrokerAccount account) throws IOException {
         UpstoxSimulator sim = new UpstoxSimulator(0, 3_000);
-        sim.funds(simulatedBrokerFunds);
-        UpstoxInstruments instruments = new UpstoxInstruments(List.of());
-        UpstoxGateway gateway = simulatorGateway(sim, instruments);
-        Market market = new Market(sim, instruments, dataSource);
-        seedHoldings(account, sim, market);
-        return new DryRun(gateway, market, "Upstox simulator " + sim.baseUri(), sim);
+        try {
+            sim.funds(simulatedBrokerFunds);
+            UpstoxInstruments instruments = new UpstoxInstruments(List.of());
+            UpstoxGateway gateway = simulatorGateway(sim, instruments);
+            Market market = new Market(sim, instruments, dataSource);
+            seedHoldings(account, sim, market);
+            return new DryRun(gateway, market, "Upstox simulator " + sim.baseUri(), sim);
+        } catch (RuntimeException e) {
+            sim.close();                                                // the route did not open: nothing keeps it
+            throw e;
+        }
     }
 
     private DryRun brokerMarket(BrokerAccount account) throws IOException {
         UpstoxSimulator sim = new UpstoxSimulator(0, 3_000);
-        sim.funds(UNLIMITED_FUNDS);
-        UpstoxInstruments simInstruments = new UpstoxInstruments(List.of());
-        UpstoxGateway simulator = simulatorGateway(sim, simInstruments);
-        Market listings = new Market(sim, simInstruments, dataSource);
-        seedHoldings(account, sim, listings);
-        UpstoxReads reads = new UpstoxReads(account);
-        ReadLiveConnection connection = new ReadLiveConnection(reads, simulator, q -> book(q, reads, sim, simInstruments),
-                sim::usedMargin);
-        return new DryRun(connection, o -> { }, "Upstox simulator " + sim.baseUri() + ", funds and instrument file read "
-                + "from Upstox, book from our live capture", sim);
+        UpstoxReads reads = null;
+        ReadLiveProbe readProbe = null;
+        try {
+            sim.funds(UNLIMITED_FUNDS);
+            UpstoxInstruments simInstruments = new UpstoxInstruments(List.of());
+            UpstoxGateway simulator = simulatorGateway(sim, simInstruments);
+            Market listings = new Market(sim, simInstruments, dataSource);
+            seedHoldings(account, sim, listings);
+            reads = new UpstoxReads(account);
+            UpstoxReads r = reads;
+            readProbe = new ReadLiveProbe(dataSource, account, "UPSTOX", reads, UpstoxGateway::knownStatus, probe,
+                    () -> sessions.access(account).map(a -> java.util.Arrays.asList(a.apiKey(), a.accessToken()))
+                            .orElse(List.of()));
+            reads.tap(readProbe.tap());
+            ReadLiveConnection connection = new ReadLiveConnection(reads, simulator, q -> book(q, r, sim, simInstruments),
+                    sim::usedMargin);
+            readProbe.start(reads::warmUp);
+            ReadLiveProbe p = readProbe;
+            return new DryRun(connection, o -> { }, "Upstox simulator " + sim.baseUri() + ", funds and instrument file read "
+                + "from Upstox, book from our live capture", sim, () -> {
+                p.close();
+                r.close();
+            });
+        } catch (RuntimeException e) {
+            if (readProbe != null) {
+                readProbe.close();
+            }
+            if (reads != null) {
+                reads.close();
+            }
+            sim.close();                                                // the route did not open: nothing keeps it
+            throw e;
+        }
     }
 
     private static UpstoxGateway simulatorGateway(UpstoxSimulator sim, UpstoxInstruments instruments) {
@@ -206,7 +242,7 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
                 throw new IOException("Upstox instrument file not loaded yet today (retried every minute)");
             }
             lastAttempt = Instant.now();
-            contracts = List.copyOf(UpstoxInstruments.load(http).contracts());
+            contracts = List.copyOf(UpstoxInstruments.load(http, today).contracts());   // a stale file is refused
             day = today;
             return contracts;
         }
@@ -224,6 +260,7 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
         private final UpstoxInstruments instruments = new UpstoxInstruments(List.of());
         private final UpstoxHttp http = new UpstoxHttp(upstox);
         private final UpstoxGateway gateway = new UpstoxGateway(upstox, http, instruments, liveQuotes);
+        private final Object dayLock = new Object();
         private LocalDate loadedDay;
         private Instant lastAttempt = Instant.EPOCH;
 
@@ -231,8 +268,14 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
             this.account = account;
         }
 
+        void tap(java.util.function.BiConsumer<String, String> tap) {
+            http.tap(tap);
+        }
+
+        /** The contract as the checked list has it (loaded here on first use when the warm-up has not). */
         UpstoxInstruments.Contract contract(String key) {
             gateway();
+            loadToday();
             return instruments.byInstrumentKey(key).orElseThrow(() -> new BrokerException(Kind.TERMINAL, "instrument "
                     + key + " is not in Upstox's checked instrument list"));
         }
@@ -245,12 +288,36 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
                         + " has no token: log in again");
             }
             http.session(access.accessToken());
-            loadToday();
-            return gateway;
+            return gateway;                                             // no download under this lock
         }
 
-        /** Today's checked list, once a day (a failure is retried after a minute; the old day's list is not kept). */
+        /** The route's first work, on its own thread: today's list, so no order waits for the download. */
+        void warmUp() {
+            try {
+                gateway();
+                loadToday();
+            } catch (BrokerException e) {
+                log.info("account {} ({}): Upstox instrument file not warmed up: {}", account.id(), account.displayName(),
+                        e.getMessage());
+            }
+        }
+
+        @Override
+        public void close() {
+            http.close();
+        }
+
+        /**
+         * Today's checked list, once a day, outside the session's lock (the shared download has its own): a failure is
+         * retried after a minute; the old day's list is not kept.
+         */
         private void loadToday() {
+            synchronized (dayLock) {
+                loadTodayLocked();
+            }
+        }
+
+        private void loadTodayLocked() {
             LocalDate today = LocalDate.now(IST);
             if (today.equals(loadedDay) || Instant.now().isBefore(lastAttempt.plus(RELOAD_RETRY))) {
                 return;
@@ -294,9 +361,14 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
             return gateway().availableFunds();
         }
 
+        /** Our live capture: no Upstox call and no session needed (code review 8 Nov 2026). */
         @Override
         public Quote quote(String instrumentKey) {
-            return gateway().quote(instrumentKey);
+            Quote q = liveQuotes.apply(instrumentKey);
+            if (q == null) {
+                throw new BrokerException(Kind.RETRYABLE, "no quote for " + instrumentKey);
+            }
+            return q;
         }
 
         @Override

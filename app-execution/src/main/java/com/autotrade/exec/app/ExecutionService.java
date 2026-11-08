@@ -18,6 +18,7 @@ import org.springframework.stereotype.Service;
 
 import com.autotrade.config.ThresholdConfig;
 import com.autotrade.execution.ExecutionLoop;
+import com.autotrade.execution.ReadLiveProbe;
 import com.autotrade.execution.StoredQuotes;
 import com.autotrade.sim.CostModel;
 
@@ -40,18 +41,24 @@ class ExecutionService implements DisposableBean {
     private final UpstoxSessionSource upstoxSessions;
     private final GrowwSessionSource growwSessions;
     private final KiteLoginProperties kite;
+    private final String probeEvery;
+    private final String probeDir;
     private volatile ExecutionLoop loop;
     private volatile java.time.Instant lastTick;
 
     /** Tests: no real broker sessions. */
     ExecutionService(DataSource dataSource, ExecutionProperties properties) {
-        this(dataSource, properties, null, null, null, null, null);
+        this(dataSource, properties, null, null, null, null, null, null, null);
     }
 
     @org.springframework.beans.factory.annotation.Autowired
     ExecutionService(DataSource dataSource, ExecutionProperties properties, KiteSessionSource kiteSessions,
                      KotakSessionSource kotakSessions, UpstoxSessionSource upstoxSessions,
-                     GrowwSessionSource growwSessions, KiteLoginProperties kite) {
+                     GrowwSessionSource growwSessions, KiteLoginProperties kite,
+                     @org.springframework.beans.factory.annotation.Value("${autotrade.execution.read-live-probe.every:}")
+                     String probeEvery,
+                     @org.springframework.beans.factory.annotation.Value("${autotrade.execution.read-live-probe.dir:}")
+                     String probeDir) {
         this.dataSource = dataSource;
         this.properties = properties;
         this.kiteSessions = kiteSessions;
@@ -59,64 +66,15 @@ class ExecutionService implements DisposableBean {
         this.upstoxSessions = upstoxSessions;
         this.growwSessions = growwSessions;
         this.kite = kite;
+        this.probeEvery = probeEvery;
+        this.probeDir = probeDir;
     }
 
     /**
-     * One order adapter per broker (8 Nov 2026): Zerodha (DRY_RUN and the LIVE pilot, unchanged) and Kotak Neo (DRY_RUN
-     * only: its {@code live()} is null and it is not in LiveBrokers). Each reads its own accounts' sessions.
-     */
-    static java.util.List<com.autotrade.execution.BrokerAdapter> adapters(DataSource dataSource, double brokerFunds,
-                                                                         KiteSessionSource kiteSessions,
-                                                                         KotakSessionSource kotakSessions,
-                                                                         java.net.URI kiteApiBase) {
-        java.util.Map<com.autotrade.account.BrokerType, com.autotrade.execution.BrokerSessions> byBroker =
-                new java.util.EnumMap<>(com.autotrade.account.BrokerType.class);
-        if (kiteSessions != null) {
-            byBroker.put(com.autotrade.account.BrokerType.ZERODHA, kiteSessions);
-        }
-        if (kotakSessions != null) {
-            byBroker.put(com.autotrade.account.BrokerType.KOTAK_NEO, kotakSessions);
-        }
-        com.autotrade.execution.BrokerSessions sessions = new BrokerSessionRouter(byBroker);
-        return java.util.List.of(
-                new com.autotrade.execution.ZerodhaDryRunAdapter(dataSource, brokerFunds, sessions, kiteApiBase),
-                new com.autotrade.execution.KotakDryRunAdapter(dataSource, brokerFunds, sessions));
-    }
-
-    /**
-     * The worker's adapters: Zerodha and Kotak Neo as above, and Upstox (8 Nov 2026, DRY_RUN only: its {@code live()} is
-     * null and it is not in LiveBrokers; its READ_LIVE reads go to {@code upstox}, Upstox's own hosts when null, with the
-     * member's own session, never zt-tiger-v2's).
-     */
-    static java.util.List<com.autotrade.execution.BrokerAdapter> adapters(DataSource dataSource, double brokerFunds,
-                                                                         KiteSessionSource kiteSessions,
-                                                                         KotakSessionSource kotakSessions,
-                                                                         UpstoxSessionSource upstoxSessions,
-                                                                         java.net.URI kiteApiBase,
-                                                                         com.autotrade.upstox.orders.UpstoxConfig upstox) {
-        java.util.Map<com.autotrade.account.BrokerType, com.autotrade.execution.BrokerSessions> byBroker =
-                new java.util.EnumMap<>(com.autotrade.account.BrokerType.class);
-        if (kiteSessions != null) {
-            byBroker.put(com.autotrade.account.BrokerType.ZERODHA, kiteSessions);
-        }
-        if (kotakSessions != null) {
-            byBroker.put(com.autotrade.account.BrokerType.KOTAK_NEO, kotakSessions);
-        }
-        if (upstoxSessions != null) {
-            byBroker.put(com.autotrade.account.BrokerType.UPSTOX, upstoxSessions);
-        }
-        com.autotrade.execution.BrokerSessions sessions = new BrokerSessionRouter(byBroker);
-        return java.util.List.of(
-                new com.autotrade.execution.ZerodhaDryRunAdapter(dataSource, brokerFunds, sessions, kiteApiBase),
-                new com.autotrade.execution.KotakDryRunAdapter(dataSource, brokerFunds, sessions),
-                new com.autotrade.execution.UpstoxDryRunAdapter(dataSource, brokerFunds, sessions,
-                        upstox == null ? com.autotrade.upstox.orders.UpstoxConfig.real() : upstox));
-    }
-
-    /**
-     * The worker's adapters: Zerodha, Kotak Neo and Upstox as above, and Groww (8 Nov 2026, DRY_RUN only: its
-     * {@code live()} is null and it is not in LiveBrokers; its READ_LIVE reads go to {@code groww}, Groww's own hosts when
-     * null, with the member's own session).
+     * The worker's adapters, one per broker (8 Nov 2026): Zerodha (DRY_RUN and the LIVE pilot, unchanged), and Kotak Neo,
+     * Upstox and Groww (DRY_RUN only: their {@code live()} is null and they are not in LiveBrokers). Each reads its own
+     * accounts' sessions; Upstox's and Groww's READ_LIVE reads go to {@code upstox} / {@code groww} (their own hosts when
+     * null), with the member's own session, never zt-tiger-v2's; a READ_LIVE route's probe runs as {@code probe} says.
      */
     static java.util.List<com.autotrade.execution.BrokerAdapter> adapters(DataSource dataSource, double brokerFunds,
                                                                          KiteSessionSource kiteSessions,
@@ -125,7 +83,8 @@ class ExecutionService implements DisposableBean {
                                                                          GrowwSessionSource growwSessions,
                                                                          java.net.URI kiteApiBase,
                                                                          com.autotrade.upstox.orders.UpstoxConfig upstox,
-                                                                         com.autotrade.groww.GrowwConfig groww) {
+                                                                         com.autotrade.groww.GrowwConfig groww,
+                                                                         ReadLiveProbe.Settings probe) {
         java.util.Map<com.autotrade.account.BrokerType, com.autotrade.execution.BrokerSessions> byBroker =
                 new java.util.EnumMap<>(com.autotrade.account.BrokerType.class);
         if (kiteSessions != null) {
@@ -141,13 +100,25 @@ class ExecutionService implements DisposableBean {
             byBroker.put(com.autotrade.account.BrokerType.GROWW, growwSessions);
         }
         com.autotrade.execution.BrokerSessions sessions = new BrokerSessionRouter(byBroker);
+        com.autotrade.execution.CapturedQuotes captured = new com.autotrade.execution.CapturedQuotes(dataSource);
         return java.util.List.of(
                 new com.autotrade.execution.ZerodhaDryRunAdapter(dataSource, brokerFunds, sessions, kiteApiBase),
-                new com.autotrade.execution.KotakDryRunAdapter(dataSource, brokerFunds, sessions),
+                new com.autotrade.execution.KotakDryRunAdapter(dataSource, brokerFunds, sessions, captured, probe),
                 new com.autotrade.execution.UpstoxDryRunAdapter(dataSource, brokerFunds, sessions,
-                        upstox == null ? com.autotrade.upstox.orders.UpstoxConfig.real() : upstox),
+                        upstox == null ? com.autotrade.upstox.orders.UpstoxConfig.real() : upstox, captured, probe),
                 new com.autotrade.execution.GrowwDryRunAdapter(dataSource, brokerFunds, sessions,
-                        groww == null ? com.autotrade.groww.GrowwConfig.real() : groww));
+                        groww == null ? com.autotrade.groww.GrowwConfig.real() : groww, captured, probe));
+    }
+
+    /**
+     * The READ_LIVE probe of this worker: every {@code autotrade.execution.read-live-probe.every} (blank = off), saving
+     * redacted answers under {@code ...dir} (blank = audit rows only).
+     */
+    ReadLiveProbe.Settings probeSettings() {
+        String every = probeEvery == null ? "" : probeEvery.trim();
+        String dir = probeDir == null ? "" : probeDir.trim();
+        return new ReadLiveProbe.Settings(every.isEmpty() ? null : java.time.Duration.parse(every),
+                dir.isEmpty() ? null : Path.of(dir));
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -163,7 +134,7 @@ class ExecutionService implements DisposableBean {
                 new StoredQuotes(dataSource, null), properties.brokerFunds(), adapters(dataSource,
                 properties.brokerFunds(), kiteSessions, kotakSessions, upstoxSessions, growwSessions,
                 kite == null ? com.autotrade.zerodha.KiteConfig.REAL_API : java.net.URI.create(kite.apiBase()), null,
-                null));
+                null, probeSettings()));
         log.info("execution worker {} serving copy group {} (tenant {}), every {} ms", properties.workerId(),
                 properties.copyGroup(), properties.tenant(), properties.pollMs());
         if (properties.day() != null) {

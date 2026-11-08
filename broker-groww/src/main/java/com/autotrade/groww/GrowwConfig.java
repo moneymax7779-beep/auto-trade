@@ -106,6 +106,11 @@ public record GrowwConfig(URI apiBase, URI assetsBase, String product, Duration 
         return real(apiBase);
     }
 
+    /** True when reads go to Groww itself (they are then throttled to Groww's read limits; a simulator's are not). */
+    public boolean readsReachGroww() {
+        return real(apiBase);
+    }
+
     private static boolean real(URI u) {
         String host = u.getHost() == null ? "" : u.getHost().toLowerCase(Locale.ROOT);
         return host.equals(REAL_DOMAIN) || host.endsWith("." + REAL_DOMAIN);

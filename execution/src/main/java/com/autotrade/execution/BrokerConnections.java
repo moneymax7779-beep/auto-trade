@@ -122,11 +122,11 @@ public final class BrokerConnections implements AutoCloseable {
     }
 
     private static void close(BrokerAdapter.DryRun d) {
-        if (d == null || d.resource() == null) {
+        if (d == null) {
             return;
         }
         try {
-            d.resource().close();
+            d.closeAll();
         } catch (Exception e) {
             log.warn("closing {}: {}", d.description(), e.getMessage());
         }

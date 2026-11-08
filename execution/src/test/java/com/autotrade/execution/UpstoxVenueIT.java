@@ -97,8 +97,8 @@ class UpstoxVenueIT {
         if (sim != null) {
             sim.close();
         }
-        if (dryRun != null && dryRun.resource() != null) {
-            dryRun.resource().close();
+        if (dryRun != null) {
+            dryRun.closeAll();
         }
     }
 
@@ -158,7 +158,7 @@ class UpstoxVenueIT {
                 "PE", LOT, 0.05));
         UpstoxConfig config = UpstoxConfig.simulator(sim.baseUri());
         http = new UpstoxHttp(config);
-        UpstoxInstruments instruments = UpstoxInstruments.load(http);
+        UpstoxInstruments instruments = UpstoxInstruments.load(http, DAY);
         http.session("dry-run");
         gateway = new UpstoxGateway(config, http, instruments, sim::book);
         FollowerRisk risk = FollowerRisk.load(Path.of(V3));
@@ -430,7 +430,7 @@ class UpstoxVenueIT {
         assertThat(own.netQuantities()).containsValue(2600L);
 
         // a restart: a new simulator is given the open position, so the exit sells what the account holds
-        dryRun.resource().close();
+        dryRun.closeAll();
         dryRun = adapter.dryRun(s.broker(), risk.orders());
         assertThat(((UpstoxSimulator) dryRun.resource()).netQuantities()).containsValue(2600L);
         decide(s, "10:00:00", SignalDecision.Action.EXIT, 120);

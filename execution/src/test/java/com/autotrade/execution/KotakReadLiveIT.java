@@ -19,6 +19,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.postgresql.PostgreSQLContainer;
@@ -29,7 +30,20 @@ import com.autotrade.account.BrokerAccount;
 import com.autotrade.account.BrokerType;
 import com.autotrade.account.EquityMode;
 import com.autotrade.account.TradeMode;
+import com.autotrade.broker.BrokerConnection;
+import com.autotrade.broker.BrokerException;
+import com.autotrade.broker.BrokerOrder;
+import com.autotrade.broker.BrokerPosition;
+import com.autotrade.broker.BrokerTrade;
+import com.autotrade.broker.OrderRequest;
+import com.autotrade.broker.OrderSide;
+import com.autotrade.broker.OrderStatus;
+import com.autotrade.broker.OrderType;
 import com.autotrade.broker.Quote;
+import com.autotrade.kotak.KotakConfig;
+import com.autotrade.kotak.KotakGateway;
+import com.autotrade.kotak.KotakHttp;
+import com.autotrade.kotak.KotakInstruments;
 import com.autotrade.config.ThresholdConfig;
 import com.autotrade.kotak.KotakSimulator;
 import com.autotrade.kotak.KotakSimulator.Fault;
@@ -119,8 +133,8 @@ class KotakReadLiveIT {
     @AfterEach
     void close() throws Exception {
         kotak.close();
-        if (dryRun != null && dryRun.resource() != null) {
-            dryRun.resource().close();
+        if (dryRun != null) {
+            dryRun.closeAll();
         }
     }
 
@@ -331,5 +345,162 @@ class KotakReadLiveIT {
             assertThat(route.description()).isEqualTo("LIVE refused: no LIVE adapter for KOTAK_NEO");
         }
         assertThat(kotak.requests()).as("nothing reached Kotak").isZero();
+    }
+
+    // ------------------------------------------------------------------ the READ_LIVE probe (code review 8 Nov 2026)
+
+    /** The probe audit rows of an account, waited for (the probe runs on the route's own thread). */
+    static List<tools.jackson.databind.JsonNode> probes(BrokerAccount a, int atLeast) throws InterruptedException {
+        var json = tools.jackson.databind.json.JsonMapper.builder().build();
+        for (int i = 0; i < 150; i++) {
+            List<String> rows = jdbc.queryForList("select detail::text from exec.audit_log where broker_account_id = ? "
+                    + "and action = 'READ_LIVE_PROBE' order by id", String.class, a.id());
+            if (rows.size() >= atLeast) {
+                return rows.stream().map(json::readTree).toList();
+            }
+            Thread.sleep(100);
+        }
+        throw new AssertionError("no READ_LIVE_PROBE audit row for account " + a.id());
+    }
+
+    static List<String> savedBodies(Path dir) throws java.io.IOException {
+        try (var files = java.nio.file.Files.walk(dir)) {
+            return files.filter(java.nio.file.Files::isRegularFile).map(f -> {
+                try {
+                    return f.getFileName() + "\n" + java.nio.file.Files.readString(f);
+                } catch (java.io.IOException e) {
+                    throw new java.io.UncheckedIOException(e);
+                }
+            }).toList();
+        }
+    }
+
+    @Test
+    void aReadLiveRouteProbesTheRealBooksAndSavesThemRedactedWithoutAnOrderCall(@TempDir Path dir) throws Exception {
+        Setup s = setup();
+        // the account's own day at Kotak (this simulator stands for it): one of our orders, filled
+        KotakConfig config = KotakConfig.simulator(kotak.baseUri());
+        try (KotakHttp h = new KotakHttp(config)) {
+            h.session("day-token", "day-sid");
+            KotakGateway own = new KotakGateway(config, h, new KotakInstruments(List.of(kotak.byKey(KEY).contract())),
+                    kotak::book);
+            kotak.quote(KEY, 99.5, 6500, 100.0, 6500, 99.8);
+            own.place(new OrderRequest("F9E1", 3000047168L, KEY, SYMBOL, "NSE_FO", OrderSide.BUY, OrderType.LIMIT, 65,
+                    100.2, 0, "F9E1"));
+        }
+        int before = orderCalls();
+        KotakDryRunAdapter adapter = new KotakDryRunAdapter(dataSource, 1e9, a -> session.get(),
+                new CapturedQuotes(dataSource), new ReadLiveProbe.Settings(java.time.Duration.ofHours(1), dir));
+        dryRun = adapter.dryRun(s.broker(), FollowerRisk.load(Path.of(V6)).orders());
+        var detail = probes(s.broker(), 1).getFirst();
+        assertThat(detail.path("broker").asString()).isEqualTo("KOTAK_NEO");
+        assertThat(detail.path("orders").asInt()).isEqualTo(1);
+        assertThat(detail.path("trades").asInt()).isEqualTo(1);
+        assertThat(detail.path("positions").asInt()).isEqualTo(1);
+        assertThat(detail.path("clean").asBoolean()).as(detail.toString()).isTrue();
+        assertThat(kotak.requests("orders")).as("the real book was read").isPositive();
+        assertThat(kotak.requests("trades")).isPositive();
+        assertThat(kotak.requests("positions")).isPositive();
+        assertThat(orderCalls()).as("the probe never places, modifies or cancels").isEqualTo(before);
+        assertThat(kotak.requests("scrip")).as("the scrip master warmed up once, off the order path").isEqualTo(1);
+        List<String> saved = savedBodies(dir);
+        assertThat(saved).as("the answers kept for contract tests").hasSizeGreaterThanOrEqualTo(3)
+                .anyMatch(b -> b.contains("nOrdNo") && b.contains("F9E1"))
+                .allMatch(b -> !b.contains("day-token") && !b.contains("day-sid") && !b.contains("real-consumer-key"));
+        try (var files = java.nio.file.Files.walk(dir)) {
+            assertThat(files.filter(java.nio.file.Files::isRegularFile).map(Path::toString))
+                    .allMatch(f -> f.contains("/kotak_neo/" + s.broker().id() + "/" + DAY + "/"));
+        }
+    }
+
+    @Test
+    void theProbeCountsWhatDoesNotParseAuditsItRedactsAndCanNeverSendAnOrder(@TempDir Path dir) throws Exception {
+        Setup s = setup();
+        List<String> orderCalls = new java.util.ArrayList<>();
+        AtomicReference<java.util.function.BiConsumer<String, String>> tap = new AtomicReference<>();
+        BrokerConnection real = new BrokerConnection() {
+            @Override public String name() { return "KOTAK_NEO"; }
+            @Override public com.autotrade.broker.BrokerCapabilities capabilities() { return null; }
+            @Override public void onUpdate(java.util.function.Consumer<com.autotrade.broker.OrderUpdate> l) { }
+            @Override public void place(OrderRequest r) { orderCalls.add("place"); }
+            @Override public void modify(String t, long q, double l, double tr) { orderCalls.add("modify"); }
+            @Override public void cancel(String t) { orderCalls.add("cancel"); }
+            @Override public double availableFunds() { return 0; }
+            @Override public Quote quote(String k) { return null; }
+            @Override public int poll() { orderCalls.add("poll"); return 0; }
+
+            @Override
+            public List<BrokerOrder> orders() {
+                tap.get().accept("GET /quick/user/orders", "{\"stat\":\"Ok\",\"data\":[{\"nOrdNo\":\"1\",\"Auth\":\"x\","
+                        + "\"sid\":\"s-1\",\"actId\":\"KT1234\",\"note\":\"leaked day-token-123\",\"tok\":\"47168\"}]}");
+                return List.of(new BrokerOrder(null, "1", null, "X", null, OrderType.LIMIT, 65, 70, 100, 100, 0,
+                        OrderStatus.OPEN, "weird new status", null, null),
+                        new BrokerOrder("F1E1", "2", KEY, SYMBOL, OrderSide.BUY, OrderType.LIMIT, 65, 65, 100, 100, 0,
+                                OrderStatus.FILLED, "complete", null, Instant.now()));
+            }
+
+            @Override
+            public List<BrokerTrade> trades() {
+                throw new BrokerException(BrokerException.Kind.RETRYABLE, "trade book down");
+            }
+
+            @Override
+            public List<BrokerPosition> positions() {
+                return List.of(new BrokerPosition(0, "RELIANCE", -1, 0, null, 0, 1, Double.NaN, Double.NaN));
+            }
+        };
+        ReadLiveProbe probe = new ReadLiveProbe(dataSource, s.broker(), "KOTAK_NEO", real, KotakGateway::knownStatus,
+                new ReadLiveProbe.Settings(java.time.Duration.ofHours(1), dir), () -> List.of("day-token-123"));
+        tap.set(probe.tap());
+        ReadLiveProbe.Summary sum = probe.probe();
+        assertThat(sum.orders()).isEqualTo(2);
+        assertThat(sum.unknownStatuses()).containsExactly("weird new status");
+        assertThat(sum.missingKey()).as("the order and the position").isEqualTo(2);
+        assertThat(sum.missingSide()).isEqualTo(1);
+        assertThat(sum.negativeQuantity()).as("70 filled of 65").isEqualTo(1);
+        assertThat(sum.missingTime()).isEqualTo(1);
+        assertThat(sum.errors()).containsOnlyKeys("trades");
+        assertThat(sum.clean()).isFalse();
+        assertThat(sum.saved()).isEqualTo(1);
+        assertThat(probes(s.broker(), 1).getFirst().path("unknownStatuses").get(0).asString())
+                .isEqualTo("weird new status");
+        assertThat(savedBodies(dir)).singleElement().satisfies(b -> assertThat(b).contains("nOrdNo").contains("47168")
+                .doesNotContain("day-token-123").doesNotContain("s-1").doesNotContain("KT1234").doesNotContain("\"x\""));
+        assertThat(probe.probe().saved()).as("the same answer is kept once").isZero();
+
+        // on its own thread: at once and then every interval, stopped by close; a probe that throws changes nothing
+        probe.start(() -> {
+            throw new IllegalStateException("warm-up failed");
+        });
+        probes(s.broker(), 3);
+        assertThat(probe.running()).isTrue();
+        probe.close();
+        assertThat(probe.running()).isFalse();
+        assertThat(orderCalls).as("read-only: no order call can reach the real broker").isEmpty();
+        assertThat(ReadLiveProbe.redact("not json day-token-123", List.of("day-token-123"))).isEqualTo("not json <redacted>");
+    }
+
+    @Test
+    void aCapturedQuoteNeedsNoKotakSessionAndTheScripMasterIsLoadedOncePerWorker() throws Exception {
+        Setup s = setup();
+        Setup other = setup();
+        capture(KEY, List.of(new Quote.Level(99.5, 6500)), List.of(new Quote.Level(100.0, 65_000)), 99.8, 0);
+        KotakDryRunAdapter adapter = new KotakDryRunAdapter(dataSource, 1e9, a -> session.get());
+        OrderRules rules = FollowerRisk.load(Path.of(V6)).orders();
+        dryRun = adapter.dryRun(s.broker(), rules);
+        assertThat(dryRun.connection().quote(KEY).ask()).isEqualTo(100.0);   // listed from the checked scrip master
+        BrokerAdapter.DryRun second = adapter.dryRun(other.broker(), rules);
+        try {
+            assertThat(second.connection().quote(KEY).ask()).isEqualTo(100.0);
+            assertThat(kotak.requests("scrip")).as("one download for the worker's accounts").isEqualTo(1);
+            assertThat(kotak.requests("files")).isEqualTo(2);
+        } finally {
+            second.closeAll();
+        }
+        // the session ends: our own capture still quotes the contract (an exit is never priced blind for want of a login)
+        session.set(Optional.empty());
+        int calls = kotak.requests();
+        assertThat(dryRun.connection().quote(KEY).bid()).isEqualTo(99.5);
+        assertThat(kotak.requests()).as("no Kotak call for a quote").isEqualTo(calls);
     }
 }

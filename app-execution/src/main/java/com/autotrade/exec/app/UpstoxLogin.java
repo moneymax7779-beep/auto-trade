@@ -51,8 +51,16 @@ class UpstoxLogin {
     private final BrokerHttp http = new BrokerHttp("Upstox");
     private final Map<String, Pending> pending = new ConcurrentHashMap<>();
     private final SecureRandom random = new SecureRandom();
+    private final UpstoxDenyList denied;
 
+    /** Tests: no Upstox key or user denied. */
     UpstoxLogin(SessionActivation sessions, DataSource dataSource, BrokerLoginProperties props) {
+        this(sessions, dataSource, props, UpstoxDenyList.NONE);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired      // two constructors: Spring must be told which
+    UpstoxLogin(SessionActivation sessions, DataSource dataSource, BrokerLoginProperties props, UpstoxDenyList denied) {
+        this.denied = denied == null ? UpstoxDenyList.NONE : denied;
         this.sessions = sessions;
         this.accounts = new AccountStore(dataSource);
         this.props = props;
@@ -62,6 +70,10 @@ class UpstoxLogin {
     URI start(Access.User user, long accountId) {
         BrokerAccount account = sessions.account(user, accountId, BrokerType.UPSTOX);
         SessionActivation.App app = sessions.app(account);
+        String refusal = deniedApp(app);
+        if (refusal != null) {
+            throw new IllegalArgumentException(refusal);
+        }
         if (app.redirectUri() == null) {
             throw new IllegalArgumentException("the Upstox app has no redirect URL");
         }
@@ -92,6 +104,11 @@ class UpstoxLogin {
         SessionActivation.App app = null;
         try {
             app = sessions.app(account);
+            String refusal = deniedApp(app);
+            if (refusal != null) {
+                sessions.failed(account, app, p.subject(), refusal);
+                return new KiteLogin.Result(false, account.displayName(), refusal + " Nothing was stored.");
+            }
             JsonNode token = http.postForm(props.upstoxApi() + "/v2/login/authorization/token", Map.of(), Map.of(
                     "code", code, "client_id", sessions.secrets.read(app.keyRef()),
                     "client_secret", sessions.secrets.read(app.secretRef()), "redirect_uri", app.redirectUri(),
@@ -100,6 +117,12 @@ class UpstoxLogin {
             String access = token.path("access_token").asString("");
             if (access.isEmpty()) {
                 throw new BrokerHttp.Failure(0, "Upstox returned no access token");
+            }
+            if (denied.deniedUser(user)) {
+                // never stored (review 8 Nov 2026): the token is dropped here, and the session source refuses it as well
+                sessions.failed(account, app, p.subject(), "logged in as a denied Upstox user");
+                return new KiteLogin.Result(false, account.displayName(), "Upstox client " + user + " is the market data "
+                        + "service's (zt-tiger-v2) and cannot be used for an account. Nothing was stored.");
             }
             if (!app.clientId().equalsIgnoreCase(user)) {
                 sessions.failed(account, app, p.subject(), "logged in as " + user + ", not " + app.clientId());
@@ -112,7 +135,7 @@ class UpstoxLogin {
             try {
                 JsonNode f = http.getJson(props.upstoxApi() + "/v2/user/get-funds-and-margin",
                         Map.of("Authorization", "Bearer " + access));
-                double available = f.path("data").path("equity").path("available_margin").asDouble(Double.NaN);
+                double available = com.autotrade.upstox.orders.UpstoxGateway.availableFrom(f.path("data"));
                 detail.put("equityAvailable", available);
                 funds = Double.isNaN(available) ? "funds not reported" : String.format("equity available Rs %,.0f", available);
             } catch (BrokerHttp.Failure e) {
@@ -129,6 +152,22 @@ class UpstoxLogin {
             sessions.failed(account, app, p.subject(), e.getMessage());
             return new KiteLogin.Result(false, account.displayName(), "The login could not be completed: " + e.getMessage());
         }
+    }
+
+    /**
+     * Why this account's Upstox app may not log in (zt-tiger-v2's app key or Upstox user, {@link UpstoxDenyList}), or
+     * null. The key is read from the secret store and never shown.
+     */
+    private String deniedApp(SessionActivation.App app) {
+        if (app.clientId() != null && denied.deniedUser(app.clientId())) {
+            return "Upstox client " + app.clientId() + " is the market data service's (zt-tiger-v2): it cannot be logged in "
+                    + "here.";
+        }
+        if (denied.deniedKey(sessions.secrets.read(app.keyRef()))) {
+            return "This Upstox app is the market data service's (zt-tiger-v2): a login here would end its session. Use "
+                    + "your own Upstox app.";
+        }
+        return null;
     }
 
     private static String enc(String s) {

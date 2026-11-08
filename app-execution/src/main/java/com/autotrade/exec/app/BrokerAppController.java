@@ -69,9 +69,18 @@ class BrokerAppController {
     private final BrokerSecrets secrets;
     private final KiteLoginProperties kite;
     private final BrokerLoginProperties brokers;
+    private final UpstoxDenyList upstoxDenied;
 
+    /** Tests: no Upstox key or user denied. */
     BrokerAppController(Access access, DataSource dataSource, TransactionTemplate tx, KiteLoginProperties kite,
                         BrokerLoginProperties brokers) {
+        this(access, dataSource, tx, kite, brokers, UpstoxDenyList.NONE);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired      // two constructors: Spring must be told which
+    BrokerAppController(Access access, DataSource dataSource, TransactionTemplate tx, KiteLoginProperties kite,
+                        BrokerLoginProperties brokers, UpstoxDenyList upstoxDenied) {
+        this.upstoxDenied = upstoxDenied == null ? UpstoxDenyList.NONE : upstoxDenied;
         this.access = access;
         this.accounts = new AccountStore(dataSource);
         this.jdbc = new JdbcTemplate(dataSource);
@@ -181,6 +190,7 @@ class BrokerAppController {
         require(keyRef.startsWith("store:"), "this app's keys are kept on the server (" + keyRef.replaceAll(":.*", ":")
                 + "...): they are changed there, not here");
         Checked c = checked(broker, body);
+        notDenied(broker, c.key());
         String key = c.key(), secret = c.secret(), mobile = c.mobile();
         secrets.write(keyRef, key);
         if (broker != BrokerType.KOTAK_NEO) {
@@ -193,6 +203,15 @@ class BrokerAppController {
                 + "where id = ?", user.id(), hint, settings, id);
         audit.audit(tenant, null, user.subject(), "BROKER_APP_KEYS_SET", Map.of("app", id, "keyHint", hint));
         return Map.of("id", id, "keyHint", hint, "verified", false);
+    }
+
+    /**
+     * zt-tiger-v2's Upstox app is never a member's app (review 8 Nov 2026: a login of it would end zt's token): its key,
+     * from {@code autotrade.brokers.upstox.denied-api-keys}, is refused here.
+     */
+    private void notDenied(BrokerType broker, String key) {
+        require(broker != BrokerType.UPSTOX || !upstoxDenied.deniedKey(key), "this Upstox app key belongs to the market "
+                + "data service (zt-tiger-v2) and cannot be used for an account: create your own Upstox app");
     }
 
     /** Keys as typed, checked for the broker: Kotak Neo has a consumer key and a mobile number, the others a key and secret. */
@@ -233,7 +252,7 @@ class BrokerAppController {
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "no such account"));
         manage(user, a.tenantId());
         require(BROKERS.contains(a.brokerType()), a.displayName() + " is a paper account: it has no broker app");
-        checked(a.brokerType(), body);                                   // nothing is created for keys that would fail
+        notDenied(a.brokerType(), checked(a.brokerType(), body).key());  // nothing is created for keys that would fail
         Long linked = jdbc.queryForObject("select credential_profile_id from acct.broker_account where id = ?", Long.class, id);
         long app;
         if (linked != null) {

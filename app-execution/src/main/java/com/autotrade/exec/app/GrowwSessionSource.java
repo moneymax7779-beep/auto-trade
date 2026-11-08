@@ -23,9 +23,10 @@ import tools.jackson.databind.json.JsonMapper;
 /**
  * The day's Groww session of a member's account for the execution worker's reads (live adapters plan, step C): the file
  * {@code groww-<id>.token} {@link GrowwLogin} wrote at the member's approval login ({@code ucc}, {@code accessToken},
- * {@code accountId}, {@code expiresAt}: the token's own expiry, else the next 06:00 IST) and the API key from the
- * account's active GROWW broker app ({@code api_key_ref}, the secret store). The bearer token is
- * {@link BrokerSessions.Access#accessToken()}; nothing else is needed for Groww's calls.
+ * {@code accountId}, {@code expiresAt}: the token's own expiry, else the next 06:00 IST), for an account with an active
+ * GROWW broker app. The bearer token is {@link BrokerSessions.Access#accessToken()}; nothing else is needed for Groww's
+ * calls, so the app's API key is not read into the session at all ({@link BrokerSessions.Access#apiKey()} is null; review
+ * 8 Nov 2026: it was carried, and shown by the Access's toString, for nothing).
  * <p>
  * Only this account's own session file is read, and it must name this account and the Groww client (UCC) pinned on it
  * ({@code external_broker_user_id}, which the login also checked). An expired, missing or foreign file is no session.
@@ -80,7 +81,7 @@ class GrowwSessionSource implements BrokerSessions {
             if (client == null || !user.equalsIgnoreCase(client.toString())) {
                 return Optional.empty();                    // not the Groww client (UCC) pinned on this account
             }
-            return Optional.of(new Access(secrets.read((String) app.getFirst().get("api_key_ref")), token));
+            return Optional.of(new Access(null, token));    // Groww's calls need only the bearer token
         } catch (RuntimeException e) {
             log.warn("account {}: Groww session not readable ({})", account.id(), e.getClass().getSimpleName());
             return Optional.empty();

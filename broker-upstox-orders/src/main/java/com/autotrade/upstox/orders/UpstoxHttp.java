@@ -5,6 +5,7 @@ import java.net.ConnectException;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
+import java.net.http.HttpConnectTimeoutException;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.net.http.HttpTimeoutException;
@@ -41,7 +42,7 @@ import tools.jackson.databind.node.ObjectNode;
  * read; a refused connection never reached Upstox. Anything else Upstox refuses (field validation) is TERMINAL. The
  * token and request or response bodies are never logged or put in a message.
  */
-public final class UpstoxHttp {
+public final class UpstoxHttp implements AutoCloseable {
 
     /** A read (book, history, trades, positions, funds: safe to retry) or an order call (place, modify, cancel). */
     public enum Call { READ, ORDER }
@@ -73,6 +74,8 @@ public final class UpstoxHttp {
     static final String POSITIONS = "/v2/portfolio/short-term-positions";
     /** v3 funds (data.available_to_trade.total: the SDK's model; UNCONFIRMED on a real account). */
     static final String FUNDS = "/v3/user/get-funds-and-margin";
+    /** v2 funds (data.equity.available_margin; what the daily login reads): when v3 is missing or of another shape. */
+    static final String FUNDS_V2 = "/v2/user/get-funds-and-margin";
     /** The day's instrument files (public; gzipped JSON arrays). */
     static final String INSTRUMENTS = "/market-quote/instruments/exchange/";
 
@@ -89,10 +92,17 @@ public final class UpstoxHttp {
     private final HttpClient client;
     private final JsonMapper json = JsonMapper.builder().build();
     private volatile String token;
+    private volatile java.util.function.BiConsumer<String, String> tap;
 
     public UpstoxHttp(UpstoxConfig config) {
         this.config = config;
         this.client = HttpClient.newBuilder().connectTimeout(config.timeout()).build();
+    }
+
+    /** Ends the client's connections and threads (a closed route). */
+    @Override
+    public void close() {
+        client.close();
     }
 
     /** The day's access token (from the member's own Upstox login); never logged. */
@@ -102,6 +112,28 @@ public final class UpstoxHttp {
 
     public UpstoxConfig config() {
         return config;
+    }
+
+    /**
+     * Sees every answer this client reads (READ_LIVE probe: the raw bodies become contract fixtures): called with
+     * {@code "<METHOD> <path>?<query>"} and the response body, after the response arrives and before it is judged; never
+     * the headers or the token. A tap that throws changes nothing about the call. Null = off.
+     */
+    public void tap(java.util.function.BiConsumer<String, String> tap) {
+        this.tap = tap;
+    }
+
+    private void tapped(HttpRequest request, String body) {
+        java.util.function.BiConsumer<String, String> t = tap;
+        if (t == null) {
+            return;
+        }
+        try {
+            String query = request.uri().getRawQuery();
+            t.accept(request.method() + " " + request.uri().getRawPath() + (query == null ? "" : "?" + query), body);
+        } catch (RuntimeException e) {
+            // a tap never affects the call
+        }
     }
 
     ObjectNode object() {
@@ -134,6 +166,14 @@ public final class UpstoxHttp {
      * files are public), only from HTTPS on Upstox's domain or the local simulator.
      */
     byte[] instrumentFile(String exchange) {
+        return instrumentFileWithDate(exchange).bytes();
+    }
+
+    /** One instrument file and its {@code Last-Modified} (null when the server sends none or it does not parse). */
+    record File(byte[] bytes, Instant lastModified) {
+    }
+
+    File instrumentFileWithDate(String exchange) {
         URI uri = URI.create(config.assetsBase() + INSTRUMENTS + exchange + ".json.gz");
         if (!UpstoxConfig.trustedBase(uri)) {
             throw new UpstoxException(Kind.TERMINAL, "instrument file not on Upstox's domain: " + uri.getHost(), 0, "",
@@ -146,7 +186,14 @@ public final class UpstoxHttp {
                 throw new UpstoxException(kind(response.statusCode(), "", Call.READ), "GET instrument file " + exchange
                         + ": HTTP " + response.statusCode(), response.statusCode(), "", true, null);
             }
-            return response.body();
+            Instant modified = response.headers().firstValue("Last-Modified").map(v -> {
+                try {
+                    return java.time.ZonedDateTime.parse(v, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant();
+                } catch (DateTimeParseException e) {
+                    return null;
+                }
+            }).orElse(null);
+            return new File(response.body(), modified);
         } catch (IOException e) {
             throw new UpstoxException(Kind.RETRYABLE, "GET instrument file " + exchange + ": "
                     + e.getClass().getSimpleName(), 0, "", true, e);
@@ -172,18 +219,13 @@ public final class UpstoxHttp {
         HttpResponse<String> response;
         try {
             response = client.send(request, HttpResponse.BodyHandlers.ofString());
-        } catch (HttpTimeoutException e) {
-            throw new UpstoxException(call == Call.ORDER ? Kind.UNKNOWN : Kind.RETRYABLE, what + " timed out", 0, "", true,
-                    e);
-        } catch (ConnectException e) {
-            throw new UpstoxException(Kind.RETRYABLE, "cannot connect to " + request.uri().getHost(), 0, "", false, e);
         } catch (IOException e) {
-            throw new UpstoxException(call == Call.ORDER ? Kind.UNKNOWN : Kind.RETRYABLE, what + ": "
-                    + e.getClass().getSimpleName(), 0, "", true, e);
+            throw transportFailure(e, call, what, request.uri().getHost());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new UpstoxException(Kind.UNKNOWN, "interrupted", 0, "", true, e);
         }
+        tapped(request, response.body());
         JsonNode body;
         try {
             body = json.readTree(response.body());
@@ -206,6 +248,28 @@ public final class UpstoxHttp {
         Kind kind = kind(code, errorCode, call);
         boolean reached = !(code == 429 || RATE_LIMIT.equals(errorCode));
         throw new UpstoxException(kind, what + ": " + explain(code, errorCode, message), code, errorCode, reached, null);
+    }
+
+    /**
+     * A call that got no answer onto {@link Kind}: a connect timeout or a refused connection never sent anything
+     * (RETRYABLE, not reached; review 8 Nov 2026: a connect timeout is also a {@link HttpTimeoutException} and was taken
+     * as "may have reached Upstox", so the checks run in this order); a timeout waiting for the answer or a dropped
+     * connection may have been processed (UNKNOWN for an order call, RETRYABLE for a read).
+     */
+    static UpstoxException transportFailure(IOException e, Call call, String what, String host) {
+        if (e instanceof HttpConnectTimeoutException) {
+            return new UpstoxException(Kind.RETRYABLE, "cannot connect to " + host + " (connect timed out)", 0, "", false,
+                    e);
+        }
+        if (e instanceof ConnectException) {
+            return new UpstoxException(Kind.RETRYABLE, "cannot connect to " + host, 0, "", false, e);
+        }
+        if (e instanceof HttpTimeoutException) {
+            return new UpstoxException(call == Call.ORDER ? Kind.UNKNOWN : Kind.RETRYABLE, what + " timed out", 0, "",
+                    true, e);
+        }
+        return new UpstoxException(call == Call.ORDER ? Kind.UNKNOWN : Kind.RETRYABLE, what + ": "
+                + e.getClass().getSimpleName(), 0, "", true, e);
     }
 
     /** Upstox's answer onto {@link Kind}; the order of the checks matters (an error code is more precise than HTTP). */

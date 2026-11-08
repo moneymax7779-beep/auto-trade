@@ -40,16 +40,24 @@ class UpstoxSessionSource implements BrokerSessions {
 
     private final JdbcTemplate jdbc;
     private final BrokerSecrets secrets;
+    private final UpstoxDenyList denied;
 
-    @org.springframework.beans.factory.annotation.Autowired      // two constructors: Spring must be told which
-    UpstoxSessionSource(DataSource dataSource, KiteLoginProperties props, BrokerLoginProperties brokers) {
+    @org.springframework.beans.factory.annotation.Autowired      // several constructors: Spring must be told which
+    UpstoxSessionSource(DataSource dataSource, KiteLoginProperties props, BrokerLoginProperties brokers,
+                        UpstoxDenyList denied) {
         this(dataSource, new BrokerSecrets(Path.of(props.secretsDir()), Path.of(props.sessionsDir()),
-                Path.of(brokers.storeDir())));
+                Path.of(brokers.storeDir())), denied);
     }
 
+    /** Tests: no Upstox key or user denied. */
     UpstoxSessionSource(DataSource dataSource, BrokerSecrets secrets) {
+        this(dataSource, secrets, UpstoxDenyList.NONE);
+    }
+
+    UpstoxSessionSource(DataSource dataSource, BrokerSecrets secrets, UpstoxDenyList denied) {
         this.jdbc = new JdbcTemplate(dataSource);
         this.secrets = secrets;
+        this.denied = denied == null ? UpstoxDenyList.NONE : denied;
     }
 
     @Override
@@ -68,6 +76,10 @@ class UpstoxSessionSource implements BrokerSessions {
             if (token.isEmpty() || user.isEmpty() || expires.isEmpty() || !Instant.parse(expires).isAfter(Instant.now())) {
                 return Optional.empty();
             }
+            if (denied.deniedUser(user)) {
+                log.warn("account {}: Upstox session refused: a denied Upstox user (zt-tiger-v2's)", account.id());
+                return Optional.empty();                    // zt-tiger-v2's Upstox user: never read here
+            }
             if (session.path("accountId").asLong(-1) != account.id()) {
                 return Optional.empty();                    // another account's file (or none named): never used
             }
@@ -81,7 +93,12 @@ class UpstoxSessionSource implements BrokerSessions {
             if (client == null || !user.equalsIgnoreCase(client.toString())) {
                 return Optional.empty();                    // not the Upstox client pinned on this account
             }
-            return Optional.of(new Access(secrets.read((String) app.getFirst().get("api_key_ref")), token));
+            String apiKey = secrets.read((String) app.getFirst().get("api_key_ref"));
+            if (denied.deniedKey(apiKey)) {
+                log.warn("account {}: Upstox session refused: a denied Upstox app (zt-tiger-v2's)", account.id());
+                return Optional.empty();                    // zt-tiger-v2's Upstox app: never used here
+            }
+            return Optional.of(new Access(apiKey, token));
         } catch (RuntimeException e) {
             log.warn("account {}: Upstox session not readable ({})", account.id(), e.getClass().getSimpleName());
             return Optional.empty();

@@ -139,6 +139,18 @@ class UpstoxSessionSourceIT {
                 .isInstanceOf(ClassNotFoundException.class);
     }
 
+    /** Review 8 Nov 2026: zt-tiger-v2's Upstox user or app key is never a session here, whatever the file says. */
+    @Test
+    void ztTigersUpstoxUserOrAppIsNoSession() {
+        tokenFile(upstox.id(), upstox.id(), "BM6462", Instant.now().plusSeconds(3600));
+        assertThat(new UpstoxSessionSource(dataSource, secrets).access(upstox)).as("not denied: a session").isPresent();
+        assertThat(new UpstoxSessionSource(dataSource, secrets, new UpstoxDenyList(List.of(), List.of("bm6462")))
+                .access(upstox)).as("zt's Upstox user").isEmpty();
+        assertThat(new UpstoxSessionSource(dataSource, secrets, new UpstoxDenyList(List.of("MEMBER-UPSTOX-API-KEY"),
+                null)).access(upstox)).as("zt's Upstox app key").isEmpty();
+        secrets.deleteToken(upstox.id());
+    }
+
     @Test
     void theWorkersSessionsDispatchByBrokerAndUpstoxHasNoLiveConnection() {
         tokenFile(upstox.id(), upstox.id(), "BM6462", Instant.now().plusSeconds(3600));
@@ -149,15 +161,13 @@ class UpstoxSessionSourceIT {
         assertThat(router.access(upstox)).hasValueSatisfying(a -> assertThat(a.apiKey()).isEqualTo("member-upstox-api-key"));
         assertThat(router.access(kotak)).hasValueSatisfying(a -> assertThat(a.apiKey()).isEqualTo("neo-key"));
 
+        java.net.URI local = java.net.URI.create("http://127.0.0.1:1");
         List<BrokerAdapter> adapters = ExecutionService.adapters(dataSource, 1e9, null, null,
-                new UpstoxSessionSource(dataSource, secrets), java.net.URI.create("http://127.0.0.1:1"),
-                UpstoxConfig.at(java.net.URI.create("http://127.0.0.1:1")));
+                new UpstoxSessionSource(dataSource, secrets), null, local, UpstoxConfig.at(local),
+                com.autotrade.groww.GrowwConfig.at(local), com.autotrade.execution.ReadLiveProbe.Settings.OFF);
         assertThat(adapters).extracting(BrokerAdapter::broker).containsExactly(BrokerType.ZERODHA, BrokerType.KOTAK_NEO,
-                BrokerType.UPSTOX);
+                BrokerType.UPSTOX, BrokerType.GROWW);
         assertThat(adapters.get(2).live(upstox, null)).isNull();
-        assertThat(ExecutionService.adapters(dataSource, 1e9, null, null, java.net.URI.create("http://127.0.0.1:1")))
-                .as("the Kite and Kotak wiring as before").extracting(BrokerAdapter::broker)
-                .containsExactly(BrokerType.ZERODHA, BrokerType.KOTAK_NEO);
         assertThat(LiveBrokers.LIVE).containsExactly(BrokerType.ZERODHA);
     }
 }

@@ -42,7 +42,9 @@ import tools.jackson.databind.JsonNode;
  *   <li><b>Orders</b>: LIMIT ({@code pt=L}) or stop-limit ({@code pt=SL}, with a trigger) only, product from the config
  *       (MIS), validity DAY, our tag in {@code ig} (echoed back as {@code GuiOrdId}: UNCONFIRMED, see {@link #TAG_FIELD});
  *       prices on the contract's tick, a buy rounded up and a sell down. Market orders and SL-M are never sent.</li>
- *   <li><b>Idempotent place</b>: a tag already placed by this gateway is ignored. A place whose outcome is unknown
+ *   <li><b>Idempotent place</b>: a tag already placed by this gateway is ignored, and a tag this gateway has not placed
+ *       is first looked up in Kotak's order book (a restarted worker: whether Kotak refuses a repeated {@code ig} is
+ *       UNCONFIRMED, so idempotency never rests on that refusal). A place whose outcome is unknown
  *       (timeout, dropped connection, 5xx, stCode 1005) is never sent again: the order is looked up by tag after
  *       {@code placeLookupWait} (three tries), adopted when found, else reported {@link Kind#UNKNOWN}. A 429 or a refused
  *       connection never reached Kotak and is retried after a short wait. Kotak refusing a tag it already has
@@ -67,8 +69,13 @@ public final class KotakGateway implements BrokerConnection {
     static final String TAG_ECHO = "GuiOrdId";
     /** Kotak's refusal of a repeated {@code ig} (reported by OpenAlgo users). UNCONFIRMED wording. */
     static final String DUPLICATE_TAG = "client orderid already exists";
-    /** A book with no rows can come back Not_Ok with this message instead of an empty list. UNCONFIRMED. */
-    static final String NO_DATA = "no data";
+    /**
+     * A book with no rows comes back {@code Not_Ok} with exactly this message instead of an empty list (UNCONFIRMED);
+     * any other failed read is RETRYABLE, never an empty book.
+     */
+    static final String NO_DATA = "No Data";
+    /** The OMS's own tags (as {@code BrokerReconciler.OUR_TAG}): a book row's {@code GuiOrdId} is ours only if it is one. */
+    static final Pattern OUR_TAG = Pattern.compile("F\\d+[A-Z].*");
     private static final int LOOKUPS = 3;
     private static final Set<String> TERMINAL_STATUSES = Set.of("complete", "rejected", "cancelled");
     private static final Set<String> KNOWN_STATUSES = Set.of("put order req received", "validation pending",
@@ -126,6 +133,22 @@ public final class KotakGateway implements BrokerConnection {
             return;                                                     // idempotent: this tag is already at the broker
         }
         KotakInstruments.Contract c = contract(r.instrumentKey());
+        Optional<BrokerOrder> already;                                  // a restart: Kotak may accept a repeated ig
+        try {
+            already = orderByTag(tag);
+        } catch (BrokerException e) {
+            if (e.kind() == Kind.SESSION) {
+                throw e;
+            }
+            throw new BrokerException(Kind.RETRYABLE, "place " + tag + ": Kotak's order book could not be read to check "
+                    + "the tag first (" + e.getMessage() + "); not sent", e);
+        }
+        if (already.isPresent()) {
+            brokerIdByTag.put(tag, already.get().brokerOrderId());
+            log.warn("place {}: already in Kotak's book as {}; adopted, not placed again", tag,
+                    already.get().brokerOrderId());
+            return;
+        }
         Map<String, String> j = new LinkedHashMap<>();
         j.put("am", "NO");
         j.put("dq", "0");
@@ -160,7 +183,17 @@ public final class KotakGateway implements BrokerConnection {
                 boolean duplicate = e.kind() == Kind.TERMINAL && e.getMessage() != null
                         && e.getMessage().toLowerCase(Locale.ROOT).contains(DUPLICATE_TAG);
                 if (duplicate || e.kind() == Kind.UNKNOWN || (e.kind() == Kind.RETRYABLE && mayHaveReached(e))) {
-                    Optional<BrokerOrder> found = lookUp(tag);
+                    Optional<BrokerOrder> found;
+                    try {
+                        found = lookUp(tag);
+                    } catch (BrokerException lookup) {
+                        // the session ended while the order may be at Kotak: never reported as not placed (SESSION
+                        // would let the caller treat it as refused); unknown, with what happened (code review 8 Nov 2026)
+                        BrokerException unknown = new BrokerException(Kind.UNKNOWN, "place " + tag + ": outcome unknown, "
+                                + "and the lookup by tag failed: " + lookup.getMessage(), e);
+                        unknown.addSuppressed(lookup);
+                        throw unknown;
+                    }
                     if (found.isPresent()) {
                         brokerIdByTag.put(tag, found.get().brokerOrderId());
                         log.warn("place {} had an unknown outcome; found at Kotak as {}", tag, found.get().brokerOrderId());
@@ -205,6 +238,12 @@ public final class KotakGateway implements BrokerConnection {
     @Override
     public void modify(String clientOrderId, long quantity, double limitPrice, double triggerPrice) {
         BrokerOrder order = known(clientOrderId);
+        if (order.filledQuantity() > 0 && quantity > 0 && quantity != order.quantity()) {
+            // whether Kotak's qt is the total or the remaining quantity is UNCONFIRMED: until the canary proves it, a
+            // partly filled order is never re-sized here (the venue cancels and places again)
+            throw new BrokerException(Kind.TERMINAL, "resize a partly filled order by cancel and re-place: " + clientOrderId
+                    + " has " + order.filledQuantity() + " of " + order.quantity() + " filled");
+        }
         KotakInstruments.Contract c = contract(order.instrumentKey());
         boolean stop = order.type() == OrderType.STOP_LIMIT;
         Map<String, String> j = new LinkedHashMap<>();
@@ -322,24 +361,36 @@ public final class KotakGateway implements BrokerConnection {
             double sellValue = KotakHttp.number(p.path("sellAmt"), Double.NaN);
             String key = key(p);
             long token = key == null ? 0 : Long.parseLong(key.substring(key.indexOf('|') + 1));
-            positions.add(new BrokerPosition(token, p.path("trdSym").asString(""), buy + cfBuy - sell - cfSell,
-                    buy > 0 && !Double.isNaN(buyValue) ? buyValue / buy : 0, key, buy, sell, buyValue, sellValue));
+            long net = buy + cfBuy - sell - cfSell;
+            // a net short is averaged on its sells, a long on its buys
+            double average = net < 0 ? (sell > 0 && !Double.isNaN(sellValue) ? sellValue / sell : 0)
+                    : (buy > 0 && !Double.isNaN(buyValue) ? buyValue / buy : 0);
+            positions.add(new BrokerPosition(token, p.path("trdSym").asString(""), net, average, key, buy, sell, buyValue,
+                    sellValue));
         }
         return positions;
     }
 
-    /** A book's rows ({@code data}); Kotak answering an empty book with Not_Ok "No Data" is no rows. */
+    /**
+     * A book's rows ({@code data}). Only Kotak's exact {@code Not_Ok} "No Data" is an empty book; an Ok answer without a
+     * {@code data} array, or any other failure, is RETRYABLE (an error read as an empty book would let a restart place
+     * again and the reconciliation see a flat account).
+     */
     private Iterable<JsonNode> rows(String path) {
+        JsonNode data;
         try {
-            JsonNode data = http.get(path, Call.READ).path("data");
-            return data.isArray() ? data : List.of();
+            data = http.get(path, Call.READ).path("data");
         } catch (KotakException e) {
-            if (e.kind() == Kind.TERMINAL && e.getMessage() != null
-                    && e.getMessage().toLowerCase(Locale.ROOT).contains(NO_DATA)) {
+            if (e.notOkMessage() != null && e.notOkMessage().trim().equalsIgnoreCase(NO_DATA)) {
                 return List.of();
             }
             throw e;
         }
+        if (!data.isArray()) {
+            throw new KotakException(Kind.RETRYABLE, "GET " + path + ": Kotak answered Ok without a data list", 200, 0, true,
+                    null);
+        }
+        return data;
     }
 
     @Override
@@ -378,12 +429,18 @@ public final class KotakGateway implements BrokerConnection {
                 "instrument " + instrumentKey + " is not in Kotak's scrip master"));
     }
 
-    /** Our key of a book row: its token ({@code tok}) when given, else its segment and trading symbol; null if neither. */
+    /**
+     * Our key of a book row: its segment with its token ({@code tok}) when given, else its segment and trading symbol;
+     * null when the segment is missing (never assumed nse_fo: a share's token would read as an option) or nothing maps.
+     */
     private String key(JsonNode row) {
         String segment = row.path("exSeg").asString("").trim().toLowerCase(Locale.ROOT);
+        if (segment.isEmpty()) {
+            return null;
+        }
         String tok = row.path("tok").asString("").trim();
         if (!tok.isEmpty() && tok.chars().allMatch(Character::isDigit)) {
-            return KotakInstruments.instrumentKey(segment.isEmpty() ? "nse_fo" : segment, Long.parseLong(tok));
+            return KotakInstruments.instrumentKey(segment, Long.parseLong(tok));
         }
         return instruments.bySymbol(segment, row.path("trdSym").asString("")).map(KotakInstruments.Contract::instrumentKey)
                 .orElse(null);
@@ -396,18 +453,30 @@ public final class KotakGateway implements BrokerConnection {
         String type = o.path("prcTp").asString("L").trim().toUpperCase(Locale.ROOT);
         Instant updated = KotakHttp.time(o.path("hsUpTm").asString(""));
         String reason = o.path("rejRsn").asString("").trim();
-        return new BrokerOrder(tag.isEmpty() || tag.equalsIgnoreCase("null") || tag.equalsIgnoreCase("NA") ? null : tag,
+        long quantity = KotakHttp.whole(o.path("qty"));
+        // GuiOrdId echoes whatever ig an order carried (other apps', Kotak's own): ours only when it is an OMS tag
+        return new BrokerOrder(OUR_TAG.matcher(tag).matches() ? tag : null,
                 o.path("nOrdNo").asString(""), key(o), o.path("trdSym").asString(""), side(o.path("trnsTp").asString("")),
-                type.equals("SL") ? OrderType.STOP_LIMIT : OrderType.LIMIT, KotakHttp.whole(o.path("qty")), filled,
+                type.equals("SL") ? OrderType.STOP_LIMIT : OrderType.LIMIT, quantity, filled,
                 KotakHttp.number(o.path("avgPrc"), 0), KotakHttp.number(o.path("prc"), 0),
-                KotakHttp.number(o.path("trgPrc"), 0), status(raw, filled), raw,
+                KotakHttp.number(o.path("trgPrc"), 0), status(raw, filled, quantity), raw,
                 reason.isEmpty() || reason.equalsIgnoreCase("NA") ? null : reason,
                 updated != null ? updated : KotakHttp.time(o.path("ordDtTm").asString("")));
     }
 
-    private static OrderSide side(String raw) {
-        String s = raw.trim().toUpperCase(Locale.ROOT);
-        return s.startsWith("S") ? OrderSide.SELL : OrderSide.BUY;
+    /** B / BUY and S / SELL; anything else (missing, unknown) is null, never taken as a buy. */
+    static OrderSide side(String raw) {
+        String s = raw == null ? "" : raw.trim().toUpperCase(Locale.ROOT);
+        return switch (s) {
+            case "B", "BUY" -> OrderSide.BUY;
+            case "S", "SELL" -> OrderSide.SELL;
+            default -> null;
+        };
+    }
+
+    /** Whether Kotak's raw status is one this gateway knows (the READ_LIVE probe counts the others). */
+    public static boolean knownStatus(String raw) {
+        return raw != null && KNOWN_STATUSES.contains(raw.trim().toLowerCase(Locale.ROOT));
     }
 
     /**
@@ -417,6 +486,14 @@ public final class KotakGateway implements BrokerConnection {
      * working (or partial) and logged once.
      */
     static OrderStatus status(String raw, long filled) {
+        return status(raw, filled, 0);
+    }
+
+    /** As above, and an order filled to its quantity is FILLED whatever the status word (code review 8 Nov 2026). */
+    static OrderStatus status(String raw, long filled, long quantity) {
+        if (quantity > 0 && filled >= quantity) {
+            return OrderStatus.FILLED;
+        }
         String s = raw == null ? "" : raw.trim().toLowerCase(Locale.ROOT);
         if (!KNOWN_STATUSES.contains(s) && loggedUnknownStatuses.add(s)) {
             log.warn("Kotak order status '{}' is not known: taken as working", s);

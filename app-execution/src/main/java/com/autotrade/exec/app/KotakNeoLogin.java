@@ -110,15 +110,14 @@ class KotakNeoLogin {
         }
     }
 
-    private boolean trustedBase(String base) {
+    /**
+     * The adapter's own rule ({@link com.autotrade.kotak.KotakConfig#trustedBase}: https on Kotak's domain, or this host's
+     * loopback), so a base URL stored here is always one the worker uses, and no other (code review 8 Nov 2026: the two
+     * rules differed).
+     */
+    static boolean trustedBase(String base) {
         try {
-            URI uri = URI.create(base);
-            URI login = URI.create(props.kotakApi());
-            String host = uri.getHost() == null ? "" : uri.getHost();
-            // https on Kotak's domain, or the configured login host with its own scheme (https in production; a local
-            // stand-in in tests): never plain http to anywhere else (code review 7 Nov 2026)
-            return ("https".equals(uri.getScheme()) && host.endsWith(".kotaksecurities.com"))
-                    || (host.equals(login.getHost()) && java.util.Objects.equals(uri.getScheme(), login.getScheme()));
+            return base != null && com.autotrade.kotak.KotakConfig.trustedBase(URI.create(base.replaceAll("/+$", "")));
         } catch (IllegalArgumentException e) {
             return false;
         }

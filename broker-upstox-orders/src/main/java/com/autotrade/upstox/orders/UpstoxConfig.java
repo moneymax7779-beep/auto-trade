@@ -15,6 +15,10 @@ import java.util.Locale;
  * The member's own Upstox app and login only: zt-tiger-v2's Upstox token and app are never used here (its user must never
  * be a LIVE account: registering a static IP for it would log zt out).
  *
+ * <p>
+ * Order calls are allowed only for a config made by {@link #simulator} ({@link #ordersAllowed()}); {@link #real},
+ * {@link #at} and the public constructor are read-only whatever their hosts.
+ *
  * @param orderBase          v3 order calls (api-hft.upstox.com)
  * @param readBase           v2/v3 reads (api.upstox.com)
  * @param assetsBase         the instrument files (assets.upstox.com)
@@ -23,8 +27,7 @@ import java.util.Locale;
  *                           in 30 minutes per user), SEBI's algo threshold is 10, so this stays below (8, like Kite)
  * @param placeLookupWait    after a place whose outcome is unknown: how long to wait before looking the order up by tag
  */
-public record UpstoxConfig(URI orderBase, URI readBase, URI assetsBase, String product, Duration timeout,
-                           int maxOrdersPerSecond, Duration placeLookupWait) {
+public final class UpstoxConfig {
 
     public static final URI REAL_ORDER_API = URI.create("https://api-hft.upstox.com");
     public static final URI REAL_READ_API = URI.create("https://api.upstox.com");
@@ -34,7 +37,26 @@ public record UpstoxConfig(URI orderBase, URI readBase, URI assetsBase, String p
     /** Intraday (MIS). */
     public static final String INTRADAY = "I";
 
-    public UpstoxConfig {
+    private final URI orderBase;
+    private final URI readBase;
+    private final URI assetsBase;
+    private final String product;
+    private final Duration timeout;
+    private final int maxOrdersPerSecond;
+    private final Duration placeLookupWait;
+    /**
+     * Set only by {@link #simulator}: the one kind of config whose gateway may place, modify or cancel (review 8 Nov
+     * 2026: not decided by the host, so no other constructor, however its bases look, can send an order anywhere).
+     */
+    private final boolean simulatorOrders;
+
+    public UpstoxConfig(URI orderBase, URI readBase, URI assetsBase, String product, Duration timeout,
+                        int maxOrdersPerSecond, Duration placeLookupWait) {
+        this(orderBase, readBase, assetsBase, product, timeout, maxOrdersPerSecond, placeLookupWait, false);
+    }
+
+    private UpstoxConfig(URI orderBase, URI readBase, URI assetsBase, String product, Duration timeout,
+                         int maxOrdersPerSecond, Duration placeLookupWait, boolean simulatorOrders) {
         if (orderBase == null || readBase == null || assetsBase == null) {
             throw new IllegalArgumentException("Upstox order, read and assets bases are required");
         }
@@ -47,9 +69,50 @@ public record UpstoxConfig(URI orderBase, URI readBase, URI assetsBase, String p
         if (!(maxOrdersPerSecond >= 1 && maxOrdersPerSecond < 10)) {
             throw new IllegalArgumentException("orders per second must be 1-9 (Upstox and SEBI: 10)");
         }
-        product = product == null ? INTRADAY : product;
-        timeout = timeout == null ? Duration.ofSeconds(5) : timeout;
-        placeLookupWait = placeLookupWait == null ? Duration.ofSeconds(1) : placeLookupWait;
+        if (simulatorOrders && (real(orderBase) || real(readBase) || real(assetsBase))) {
+            throw new IllegalArgumentException("a simulator config cannot name Upstox's own hosts");
+        }
+        this.orderBase = orderBase;
+        this.readBase = readBase;
+        this.assetsBase = assetsBase;
+        this.product = product == null ? INTRADAY : product;
+        this.timeout = timeout == null ? Duration.ofSeconds(5) : timeout;
+        this.maxOrdersPerSecond = maxOrdersPerSecond;
+        this.placeLookupWait = placeLookupWait == null ? Duration.ofSeconds(1) : placeLookupWait;
+        this.simulatorOrders = simulatorOrders;
+    }
+
+    public URI orderBase() {
+        return orderBase;
+    }
+
+    public URI readBase() {
+        return readBase;
+    }
+
+    public URI assetsBase() {
+        return assetsBase;
+    }
+
+    public String product() {
+        return product;
+    }
+
+    public Duration timeout() {
+        return timeout;
+    }
+
+    public int maxOrdersPerSecond() {
+        return maxOrdersPerSecond;
+    }
+
+    public Duration placeLookupWait() {
+        return placeLookupWait;
+    }
+
+    /** True only for a config made by {@link #simulator}: the only one whose gateway sends order calls. */
+    public boolean ordersAllowed() {
+        return simulatorOrders;
     }
 
     /** A real session's reads: intraday, 5 s timeouts, 8 orders a second. */
@@ -62,9 +125,9 @@ public record UpstoxConfig(URI orderBase, URI readBase, URI assetsBase, String p
         return new UpstoxConfig(base, base, base, INTRADAY, Duration.ofSeconds(5), 8, null);
     }
 
-    /** Against a local simulator: short timeouts. */
+    /** Against a local simulator: short timeouts; the only config whose gateway may send order calls. */
     public static UpstoxConfig simulator(URI base) {
-        return new UpstoxConfig(base, base, base, INTRADAY, Duration.ofSeconds(2), 8, Duration.ofMillis(50));
+        return new UpstoxConfig(base, base, base, INTRADAY, Duration.ofSeconds(2), 8, Duration.ofMillis(50), true);
     }
 
     /**

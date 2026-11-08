@@ -124,6 +124,33 @@ public final class UpstoxSimulator implements AutoCloseable {
                          Instant time, String product) {
     }
 
+    // Upstox's own literals (docs, SDK 1.29), written out here rather than taken from the gateway (review 8 Nov 2026): a
+    // wrong constant in the gateway must fail against the simulator, not be mirrored by it
+    private static final String PLACE = "/v3/order/place";
+    private static final String MODIFY = "/v3/order/modify";
+    private static final String CANCEL = "/v3/order/cancel";
+    private static final String ORDERS = "/v2/order/retrieve-all";
+    private static final String HISTORY = "/v2/order/history";
+    private static final String TRADES = "/v2/order/trades/get-trades-for-day";
+    private static final String POSITIONS = "/v2/portfolio/short-term-positions";
+    private static final String FUNDS_V3 = "/v3/user/get-funds-and-margin";
+    private static final String FUNDS_V2 = "/v2/user/get-funds-and-margin";
+    private static final String INSTRUMENTS = "/market-quote/instruments/exchange/";
+    private static final String NOT_FOUND = "UDAPI100010";
+    private static final String RATE_LIMIT = "UDAPI10005";
+    private static final String TOKEN_INVALID = "UDAPI100050";
+    private static final String STATIC_IP_CODE = "UDAPI1154";
+    private static final String FUNDS_DOWN_CODE = "UDAPI100072";
+    private static final String INVALID_INSTRUMENT = "UDAPI100011";
+    private static final String FINISHED_CANCEL = "UDAPI100040";
+    private static final String FINISHED_MODIFY = "UDAPI100041";
+    /** Upstox's limit on {@code tag}. */
+    private static final int TAG_MAX = 40;
+    /** The instrument file's tick is in paise. */
+    private static final double PAISE = 100;
+    private static final java.util.Set<String> FINISHED = java.util.Set.of("complete", "rejected", "cancelled",
+            "cancelled after market order");
+
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
     private static final String SIM_QUANTITY = "UDAPI1023";     // the simulator's own code (Upstox's not documented)
@@ -132,6 +159,7 @@ public final class UpstoxSimulator implements AutoCloseable {
     private static final String SIM_CIRCUIT = "UDAPI1052";      // the simulator's own code for a price-band refusal
 
     private final HttpServer server;
+    private final java.util.concurrent.ExecutorService executor;
     private final JsonMapper json = JsonMapper.builder().build();
     private final Map<String, Listing> listings = new LinkedHashMap<>();
     private final Map<String, Book> books = new HashMap<>();
@@ -145,6 +173,8 @@ public final class UpstoxSimulator implements AutoCloseable {
     private boolean strict;
     private boolean expired;
     private double funds = 1e9;
+    private FundsV3 fundsV3 = FundsV3.OK;
+    private Instant filesModified;
     private double partialFraction = 1.0;
     private boolean fillStopOnCancel;
     private int cancelLagReads;
@@ -159,8 +189,8 @@ public final class UpstoxSimulator implements AutoCloseable {
     public UpstoxSimulator(int port, long timeoutMillis) throws IOException {
         this.timeoutMillis = timeoutMillis;
         this.server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
-        server.setExecutor(Executors.newFixedThreadPool(4, Thread.ofPlatform().daemon(true).name("upstox-sim-", 0)
-                .factory()));
+        executor = Executors.newFixedThreadPool(4, Thread.ofPlatform().daemon(true).name("upstox-sim-", 0).factory());
+        server.setExecutor(executor);
         server.createContext("/", this::handle);
         server.start();
     }
@@ -172,6 +202,12 @@ public final class UpstoxSimulator implements AutoCloseable {
     @Override
     public void close() {
         server.stop(0);
+        executor.shutdownNow();                 // its threads end with it (review 8 Nov 2026: they were left running)
+    }
+
+    /** True once {@link #close} has shut its handler threads down (tests). */
+    public boolean closed() {
+        return executor.isShutdown();
     }
 
     // ------------------------------------------------------------------ set-up and faults
@@ -248,9 +284,21 @@ public final class UpstoxSimulator implements AutoCloseable {
                 quantity, price, clock.get(), product));
     }
 
-    /** Operations: place, modify, cancel, orders, history, trades, positions, funds, instruments. */
+    /** Operations: place, modify, cancel, orders, history, trades, positions, funds, funds-v2, instruments. */
     public synchronized void failNext(String operation, Fault fault) {
         faults.computeIfAbsent(operation, k -> new ArrayDeque<>()).add(fault);
+    }
+
+    /** How v3 funds answers: as the SDK's model (default), 404 (not offered), or a shape the gateway does not know. */
+    public enum FundsV3 { OK, MISSING, OTHER_SHAPE }
+
+    public synchronized void fundsV3(FundsV3 mode) {
+        this.fundsV3 = mode;
+    }
+
+    /** The instrument files' {@code Last-Modified} (default: none sent). */
+    public synchronized void instrumentFilesModified(Instant at) {
+        this.filesModified = at;
     }
 
     public synchronized void funds(double available) {
@@ -384,10 +432,18 @@ public final class UpstoxSimulator implements AutoCloseable {
                 String exchange = path.substring(path.lastIndexOf('/') + 1).replace(".json.gz", "");
                 byte[] bytes = instrumentFile(exchange);
                 if (bytes == null) {
-                    respond(ex, 404, error(UpstoxHttp.NOT_FOUND, "file not found"));
+                    respond(ex, 404, error(NOT_FOUND, "file not found"));
                     return;
                 }
                 ex.getResponseHeaders().set("Content-Type", "application/gzip");
+                Instant modified;
+                synchronized (this) {
+                    modified = filesModified;
+                }
+                if (modified != null) {
+                    ex.getResponseHeaders().set("Last-Modified", java.time.format.DateTimeFormatter.RFC_1123_DATE_TIME
+                            .format(modified.atZone(java.time.ZoneOffset.UTC)));
+                }
                 ex.sendResponseHeaders(200, bytes.length);
                 try (OutputStream out = ex.getResponseBody()) {
                     out.write(bytes);
@@ -400,7 +456,7 @@ public final class UpstoxSimulator implements AutoCloseable {
                 return;
             }
             if (fault == Fault.HTTP_429) {
-                respond(ex, 429, error(UpstoxHttp.RATE_LIMIT, "Too Many Requests"));
+                respond(ex, 429, error(RATE_LIMIT, "Too Many Requests"));
                 return;
             }
             if (fault == Fault.HTTP_500) {
@@ -412,16 +468,16 @@ public final class UpstoxSimulator implements AutoCloseable {
                 return;
             }
             if (fault == Fault.TOKEN_INVALID) {
-                respond(ex, 401, error(UpstoxHttp.TOKEN_INVALID, "Invalid token used to access API"));
+                respond(ex, 401, error(TOKEN_INVALID, "Invalid token used to access API"));
                 return;
             }
             if (fault == Fault.STATIC_IP) {
-                respond(ex, 403, error(UpstoxHttp.STATIC_IP, "Requests from this IP address are not allowed: register "
+                respond(ex, 403, error(STATIC_IP_CODE, "Requests from this IP address are not allowed: register "
                         + "your static IP"));
                 return;
             }
             if (fault == Fault.FUNDS_DOWN) {
-                respond(ex, 423, error(UpstoxHttp.FUNDS_DOWN, "Funds service is not available between 00:00 and 05:30"));
+                respond(ex, 423, error(FUNDS_DOWN_CODE, "Funds service is not available between 00:00 and 05:30"));
                 return;
             }
             if (fault == Fault.INPUT_ERROR) {
@@ -430,7 +486,7 @@ public final class UpstoxSimulator implements AutoCloseable {
             }
             String refusal = authorised(ex);
             if (refusal != null) {
-                respond(ex, 401, error(UpstoxHttp.TOKEN_INVALID, refusal));
+                respond(ex, 401, error(TOKEN_INVALID, refusal));
                 return;
             }
             String accept = ex.getRequestHeaders().getFirst("Accept");
@@ -470,15 +526,16 @@ public final class UpstoxSimulator implements AutoCloseable {
 
     private static String operation(String path) {
         return switch (path) {
-            case UpstoxHttp.PLACE -> "place";
-            case UpstoxHttp.MODIFY -> "modify";
-            case UpstoxHttp.CANCEL -> "cancel";
-            case UpstoxHttp.ORDERS -> "orders";
-            case UpstoxHttp.HISTORY -> "history";
-            case UpstoxHttp.TRADES -> "trades";
-            case UpstoxHttp.POSITIONS -> "positions";
-            case UpstoxHttp.FUNDS -> "funds";
-            default -> path.startsWith(UpstoxHttp.INSTRUMENTS) ? "instruments" : path;
+            case PLACE -> "place";
+            case MODIFY -> "modify";
+            case CANCEL -> "cancel";
+            case ORDERS -> "orders";
+            case HISTORY -> "history";
+            case TRADES -> "trades";
+            case POSITIONS -> "positions";
+            case FUNDS_V3 -> "funds";
+            case FUNDS_V2 -> "funds-v2";
+            default -> path.startsWith(INSTRUMENTS) ? "instruments" : path;
         };
     }
 
@@ -516,7 +573,7 @@ public final class UpstoxSimulator implements AutoCloseable {
             case "place" -> "POST";
             case "modify" -> "PUT";
             case "cancel" -> "DELETE";
-            case "orders", "history", "trades", "positions", "funds" -> "GET";
+            case "orders", "history", "trades", "positions", "funds", "funds-v2" -> "GET";
             default -> null;
         };
         if (expected == null) {
@@ -533,6 +590,7 @@ public final class UpstoxSimulator implements AutoCloseable {
             case "history" -> history(query.get("tag"), query.get("order_id"));
             case "trades" -> success(tradeBook());
             case "positions" -> success(positions());
+            case "funds-v2" -> fundsV2();
             default -> funds();
         };
     }
@@ -559,12 +617,12 @@ public final class UpstoxSimulator implements AutoCloseable {
             return status(400, error(SIM_FIELD, "Invalid order_type " + type, "order_type"));
         }
         String tag = b.get("tag").asString();
-        if (tag.length() > UpstoxGateway.UPSTOX_TAG_MAX) {
+        if (tag.length() > TAG_MAX) {
             return status(400, error(SIM_FIELD, "tag can be at most 40 characters", "tag"));
         }
         Listing l = listings.get(b.get("instrument_token").asString());
         if (l == null) {
-            return status(400, error(UpstoxHttp.INVALID_INSTRUMENT, "Invalid instrument key"));
+            return status(400, error(INVALID_INSTRUMENT, "Invalid instrument key"));
         }
         if (b.get("is_amo").asBoolean() || b.get("slice").asBoolean() || !b.get("validity").asString().equals("DAY")) {
             return status(400, error(SIM_FIELD, "Only DAY orders without AMO or slicing are simulated"));
@@ -624,7 +682,7 @@ public final class UpstoxSimulator implements AutoCloseable {
     private ObjectNode modify(JsonNode b) {
         Order o = orders.get(b.path("order_id").asString(""));
         if (o == null) {
-            return status(400, error(UpstoxHttp.NOT_FOUND, "Order not found"));
+            return status(400, error(NOT_FOUND, "Order not found"));
         }
         for (String field : List.of("validity", "price", "order_type", "trigger_price")) {
             if (!b.has(field)) {
@@ -632,7 +690,7 @@ public final class UpstoxSimulator implements AutoCloseable {
             }
         }
         if (terminal(o)) {
-            return status(400, error(UpstoxHttp.ORDER_FINISHED_MODIFY, "Order cannot be modified as it is " + o.status));
+            return status(400, error(FINISHED_MODIFY, "Order cannot be modified as it is " + o.status));
         }
         Listing l = listings.get(o.key);
         if (b.has("quantity")) {
@@ -665,7 +723,7 @@ public final class UpstoxSimulator implements AutoCloseable {
     private ObjectNode cancel(String id) {
         Order o = id == null ? null : orders.get(id);
         if (o == null) {
-            return status(400, error(UpstoxHttp.NOT_FOUND, "Order not found"));
+            return status(400, error(NOT_FOUND, "Order not found"));
         }
         if (fillStopOnCancel && o.type.equals("SL") && !terminal(o)) {
             Book b = books.get(o.key);
@@ -673,7 +731,7 @@ public final class UpstoxSimulator implements AutoCloseable {
                     : Math.max(o.price, Math.min(b.bid(), o.trigger)));
         }
         if (terminal(o)) {
-            return status(400, error(UpstoxHttp.ORDER_FINISHED_CANCEL, "Order cannot be cancelled as it is " + o.status));
+            return status(400, error(FINISHED_CANCEL, "Order cannot be cancelled as it is " + o.status));
         }
         o.shownBeforeCancel = o.status;
         o.cancelHiddenReads = cancelLagReads;
@@ -687,7 +745,11 @@ public final class UpstoxSimulator implements AutoCloseable {
     }
 
     private static boolean terminal(Order o) {
-        return UpstoxGateway.terminal(o.status);
+        return finished(o.status);
+    }
+
+    private static boolean finished(String status) {
+        return status != null && FINISHED.contains(status);
     }
 
     private void match(Order o) {
@@ -743,7 +805,7 @@ public final class UpstoxSimulator implements AutoCloseable {
 
     /** One order as Upstox's order book and history show it (numbers as numbers, timestamps "yyyy-MM-dd HH:mm:ss"). */
     private ObjectNode row(Order o, String status) {
-        boolean done = UpstoxGateway.terminal(status);
+        boolean done = finished(status);
         return json.createObjectNode().put("exchange", o.key.startsWith("BSE") ? "BFO" : "NFO").put("product", o.product)
                 .put("price", money(o.price)).put("quantity", o.quantity).put("status", status)
                 .put("tag", o.tag == null || o.tag.isEmpty() ? null : o.tag).put("instrument_token", o.key)
@@ -788,7 +850,7 @@ public final class UpstoxSimulator implements AutoCloseable {
             }
         }
         if (rows.isEmpty()) {
-            return status(400, error(UpstoxHttp.NOT_FOUND, "No order found"));
+            return status(400, error(NOT_FOUND, "No order found"));
         }
         return success(rows);
     }
@@ -846,12 +908,32 @@ public final class UpstoxSimulator implements AutoCloseable {
 
     /** v3 funds (the SDK's GetUserFundMarginV3Response): available_to_trade.total, unavailable_to_trade.total. */
     private ObjectNode funds() {
+        if (fundsV3 == FundsV3.MISSING) {
+            return status(404, error("UDAPI100060", "Resource not Found"));
+        }
+        if (fundsV3 == FundsV3.OTHER_SHAPE) {
+            ObjectNode answer = success(null);
+            answer.putObject("data").putObject("margins").put("cash", money(funds - usedMargin()));
+            return answer;
+        }
         double available = funds - usedMargin();
         ObjectNode answer = success(null);
         ObjectNode data = answer.putObject("data");
         ObjectNode avail = data.putObject("available_to_trade").put("total", money(available));
         avail.putObject("cash_available_to_trade").put("total", money(available));
         data.putObject("unavailable_to_trade").put("total", money(usedMargin()));
+        return answer;
+    }
+
+    /** v2 funds (the login's call): data.equity.available_margin, data.commodity.available_margin. */
+    private ObjectNode fundsV2() {
+        double available = funds - usedMargin();
+        ObjectNode answer = success(null);
+        ObjectNode data = answer.putObject("data");
+        data.putObject("equity").put("used_margin", money(usedMargin())).put("payin_amount", 0.0)
+                .put("span_margin", 0.0).put("adhoc_margin", 0.0).put("notional_cash", 0.0)
+                .put("available_margin", money(available)).put("exposure_margin", 0.0);
+        data.putObject("commodity").put("used_margin", 0.0).put("available_margin", 0.0);
         return answer;
     }
 
@@ -882,7 +964,7 @@ public final class UpstoxSimulator implements AutoCloseable {
                     .put("lot_size", l.lotSize()).put("freeze_quantity", 1800.0).put("exchange_token",
                             l.instrumentKey().substring(l.instrumentKey().indexOf('|') + 1))
                     .put("minimum_lot", l.lotSize()).put("asset_key", "NSE_INDEX|Nifty 50").put("underlying_key",
-                            "NSE_INDEX|Nifty 50").put("tick_size", Math.round(l.tickSize() * UpstoxInstruments.TICK_DIVISOR
+                            "NSE_INDEX|Nifty 50").put("tick_size", Math.round(l.tickSize() * PAISE
                             * 100) / 100.0).put("asset_type", "INDEX").put("underlying_type", "INDEX")
                     .put("trading_symbol", l.tradingSymbol()).put("strike_price", l.strike()).put("qty_multiplier", 1.0));
         }

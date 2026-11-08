@@ -116,7 +116,8 @@ class GrowwSessionSourceIT {
         assertThat(source.access(groww)).as("no login today").isEmpty();
         tokenFile(groww.id(), groww.id(), "grw1234", Instant.now().plusSeconds(3600));
         assertThat(source.access(groww)).hasValueSatisfying(a -> {
-            assertThat(a.apiKey()).isEqualTo("member-groww-api-key");
+            assertThat(a.apiKey()).as("Groww's calls need no API key: none is carried").isNull();
+            assertThat(a.toString()).doesNotContain("member-groww-api-key");
             assertThat(a.accessToken()).isEqualTo("member-access-token");
             assertThat(a.extra()).isEmpty();
             assertThat(a.toString()).doesNotContain("member-access-token");
@@ -143,18 +144,17 @@ class GrowwSessionSourceIT {
         BrokerSessions neo = a -> Optional.of(new BrokerSessions.Access("neo-key", "neo-token"));
         BrokerSessionRouter router = new BrokerSessionRouter(Map.of(BrokerType.ZERODHA, kite, BrokerType.KOTAK_NEO, neo,
                 BrokerType.GROWW, new GrowwSessionSource(dataSource, secrets)));
-        assertThat(router.access(groww)).hasValueSatisfying(a -> assertThat(a.apiKey()).isEqualTo("member-groww-api-key"));
+        assertThat(router.access(groww)).hasValueSatisfying(a -> assertThat(a.accessToken())
+                .isEqualTo("member-access-token"));
         assertThat(router.access(kotak)).hasValueSatisfying(a -> assertThat(a.apiKey()).isEqualTo("neo-key"));
 
         java.net.URI local = java.net.URI.create("http://127.0.0.1:1");
         List<BrokerAdapter> adapters = ExecutionService.adapters(dataSource, 1e9, null, null, null,
-                new GrowwSessionSource(dataSource, secrets), local, UpstoxConfig.at(local), GrowwConfig.at(local));
+                new GrowwSessionSource(dataSource, secrets), local, UpstoxConfig.at(local), GrowwConfig.at(local),
+                com.autotrade.execution.ReadLiveProbe.Settings.OFF);
         assertThat(adapters).extracting(BrokerAdapter::broker).containsExactly(BrokerType.ZERODHA, BrokerType.KOTAK_NEO,
                 BrokerType.UPSTOX, BrokerType.GROWW);
         assertThat(adapters.get(3).live(groww, null)).isNull();
-        assertThat(ExecutionService.adapters(dataSource, 1e9, null, null, null, local, UpstoxConfig.at(local)))
-                .as("the Kite, Kotak and Upstox wiring as before").extracting(BrokerAdapter::broker)
-                .containsExactly(BrokerType.ZERODHA, BrokerType.KOTAK_NEO, BrokerType.UPSTOX);
         assertThat(LiveBrokers.LIVE).containsExactly(BrokerType.ZERODHA);
     }
 }

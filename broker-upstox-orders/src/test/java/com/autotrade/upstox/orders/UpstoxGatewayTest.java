@@ -40,6 +40,8 @@ class UpstoxGatewayTest {
     private static final String NIFTY_SYMBOL = "NIFTY 23100 PE 11 NOV 26";
     private static final LocalDate NIFTY_EXPIRY = LocalDate.of(2026, 11, 11);
     private static final LocalDate SENSEX_EXPIRY = LocalDate.of(2026, 11, 13);
+    /** The session the fixtures' contracts are listed for (both expire after it). */
+    private static final LocalDate DAY = LocalDate.of(2026, 11, 9);
 
     private UpstoxSimulator sim;
     private UpstoxHttp http;
@@ -56,7 +58,7 @@ class UpstoxGatewayTest {
         sim.quote(KEY, 99.5, 6500, 100.0, 6500, 99.8);
         UpstoxConfig config = UpstoxConfig.simulator(sim.baseUri());
         http = new UpstoxHttp(config);
-        instruments = UpstoxInstruments.load(http);
+        instruments = UpstoxInstruments.load(http, DAY);
         assertThat(instruments.size()).isEqualTo(2);
         http.session("any-token");
         gateway = new UpstoxGateway(config, http, instruments, sim::book);
@@ -530,5 +532,181 @@ class UpstoxGatewayTest {
         assertThat(UpstoxHttp.number(json.readTree("\" 1,234.50 \""), 0)).isEqualTo(1234.5);
         assertThat(UpstoxHttp.number(json.readTree("65"), 0)).isEqualTo(65);
         assertThat(UpstoxHttp.number(json.readTree("\"\""), -1)).isEqualTo(-1);
+    }
+
+    // ------------------------------------------------------------------ review fixes, 8 Nov 2026
+
+    @Test
+    void aConnectTimeoutNeverReachedUpstoxButAnAnswerTimeoutMayHave() {
+        UpstoxException connect = UpstoxHttp.transportFailure(new java.net.http.HttpConnectTimeoutException("connect"),
+                Call.ORDER, "POST /v3/order/place", "api-hft.upstox.com");
+        assertThat(connect.kind()).isEqualTo(Kind.RETRYABLE);
+        assertThat(connect.mayHaveReached()).as("no connection: nothing was sent").isFalse();
+        UpstoxException answer = UpstoxHttp.transportFailure(new java.net.http.HttpTimeoutException("request"),
+                Call.ORDER, "POST /v3/order/place", "api-hft.upstox.com");
+        assertThat(answer.kind()).isEqualTo(Kind.UNKNOWN);
+        assertThat(answer.mayHaveReached()).isTrue();
+        UpstoxException refused = UpstoxHttp.transportFailure(new java.net.ConnectException("refused"), Call.ORDER,
+                "POST /v3/order/place", "h");
+        assertThat(refused.kind()).isEqualTo(Kind.RETRYABLE);
+        assertThat(refused.mayHaveReached()).isFalse();
+        assertThat(UpstoxHttp.transportFailure(new java.io.IOException("reset"), Call.READ, "GET", "h").kind())
+                .isEqualTo(Kind.RETRYABLE);
+    }
+
+    @Test
+    void aNetShortPositionIsAveragedOnItsSells() {
+        gateway.place(buy("S1E1", 65, 100.2));                        // 65 bought at 100
+        sim.quote(KEY, 110, 6500, 110.5, 6500, 110);
+        gateway.place(new OrderRequest("S1X1", 3000047168L, KEY, "N", "NSE_FO", OrderSide.SELL, OrderType.LIMIT, 130,
+                109.0, 0, "S1X1"));                                     // 130 sold at 110: net short 65
+        assertThat(gateway.positions()).singleElement().satisfies(p -> {
+            assertThat(p.netQuantity()).isEqualTo(-65);
+            assertThat(p.averagePrice()).as("a short's entry is its sells").isEqualTo(110.0);
+        });
+        assertThat(gateway.positions().getFirst().averagePrice()).isNotEqualTo(100.0);
+    }
+
+    @Test
+    void fundsFallBackToV2WhenV3IsMissingOrOfAnotherShape() {
+        sim.funds(250_000);
+        sim.fundsV3(UpstoxSimulator.FundsV3.MISSING);
+        assertThat(gateway.availableFunds()).isEqualTo(250_000);
+        sim.fundsV3(UpstoxSimulator.FundsV3.OTHER_SHAPE);
+        assertThat(gateway.availableFunds()).isEqualTo(250_000);
+        assertThat(sim.requests("funds-v2")).isEqualTo(2);
+        sim.fundsV3(UpstoxSimulator.FundsV3.OK);
+        assertThat(gateway.availableFunds()).isEqualTo(250_000);
+        assertThat(sim.requests("funds-v2")).as("v3 answered: no v2 call").isEqualTo(2);
+        sim.failNext("funds", Fault.FUNDS_DOWN);                      // the night window is not a missing v3: no fallback
+        assertThatThrownBy(() -> gateway.availableFunds()).satisfies(e -> assertThat(kind(e)).isEqualTo(Kind.RETRYABLE));
+        assertThat(sim.requests("funds-v2")).isEqualTo(2);
+        var json = tools.jackson.databind.json.JsonMapper.builder().build();
+        assertThat(UpstoxGateway.availableFrom(json.readTree("{\"equity\":{\"available_margin\":12.5}}")))
+                .isEqualTo(12.5);
+        assertThat(UpstoxGateway.availableFrom(json.readTree("{\"x\":1}"))).isNaN();
+    }
+
+    @Test
+    void ordersGoOnlyThroughASimulatorConfigWhateverTheHost() {
+        // review 8 Nov 2026: was decided by the host, so a read config pointed at any local address could place
+        UpstoxConfig reads = UpstoxConfig.at(sim.baseUri());
+        UpstoxGateway readOnly = new UpstoxGateway(reads, http, instruments, sim::book);
+        assertThatThrownBy(() -> readOnly.place(buy("R1E1", 65, 100.2))).hasMessageContaining("no LIVE Upstox connection");
+        UpstoxConfig built = new UpstoxConfig(sim.baseUri(), sim.baseUri(), sim.baseUri(), "I", null, 8, null);
+        UpstoxGateway alsoReadOnly = new UpstoxGateway(built, http, instruments, sim::book);
+        assertThatThrownBy(() -> alsoReadOnly.place(buy("R1E2", 65, 100.2))).hasMessageContaining("no LIVE Upstox");
+        assertThatThrownBy(() -> alsoReadOnly.modify("R1E2", 0, 100, 0)).hasMessageContaining("no LIVE Upstox");
+        assertThatThrownBy(() -> alsoReadOnly.cancel("R1E2")).hasMessageContaining("no LIVE Upstox");
+        assertThat(sim.orderCount()).isZero();
+        assertThat(readOnly.orders()).as("reads work on any config").isEmpty();
+        assertThat(reads.ordersAllowed()).isFalse();
+        assertThat(UpstoxConfig.real().ordersAllowed()).isFalse();
+        assertThat(UpstoxConfig.simulator(sim.baseUri()).ordersAllowed()).isTrue();
+        assertThatThrownBy(() -> UpstoxConfig.simulator(URI.create("https://api.upstox.com")))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void aStaleInstrumentFileIsRefused() throws Exception {
+        assertThat(UpstoxInstruments.load(http, NIFTY_EXPIRY).size()).as("expiring today is today's").isEqualTo(2);
+        assertThatThrownBy(() -> UpstoxInstruments.load(http, SENSEX_EXPIRY.plusDays(1)))
+                .as("every option already expired").hasMessageContaining("stale");
+        sim.instrumentFilesModified(DAY.minusDays(1).atTime(20, 0).atZone(java.time.ZoneId.of("Asia/Kolkata"))
+                .toInstant());
+        assertThatThrownBy(() -> UpstoxInstruments.load(http, DAY)).as("last modified yesterday")
+                .hasMessageContaining("stale").hasMessageContaining("last modified");
+        sim.instrumentFilesModified(DAY.atTime(6, 0).atZone(java.time.ZoneId.of("Asia/Kolkata")).toInstant());
+        assertThat(UpstoxInstruments.load(http, DAY).size()).isEqualTo(2);
+    }
+
+    @Test
+    void aPartlyFilledOrderIsNeverResizedByModify() {
+        sim.partialFills(0.5);
+        gateway.place(buy("M1E1", 260, 100.2));                      // 130 of 260 filled
+        int modifies = sim.requests("modify");
+        assertThatThrownBy(() -> gateway.modify("M1E1", 390, 100.2, 0)).satisfies(e -> {
+            assertThat(kind(e)).isEqualTo(Kind.TERMINAL);
+            assertThat(e.getMessage()).contains("resize a partly filled order by cancel and re-place");
+        });
+        assertThat(sim.requests("modify")).as("refused before any call").isEqualTo(modifies);
+        gateway.modify("M1E1", 0, 99.0, 0);                           // price only (below the ask): allowed
+        gateway.modify("M1E1", 260, 99.05, 0);                        // the same total: allowed
+        assertThat(sim.requests("modify")).isEqualTo(modifies + 2);
+    }
+
+    @Test
+    void aSessionLostWhileLookingUpAnUncertainPlaceIsUnknownNotSession() {
+        sim.failNext("place", Fault.HTTP_500);                        // outcome unknown
+        sim.failNext("orders", Fault.TOKEN_INVALID);                  // the lookup finds the session gone
+        assertThatThrownBy(() -> gateway.place(buy("L1E1", 65, 100.2))).satisfies(e -> {
+            assertThat(kind(e)).as("the place may have reached Upstox").isEqualTo(Kind.UNKNOWN);
+            assertThat(e.getMessage()).contains("could not be looked up");
+            assertThat(e.getSuppressed()).singleElement().satisfies(s -> assertThat(kind(s)).isEqualTo(Kind.SESSION));
+        });
+    }
+
+    @Test
+    void theSimulatorsThreadsEndWithIt() throws Exception {
+        UpstoxSimulator other = new UpstoxSimulator(0, 100);
+        assertThat(other.closed()).isFalse();
+        other.close();
+        assertThat(other.closed()).isTrue();
+    }
+
+    @Test
+    void theTapSeesEveryAnswerButNeverTheTokenAndCannotBreakACall() {
+        List<String> seen = new ArrayList<>();
+        http.tap((call, body) -> seen.add(call + " => " + body));
+        gateway.place(buy("T1E1", 65, 100.2));
+        gateway.orders();
+        gateway.positions();
+        assertThat(seen).anySatisfy(s -> assertThat(s).startsWith("POST /v3/order/place => {"));
+        assertThat(seen).anySatisfy(s -> assertThat(s).startsWith("GET /v2/order/retrieve-all => {").contains("T1E1"));
+        assertThat(seen).anySatisfy(s -> assertThat(s).startsWith("GET /v2/portfolio/short-term-positions"));
+        assertThat(String.join("\n", seen)).doesNotContain("any-token").doesNotContain("Bearer");
+        http.tap((call, body) -> {
+            throw new IllegalStateException("tap broken");
+        });
+        assertThat(gateway.orders()).hasSize(1);
+        http.tap(null);
+        assertThat(gateway.orders()).hasSize(1);
+    }
+
+    @Test
+    void aMissingOrUnknownSideIsNullAndTheStatusesAreKnownOrNot() throws Exception {
+        com.sun.net.httpserver.HttpServer book = com.sun.net.httpserver.HttpServer.create(
+                new java.net.InetSocketAddress("127.0.0.1", 0), 0);
+        book.createContext("/", ex -> {
+            String rows = ex.getRequestURI().getPath().contains("trades")
+                    ? "[{\"trade_id\":\"1\",\"order_id\":\"9\",\"instrument_token\":\"NSE_FO|47168\",\"quantity\":65,"
+                    + "\"average_price\":100,\"exchange_timestamp\":\"2026-11-09 09:16:00\"}]"
+                    : "[{\"order_id\":\"9\",\"status\":\"open\",\"tag\":\"Q1E1\",\"instrument_token\":\"NSE_FO|47168\","
+                    + "\"quantity\":65,\"filled_quantity\":0,\"transaction_type\":\"\"},{\"order_id\":\"10\","
+                    + "\"status\":\"open\",\"transaction_type\":\"SHORT\",\"quantity\":65}]";
+            byte[] body = ("{\"status\":\"success\",\"data\":" + rows + "}").getBytes(StandardCharsets.UTF_8);
+            ex.sendResponseHeaders(200, body.length);
+            try (var out = ex.getResponseBody()) {
+                out.write(body);
+            }
+        });
+        book.start();
+        try {
+            UpstoxConfig c = UpstoxConfig.at(URI.create("http://127.0.0.1:" + book.getAddress().getPort()));
+            UpstoxHttp h = new UpstoxHttp(c);
+            h.session("t");
+            UpstoxGateway g = new UpstoxGateway(c, h, instruments, null);
+            assertThat(g.orders()).extracting(BrokerOrder::side).containsExactly(null, null);
+            assertThat(g.trades()).singleElement().satisfies(t -> assertThat(t.side()).isNull());
+            assertThat(g.poll()).as("a null side breaks nothing").isEqualTo(2);
+        } finally {
+            book.stop(0);
+        }
+        assertThat(UpstoxGateway.side("BUY")).isEqualTo(OrderSide.BUY);
+        assertThat(UpstoxGateway.side("sell")).isEqualTo(OrderSide.SELL);
+        assertThat(UpstoxGateway.knownStatus(" Trigger Pending ")).isTrue();
+        assertThat(UpstoxGateway.knownStatus("complete")).isTrue();
+        assertThat(UpstoxGateway.knownStatus("something new")).isFalse();
+        assertThat(UpstoxGateway.knownStatus(null)).isFalse();
     }
 }

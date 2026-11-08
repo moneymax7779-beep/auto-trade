@@ -376,21 +376,30 @@ public final class BrokerVenue implements FollowerVenue {
             if (!active.isEmpty() && covered == open && sameTrigger) {
                 return Protection.ARMED;                                           // already right: nothing to send
             }
+            boolean modified = false;
             if (active.size() == 1 && open <= maxPerOrder) {                     // one stop: re-sized in place
                 String tag = (String) active.getFirst().get("client_tag");
                 long already = ((Number) active.getFirst().get("quantity_filled")).longValue();
                 try {
                     broker.modify(tag, open + already, limit, trigger);
+                    modified = true;
                 } catch (BrokerException e) {
                     if (e.kind() == Kind.SESSION) {
                         throw e;
                     }
-                    return Protection.failed("STOP_MODIFY_" + e.kind() + ": " + e.getMessage());
+                    if (e.kind() != Kind.TERMINAL) {
+                        return Protection.failed("STOP_MODIFY_" + e.kind() + ": " + e.getMessage());
+                    }
+                    // the broker (or the adapter) refuses this change, e.g. a partly filled stop is not re-sized until the
+                    // canary proves whether its quantity is the total or the rest (code review 8 Nov 2026): replaced below
+                    log.warn("stop {} not modified ({}); cancelled and placed again", tag, e.getMessage());
                 }
-                jdbc.update("update exec.order_execution set quantity_requested = ?, limit_price = ?, trigger_price = ?, "
-                        + "updated_at = now() where broker_account_id = ? and client_tag = ?", open + already, limit, trigger,
-                        account.id(), tag);
-                return Protection.ARMED;
+                if (modified) {
+                    jdbc.update("update exec.order_execution set quantity_requested = ?, limit_price = ?, "
+                            + "trigger_price = ?, updated_at = now() where broker_account_id = ? and client_tag = ?",
+                            open + already, limit, trigger, account.id(), tag);
+                    return Protection.ARMED;
+                }
             }
             for (Map<String, Object> s : active) {                               // replaced: several, or none yet
                 String tag = (String) s.get("client_tag");

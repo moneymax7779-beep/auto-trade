@@ -96,7 +96,7 @@ class GrowwGatewayTest {
         assertThat(GrowwGateway.referenceId("F1234567890123E1N1S2")).hasSize(20);
         assertThat(GrowwGateway.tagOf("F12E1-00")).isEqualTo("F12E1");
         assertThat(GrowwGateway.tagOf("F123E1N1")).isEqualTo("F123E1N1");
-        assertThat(GrowwGateway.tagOf("F10E100")).as("zeros of the tag itself are kept").isEqualTo("F10E100");
+        assertThat(GrowwGateway.tagOf("F100E100")).as("zeros of the tag itself are kept").isEqualTo("F100E100");
         assertThat(GrowwGateway.tagOf(null)).isNull();
         assertThat(GrowwGateway.tagOf("null")).isNull();
         assertThatThrownBy(() -> GrowwGateway.referenceId("F12-E1")).isInstanceOf(IllegalArgumentException.class);
@@ -120,7 +120,9 @@ class GrowwGatewayTest {
         for (String tag : tags) {
             String reference = GrowwGateway.referenceId(tag);
             assertThat(GrowwGateway.validReference(reference)).as(reference).isTrue();
-            assertThat(GrowwGateway.tagOf(reference)).as(tag).isEqualTo(tag);
+            assertThat(GrowwGateway.unpadded(reference)).as(tag).isEqualTo(tag);
+            assertThat(GrowwGateway.tagOf(reference)).as("only the OMS's tags read back: " + tag)
+                    .isEqualTo(GrowwGateway.ours(tag) ? tag : null);
             assertThat(references.add(reference)).as("no collision: " + reference).isTrue();
         }
         assertThat(GrowwGateway.validReference("F12E1")).as("under 8").isFalse();
@@ -190,16 +192,16 @@ class GrowwGatewayTest {
     void tradesAreBuiltFromTheDaysFilledOrdersAndAFinishedOrdersTradesAreReadOnce() {
         sim.depth(KEY, List.of(new Quote.Level(99.5, 6500)), List.of(new Quote.Level(100.0, 65),
                 new Quote.Level(100.05, 6500)), 99.8);
-        gateway.place(buy("T1E1", 130, 100.10));                      // two fills: 65 at 100.00 and 65 at 100.05
-        gateway.place(buy("T2E1", 65, 90));                           // rests: no fill, no trades read
+        gateway.place(buy("F71E1", 130, 100.10));                      // two fills: 65 at 100.00 and 65 at 100.05
+        gateway.place(buy("F72E1", 65, 90));                           // rests: no fill, no trades read
         assertThat(gateway.trades()).hasSize(2).extracting(t -> t.brokerOrderId()).containsOnly(
-                gateway.orderByTag("T1E1").orElseThrow().brokerOrderId());
+                gateway.orderByTag("F71E1").orElseThrow().brokerOrderId());
         assertThat(sim.requests("trades")).as("only the filled order's trades").isEqualTo(1);
         assertThat(gateway.trades()).hasSize(2);
         assertThat(sim.requests("trades")).as("a finished order's trades are kept").isEqualTo(1);
 
         sim.partialFills(0.5);
-        gateway.place(buy("T3E1", 130, 100.10));                      // partially filled: read every time
+        gateway.place(buy("F73E1", 130, 100.10));                      // partially filled: read every time
         gateway.trades();
         gateway.trades();
         assertThat(sim.requests("trades")).isEqualTo(3);
@@ -210,13 +212,14 @@ class GrowwGatewayTest {
         GrowwConfig paged = GrowwConfig.simulator(sim.baseUri()).withPageSize(2);
         GrowwGateway small = new GrowwGateway(paged, http, instruments, sim::book);
         for (int i = 1; i <= 5; i++) {
-            small.place(buy("P" + i + "E1", 65, 90));
+            small.place(buy("F8" + i + "E1", 65, 90));
         }
         int before = sim.requests("orders");
-        assertThat(small.orders()).extracting(BrokerOrder::clientTag).containsExactly("P1E1", "P2E1", "P3E1", "P4E1",
-                "P5E1");
-        assertThat(sim.requests("orders") - before).as("pages of 2, 2 and 1").isEqualTo(3);
-        small.place(buy("P6E1", 65, 90));
+        assertThat(small.orders()).extracting(BrokerOrder::clientTag).containsExactly("F81E1", "F82E1", "F83E1", "F84E1",
+                "F85E1");
+        assertThat(sim.requests("orders") - before).as("pages of 2, 2 and 1, then the empty page that ends the read")
+                .isEqualTo(4);
+        small.place(buy("F86E1", 65, 90));
         before = sim.requests("orders");
         assertThat(small.orders()).hasSize(6);
         assertThat(sim.requests("orders") - before).as("a full last page needs one more, empty read").isEqualTo(4);
@@ -230,8 +233,8 @@ class GrowwGatewayTest {
         Quote q = gateway.quote(KEY);
         assertThat(q.asks()).containsExactly(new Quote.Level(100.0, 650), new Quote.Level(100.5, 1300),
                 new Quote.Level(101.0, 6500));
-        gateway.place(buy("D1E1", 2600, 100.5));                     // 650 at 100.00 + 1,300 at 100.50; 650 rest open
-        BrokerOrder first = gateway.orderByTag("D1E1").orElseThrow();
+        gateway.place(buy("F91E1", 2600, 100.5));                     // 650 at 100.00 + 1,300 at 100.50; 650 rest open
+        BrokerOrder first = gateway.orderByTag("F91E1").orElseThrow();
         assertThat(first.filledQuantity()).isEqualTo(1950);
         assertThat(first.averagePrice()).isCloseTo((650 * 100.0 + 1300 * 100.5) / 1950, within(0.01));
         assertThat(first.status()).as("a partial fill: filled_quantity on OPEN").isEqualTo(OrderStatus.PARTIALLY_FILLED);
@@ -279,14 +282,14 @@ class GrowwGatewayTest {
 
     @Test
     void aDuplicateReferenceIsAdoptedWhenItIsOursAndUnknownWhenItIsNot() {
-        gateway.place(buy("G1E1", 65, 100.2));
+        gateway.place(buy("F61E1", 65, 100.2));
         GrowwGateway restarted = new GrowwGateway(GrowwConfig.simulator(sim.baseUri()), http, instruments, sim::book);
-        restarted.place(buy("G1E1", 65, 100.2));                      // Groww: GA007; found by reference: adopted
+        restarted.place(buy("F61E1", 65, 100.2));                      // Groww: GA007; found by reference: adopted
         assertThat(sim.orderCount()).as("never a second order").isEqualTo(1);
         assertThat(sim.requests("place")).isEqualTo(2);
 
         sim.failNext("place", Fault.DUPLICATE_REF);                   // GA007 for a reference no order of ours has
-        assertThatThrownBy(() -> gateway.place(buy("G2E1", 65, 100.2))).satisfies(e -> assertThat(kind(e))
+        assertThatThrownBy(() -> gateway.place(buy("F62E1", 65, 100.2))).satisfies(e -> assertThat(kind(e))
                 .isEqualTo(Kind.UNKNOWN)).hasMessageContaining("GA007");
         assertThat(sim.orderCount()).isEqualTo(1);
     }
@@ -294,24 +297,24 @@ class GrowwGatewayTest {
     @Test
     void anOrderNotYetInTheListIsFoundByItsReferenceId() {
         sim.staleOrderBookOnce();                                     // the next list is the one before this order
-        gateway.place(buy("H1E1", 65, 100.2));
-        assertThat(gateway.orderByTag("H1E1")).as("status by reference, then the detail").hasValueSatisfying(o -> {
+        gateway.place(buy("F51E1", 65, 100.2));
+        assertThat(gateway.orderByTag("F51E1")).as("status by reference, then the detail").hasValueSatisfying(o -> {
             assertThat(o.status()).isEqualTo(OrderStatus.FILLED);
             assertThat(o.filledQuantity()).isEqualTo(65);
-            assertThat(o.clientTag()).isEqualTo("H1E1");
+            assertThat(o.clientTag()).isEqualTo("F51E1");
             assertThat(o.instrumentKey()).isEqualTo(KEY);
         });
         assertThat(sim.requests("status")).isEqualTo(1);
         assertThat(sim.requests("detail")).isEqualTo(1);
-        assertThat(gateway.orderByTag("NOSUCH1")).as("GA004 is no order").isEmpty();
+        assertThat(gateway.orderByTag("F99E9")).as("GA004 is no order").isEmpty();
         assertThat(sim.requests("status")).isEqualTo(2);
 
-        sim.ackLag(1);                                                // not acknowledged yet: pending, nothing filled
-        gateway.place(buy("H2E1", 65, 100.2));
-        BrokerOrder pending = gateway.orderByTag("H2E1").orElseThrow();
+        sim.ackLag(2);                          // not acknowledged yet (status and detail reads): pending, nothing filled
+        gateway.place(buy("F52E1", 65, 100.2));
+        BrokerOrder pending = gateway.orderByTag("F52E1").orElseThrow();
         assertThat(pending.rawStatus()).isEqualTo("NEW");
         assertThat(pending.status()).isEqualTo(OrderStatus.PENDING);
-        assertThat(gateway.orderByTag("H2E1").orElseThrow().status()).isEqualTo(OrderStatus.FILLED);
+        assertThat(gateway.orderByTag("F52E1").orElseThrow().status()).isEqualTo(OrderStatus.FILLED);
     }
 
     @Test
@@ -325,7 +328,7 @@ class GrowwGatewayTest {
         sim.failNext("place", Fault.STATIC_IP);
         assertThatThrownBy(() -> gateway.place(buy("F6E1", 65, 100.2))).satisfies(e -> assertThat(kind(e))
                 .isEqualTo(Kind.SESSION)).hasMessageContaining("HTTP 403").hasMessageContaining("static IP")
-                .hasMessageContaining("log in again");
+                .hasMessageContaining("logging in again may not help");
         assertThat(sim.orderCount()).as("nothing placed by a refused call").isZero();
         sim.failNext("place", Fault.INPUT_ERROR);
         assertThatThrownBy(() -> gateway.place(buy("F6E1", 65, 100.2))).satisfies(e -> assertThat(kind(e))
@@ -402,8 +405,8 @@ class GrowwGatewayTest {
     void theOrderBodyHasGrowwsFieldsAndTypesAndCallsWithoutTheTokenAreRefused() {
         // the simulator refuses a missing field, a string quantity or price, MARKET / SL_M, a reference id outside
         // Groww's rule, a symbol not in the CSV and a price off the tick: a place it accepts carries Groww's body exactly
-        gateway.place(buy("B1E1", 65, 100.21));                      // rounded up to 100.25 on the 0.05 tick
-        assertThat(gateway.orderByTag("B1E1").orElseThrow().limitPrice()).isEqualTo(100.25);
+        gateway.place(buy("F31E1", 65, 100.21));                      // rounded up to 100.25 on the 0.05 tick
+        assertThat(gateway.orderByTag("F31E1").orElseThrow().limitPrice()).isEqualTo(100.25);
         GrowwHttp anonymous = new GrowwHttp(GrowwConfig.simulator(sim.baseUri()));
         assertThatThrownBy(() -> new GrowwGateway(GrowwConfig.simulator(sim.baseUri()), anonymous, instruments, null)
                 .orders()).satisfies(e -> assertThat(kind(e)).isEqualTo(Kind.SESSION));
@@ -495,7 +498,7 @@ class GrowwGatewayTest {
     void theRateLimiterKeepsOrdersBelowTenASecondAndUnderTheMinuteCap() {
         long start = System.nanoTime();
         for (int i = 0; i < 12; i++) {
-            gateway.place(buy("R" + i, 65, 100.2));
+            gateway.place(buy("F6" + i + "E1", 65, 100.2));
         }
         assertThat((System.nanoTime() - start) / 1e9).as("12 orders at 8 a second").isGreaterThanOrEqualTo(0.9);
         assertThat(sim.orderCount()).isEqualTo(12);
@@ -535,20 +538,20 @@ class GrowwGatewayTest {
     @Test
     void theTwentySixthModificationOfAnOrderIsRefusedWithoutBeingSent() {
         sim.quote(KEY, 80.0, 6500, 95.0, 6500, 90);
-        gateway.place(buy("M1E1", 65, 85));
+        gateway.place(buy("F41E1", 65, 85));
         for (int i = 0; i < GrowwGateway.MAX_MODIFICATIONS; i++) {
-            gateway.modify("M1E1", 0, i % 2 == 0 ? 86 : 85, 0);
+            gateway.modify("F41E1", 0, i % 2 == 0 ? 86 : 85, 0);
         }
         assertThat(sim.requests("modify")).isEqualTo(25);
-        assertThatThrownBy(() -> gateway.modify("M1E1", 0, 86, 0)).satisfies(e -> assertThat(kind(e))
+        assertThatThrownBy(() -> gateway.modify("F41E1", 0, 86, 0)).satisfies(e -> assertThat(kind(e))
                 .isEqualTo(Kind.TERMINAL)).hasMessageContaining("at most 25 modifications");
         assertThat(sim.requests("modify")).as("the 26th is never sent").isEqualTo(25);
         // a restarted gateway does not know the count: Groww's own refusal (GA006) is terminal too
         GrowwGateway restarted = new GrowwGateway(GrowwConfig.simulator(sim.baseUri()), http, instruments, sim::book);
-        assertThatThrownBy(() -> restarted.modify("M1E1", 0, 86, 0)).satisfies(e -> assertThat(kind(e))
+        assertThatThrownBy(() -> restarted.modify("F41E1", 0, 86, 0)).satisfies(e -> assertThat(kind(e))
                 .isEqualTo(Kind.TERMINAL)).hasMessageContaining("GA006");
-        gateway.cancel("M1E1");                                       // a cancel is not a modification
-        assertThat(gateway.orderByTag("M1E1").orElseThrow().status()).isEqualTo(OrderStatus.CANCELLED);
+        gateway.cancel("F41E1");                                       // a cancel is not a modification
+        assertThat(gateway.orderByTag("F41E1").orElseThrow().status()).isEqualTo(OrderStatus.CANCELLED);
     }
 
     @Test
@@ -578,15 +581,15 @@ class GrowwGatewayTest {
     @Test
     void positionsAreTheConfiguredProductsOnly() {
         sim.holding(KEY, 650, 90, "NRML");                            // not ours: another product
-        gateway.place(buy("P1E1", 65, 100.2));
+        gateway.place(buy("F21E1", 65, 100.2));
         assertThat(gateway.positions()).singleElement().satisfies(p -> {
             assertThat(p.netQuantity()).isEqualTo(65);
             assertThat(p.dayBuyQuantity()).isEqualTo(65);
             assertThat(p.daySellQuantity()).isZero();
         });
         sim.quote(KEY, 110, 6500, 110.5, 6500, 110);
-        gateway.place(new OrderRequest("P1X1", 3000047168L, KEY, "N", "NSE_FO", OrderSide.SELL, OrderType.LIMIT, 65, 109.0,
-                0, "P1X1"));
+        gateway.place(new OrderRequest("F21X1", 3000047168L, KEY, "N", "NSE_FO", OrderSide.SELL, OrderType.LIMIT, 65, 109.0,
+                0, "F21X1"));
         assertThat(gateway.positions()).singleElement().satisfies(p -> {
             assertThat(p.netQuantity()).isZero();
             assertThat(p.daySellValue()).isEqualTo(110.0 * 65);
@@ -673,5 +676,205 @@ class GrowwGatewayTest {
         assertThat(GrowwHttp.number(json.readTree("\" 1,234.50 \""), 0)).isEqualTo(1234.5);
         assertThat(GrowwHttp.number(json.readTree("65"), 0)).isEqualTo(65);
         assertThat(GrowwHttp.number(json.readTree("\"\""), -1)).isEqualTo(-1);
+    }
+
+    // ------------------------------------------------------------------ review fixes, 8 Nov 2026
+
+    private static OrderRequest raw(String tag) {
+        return buy(tag, 65, 90);
+    }
+
+    @Test
+    void onlyTheOmsTagsWhosePaddingIsExactAreReadBackAsOurs() {
+        assertThat(GrowwGateway.tagOf("ABCDEFGH")).as("another app's reference").isNull();
+        assertThat(GrowwGateway.tagOf("F12E1-000")).as("not the padding we send for F12E1").isNull();
+        assertThat(GrowwGateway.tagOf("F10E100")).as("F10E100 is sent as F10E100-0, never as it is").isNull();
+        assertThat(GrowwGateway.tagOf("F12E1-00")).isEqualTo("F12E1");
+        // orders placed by hand or another app with such references are in the book, but none is ours
+        for (String reference : List.of("ABCDEFGHIJ", "F12E1-000", "manual-001")) {
+            http.post(GrowwHttp.PLACE, http.object().put("trading_symbol", NIFTY_SYMBOL).put("quantity", 65)
+                    .put("price", 90).put("validity", "DAY").put("exchange", "NSE").put("segment", "FNO")
+                    .put("product", "MIS").put("order_type", "LIMIT").put("transaction_type", "BUY")
+                    .put("order_reference_id", reference));
+        }
+        gateway.place(raw("F12E1"));
+        assertThat(gateway.orders()).hasSize(4).extracting(BrokerOrder::clientTag).containsOnly(null, "F12E1")
+                .containsOnlyOnce("F12E1");
+        assertThat(gateway.orderByTag("F12E1")).isPresent();
+
+        // GA007 for a tag that is not the OMS's: never adopted (it cannot be told to be ours), nothing looked up
+        int status = sim.requests("status");
+        sim.failNext("place", Fault.DUPLICATE_REF);
+        assertThatThrownBy(() -> gateway.place(raw("X1E1"))).satisfies(e -> assertThat(kind(e)).isEqualTo(Kind.TERMINAL))
+                .hasMessageContaining("not one of ours");
+        assertThat(sim.requests("status")).isEqualTo(status);
+    }
+
+    @Test
+    void theOrderListIsReadUntilAnEmptyPageAndARowOnTwoPagesIsKeptOnce() {
+        for (int i = 1; i <= 5; i++) {
+            gateway.place(raw("F2" + i + "E1"));
+        }
+        sim.pageCap(2);                                               // Groww serves 2 a page although 100 are asked
+        assertThat(gateway.orders()).as("a short page is not the last").extracting(BrokerOrder::clientTag)
+                .containsExactly("F21E1", "F22E1", "F23E1", "F24E1", "F25E1");
+        sim.pageOverlap(true);                                        // the list moved: each page repeats a row
+        assertThat(gateway.orders()).extracting(BrokerOrder::clientTag)
+                .containsExactly("F21E1", "F22E1", "F23E1", "F24E1", "F25E1");
+    }
+
+    @Test
+    void anOrderIsLookedUpByItsReferenceNotByReadingTheWholeList() {
+        gateway.place(raw("F31E1"));
+        int orders = sim.requests("orders");
+        assertThat(gateway.orderByTag("F31E1")).hasValueSatisfying(o -> assertThat(o.clientTag()).isEqualTo("F31E1"));
+        assertThat(sim.requests("orders")).as("no list read").isEqualTo(orders);
+        assertThat(sim.requests("status")).isEqualTo(1);
+        assertThat(sim.requests("detail")).isEqualTo(1);
+        assertThat(gateway.orderByTag("NOTOURS1")).as("not an OMS tag: nothing read").isEmpty();
+        assertThat(sim.requests("status")).isEqualTo(1);
+    }
+
+    @Test
+    void aFinishedOrdersTradesAreKeptOnlyWhenTheyAddUpToItsFill() {
+        sim.depth(KEY, List.of(new Quote.Level(99.5, 6500)), List.of(new Quote.Level(100.0, 65),
+                new Quote.Level(100.05, 6500)), 99.8);
+        gateway.place(buy("F41E1", 130, 100.10));                     // two fills of 65
+        sim.hideLastTrade(1);                                         // Groww's trade list lags: one fill shown
+        assertThat(gateway.trades()).hasSize(1);
+        assertThat(gateway.trades()).as("the short list was not kept: read again").hasSize(2);
+        int read = sim.requests("trades");
+        assertThat(gateway.trades()).hasSize(2);
+        assertThat(sim.requests("trades")).as("complete now: kept").isEqualTo(read);
+    }
+
+    @Test
+    void aModifyAlwaysCarriesAQuantityAndAPartlyFilledOrderIsNeverResized() {
+        gateway.place(raw("F51E1"));                                  // rests
+        gateway.modify("F51E1", 0, 91, 0);                            // the exit chase's re-price: quantity 0
+        assertThat(gateway.orderByTag("F51E1").orElseThrow().quantity()).as("the order's own quantity was sent")
+                .isEqualTo(65);
+        assertThat(sim.requests("modify")).isEqualTo(1);
+
+        sim.partialFills(0.5);
+        gateway.place(buy("F52E1", 260, 100.2));                      // 130 of 260 filled, the rest open
+        assertThat(gateway.orderByTag("F52E1").orElseThrow().filledQuantity()).isEqualTo(130);
+        assertThatThrownBy(() -> gateway.modify("F52E1", 390, 100.2, 0)).satisfies(e -> assertThat(kind(e))
+                .isEqualTo(Kind.TERMINAL)).hasMessageContaining("cancel and re-place");
+        assertThatThrownBy(() -> gateway.modify("F52E1", 130, 100.2, 0)).hasMessageContaining("cancel and re-place");
+        assertThat(sim.requests("modify")).as("nothing sent").isEqualTo(1);
+        gateway.modify("F52E1", 260, 99.0, 0);                        // its own quantity: a price change only
+        gateway.modify("F52E1", 0, 99.5, 0);
+        assertThat(sim.requests("modify")).isEqualTo(3);
+    }
+
+    @Test
+    void anOrderFilledToItsQuantityIsFilledWhateverTheStatusWord() {
+        assertThat(GrowwGateway.status("DELIVERY_AWAITED", 65, 65)).isEqualTo(OrderStatus.FILLED);
+        assertThat(GrowwGateway.status("SOMETHING_NEW", 130, 130)).isEqualTo(OrderStatus.FILLED);
+        assertThat(GrowwGateway.status("OPEN", 65, 130)).isEqualTo(OrderStatus.PARTIALLY_FILLED);
+        assertThat(GrowwGateway.status("NEW", 0, 0)).isEqualTo(OrderStatus.PENDING);
+        assertThat(GrowwGateway.knownStatus("delivery_awaited")).isTrue();
+        assertThat(GrowwGateway.knownStatus("SOMETHING_NEW")).isFalse();
+        assertThat(GrowwGateway.knownStatus(null)).isFalse();
+    }
+
+    @Test
+    void aMissingOrUnknownSideIsNoSideNeverABuy() {
+        assertThat(GrowwGateway.side("SELL")).isEqualTo(OrderSide.SELL);
+        assertThat(GrowwGateway.side(" buy ")).isEqualTo(OrderSide.BUY);
+        assertThat(GrowwGateway.side("")).isNull();
+        assertThat(GrowwGateway.side("SHORT")).isNull();
+        assertThat(GrowwGateway.side(null)).isNull();
+    }
+
+    @Test
+    void positionsWhoseNetIsNotBuysLessSellsAreRefused() {
+        gateway.place(buy("F61E1", 65, 100.2));
+        assertThat(gateway.positions()).singleElement().satisfies(p -> assertThat(p.netQuantity()).isEqualTo(65));
+        sim.positionsDisagree(65);
+        assertThatThrownBy(() -> gateway.positions()).satisfies(e -> assertThat(kind(e)).isEqualTo(Kind.RETRYABLE))
+                .hasMessageContaining("is not credit 65 less debit 0");
+    }
+
+    @Test
+    void aLostSessionDuringTheLookUpOfAnUncertainPlaceIsUnknownNotUnsent() {
+        sim.failNext("place", Fault.TIMEOUT_PROCESSED);               // the order is at Groww, the answer lost
+        sim.failNext("status", Fault.TOKEN_EXPIRED);                  // and the look-up meets an expired session
+        assertThatThrownBy(() -> gateway.place(buy("F71E1", 65, 100.2))).satisfies(e -> {
+            assertThat(kind(e)).isEqualTo(Kind.UNKNOWN);
+            assertThat(((BrokerException) e.getCause()).kind()).isEqualTo(Kind.SESSION);
+        });
+        assertThat(sim.orderCount()).isEqualTo(1);
+    }
+
+    @Test
+    void aConnectTimeoutNeverReachedGrowwAndOtherTimeoutsMayHave() {
+        GrowwException connect = GrowwHttp.failure(new java.net.http.HttpConnectTimeoutException("connect"),
+                Call.ORDER, "POST /v1/order/create", "api.groww.in");
+        assertThat(connect.kind()).isEqualTo(Kind.RETRYABLE);
+        assertThat(connect.mayHaveReached()).isFalse();
+        GrowwException timeout = GrowwHttp.failure(new java.net.http.HttpTimeoutException("request"), Call.ORDER,
+                "POST /v1/order/create", "api.groww.in");
+        assertThat(timeout.kind()).isEqualTo(Kind.UNKNOWN);
+        assertThat(timeout.mayHaveReached()).isTrue();
+        assertThat(GrowwHttp.failure(new java.net.http.HttpTimeoutException("request"), Call.READ, "GET", "h").kind())
+                .isEqualTo(Kind.RETRYABLE);
+        assertThat(GrowwHttp.failure(new java.net.ConnectException("refused"), Call.ORDER, "POST", "h").mayHaveReached())
+                .isFalse();
+    }
+
+    @Test
+    void theTapHearsEveryAnswerButNeverAHeaderAndCannotBreakACall() {
+        List<String> heard = new ArrayList<>();
+        http.tap((call, body) -> heard.add(call + " " + body));
+        gateway.place(raw("F81E1"));
+        gateway.orders();
+        assertThat(heard).anySatisfy(h -> assertThat(h).startsWith("POST /v1/order/create ").contains("groww_order_id"));
+        assertThat(heard).anySatisfy(h -> assertThat(h).startsWith("GET /v1/order/list?segment=FNO&page=0")
+                .contains("F81E1"));
+        assertThat(heard).noneSatisfy(h -> assertThat(h).contains("any-token"));
+        http.tap((call, body) -> {
+            throw new IllegalStateException("a broken tap");
+        });
+        assertThat(gateway.orders()).hasSize(1);
+        http.tap(null);
+        assertThat(gateway.orders()).hasSize(1);
+    }
+
+    @Test
+    void readsOfALocalSimulatorAreNotThrottledButGrowwsAre() {
+        assertThat(new GrowwHttp(GrowwConfig.real()).throttlesReads()).isTrue();
+        assertThat(http.throttlesReads()).isFalse();
+        long start = System.nanoTime();
+        for (int i = 0; i < 40; i++) {
+            gateway.orders();
+        }
+        assertThat((System.nanoTime() - start) / 1e9).as("40 reads; Groww's 15 a second would take 2.6 s")
+                .isLessThan(1.5);
+    }
+
+    @Test
+    void aCallerWaitingForTheLimiterDoesNotHoldItsLock() throws Exception {
+        GrowwHttp.Limiter limiter = new GrowwHttp.Limiter(1, 100, Duration.ofMinutes(1));
+        limiter.acquire();
+        Thread waiter = Thread.ofPlatform().daemon(true).start(limiter::acquire);   // waits about a second
+        Thread.sleep(100);
+        long start = System.nanoTime();
+        synchronized (limiter) {
+            assertThat((System.nanoTime() - start) / 1e6).as("the lock is free while the waiter sleeps")
+                    .isLessThan(300);
+        }
+        waiter.join(3_000);
+        assertThat(waiter.isAlive()).isFalse();
+    }
+
+    @Test
+    void closingTheSimulatorStopsItsThreads() throws Exception {
+        GrowwSimulator other = new GrowwSimulator(0, 100);
+        GrowwInstruments.load(new GrowwHttp(GrowwConfig.simulator(other.baseUri())));
+        assertThat(other.isClosed()).isFalse();
+        other.close();
+        assertThat(other.isClosed()).isTrue();
     }
 }

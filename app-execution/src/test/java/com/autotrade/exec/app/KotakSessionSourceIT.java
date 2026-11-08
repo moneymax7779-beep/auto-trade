@@ -133,9 +133,12 @@ class KotakSessionSourceIT {
                 true);
         assertThat(router.access(upstox)).isEmpty();
 
-        List<BrokerAdapter> adapters = ExecutionService.adapters(dataSource, 1e9, null, null,
-                java.net.URI.create("http://127.0.0.1:1"));
-        assertThat(adapters).extracting(BrokerAdapter::broker).containsExactly(BrokerType.ZERODHA, BrokerType.KOTAK_NEO);
+        java.net.URI local = java.net.URI.create("http://127.0.0.1:1");
+        List<BrokerAdapter> adapters = ExecutionService.adapters(dataSource, 1e9, null, null, null, null, local,
+                com.autotrade.upstox.orders.UpstoxConfig.at(local), com.autotrade.groww.GrowwConfig.at(local),
+                com.autotrade.execution.ReadLiveProbe.Settings.OFF);
+        assertThat(adapters).extracting(BrokerAdapter::broker).containsExactly(BrokerType.ZERODHA, BrokerType.KOTAK_NEO,
+                BrokerType.UPSTOX, BrokerType.GROWW);
         assertThat(adapters.get(1).live(kotak, null)).isNull();
         assertThat(LiveBrokers.LIVE).containsExactly(BrokerType.ZERODHA);
     }

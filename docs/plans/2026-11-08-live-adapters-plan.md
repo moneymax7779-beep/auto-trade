@@ -88,4 +88,4 @@ after hours (D10, D11). E needs your explicit switch per broker and never happen
 |---|---|---|
 | D12 | Order of the three adapters | Kotak (account ready, tag to prove), Upstox, Groww (paid, feed undocumented) |
 | D13 | Groww subscription (₹499/month + GST) for READ_LIVE | only when B3 is done |
-| D14 | Which Upstox user goes LIVE (never zt's) | satyatrader's BM6462, after D |
+| D14 | Which Upstox user goes LIVE (never zt's) | **not BM6462**: BM6462 is the primary Upstox user zt-tiger-v2 logs in with (and satyatrader's Upstox account is a second app on that same user); Upstox's static IP is per user and any IP change logs out every session, so registering it would log zt out. A family member's own Upstox user, after D. BM6462 is deny-listed by default (`AUTOTRADE_UPSTOX_DENIED_USER_IDS`); zt's app key goes in `AUTOTRADE_UPSTOX_DENIED_API_KEYS` on the host |

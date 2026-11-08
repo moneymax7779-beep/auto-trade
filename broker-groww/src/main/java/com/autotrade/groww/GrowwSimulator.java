@@ -23,6 +23,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
@@ -135,6 +136,7 @@ public final class GrowwSimulator implements AutoCloseable {
             + "freeze_quantity,is_reserved,buy_allowed,sell_allowed";
 
     private final HttpServer server;
+    private final ExecutorService executor;
     private final JsonMapper json = JsonMapper.builder().build();
     private final Map<String, Listing> listings = new LinkedHashMap<>();
     private final Map<String, Book> books = new HashMap<>();
@@ -154,6 +156,10 @@ public final class GrowwSimulator implements AutoCloseable {
     private int cancelLagReads;
     private int ackLagReads;
     private boolean staleOnce;
+    private long positionsSkew;
+    private int pageCap = 100;
+    private boolean pageOverlap;
+    private int hideLastTradeReads;
     private List<ObjectNode> previousBook = List.of();
     private int requests;
     private int tokensSentToAssets;
@@ -163,8 +169,8 @@ public final class GrowwSimulator implements AutoCloseable {
     public GrowwSimulator(int port, long timeoutMillis) throws IOException {
         this.timeoutMillis = timeoutMillis;
         this.server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
-        server.setExecutor(Executors.newFixedThreadPool(4, Thread.ofPlatform().daemon(true).name("groww-sim-", 0)
-                .factory()));
+        this.executor = Executors.newFixedThreadPool(4, Thread.ofPlatform().daemon(true).name("groww-sim-", 0).factory());
+        server.setExecutor(executor);
         server.createContext("/", this::handle);
         server.start();
     }
@@ -176,6 +182,12 @@ public final class GrowwSimulator implements AutoCloseable {
     @Override
     public void close() {
         server.stop(0);
+        executor.shutdownNow();                                 // its threads end with the simulator
+    }
+
+    /** Whether {@link #close} has stopped the simulator's threads (tests). */
+    public boolean isClosed() {
+        return executor.isShutdown();
     }
 
     // ------------------------------------------------------------------ set-up and faults
@@ -288,6 +300,29 @@ public final class GrowwSimulator implements AutoCloseable {
     /** A new order shows NEW in the next {@code reads} order lists before its real status. */
     public synchronized void ackLag(int reads) {
         this.ackLagReads = reads;
+    }
+
+    /**
+     * Fault: positions show a net {@code quantity} that is {@code skew} away from credit less debit (a misread or
+     * inconsistent row); 0 = consistent (default).
+     */
+    public synchronized void positionsDisagree(long skew) {
+        positionsSkew = skew;
+    }
+
+    /** The order list serves at most {@code rows} a page, whatever page_size asks (Groww may serve fewer). */
+    public synchronized void pageCap(int rows) {
+        pageCap = Math.max(1, Math.min(100, rows));
+    }
+
+    /** Fault: every page of the order list after the first starts with the previous page's last row (a moving list). */
+    public synchronized void pageOverlap(boolean on) {
+        pageOverlap = on;
+    }
+
+    /** Fault: the next {@code reads} trade lists leave out the order's last fill (Groww's trade list lagging its fills). */
+    public synchronized void hideLastTrade(int reads) {
+        hideLastTradeReads = reads;
     }
 
     public synchronized void staleOrderBookOnce() {
@@ -659,7 +694,7 @@ public final class GrowwSimulator implements AutoCloseable {
         if (o == null) {
             return status(400, error(GrowwHttp.NOT_FOUND, "Order not found"));
         }
-        for (String field : List.of("order_type", "segment")) {
+        for (String field : List.of("order_type", "segment", "quantity")) {     // Groww's modify needs the quantity
             if (!b.has(field)) {
                 return status(400, error(GrowwHttp.BAD_REQUEST, "Missing field " + field));
             }
@@ -802,7 +837,7 @@ public final class GrowwSimulator implements AutoCloseable {
 
     private ObjectNode orderList(Map<String, String> query) {
         int page = Integer.parseInt(query.getOrDefault("page", "0"));
-        int size = Math.min(100, Integer.parseInt(query.getOrDefault("page_size", "100")));
+        int size = Math.min(pageCap, Integer.parseInt(query.getOrDefault("page_size", "100")));
         List<ObjectNode> all;
         if (page == 0) {                                        // a read of the list starts at page 0
             List<ObjectNode> now = new ArrayList<>();
@@ -817,7 +852,8 @@ public final class GrowwSimulator implements AutoCloseable {
         }
         ObjectNode answer = success();
         ArrayNode list = answer.putObject("payload").putArray("order_list");
-        for (int i = page * size; i < Math.min(all.size(), (page + 1) * size); i++) {
+        int from = Math.max(0, page * size - (pageOverlap && page > 0 ? 1 : 0));
+        for (int i = from; i < Math.min(all.size(), from + size); i++) {
             list.add(all.get(i));
         }
         return answer;
@@ -857,6 +893,10 @@ public final class GrowwSimulator implements AutoCloseable {
         int page = Integer.parseInt(query.getOrDefault("page", "0"));
         int size = Math.min(50, Integer.parseInt(query.getOrDefault("page_size", "50")));
         List<Trade> mine = trades.stream().filter(t -> t.orderId().equals(orderId)).toList();
+        if (hideLastTradeReads > 0 && !mine.isEmpty()) {
+            hideLastTradeReads--;
+            mine = mine.subList(0, mine.size() - 1);
+        }
         ObjectNode answer = success();
         ArrayNode list = answer.putObject("payload").putArray("trade_list");
         for (int i = page * size; i < Math.min(mine.size(), (page + 1) * size); i++) {
@@ -896,7 +936,7 @@ public final class GrowwSimulator implements AutoCloseable {
                     .put("debit_price", money(sellPrice)).put("carry_forward_credit_quantity", 0)
                     .put("carry_forward_credit_price", 0).put("carry_forward_debit_quantity", 0)
                     .put("carry_forward_debit_price", 0).put("exchange", l.exchange()).put("symbol_isin", (String) null)
-                    .put("quantity", q[0] - q[1]).put("product", product).put("net_carry_forward_quantity", 0)
+                    .put("quantity", q[0] - q[1] + positionsSkew).put("product", product).put("net_carry_forward_quantity", 0)
                     .put("net_price", money(q[0] - q[1] != 0 ? (v[0] - v[1]) / (q[0] - q[1]) : 0))
                     .put("net_carry_forward_price", 0).put("realised_pnl", money(Math.min(q[0], q[1])
                             * (sellPrice - buyPrice))));

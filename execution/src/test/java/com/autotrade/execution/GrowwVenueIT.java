@@ -98,8 +98,8 @@ class GrowwVenueIT {
         if (sim != null) {
             sim.close();
         }
-        if (dryRun != null && dryRun.resource() != null) {
-            dryRun.resource().close();
+        if (dryRun != null) {
+            dryRun.closeAll();
         }
     }
 
@@ -332,7 +332,9 @@ class GrowwVenueIT {
         decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
         jdbc.update("update exec.signal_decision set premium_budget = 130000 where copy_group_id = ?", s.group());
         FollowerSimulator groww = brokerFollower();
-        sim.failNext("orders", Fault.STATIC_IP);                       // placed, then Groww's HTTP 403 on the list read
+        // placed, then Groww's HTTP 403 on the look-up by reference (the venue's first read after the place; since the
+        // review of 8 Nov 2026 a tag is looked up by its reference, not by reading the whole list)
+        sim.failNext("status", Fault.STATIC_IP);
         FollowerSimulator.DayResult r = groww.run(s.broker(), s.group(), DAY);
         assertThat(r.reasons()).containsKey("PENDING_BROKER_SESSION");
         assertThat(intentState(s.broker(), "ENTER")).isEqualTo("CREATED");
@@ -432,7 +434,7 @@ class GrowwVenueIT {
         assertThat(own.netQuantities()).containsValue(2600L);
 
         // a restart: a new simulator is given the open position, so the exit sells what the account holds
-        dryRun.resource().close();
+        dryRun.closeAll();
         dryRun = adapter.dryRun(s.broker(), risk.orders());
         assertThat(((GrowwSimulator) dryRun.resource()).netQuantities()).containsValue(2600L);
         decide(s, "10:00:00", SignalDecision.Action.EXIT, 120);

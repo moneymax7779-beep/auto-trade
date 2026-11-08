@@ -16,9 +16,40 @@ import com.autotrade.broker.BrokerConnection;
  */
 public interface BrokerAdapter {
 
-    /** A DRY_RUN connection to the adapter's local simulator, the hook run before each order, and what to close. */
+    /**
+     * A DRY_RUN connection to the adapter's local simulator, the hook run before each order, and what to close:
+     * {@code resource} is the simulator; {@code readers} (null when none) what a READ_LIVE route holds beside it (its
+     * real-broker HTTP clients, its probe's thread).
+     */
     record DryRun(BrokerConnection connection, Consumer<FollowerVenue.OrderSpec> beforeOrder, String description,
-                  AutoCloseable resource) {
+                  AutoCloseable resource, AutoCloseable readers) {
+
+        public DryRun(BrokerConnection connection, Consumer<FollowerVenue.OrderSpec> beforeOrder, String description,
+                      AutoCloseable resource) {
+            this(connection, beforeOrder, description, resource, null);
+        }
+
+        /** Closes the readers, then the simulator; a failure of one does not keep the other open. */
+        public void closeAll() throws Exception {
+            Exception first = null;
+            for (AutoCloseable c : new AutoCloseable[] {readers, resource}) {
+                if (c == null) {
+                    continue;
+                }
+                try {
+                    c.close();
+                } catch (Exception e) {
+                    if (first == null) {
+                        first = e;
+                    } else {
+                        first.addSuppressed(e);
+                    }
+                }
+            }
+            if (first != null) {
+                throw first;
+            }
+        }
     }
 
     BrokerType broker();

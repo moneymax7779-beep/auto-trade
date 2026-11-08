@@ -59,6 +59,10 @@ class BrokerLoginIT {
     private static BrokerLoginController logins;
     private static UpstoxLogin upstox;
     private static WorkspaceController workspaces;
+    private static KiteLoginProperties kiteProps;
+    private static BrokerLoginProperties brokerProps;
+    private static SessionActivation activation;
+    private static TransactionTemplate transactions;
 
     /** Keeps the pool for the class. */
     private record HikariDataSourceHolder(com.zaxxer.hikari.HikariDataSource ds) {
@@ -102,6 +106,10 @@ class BrokerLoginIT {
         apps = new BrokerAppController(access, db.ds(), tx, kite, props);
         SessionActivation sessions = new SessionActivation(db.ds(), tx, kite, props);
         upstox = new UpstoxLogin(sessions, db.ds(), props);
+        kiteProps = kite;
+        brokerProps = props;
+        activation = sessions;
+        transactions = tx;
         logins = new BrokerLoginController(access, db.ds(), upstox, new KotakNeoLogin(sessions, props),
                 new GrowwLogin(sessions, props), sessions);
         workspaces = new WorkspaceController(access, db.ds(), tx, telegram);
@@ -393,6 +401,57 @@ class BrokerLoginIT {
         assertThat(code(() -> logins.logout("pia", acc))).as("another workspace's account").isEqualTo(404);
     }
 
+    /** Review 8 Nov 2026: zt-tiger-v2's Upstox app key and Upstox user are refused at the key save and the login. */
+    @Test
+    void ztTigersUpstoxAppAndUserAreNeverSavedOrLoggedIn() {
+        UpstoxDenyList deny = new UpstoxDenyList(List.of("zt-app-key-1"), List.of("BM6462", "7AB12C"));
+        BrokerAppController denying = new BrokerAppController(new Access(db.ds()), db.ds(), transactions, kiteProps,
+                brokerProps, deny);
+        UpstoxLogin denyingLogin = new UpstoxLogin(activation, db.ds(), brokerProps, deny);
+        long t = member("zara");
+        long id = app("zara", t, "UPSTOX", "Zt app");
+        assertThat(code(() -> denying.keys("zara", id, new BrokerAppController.Keys(" ZT-APP-KEY-1 ", "zt-secret-1",
+                null)))).as("zt's key, any case and spacing").isEqualTo(400);
+        assertThat(dir.resolve("store").resolve("t" + t + "-p" + id + "-key")).doesNotExist();
+        long acc = account("zara", t, "Upstox Z", "UPSTOX", "QZ2222");
+        assertThat(code(() -> denying.setup("zara", acc, new BrokerAppController.Keys("zt-app-key-1", "zt-secret-1",
+                null)))).isEqualTo(400);
+        assertThat(jdbc.queryForObject("select credential_profile_id is null from acct.broker_account where id = ?",
+                Boolean.class, acc)).as("nothing created for a refused key").isTrue();
+        assertThat(denying.keys("zara", id, new BrokerAppController.Keys("own-app-key-9", "up-secret", null)))
+                .containsEntry("keyHint", "...ey-9");
+
+        // a key stored before the deny list knew it: the login refuses to start
+        apps.keys("zara", id, new BrokerAppController.Keys("zt-app-key-1", "zt-secret-1", null));
+        apps.link("zara", acc, new BrokerAppController.Link(id));
+        Access.User zara = new Access(db.ds()).user("zara");
+        assertThatThrownByMessage(() -> denyingLogin.start(zara, acc), "market data service");
+        assertThat(upstox.start(zara, acc)).as("without the deny list it would have started").isNotNull();
+
+        // the app is the member's own, but Upstox answers as a denied user: nothing is stored
+        apps.keys("zara", id, new BrokerAppController.Keys("own-app-key-9", "up-secret", null));
+        String state = denyingLogin.start(zara, acc).getQuery().replaceAll(".*state=", "");
+        KiteLogin.Result r = denyingLogin.callback("good", state);   // the stand-in answers as 7AB12C
+        assertThat(r.ok()).isFalse();
+        assertThat(r.message()).contains("market data service").contains("Nothing was stored");
+        assertThat(dir.resolve("sessions").resolve("upstox-" + acc + ".token")).doesNotExist();
+
+        // a pinned client that is denied: refused before Upstox is asked
+        long acc2 = account("zara", t, "Upstox Z2", "UPSTOX", "BM6462");
+        apps.link("zara", acc2, new BrokerAppController.Link(id));
+        assertThatThrownByMessage(() -> denyingLogin.start(zara, acc2), "market data service");
+    }
+
+    private static void assertThatThrownByMessage(Runnable call, String part) {
+        try {
+            call.run();
+        } catch (RuntimeException e) {
+            assertThat(e.getMessage()).contains(part);
+            return;
+        }
+        throw new AssertionError("expected a refusal containing '" + part + "'");
+    }
+
     /** Code review 7 Nov 2026: a session or app an open position depends on is never taken away. */
     @Test
     void anAccountHoldingAPositionKeepsItsSessionAndItsApp() {
@@ -447,6 +506,16 @@ class BrokerLoginIT {
         Map<String, Object> evil = logins.kotakLogin("neha", acc, new BrokerLoginController.KotakCodes("123456", "4321"));
         assertThat(evil).containsEntry("ok", false);
         assertThat(String.valueOf(evil.get("message"))).contains("unexpected base URL");
+        // one rule with the adapter (code review 8 Nov 2026): a base URL the worker would use is stored, and no other
+        kotakBase = "http://localhost:" + broker.getAddress().getPort();
+        assertThat(logins.kotakLogin("neha", acc, new BrokerLoginController.KotakCodes("123456", "4321")))
+                .containsEntry("ok", true);
+        for (String base : List.of("https://e21.kotaksecurities.com", "http://e21.kotaksecurities.com", "http://localhost:1",
+                "https://127.0.0.1:9", "http://evil.example.com", "https://kotaksecurities.com.evil.example",
+                "http://127.0.0.1:" + broker.getAddress().getPort())) {
+            assertThat(KotakNeoLogin.trustedBase(base)).as(base)
+                    .isEqualTo(com.autotrade.kotak.KotakConfig.trustedBase(java.net.URI.create(base)));
+        }
         kotakBase = "http://127.0.0.1:" + broker.getAddress().getPort();
     }
 

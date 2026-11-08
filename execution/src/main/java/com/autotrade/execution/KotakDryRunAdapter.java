@@ -45,7 +45,10 @@ import com.autotrade.kotak.KotakSimulator;
  *       read for funds (limits) and the scrip master, checked each day against our contract master by
  *       {@link KotakMappingCheck}. Kotak's quote API is not called in this build: the book is our own live capture of
  *       that moment ({@link CapturedQuotes}), and every such quote becomes the simulator's book before the order. Orders
- *       go only to the simulator: the real connection is read-only ({@link ReadLiveConnection}).</li>
+ *       go only to the simulator: the real connection is read-only ({@link ReadLiveConnection}). The scrip master is
+ *       downloaded once a day for every account of this worker, off the order path (the route's thread warms it up when
+ *       the route opens); a quote never needs the Kotak session. A {@link ReadLiveProbe} reads the real book, trades
+ *       and positions at the route's open and every few minutes.</li>
  * </ul>
  * There is no LIVE Kotak connection: {@link #live} returns null, so an account switched LIVE gets no route (and Kotak is
  * not in {@link LiveBrokers#LIVE}). LIVE needs the READ_LIVE sessions, the static IP and the canary of the plan first.
@@ -63,6 +66,8 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
     private final double simulatedBrokerFunds;
     private final BrokerSessions sessions;
     private final Function<String, Quote> liveQuotes;
+    private final ReadLiveProbe.Settings probe;
+    private final DailyScripMaster scripMaster = new DailyScripMaster();
 
     public KotakDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds) {
         this(dataSource, simulatedBrokerFunds, BrokerSessions.NONE);
@@ -76,10 +81,17 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
     /** @param liveQuotes the book of now by our key, for BROKER-market routes (our live capture; a stand-in in tests) */
     public KotakDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
                               Function<String, Quote> liveQuotes) {
+        this(dataSource, simulatedBrokerFunds, sessions, liveQuotes, ReadLiveProbe.Settings.OFF);
+    }
+
+    /** @param probe how often a READ_LIVE route's {@link ReadLiveProbe} reads the real books, and where it saves them */
+    public KotakDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
+                              Function<String, Quote> liveQuotes, ReadLiveProbe.Settings probe) {
         this.dataSource = dataSource;
         this.simulatedBrokerFunds = simulatedBrokerFunds;
         this.sessions = sessions;
         this.liveQuotes = liveQuotes;
+        this.probe = probe == null ? ReadLiveProbe.Settings.OFF : probe;
     }
 
     @Override
@@ -100,26 +112,64 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
 
     private DryRun storedMarket(BrokerAccount account) throws IOException {
         KotakSimulator sim = new KotakSimulator(0, "sim-consumer-key", 3_000);
-        sim.funds(simulatedBrokerFunds);
-        KotakInstruments instruments = new KotakInstruments(List.of());
-        KotakGateway gateway = simulatorGateway(sim, instruments);
-        Market market = new Market(sim, instruments, dataSource);
-        seedHoldings(account, sim, market);
-        return new DryRun(gateway, market, "Kotak simulator " + sim.baseUri(), sim);
+        try {
+            sim.funds(simulatedBrokerFunds);
+            KotakInstruments instruments = new KotakInstruments(List.of());
+            KotakGateway gateway = simulatorGateway(sim, instruments);
+            Market market = new Market(sim, instruments, dataSource);
+            seedHoldings(account, sim, market);
+            return new DryRun(gateway, market, "Kotak simulator " + sim.baseUri(), sim);
+        } catch (RuntimeException e) {
+            sim.close();                                                // the route did not open: nothing keeps it
+            throw e;
+        }
     }
 
     private DryRun brokerMarket(BrokerAccount account) throws IOException {
         KotakSimulator sim = new KotakSimulator(0, "sim-consumer-key", 3_000);
-        sim.funds(UNLIMITED_FUNDS);
-        KotakInstruments simInstruments = new KotakInstruments(List.of());
-        KotakGateway simulator = simulatorGateway(sim, simInstruments);
-        Market listings = new Market(sim, simInstruments, dataSource);
-        seedHoldings(account, sim, listings);
-        KotakReads reads = new KotakReads(account);
-        ReadLiveConnection connection = new ReadLiveConnection(reads, simulator, q -> book(q, reads, sim, simInstruments),
-                sim::usedMargin);
-        return new DryRun(connection, o -> { }, "Kotak simulator " + sim.baseUri() + ", funds and scrip master read from "
-                + "Kotak, book from our live capture", sim);
+        KotakReads reads = null;
+        ReadLiveProbe readProbe = null;
+        try {
+            sim.funds(UNLIMITED_FUNDS);
+            KotakInstruments simInstruments = new KotakInstruments(List.of());
+            KotakGateway simulator = simulatorGateway(sim, simInstruments);
+            Market listings = new Market(sim, simInstruments, dataSource);
+            seedHoldings(account, sim, listings);
+            reads = new KotakReads(account);
+            KotakReads r = reads;
+            readProbe = new ReadLiveProbe(dataSource, account, "KOTAK_NEO", reads, KotakGateway::knownStatus, probe,
+                    () -> secrets(account));
+            reads.tap(readProbe.tap());
+            ReadLiveConnection connection = new ReadLiveConnection(reads, simulator, q -> book(q, r, sim, simInstruments),
+                    sim::usedMargin);
+            readProbe.start(reads::warmUp);
+            ReadLiveProbe p = readProbe;
+            return new DryRun(connection, o -> { }, "Kotak simulator " + sim.baseUri() + ", funds and scrip master read "
+                    + "from Kotak, book from our live capture", sim, () -> {
+                        p.close();
+                        r.close();
+                    });
+        } catch (RuntimeException e) {
+            if (readProbe != null) {
+                readProbe.close();
+            }
+            if (reads != null) {
+                reads.close();
+            }
+            sim.close();                                                // the route did not open: nothing keeps it
+            throw e;
+        }
+    }
+
+    /** The session's own values, taken out of what the probe saves. */
+    private List<String> secrets(BrokerAccount account) {
+        return sessions.access(account).map(a -> {
+            List<String> v = new java.util.ArrayList<>();
+            v.add(a.apiKey());
+            v.add(a.accessToken());
+            v.addAll(a.extra().values());
+            return v;
+        }).orElse(List.of());
     }
 
     private static KotakGateway simulatorGateway(KotakSimulator sim, KotakInstruments instruments) {
@@ -175,19 +225,47 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
     }
 
     /**
+     * Kotak's scrip master of the day, downloaded once for every account of this worker (the same exchange contracts for
+     * everyone; a few MB) by whichever account's session first needs it, outside any account's lock: a failure is
+     * retried after a minute, and yesterday's list is never served.
+     */
+    private static final class DailyScripMaster {
+
+        private LocalDate day;
+        private List<KotakInstruments.Contract> contracts = List.of();
+        private Instant lastAttempt = Instant.EPOCH;
+
+        synchronized List<KotakInstruments.Contract> today(LocalDate today, KotakHttp http) throws IOException {
+            if (today.equals(day)) {
+                return contracts;
+            }
+            if (Instant.now().isBefore(lastAttempt.plus(RELOAD_RETRY))) {
+                throw new IOException("Kotak scrip master not loaded yet today (retried every minute)");
+            }
+            lastAttempt = Instant.now();
+            contracts = List.copyOf(KotakInstruments.load(http).contracts());
+            day = today;
+            return contracts;
+        }
+    }
+
+    /**
      * The account's real Kotak session, read only: the consumer key, trade token, sid and base URL are looked up on every
-     * call (a login during the day takes effect at once; none = {@link Kind#SESSION}); the scrip master is loaded once a
-     * day and checked against our contract master. Quotes come from {@code liveQuotes}, never from Kotak. Order calls
-     * are not offered (and {@link ReadLiveConnection} refuses them as well).
+     * call (a login during the day takes effect at once; none = {@link Kind#SESSION}); the day's scrip master is checked
+     * against our contract master once a day, outside the session's lock (the route's thread warms it up). Quotes come
+     * from {@code liveQuotes}, never from Kotak, and need no session. Order calls are not offered (and
+     * {@link ReadLiveConnection} refuses them as well).
      */
     private final class KotakReads implements BrokerConnection {
 
         private final BrokerAccount account;
         private final KotakInstruments instruments = new KotakInstruments(List.of());
+        private final Object dayLock = new Object();
         private String consumerKey;
         private URI baseUrl;
         private KotakHttp http;
         private KotakGateway gateway;
+        private volatile java.util.function.BiConsumer<String, String> tap;
         private LocalDate loadedDay;
         private Instant lastAttempt = Instant.EPOCH;
 
@@ -195,13 +273,37 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
             this.account = account;
         }
 
+        void tap(java.util.function.BiConsumer<String, String> tap) {
+            this.tap = tap;
+        }
+
+        /** The contract as Kotak's checked scrip master lists it (loaded here on first use when the warm-up has not). */
         KotakInstruments.Contract contract(String key) {
-            gateway();
+            KotakHttp h = session();
+            loadToday(h);
             return instruments.byInstrumentKey(key).orElseThrow(() -> new BrokerException(Kind.TERMINAL, "instrument "
                     + key + " is not in Kotak's checked scrip master"));
         }
 
-        private synchronized KotakGateway gateway() {
+        /** The route's first work, on its own thread: today's scrip master, so no order waits for the download. */
+        void warmUp() {
+            try {
+                loadToday(session());
+            } catch (BrokerException e) {
+                log.info("account {} ({}): Kotak scrip master not warmed up: {}", account.id(), account.displayName(),
+                        e.getMessage());
+            }
+        }
+
+        /** The gateway with today's session (no download here: the lock is held only to swap the session). */
+        private KotakGateway gateway() {
+            session();
+            synchronized (this) {
+                return gateway;
+            }
+        }
+
+        private synchronized KotakHttp session() {
             BrokerSessions.Access access = sessions.access(account).orElseThrow(() -> new BrokerException(Kind.SESSION,
                     "no Kotak session for " + account.displayName() + " today: log in"));
             String sid = access.extra().get(SID), base = access.extra().get(BASE_URL);
@@ -219,49 +321,72 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
                 throw new BrokerException(Kind.SESSION, "the Kotak session of " + account.displayName()
                         + " names a base URL that is not Kotak's: log in again");
             }
-            if (gateway == null || !uri.equals(baseUrl) || !access.apiKey().equals(consumerKey)) {
-                KotakConfig config = KotakConfig.session(access.apiKey(), uri);
+            String key = access.apiKey() == null ? "" : access.apiKey();
+            if (gateway == null || !uri.equals(baseUrl) || !key.equals(consumerKey)) {
+                KotakConfig config = KotakConfig.session(key, uri);
+                KotakHttp old = http;
                 http = new KotakHttp(config);
+                http.tap((call, body) -> {
+                    java.util.function.BiConsumer<String, String> t = tap;
+                    if (t != null) {
+                        t.accept(call, body);
+                    }
+                });
                 gateway = new KotakGateway(config, http, instruments, liveQuotes);
                 baseUrl = uri;
-                consumerKey = access.apiKey();
-                loadedDay = null;
+                consumerKey = key;
+                if (old != null) {
+                    old.close();                                        // the old base URL's client: never used again
+                }
             }
             http.session(access.accessToken(), sid);
-            loadToday();
-            return gateway;
+            return http;
         }
 
-        /** Today's scrip master, once a day (a failure is retried after a minute; the old day's list is not kept). */
-        private void loadToday() {
+        /**
+         * Today's scrip master for this account, once a day: the shared download (outside this session's lock), then the
+         * mapping check (a failure is retried after a minute; the old day's list is not kept).
+         */
+        private void loadToday(KotakHttp h) {
             LocalDate today = LocalDate.now(IST);
-            if (today.equals(loadedDay) || Instant.now().isBefore(lastAttempt.plus(RELOAD_RETRY))) {
-                return;
+            synchronized (dayLock) {
+                if (today.equals(loadedDay) || Instant.now().isBefore(lastAttempt.plus(RELOAD_RETRY))) {
+                    return;
+                }
+                lastAttempt = Instant.now();
+                try {
+                    KotakInstruments fresh = new KotakInstruments(scripMaster.today(today, h));
+                    KotakMappingCheck.Result check = KotakMappingCheck.apply(fresh, new JdbcTemplate(dataSource), today);
+                    instruments.replaceWith(fresh);
+                    loadedDay = today;
+                    if (check.mismatched().isEmpty()) {
+                        log.info("account {} ({}): Kotak scrip master for {}: {} listed; {}", account.id(),
+                                account.displayName(), today, fresh.size(), check.summary());
+                    } else {
+                        log.error("account {} ({}): Kotak scrip master for {}: {}", account.id(), account.displayName(),
+                                today, check.summary());
+                        new KillSwitches(dataSource).audit(account, "execution", "INSTRUMENT_MAPPING_MISMATCH",
+                                Map.of("broker", "KOTAK_NEO", "checked", check.checked(), "mismatched",
+                                        check.mismatched()));
+                    }
+                } catch (IOException | RuntimeException e) {
+                    if (e instanceof BrokerException b && b.kind() == Kind.SESSION) {
+                        lastAttempt = Instant.EPOCH;                    // a new login may load it at once
+                        throw b;
+                    }
+                    if (!today.equals(loadedDay)) {
+                        instruments.replaceWith(new KotakInstruments(List.of()));      // never yesterday's tokens
+                    }
+                    log.warn("account {} ({}): Kotak scrip master not loaded ({}); orders are refused until it is",
+                            account.id(), account.displayName(), e.getMessage());
+                }
             }
-            lastAttempt = Instant.now();
-            try {
-                KotakInstruments fresh = KotakInstruments.load(http);
-                KotakMappingCheck.Result check = KotakMappingCheck.apply(fresh, new JdbcTemplate(dataSource), today);
-                instruments.replaceWith(fresh);
-                loadedDay = today;
-                if (check.mismatched().isEmpty()) {
-                    log.info("account {} ({}): Kotak scrip master for {}: {} listed; {}", account.id(),
-                            account.displayName(), today, fresh.size(), check.summary());
-                } else {
-                    log.error("account {} ({}): Kotak scrip master for {}: {}", account.id(), account.displayName(), today,
-                            check.summary());
-                    new KillSwitches(dataSource).audit(account, "execution", "INSTRUMENT_MAPPING_MISMATCH",
-                            Map.of("broker", "KOTAK_NEO", "checked", check.checked(), "mismatched", check.mismatched()));
-                }
-            } catch (IOException | RuntimeException e) {
-                if (e instanceof BrokerException b && b.kind() == Kind.SESSION) {
-                    throw b;
-                }
-                if (!today.equals(loadedDay)) {
-                    instruments.replaceWith(new KotakInstruments(List.of()));      // never yesterday's tokens
-                }
-                log.warn("account {} ({}): Kotak scrip master not loaded ({}); orders are refused until it is",
-                        account.id(), account.displayName(), e.getMessage());
+        }
+
+        @Override
+        public synchronized void close() {
+            if (http != null) {
+                http.close();
             }
         }
 
@@ -280,9 +405,14 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
             return gateway().availableFunds();
         }
 
+        /** Our live capture: no Kotak call and no session needed (code review 8 Nov 2026). */
         @Override
         public Quote quote(String instrumentKey) {
-            return gateway().quote(instrumentKey);
+            Quote q = liveQuotes.apply(instrumentKey);
+            if (q == null) {
+                throw new BrokerException(Kind.RETRYABLE, "no quote for " + instrumentKey);
+            }
+            return q;
         }
 
         @Override
