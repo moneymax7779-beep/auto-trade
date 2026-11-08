@@ -49,6 +49,9 @@ autotrade:
     read-live-probe:
       every: ${AUTOTRADE_READ_LIVE_PROBE_EVERY:PT5M}
       dir: ${AUTOTRADE_READ_LIVE_PROBE_DIR:/app/broker-sessions/read-live-probes}
+      # Idle accounts (a DAILY_SWITCH member's real account on a PAPER day) that keep a READ_LIVE probe while they have
+      # today's login: account ids, comma-separated; blank = none. Reads only, never an order (user 8 Nov 2026).
+      accounts: ${AUTOTRADE_READ_LIVE_PROBE_ACCOUNTS:}
     # The daily Kite login (live L3, user go-ahead 24 Oct 2026): the app's key and secret as files in secrets-dir (read
     # only; the credential profile names them file:<name>), the day's access token per account in sessions-dir (owner
     # only), the 08:30 IST login link by Telegram to public-base-url/api/execution/accounts/{id}/kite/login.

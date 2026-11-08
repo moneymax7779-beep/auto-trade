@@ -43,7 +43,9 @@ import com.autotrade.sim.CostModel;
  * <p>
  * <b>Idle accounts</b> (DAILY_SWITCH workspaces, V29): a real broker account that is not the day's entry target and holds
  * nothing ({@link TradingDay#idle}) gets no turn: no broker connection, no lease, no reconciliation (a member's own hand
- * trades on a PAPER day are not ours to reconcile), and its exits and adds are closed as NOT_HELD.
+ * trades on a PAPER day are not ours to reconcile), and its exits and adds are closed as NOT_HELD. An idle account named
+ * in {@link #probeOnly(java.util.Set)} keeps one read-only connection while it has today's session: its READ_LIVE probe
+ * reads the real books, and nothing is ever sent through it ({@link BrokerConnections#probeOnly}).
  */
 public final class ExecutionLoop implements AutoCloseable {
 
@@ -84,6 +86,11 @@ public final class ExecutionLoop implements AutoCloseable {
     private final Map<Long, FollowerRisk> risks = new ConcurrentHashMap<>();
     private final Map<Long, String> signatures = new ConcurrentHashMap<>();
     private final Map<Long, AccountStatus> status = new ConcurrentHashMap<>();
+    /** Idle accounts that keep a READ_LIVE probe (autotrade.execution.read-live-probe.accounts); none by default. */
+    private volatile java.util.Set<Long> probeOnly = java.util.Set.of();
+    /** When a probe that failed to open may be tried again (a broker down must not be retried every second). */
+    private final Map<Long, Instant> probeRetry = new ConcurrentHashMap<>();
+    static final java.time.Duration PROBE_RETRY = java.time.Duration.ofMinutes(1);
     private volatile LocalDate squareOffDay;                 // the day whose square-off has not left everything flat
     private volatile Instant squareOffStarted;
     private volatile Instant squareOffLast;
@@ -127,6 +134,15 @@ public final class ExecutionLoop implements AutoCloseable {
         this.connections = new BrokerConnections(dataSource, brokerFunds, adapters);
         this.reconciler = new BrokerReconciler(dataSource, costs);
         this.tradingDay = new TradingDay(dataSource);
+    }
+
+    /**
+     * The idle accounts that keep a READ_LIVE probe (user 8 Nov 2026: a member's Kotak account on PAPER days). Reads only:
+     * the probe connection is never a route, so it sends nothing, real or simulated.
+     */
+    public ExecutionLoop probeOnly(java.util.Set<Long> accountIds) {
+        this.probeOnly = java.util.Set.copyOf(accountIds);
+        return this;
     }
 
     /** The copy groups this worker serves now (ids). */
@@ -239,6 +255,38 @@ public final class ExecutionLoop implements AutoCloseable {
         reconciled.remove(accountId);
     }
 
+    /**
+     * An idle account's READ_LIVE probe: open while the account has today's ACTIVE session (a new login opens a fresh one),
+     * closed otherwise; a failed open is tried again after {@link #PROBE_RETRY}. Returns the status line.
+     */
+    private String probe(BrokerAccount account, LocalDate day) {
+        if (!day.equals(LocalDate.now(java.time.ZoneId.of("Asia/Kolkata")))) {
+            connections.closeProbe(account.id());
+            return "READ_LIVE probe: only today's session, not " + day;
+        }
+        Boolean session = jdbc.queryForObject("select exists (select 1 from acct.broker_session where broker_account_id = ? "
+                + "and status = 'ACTIVE' and expires_at > now())", Boolean.class, account.id());
+        if (!Boolean.TRUE.equals(session)) {
+            connections.closeProbe(account.id());
+            return "READ_LIVE probe waits for today's login";
+        }
+        Instant retry = probeRetry.get(account.id());
+        if (retry != null && Instant.now().isBefore(retry)) {
+            return "READ_LIVE probe did not open; tried again after " + retry;
+        }
+        try {
+            FollowerRisk risk = risks.computeIfAbsent(account.id(), id -> FollowerRisk.load(Path.of(account.riskFile())));
+            String line = connections.probeOnly(account, risk);
+            probeRetry.remove(account.id());
+            return line;
+        } catch (RuntimeException e) {
+            probeRetry.put(account.id(), Instant.now().plus(PROBE_RETRY));
+            log.warn("account {} ({}): READ_LIVE probe did not open: {}", account.id(), account.displayName(),
+                    e.getMessage());
+            return "READ_LIVE probe did not open: " + e.getMessage();
+        }
+    }
+
     private int openPositions(long accountId) {
         Integer open = jdbc.queryForObject("select count(*) from exec.position where broker_account_id = ? "
                 + "and status = 'OPEN' and quantity_open > 0", Integer.class, accountId);
@@ -260,9 +308,13 @@ public final class ExecutionLoop implements AutoCloseable {
             }
             if (tradingDay.idle(account)) {
                 int closed = tradingDay.closeIdleIntents(account.id());
-                record(account, null, null, "IDLE", "not the day's broker and holds nothing; no broker connection"
+                record(account, null, null, "IDLE", "not the day's broker and holds nothing; "
+                        + (probeOnly.contains(account.id()) ? probe(account, day) : "no broker connection")
                         + (closed > 0 ? " (" + closed + " exit/add closed NOT_HELD)" : ""));
                 return;
+            }
+            if (connections.probing(account.id())) {
+                connections.closeProbe(account.id());                // it trades now: its route reads on its own
             }
             FollowerRisk risk = risks.computeIfAbsent(account.id(), id -> FollowerRisk.load(Path.of(account.riskFile())));
             if ((account.tradeMode() == TradeMode.LIVE || risk.orders() != null && risk.orders().brokerMarket())

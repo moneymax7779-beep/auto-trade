@@ -45,6 +45,8 @@ public final class BrokerConnections implements AutoCloseable {
     private final Map<BrokerType, BrokerAdapter> adapters = new java.util.EnumMap<>(BrokerType.class);
     private final Map<Long, Route> routes = new ConcurrentHashMap<>();
     private final Map<Long, BrokerAdapter.DryRun> opened = new ConcurrentHashMap<>();
+    /** Read-only connections of idle accounts ({@link #probeOnly}): never a venue, so nothing can be sent through them. */
+    private final Map<Long, BrokerAdapter.DryRun> probes = new ConcurrentHashMap<>();
 
     /** The registry with this build's adapters (Zerodha). */
     public BrokerConnections(DataSource dataSource, double simulatedBrokerFunds) {
@@ -102,6 +104,55 @@ public final class BrokerConnections implements AutoCloseable {
         return new Route(venue, live.connection(), live.description());
     }
 
+    /**
+     * A READ_LIVE probe on its own (user 8 Nov 2026: "put Ravali's Kotak account in READ_LIVE for Monday"): a DAILY_SWITCH
+     * member's real account is idle on a PAPER day (its entries go to the paper twin), so it never gets a route and its
+     * adapter's real readers never run. This opens the account's READ_LIVE connection (its adapter's {@code dryRun} with
+     * a risk file that reads the broker: the {@link ReadLiveProbe} reads the real order book, trades and positions every
+     * few minutes) and keeps it here, apart from the routes: no {@link BrokerVenue} is built over it and it is never
+     * handed to the follower, so no order (not even a simulated one) can go through it. Whatever the account's mode.
+     * Returns what the status page shows.
+     */
+    public String probeOnly(BrokerAccount account, FollowerRisk risk) {
+        BrokerAdapter.DryRun open = probes.get(account.id());
+        if (open != null) {
+            return "READ_LIVE probe only (no order path): " + open.description();
+        }
+        if (account.brokerType() == BrokerType.PAPER) {
+            return "no READ_LIVE probe: a paper account has no broker";
+        }
+        if (risk.orders() == null || !risk.orders().brokerMarket()) {
+            return "no READ_LIVE probe: risk file " + risk.version() + " does not read the broker (orders.dry_run_market)";
+        }
+        BrokerAdapter adapter = adapters.get(account.brokerType());
+        if (adapter == null) {
+            return "no READ_LIVE probe: no adapter for " + account.brokerType();
+        }
+        try {
+            BrokerAdapter.DryRun d = adapter.dryRun(account, risk.orders());
+            probes.put(account.id(), d);
+            log.info("account {} ({}): READ_LIVE probe only, no order path: {}", account.id(), account.displayName(),
+                    d.description());
+            return "READ_LIVE probe only (no order path): " + d.description();
+        } catch (IOException e) {
+            throw new UncheckedIOException(e);
+        }
+    }
+
+    /** Whether the account has a probe-only connection open. */
+    public boolean probing(long accountId) {
+        return probes.containsKey(accountId);
+    }
+
+    /** Closes the account's probe-only connection, if any (its session ended, it trades now, the list changed). */
+    public void closeProbe(long accountId) {
+        BrokerAdapter.DryRun d = probes.remove(accountId);
+        if (d != null) {
+            log.info("account {}: READ_LIVE probe closed", accountId);
+            close(d);
+        }
+    }
+
     /** The Kite simulator of a ZERODHA DRY_RUN account (tests, fault drills); null when it has none. */
     public KiteSimulator simulator(long accountId) {
         BrokerAdapter.DryRun d = opened.get(accountId);
@@ -112,12 +163,15 @@ public final class BrokerConnections implements AutoCloseable {
     public void drop(long accountId) {
         routes.remove(accountId);
         close(opened.remove(accountId));
+        closeProbe(accountId);
     }
 
     @Override
     public void close() {
         opened.values().forEach(BrokerConnections::close);
         opened.clear();
+        probes.values().forEach(BrokerConnections::close);
+        probes.clear();
         routes.clear();
     }
 

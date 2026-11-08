@@ -43,12 +43,13 @@ class ExecutionService implements DisposableBean {
     private final KiteLoginProperties kite;
     private final String probeEvery;
     private final String probeDir;
+    private final String probeAccounts;
     private volatile ExecutionLoop loop;
     private volatile java.time.Instant lastTick;
 
     /** Tests: no real broker sessions. */
     ExecutionService(DataSource dataSource, ExecutionProperties properties) {
-        this(dataSource, properties, null, null, null, null, null, null, null);
+        this(dataSource, properties, null, null, null, null, null, null, null, null);
     }
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -58,7 +59,9 @@ class ExecutionService implements DisposableBean {
                      @org.springframework.beans.factory.annotation.Value("${autotrade.execution.read-live-probe.every:}")
                      String probeEvery,
                      @org.springframework.beans.factory.annotation.Value("${autotrade.execution.read-live-probe.dir:}")
-                     String probeDir) {
+                     String probeDir,
+                     @org.springframework.beans.factory.annotation.Value("${autotrade.execution.read-live-probe.accounts:}")
+                     String probeAccounts) {
         this.dataSource = dataSource;
         this.properties = properties;
         this.kiteSessions = kiteSessions;
@@ -68,6 +71,7 @@ class ExecutionService implements DisposableBean {
         this.kite = kite;
         this.probeEvery = probeEvery;
         this.probeDir = probeDir;
+        this.probeAccounts = probeAccounts;
     }
 
     /**
@@ -114,6 +118,24 @@ class ExecutionService implements DisposableBean {
      * The READ_LIVE probe of this worker: every {@code autotrade.execution.read-live-probe.every} (blank = off), saving
      * redacted answers under {@code ...dir} (blank = audit rows only).
      */
+    /**
+     * The idle accounts that keep a READ_LIVE probe ({@code autotrade.execution.read-live-probe.accounts}: account ids,
+     * comma-separated; blank = none). Reads only: see ExecutionLoop#probeOnly.
+     */
+    java.util.Set<Long> probeAccounts() {
+        String ids = probeAccounts == null ? "" : probeAccounts.trim();
+        if (ids.isEmpty()) {
+            return java.util.Set.of();
+        }
+        java.util.Set<Long> set = new java.util.TreeSet<>();
+        for (String id : ids.split(",")) {
+            if (!id.isBlank()) {
+                set.add(Long.parseLong(id.trim()));
+            }
+        }
+        return set;
+    }
+
     ReadLiveProbe.Settings probeSettings() {
         String every = probeEvery == null ? "" : probeEvery.trim();
         String dir = probeDir == null ? "" : probeDir.trim();
@@ -134,7 +156,10 @@ class ExecutionService implements DisposableBean {
                 new StoredQuotes(dataSource, null), properties.brokerFunds(), adapters(dataSource,
                 properties.brokerFunds(), kiteSessions, kotakSessions, upstoxSessions, growwSessions,
                 kite == null ? com.autotrade.zerodha.KiteConfig.REAL_API : java.net.URI.create(kite.apiBase()), null,
-                null, probeSettings()));
+                null, probeSettings())).probeOnly(probeAccounts());
+        if (!probeAccounts().isEmpty()) {
+            log.warn("READ_LIVE probe (reads only, no order path) for idle accounts {}", probeAccounts());
+        }
         log.info("execution worker {} serving copy group {} (tenant {}), every {} ms", properties.workerId(),
                 properties.copyGroup(), properties.tenant(), properties.pollMs());
         if (properties.day() != null) {

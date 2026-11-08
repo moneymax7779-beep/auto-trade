@@ -136,6 +136,9 @@ class ReadLiveIT {
         long broker = accounts.ensureFollowerAccount(tenant, owner, "KITE-R" + n, BrokerType.ZERODHA, TradeMode.DRY_RUN,
                 500_000, EquityMode.FIXED, DAY, V6, 100);
         new FanOut(dataSource).subscribe(group, broker, List.of("opening-drive"), 1.0);
+        // the test's clock and the database's differ by up to a second in Docker (LiveIT, 8 Nov 2026)
+        jdbc.update("update acct.strategy_subscription set enabled_at = now() - interval '1 hour' where copy_group_id = ?",
+                group);
         long sessionId = jdbc.queryForObject("insert into trade.session (account, mode, session_date, feed, strategy_id, "
                 + "strategy_hash, configs, code_version, status) values (?, 'PAPER_REPLAY', ?, 'it', 'live-set', 'sha256:it', "
                 + "'{}'::jsonb, 'it', 'DONE') returning id", Long.class, "SIG-R" + n, DAY);

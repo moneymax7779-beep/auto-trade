@@ -38,6 +38,8 @@ services:
       AUTOTRADE_EXECUTION_KEYCLOAK_URL: http://keycloak:8180/auth
       AUTOTRADE_EXECUTION_KEYCLOAK_CLIENT_SECRET: ${AUTOTRADE_EXECUTION_KEYCLOAK_CLIENT_SECRET:-}
       AUTOTRADE_EXECUTION_BROKERS_EGRESS_IPS: ${AUTOTRADE_BROKER_EGRESS_IPS:-}
+      # READ_LIVE probe on idle accounts (reads only; user 8 Nov 2026): 21 = Ravali Kotak Neo 2 (family-satyatrader)
+      AUTOTRADE_READ_LIVE_PROBE_ACCOUNTS: "21"
     volumes:
       - ./.local/kite-secrets:/app/secrets:ro
       - ./.local/broker-sessions:/app/broker-sessions

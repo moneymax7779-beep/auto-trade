@@ -503,4 +503,81 @@ class KotakReadLiveIT {
         assertThat(dryRun.connection().quote(KEY).bid()).isEqualTo(99.5);
         assertThat(kotak.requests()).as("no Kotak call for a quote").isEqualTo(calls);
     }
+
+    // ------------------------------------------------- a member's idle Kotak account keeps a probe (user 8 Nov 2026)
+
+    @Test
+    void anIdleMembersKotakAccountOnTheProbeListReadsTheRealBooksAndNothingElse(@TempDir Path dir) throws Exception {
+        int n = ++seq;
+        AccountStore accounts = new AccountStore(dataSource);
+        long ownerTenant = accounts.ensureTenant("owner-probe" + n);
+        long ownerUser = accounts.ensureUser("kc-owner-probe" + n, "owner");
+        accounts.ensureMembership(ownerTenant, ownerUser, "ADMIN");
+        long signal = accounts.ensureSignalSourceAccount(ownerTenant, ownerUser, "SIG-PR" + n, 500_000, DAY,
+                "config/risk/signal-source.v2.yaml");
+        long group = accounts.ensureCopyGroup(ownerTenant, "PROBE-" + n, signal);
+        long tenant = accounts.ensureTenant("family-probe" + n);
+        long member = accounts.ensureUser("kc-member-probe" + n, "member");
+        accounts.ensureMembership(tenant, member, "OWNER");
+        accounts.shareCopyGroup(group, tenant, ownerUser);
+        jdbc.update("update acct.tenant set trading_control = 'DAILY_SWITCH' where id = ?", tenant);
+        // the member's real Kotak account (PAPER mode, as members' accounts are made) and one not on the list
+        long listed = accounts.createFollowerAccount(tenant, member, "Kotak P" + n, BrokerType.KOTAK_NEO, TradeMode.PAPER,
+                300_000, EquityMode.FIXED, DAY, V7, 0);
+        long unlisted = accounts.createFollowerAccount(tenant, member, "Kotak U" + n, BrokerType.KOTAK_NEO,
+                TradeMode.PAPER, 300_000, EquityMode.FIXED, DAY, V7, 0);
+        for (long a : List.of(listed, unlisted)) {
+            new FanOut(dataSource).subscribe(group, a, List.of("ma-cross"), 1.0);
+            accounts.ensurePaperTwin(a);
+            accounts.syncPaperTwin(a);
+            jdbc.update("insert into acct.broker_session (broker_account_id, token_ref, acquired_at, expires_at, status) "
+                    + "values (?, 'store:kotak-day', now(), now() + interval '1 day', 'ACTIVE')", a);
+        }
+        jdbc.update("update acct.strategy_subscription set enabled_at = now() - interval '1 hour' where copy_group_id = ?",
+                group);
+        jdbc.update("update acct.tenant set default_broker_account_id = ? where id = ?", listed, tenant);
+        // the member's own order at Kotak today (this simulator stands for their Kotak)
+        KotakConfig config = KotakConfig.simulator(kotak.baseUri());
+        try (KotakHttp h = new KotakHttp(config)) {
+            h.session("day-token", "day-sid");
+            new KotakGateway(config, h, new KotakInstruments(List.of(kotak.byKey(KEY).contract())), kotak::book)
+                    .place(new OrderRequest("HAND1", 3000047168L, KEY, SYMBOL, "NSE_FO", OrderSide.BUY, OrderType.LIMIT,
+                            65, 100.2, 0, "HAND1"));
+        }
+        int before = orderCalls();
+        BrokerAccount account = accounts.byId(listed).orElseThrow();
+        assertThat(new TradingDay(dataSource).idle(account)).as("a PAPER day: its entries go to the twin").isTrue();
+        BrokerSessions sessions = a -> session.get();
+        QuoteSource none = (d, u, t, at) -> Double.NaN;
+        try (ExecutionLoop loop = new ExecutionLoop(dataSource, "owner-probe" + n, "PROBE-" + n, "worker-PR", costs, none,
+                1e9, List.of(new ZerodhaDryRunAdapter(dataSource, 1e9, sessions, kotak.baseUri()),
+                new KotakDryRunAdapter(dataSource, 1e9, sessions, new CapturedQuotes(dataSource),
+                        new ReadLiveProbe.Settings(java.time.Duration.ofHours(1), dir))))
+                .probeOnly(java.util.Set.of(listed))) {
+            loop.tick(DAY, 20_000);
+            var detail = probes(account, 1).getFirst();
+            assertThat(detail.path("orders").asInt()).as("the member's real order book was read").isEqualTo(1);
+            assertThat(detail.path("clean").asBoolean()).as(detail.toString()).isTrue();
+            assertThat(status(loop, listed).state()).isEqualTo("IDLE");
+            assertThat(status(loop, listed).lastResult()).contains("READ_LIVE probe only (no order path)");
+            assertThat(status(loop, unlisted).lastResult()).contains("no broker connection");
+            assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? and action = "
+                    + "'READ_LIVE_PROBE'", Integer.class, unlisted)).as("an account not on the list is not read").isZero();
+            loop.tick(DAY, 20_000);
+            assertThat(kotak.requests("scrip")).as("one connection kept across turns").isEqualTo(1);
+            // its session ends: the probe closes and waits for the next login
+            jdbc.update("update acct.broker_session set status = 'EXPIRED' where broker_account_id = ?", listed);
+            loop.tick(DAY, 20_000);
+            assertThat(status(loop, listed).lastResult()).contains("READ_LIVE probe waits for today's login");
+        }
+        assertThat(orderCalls()).as("no place, modify or cancel ever reached Kotak").isEqualTo(before);
+        assertThat(jdbc.queryForObject("select count(*) from exec.account_lease where broker_account_id = ?", Integer.class,
+                listed)).as("an idle account takes no lease").isZero();
+        assertThat(jdbc.queryForObject("select count(*) from exec.order_execution where broker_account_id = ?",
+                Integer.class, listed)).isZero();
+    }
+
+    private static ExecutionLoop.AccountStatus status(ExecutionLoop loop, long accountId) {
+        return loop.status().stream().filter(s -> s.accountId() == accountId).findFirst().orElseThrow();
+    }
 }
