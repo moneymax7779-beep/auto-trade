@@ -91,6 +91,13 @@ public final class ExecutionLoop implements AutoCloseable {
      */
     public ExecutionLoop(DataSource dataSource, String tenant, String copyGroups, String workerId, CostModel costs,
                          QuoteSource quotes, double brokerFunds, BrokerSessions sessions, java.net.URI kiteApiBase) {
+        this(dataSource, tenant, copyGroups, workerId, costs, quotes, brokerFunds,
+                List.of(new ZerodhaDryRunAdapter(dataSource, brokerFunds, sessions, kiteApiBase)));
+    }
+
+    /** @param adapters one order adapter per broker (8 Nov 2026: Kite, then Kotak, Upstox, Groww as each is built) */
+    public ExecutionLoop(DataSource dataSource, String tenant, String copyGroups, String workerId, CostModel costs,
+                         QuoteSource quotes, double brokerFunds, List<BrokerAdapter> adapters) {
         this.dataSource = dataSource;
         this.jdbc = new JdbcTemplate(dataSource);
         this.transactions = new TransactionTemplate(new org.springframework.jdbc.datasource.DataSourceTransactionManager(
@@ -102,8 +109,7 @@ public final class ExecutionLoop implements AutoCloseable {
         this.workerId = workerId;
         this.costs = costs;
         this.quotes = quotes;
-        this.connections = new BrokerConnections(dataSource, brokerFunds,
-                List.of(new ZerodhaDryRunAdapter(dataSource, brokerFunds, sessions, kiteApiBase)));
+        this.connections = new BrokerConnections(dataSource, brokerFunds, adapters);
         this.reconciler = new BrokerReconciler(dataSource, costs);
         this.tradingDay = new TradingDay(dataSource);
     }

@@ -14,12 +14,23 @@ public interface BrokerSessions {
     /** No real sessions: such a route's reads fail as a lost session (entries refused BROKER_SESSION). */
     BrokerSessions NONE = account -> Optional.empty();
 
-    /** An app key and an access token; {@link #toString()} never shows the token. */
-    record Access(String apiKey, String accessToken) {
+    /**
+     * An app key and an access token, plus what else a broker's session carries ({@code extra}: Kotak's sid and base URL;
+     * empty for Kite); {@link #toString()} never shows the token or the extras' values.
+     */
+    record Access(String apiKey, String accessToken, java.util.Map<String, String> extra) {
+
+        public Access {
+            extra = extra == null ? java.util.Map.of() : java.util.Map.copyOf(extra);
+        }
+
+        public Access(String apiKey, String accessToken) {
+            this(apiKey, accessToken, java.util.Map.of());
+        }
 
         @Override
         public String toString() {
-            return "Access[apiKey=" + apiKey + ", accessToken=<redacted>]";
+            return "Access[apiKey=" + apiKey + ", accessToken=<redacted>, extra=" + extra.keySet() + "]";
         }
     }
 

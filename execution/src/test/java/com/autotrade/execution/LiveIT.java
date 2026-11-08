@@ -130,6 +130,9 @@ class LiveIT {
         jdbc.update("update acct.broker_account set credential_profile_id = ?, trade_mode = 'LIVE', "
                 + "live_trading_enabled = ? where id = ?", profile, live, id);
         new FanOut(dataSource).subscribe(group, id, List.of(strategies), 1.0);
+        // the test's clock (decided_at) and the database's (enabled_at) differ by up to a second in Docker: a
+        // subscription made a moment before its decision must not count as made after it (full-suite flake, 8 Nov 2026)
+        jdbc.update("update acct.strategy_subscription set enabled_at = now() - interval '1 hour' where copy_group_id = ?", group);
         return accounts.byId(id).orElseThrow();
     }
 

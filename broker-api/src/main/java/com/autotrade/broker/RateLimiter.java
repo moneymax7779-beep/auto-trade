@@ -1,21 +1,21 @@
-package com.autotrade.zerodha;
+package com.autotrade.broker;
 
 /**
  * At most {@code perSecond} permits in any rolling second. Callers wait for a permit, one at a time (a waiting caller
  * holds the lock, so callers sharing a limiter queue): an account's order limiter has one caller, its lane; the quote
- * limiter of an app is shared by every account and route on that app.
+ * limiter of an app is shared by every account and route on that app. Shared by every broker adapter (8 Nov 2026).
  */
-final class RateLimiter {
+public final class RateLimiter {
 
     private final long[] stamps;
     private int next;
 
-    RateLimiter(int perSecond) {
+    public RateLimiter(int perSecond) {
         this.stamps = new long[perSecond];
         java.util.Arrays.fill(stamps, Long.MIN_VALUE);
     }
 
-    synchronized void acquire() {
+    public synchronized void acquire() {
         long now = System.nanoTime();
         long oldest = stamps[next];
         long wait = oldest == Long.MIN_VALUE ? 0 : oldest + 1_000_000_000L - now;

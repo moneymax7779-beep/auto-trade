@@ -61,7 +61,7 @@ import com.autotrade.execution.TradingDay;
 class WorkspaceController {
 
     /** The brokers this build can trade LIVE (an order adapter with a LIVE route: BrokerConnections). */
-    static final Set<BrokerType> LIVE_BROKERS = Set.of(BrokerType.ZERODHA);
+    static final Set<BrokerType> LIVE_BROKERS = com.autotrade.execution.LiveBrokers.LIVE;
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     private static final DateTimeFormatter HHMM = DateTimeFormatter.ofPattern("HH:mm");
     private static final double MAX_LIMIT = 100_000_000;                 // Rs 10 Cr: a typo guard, not a policy

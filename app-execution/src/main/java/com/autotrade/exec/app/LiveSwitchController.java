@@ -78,7 +78,7 @@ class LiveSwitchController {
         if (body.on()) {
             require(a.displayName().equals(body.confirm()), "type the account's name (" + a.displayName() + ") to confirm");
             require(a.enabled() && a.role().name().equals("FOLLOWER_TRADE"), a.displayName() + " is not an enabled follower");
-            require(a.brokerType() == BrokerType.ZERODHA, "LIVE is built for Zerodha only");
+            require(com.autotrade.execution.LiveBrokers.live(a.brokerType()), a.brokerType() + " has no LIVE order adapter yet");
             require(a.tradeMode() == TradeMode.DRY_RUN, a.displayName() + " is " + a.tradeMode() + ", not DRY_RUN");
             require(a.sizeStepPct() == 0, "the LIVE pilot trades one lot an entry: set the size step to 0 first");
             FollowerRisk risk;
