@@ -22,7 +22,8 @@ import com.autotrade.zerodha.KiteSimulator;
  * <ul>
  *   <li>PAPER, and DRY_RUN on a risk file without order rules (v1, v2): simulated fills ({@link SimulatedVenue}).</li>
  *   <li>DRY_RUN with order rules (v3+): the account's broker adapter ({@link BrokerAdapter}; this build has
- *       {@link ZerodhaDryRunAdapter}: the Kite adapter against a local simulator of its own) under a
+ *       {@link ZerodhaDryRunAdapter}: the Kite adapter against a local simulator of its own; and, when the worker is
+ *       given it, {@link KotakDryRunAdapter}: the Kotak Neo adapter against its own simulator, DRY_RUN only) under a
  *       {@link BrokerVenue}. A broker without an adapter is refused.</li>
  *   <li>LIVE (the Kite pilot, user 2 Nov 2026): only an account the user switched LIVE ({@code live_trading_enabled}),
  *       on a risk file with {@code live} limits (v7+) and order rules, through an adapter that offers LIVE (Zerodha):

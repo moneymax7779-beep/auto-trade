@@ -13,6 +13,19 @@ public final class InstrumentKeys {
     private InstrumentKeys() {
     }
 
+    /** Our capture's token of an exchange key ({@code NSE_FO|47168} = 3,000,047,168); -1 for any other key. */
+    public static long token(String key) {
+        if (key == null || key.indexOf('|') < 0) {
+            return -1;
+        }
+        long offset = key.startsWith("NSE_FO|") ? NSE_FO : key.startsWith("BSE_FO|") ? BSE_FO : -1;
+        try {
+            return offset < 0 ? -1 : offset + Long.parseLong(key.substring(key.indexOf('|') + 1));
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
     /** The exchange key, or the given key unchanged when neither it nor the token says which contract it is. */
     public static String normalize(String key, long token) {
         if (key != null && (key.startsWith("NSE_FO|") || key.startsWith("BSE_FO|"))) {

@@ -12,8 +12,11 @@ public record BrokerCapabilities(boolean stopLimit, boolean modify, int maxOrder
     /** How the adapter learns about order changes. The order book is pulled on a timer in every case. */
     public enum UpdateChannel { IN_PROCESS, WEBSOCKET, POSTBACK, POLLING }
 
-    /** How a session is obtained. */
-    public enum LoginFlow { NONE, DAILY_REQUEST_TOKEN, DAILY_OAUTH }
+    /**
+     * How a session is obtained. DAILY_TOTP_MPIN: the member types the day's TOTP and MPIN on our page (Kotak Neo); they
+     * pass through to the broker once and are never stored.
+     */
+    public enum LoginFlow { NONE, DAILY_REQUEST_TOKEN, DAILY_OAUTH, DAILY_TOTP_MPIN }
 
     /** The L0 shape: an in-process adapter with no funds API, login or IP registration. */
     public BrokerCapabilities(boolean stopLimit, boolean modify, int maxOrdersPerSecond, int tagMaxLength, boolean paper) {

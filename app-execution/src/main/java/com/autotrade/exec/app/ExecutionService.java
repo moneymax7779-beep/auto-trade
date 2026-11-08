@@ -36,22 +36,46 @@ class ExecutionService implements DisposableBean {
     private final DataSource dataSource;
     private final ExecutionProperties properties;
     private final KiteSessionSource kiteSessions;
+    private final KotakSessionSource kotakSessions;
     private final KiteLoginProperties kite;
     private volatile ExecutionLoop loop;
     private volatile java.time.Instant lastTick;
 
     /** Tests: no real broker sessions. */
     ExecutionService(DataSource dataSource, ExecutionProperties properties) {
-        this(dataSource, properties, null, null);
+        this(dataSource, properties, null, null, null);
     }
 
     @org.springframework.beans.factory.annotation.Autowired
     ExecutionService(DataSource dataSource, ExecutionProperties properties, KiteSessionSource kiteSessions,
-                     KiteLoginProperties kite) {
+                     KotakSessionSource kotakSessions, KiteLoginProperties kite) {
         this.dataSource = dataSource;
         this.properties = properties;
         this.kiteSessions = kiteSessions;
+        this.kotakSessions = kotakSessions;
         this.kite = kite;
+    }
+
+    /**
+     * One order adapter per broker (8 Nov 2026): Zerodha (DRY_RUN and the LIVE pilot, unchanged) and Kotak Neo (DRY_RUN
+     * only: its {@code live()} is null and it is not in LiveBrokers). Each reads its own accounts' sessions.
+     */
+    static java.util.List<com.autotrade.execution.BrokerAdapter> adapters(DataSource dataSource, double brokerFunds,
+                                                                         KiteSessionSource kiteSessions,
+                                                                         KotakSessionSource kotakSessions,
+                                                                         java.net.URI kiteApiBase) {
+        java.util.Map<com.autotrade.account.BrokerType, com.autotrade.execution.BrokerSessions> byBroker =
+                new java.util.EnumMap<>(com.autotrade.account.BrokerType.class);
+        if (kiteSessions != null) {
+            byBroker.put(com.autotrade.account.BrokerType.ZERODHA, kiteSessions);
+        }
+        if (kotakSessions != null) {
+            byBroker.put(com.autotrade.account.BrokerType.KOTAK_NEO, kotakSessions);
+        }
+        com.autotrade.execution.BrokerSessions sessions = new BrokerSessionRouter(byBroker);
+        return java.util.List.of(
+                new com.autotrade.execution.ZerodhaDryRunAdapter(dataSource, brokerFunds, sessions, kiteApiBase),
+                new com.autotrade.execution.KotakDryRunAdapter(dataSource, brokerFunds, sessions));
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -64,9 +88,9 @@ class ExecutionService implements DisposableBean {
         }
         CostModel costs = CostModel.from(ThresholdConfig.load(Path.of(properties.costsFile())));
         loop = new ExecutionLoop(dataSource, properties.tenant(), properties.copyGroup(), properties.workerId(), costs,
-                new StoredQuotes(dataSource, null), properties.brokerFunds(),
-                kiteSessions == null ? com.autotrade.execution.BrokerSessions.NONE : kiteSessions,
-                kite == null ? com.autotrade.zerodha.KiteConfig.REAL_API : java.net.URI.create(kite.apiBase()));
+                new StoredQuotes(dataSource, null), properties.brokerFunds(), adapters(dataSource,
+                properties.brokerFunds(), kiteSessions, kotakSessions,
+                kite == null ? com.autotrade.zerodha.KiteConfig.REAL_API : java.net.URI.create(kite.apiBase())));
         log.info("execution worker {} serving copy group {} (tenant {}), every {} ms", properties.workerId(),
                 properties.copyGroup(), properties.tenant(), properties.pollMs());
         if (properties.day() != null) {

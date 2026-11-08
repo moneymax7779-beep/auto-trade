@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <modelVersion>4.0.0</modelVersion>
+    <parent>
+        <groupId>com.autotrade</groupId>
+        <artifactId>autotrade-parent</artifactId>
+        <version>0.1.0-SNAPSHOT</version>
+    </parent>
+    <artifactId>broker-kotak</artifactId>
+    <description>Kotak Neo Trade API adapter (live adapters plan step B1, 8 Nov 2026): orders with our tag in `ig`, the
+        order, trade and position books, limits, the scrip master; and a local Kotak simulator with fault injection for
+        DRY_RUN and tests. DRY_RUN only in this build: no LIVE connection exists. No SDK: plain HTTP (java.net.http) and
+        Jackson.</description>
+    <dependencies>
+        <dependency><groupId>com.autotrade</groupId><artifactId>broker-api</artifactId></dependency>
+        <dependency><groupId>tools.jackson.core</groupId><artifactId>jackson-databind</artifactId></dependency>
+        <dependency><groupId>org.slf4j</groupId><artifactId>slf4j-api</artifactId></dependency>
+    </dependencies>
+</project>

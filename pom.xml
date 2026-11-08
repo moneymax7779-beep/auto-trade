@@ -36,6 +36,7 @@
         <module>marketdata-live</module>
         <module>broker-upstox</module>
         <module>broker-zerodha</module>
+        <module>broker-kotak</module>
         <module>account</module>
         <module>execution</module>
         <module>app-trading-core</module>
@@ -144,6 +145,11 @@
             <dependency>
                 <groupId>com.autotrade</groupId>
                 <artifactId>broker-zerodha</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.autotrade</groupId>
+                <artifactId>broker-kotak</artifactId>
                 <version>${project.version}</version>
             </dependency>
             <dependency>
