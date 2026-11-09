@@ -12,7 +12,17 @@ export function isPrimaryLive(row: { mode: string; account?: string }): boolean 
 
 export async function get<T>(path: string): Promise<T> {
   const response = await fetch(path);
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText} for ${path}`);
+  if (!response.ok) {
+    // the server's reason when it sent one (a 409 refusal says why), as postJson does (code review 9 Nov 2026)
+    let reason = "";
+    try {
+      const body = (await response.json()) as Json;
+      reason = (body?.message as string) || (body?.error as string) || "";
+    } catch {
+      reason = "";
+    }
+    throw new Error(`${response.status} ${reason || response.statusText} for ${path}`);
+  }
   return (await response.json()) as T;
 }
 

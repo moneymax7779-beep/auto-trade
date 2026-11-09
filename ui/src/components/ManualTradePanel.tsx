@@ -21,6 +21,8 @@ interface ManualAccount {
   canBuy: boolean;
   canExit: boolean;
   liveBlocked: string | null;
+  /** a daily-switch workspace account that does not take entries now (why) */
+  blocked?: string | null;
   lots: number;
   open: { id: number; underlying: string; side: string; symbol: string; quantity: number; entry: number }[];
 }
@@ -37,7 +39,7 @@ interface ManualQuote {
   lotSize: number;
   bid: number;
   ask: number;
-  spreadPct: number;
+  spreadPct: number | null;
   candidates: Candidate[];
 }
 
@@ -65,21 +67,6 @@ interface ManualDetail extends ManualAccount {
 
 const INDICES = ["NIFTY", "SENSEX"] as const;
 
-/** A GET whose refusal (409 with the server's reason) reaches the trader, as postJson's does. */
-async function getWithReason<T>(path: string): Promise<T> {
-  const response = await fetch(path);
-  const text = await response.text();
-  let parsed: Record<string, unknown> | null = null;
-  try {
-    parsed = text ? (JSON.parse(text) as Record<string, unknown>) : null;
-  } catch {
-    parsed = null;
-  }
-  if (!response.ok) {
-    throw new Error(`${response.status}: ${(parsed?.message as string) || (parsed?.error as string) || response.statusText}`);
-  }
-  return parsed as T;
-}
 const px = (v: number | null | undefined) => (v == null || !Number.isFinite(v) ? "–" : v.toFixed(2));
 const hhmmss = (iso: string | null | undefined) => (iso ? iso.slice(11, 19) : "–");
 const btn = "rounded-md border px-4 py-2 text-sm font-semibold disabled:cursor-not-allowed disabled:opacity-40";
@@ -87,8 +74,8 @@ const btn = "rounded-md border px-4 py-2 text-sm font-semibold disabled:cursor-n
 const working = (o: ManualOrderRow) => o.state === "CREATED";
 
 function modeBadge(mode: string) {
-  const cls = mode === "LIVE" ? "bg-rose-600 text-white" : mode === "DRY_RUN" ? "bg-amber-100 text-amber-900"
-    : "bg-slate-100 text-slate-700";
+  const cls = mode === "LIVE" ? "bg-rose-600 text-white" : mode === "DRY_RUN" ? "bg-warn/15 text-warn"
+    : "bg-panel-2 text-muted";
   return <span className={`rounded px-1.5 py-0.5 text-xs font-bold ${cls}`}>{mode === "LIVE" ? "LIVE · real money" : mode}</span>;
 }
 
@@ -113,13 +100,13 @@ export function ManualTradePanel() {
         <div className="flex flex-wrap items-center gap-2 text-sm">
           <label className="flex items-center gap-1.5 text-xs text-muted">Account
             <select value={accountId} onChange={(e) => setPicked(Number(e.target.value))}
-              className="rounded border border-line bg-white px-2 py-1 text-sm text-text">
+              className="rounded border border-line bg-bg px-2 py-1 text-sm text-text">
               {usable.map((a) => <option key={a.id} value={a.id}>{a.name} · {a.broker} · {a.mode}</option>)}
             </select></label>
           <div className="flex overflow-hidden rounded border border-line">
             {INDICES.map((u) => (
               <button key={u} onClick={() => setIndex(u)}
-                className={`px-3 py-1 text-xs font-semibold ${index === u ? "bg-accent text-white" : "bg-white text-muted"}`}>{u}</button>
+                className={`px-3 py-1 text-xs font-semibold ${index === u ? "bg-accent text-white" : "bg-bg text-muted"}`}>{u}</button>
             ))}
           </div>
         </div>
@@ -143,7 +130,7 @@ function ManualAccountView({ accountId, index }: { accountId: number; index: str
     client.invalidateQueries({ queryKey: ["manual-accounts"] });
   };
   const quote = useMutation({
-    mutationFn: (side: "CE" | "PE") => getWithReason<ManualQuote>(
+    mutationFn: (side: "CE" | "PE") => get<ManualQuote>(
       `/api/execution/accounts/${accountId}/manual/quote?underlying=${index}&side=${side}`),
     onSuccess: (q, side) => setConfirm({ kind: "BUY", side, quote: q }),
   });
@@ -167,7 +154,7 @@ function ManualAccountView({ accountId, index }: { accountId: number; index: str
   const live = a.mode === "LIVE";
   const openHere = a.open.filter((p) => p.underlying === index);
   const pending = a.orders.some((o) => o.underlying === index && working(o));
-  const buyBlocked = !a.canBuy ? "your role cannot buy on this account" : live && a.liveBlocked ? `LIVE buy blocked: ${a.liveBlocked}`
+  const buyBlocked = !a.canBuy ? "your role cannot buy on this account" : a.blocked ? a.blocked : live && a.liveBlocked ? `LIVE buy blocked: ${a.liveBlocked}`
     : a.killSwitch ? `kill switch engaged: ${a.killSwitch}` : openHere.length > 0 ? `holds ${openHere[0].symbol}: EXIT it first`
     : pending ? "a buy is still working" : null;
   const busy = quote.isPending || buy.isPending || exit.isPending;
@@ -183,7 +170,7 @@ function ManualAccountView({ accountId, index }: { accountId: number; index: str
           onClick={() => { setNote(null); buy.reset(); quote.mutate("CE"); }}>BUY {index} CE</button>
         <button className={`${btn} border-rose-600 bg-rose-600 text-white hover:bg-rose-700`} disabled={busy || !!buyBlocked}
           onClick={() => { setNote(null); buy.reset(); quote.mutate("PE"); }}>BUY {index} PE</button>
-        <button className={`${btn} border-slate-500 bg-white text-slate-800 hover:bg-slate-50`}
+        <button className={`${btn} border-line bg-bg text-text hover:bg-panel-2`}
           disabled={busy || !a.canExit || (openHere.length === 0 && !pending)}
           onClick={() => { setNote(null); exit.reset(); setConfirm({ kind: "EXIT" }); }}>EXIT {index}</button>
         {quote.isPending && <span className="text-sm text-muted">Finding the best ATM…</span>}
@@ -192,11 +179,11 @@ function ManualAccountView({ accountId, index }: { accountId: number; index: str
       {quote.error && <p className="text-sm text-down">No contract to buy: {(quote.error as Error).message}</p>}
 
       {confirm?.kind === "BUY" && (
-        <div className={`space-y-2 rounded-md border px-3 py-2 text-sm ${live ? "border-rose-400 bg-rose-50" : "border-line bg-panel-2"}`}>
+        <div className={`space-y-2 rounded-md border px-3 py-2 text-sm ${live ? "border-down/60 bg-down/10" : "border-line bg-panel-2"}`}>
           <div>
-            {live && <b className="text-rose-700">REAL ORDER at {a.broker}. </b>}
+            {live && <b className="text-down">REAL ORDER at {a.broker}. </b>}
             Buy <b>{a.lots} lot · {a.lots * confirm.quote.lotSize} qty</b> of <b>{confirm.quote.symbol}</b> on <b>{a.name}</b> ({a.mode})
-            {" "}at about ₹{px(confirm.quote.ask)} (bid {px(confirm.quote.bid)}, spread {confirm.quote.spreadPct.toFixed(1)} %,
+            {" "}at about ₹{px(confirm.quote.ask)} (bid {px(confirm.quote.bid)}, spread {confirm.quote.spreadPct == null ? "–" : confirm.quote.spreadPct.toFixed(1)} %,
             {" "}spot {confirm.quote.spot.toLocaleString("en-IN")}) — about ₹{Math.round(a.lots * confirm.quote.lotSize * confirm.quote.ask).toLocaleString("en-IN")} premium.
           </div>
           <div className="text-xs text-muted">
@@ -209,16 +196,16 @@ function ManualAccountView({ accountId, index }: { accountId: number; index: str
             <button className={`${btn} ${live ? "border-rose-700 bg-rose-700" : "border-accent bg-accent"} text-white`} disabled={buy.isPending}
               onClick={() => buy.mutate({ underlying: confirm.quote.underlying, side: confirm.side, symbol: confirm.quote.symbol, live })}>
               {buy.isPending ? "Sending…" : live ? `Confirm BUY ${confirm.side} LIVE` : `Confirm BUY ${confirm.side}`}</button>
-            <button className={`${btn} border-line bg-white`} disabled={buy.isPending} onClick={() => setConfirm(null)}>Cancel</button>
+            <button className={`${btn} border-line bg-bg text-text`} disabled={buy.isPending} onClick={() => setConfirm(null)}>Cancel</button>
           </div>
           {buy.error && <p className="text-down">Not bought: {(buy.error as Error).message}</p>}
         </div>
       )}
 
       {confirm?.kind === "EXIT" && (
-        <div className={`space-y-2 rounded-md border px-3 py-2 text-sm ${live ? "border-rose-400 bg-rose-50" : "border-line bg-panel-2"}`}>
+        <div className={`space-y-2 rounded-md border px-3 py-2 text-sm ${live ? "border-down/60 bg-down/10" : "border-line bg-panel-2"}`}>
           <div>
-            {live && <b className="text-rose-700">REAL ORDER at {a.broker}. </b>}
+            {live && <b className="text-down">REAL ORDER at {a.broker}. </b>}
             {openHere.length > 0
               ? <>Sell {openHere.map((p) => <b key={p.id}>{p.quantity} {p.symbol} </b>)}on <b>{a.name}</b> ({a.mode}) now? Its stop comes off first.</>
               : <>Cancel the {index} buy on <b>{a.name}</b> if it has not been sent; anything it bought is sold.</>}
@@ -226,7 +213,7 @@ function ManualAccountView({ accountId, index }: { accountId: number; index: str
           <div className="flex flex-wrap gap-2">
             <button className={`${btn} border-rose-600 bg-rose-600 text-white`} disabled={exit.isPending}
               onClick={() => exit.mutate()}>{exit.isPending ? "Exiting…" : "Confirm EXIT"}</button>
-            <button className={`${btn} border-line bg-white`} disabled={exit.isPending} onClick={() => setConfirm(null)}>Cancel</button>
+            <button className={`${btn} border-line bg-bg text-text`} disabled={exit.isPending} onClick={() => setConfirm(null)}>Cancel</button>
           </div>
           {exit.error && <p className="text-down">Not exited: {(exit.error as Error).message}</p>}
         </div>

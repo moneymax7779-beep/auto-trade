@@ -167,6 +167,8 @@ class ManualTradeController {
             }
         }
         v.put("liveBlocked", why);
+        // a DAILY_SWITCH workspace's account that does not take entries now: shown before the trader clicks
+        v.put("blocked", new ManualOrders(jdbc.getDataSource()).notEntryTarget(a, service.day()));
         v.put("lots", ManualOrders.LOTS);
         v.put("open", jdbc.queryForList("select id, underlying, option_side side, symbol, quantity_open quantity, "
                 + "average_entry entry from exec.position where broker_account_id = ? and strategy_id = ? and status <> "
@@ -193,7 +195,7 @@ class ManualTradeController {
         out.put("lotSize", p.chosen().lotSize());
         out.put("bid", p.chosen().bid());
         out.put("ask", p.chosen().ask());
-        out.put("spreadPct", p.chosen().spreadPct());
+        out.put("spreadPct", Double.isNaN(p.chosen().spreadPct()) ? null : p.chosen().spreadPct());
         List<Map<String, Object>> candidates = new ArrayList<>();
         for (ManualOrders.Candidate c : p.candidates()) {
             Map<String, Object> m = new LinkedHashMap<>();

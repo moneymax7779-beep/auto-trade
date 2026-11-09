@@ -398,6 +398,46 @@ class ManualOrdersIT {
                 s.account().id())).isZero();
     }
 
+    /**
+     * Code review 9 Nov 2026: in a DAILY_SWITCH workspace only the entry account takes a buy, refused before anything is
+     * written (idle() let other accounts through and the turn then rejected the written buy as TARGET_CHANGED).
+     */
+    @Test
+    void inADailySwitchWorkspaceOnlyTheEntryAccountTakesABuy() {
+        Setup s = setup(BrokerType.PAPER, TradeMode.PAPER, V3);
+        AccountStore accounts = new AccountStore(dataSource);
+        long otherId = accounts.ensureFollowerAccount(s.tenant(), s.account().appUserId(), "MAN-OTHER-" + seq,
+                BrokerType.PAPER, TradeMode.PAPER, 200_000, EquityMode.FIXED, DAY, V3, 100);
+        new FanOut(dataSource).subscribe(s.group(), otherId, List.of("ma-cross"), 1.0);
+        BrokerAccount other = accounts.byId(otherId).orElseThrow();
+        jdbc.update("update acct.tenant set trading_control = 'DAILY_SWITCH' where id = ?", s.tenant());
+        String ce = best("CE");
+
+        // nothing chosen today: trading is Off, no account takes a buy
+        assertThatThrownBy(() -> manual().buy(s.account(), s.group(), "NIFTY", "CE", ce, "kc", DAY))
+                .hasMessageContaining("trading is Off today");
+        // the first account chosen (PAPER): the other one is refused, naming where entries go
+        new TradingDay(dataSource).append(s.tenant(), s.account().id(), TradingDay.Mode.PAPER, "TODAYS_BROKER", null);
+        assertThatThrownBy(() -> manual().buy(other, s.group(), "NIFTY", "CE", ce, "kc", DAY))
+                .hasMessageContaining("entries go to " + s.account().displayName());
+        assertThat(jdbc.queryForObject("select count(*) from exec.trade_intent where broker_account_id = ?", Long.class,
+                other.id())).isZero();
+        assertThat(manual().notEntryTarget(s.account(), DAY)).isNull();
+        ManualOrders.Placed placed = manual().buy(s.account(), s.group(), "NIFTY", "CE", ce, "kc", DAY);
+        assertThat(intentState(placed.intentId())).isEqualTo("CREATED");
+    }
+
+    /** A locked book (bid = ask) has spread 0 and can be bought; it never reaches the page as NaN. */
+    @Test
+    void aLockedBookHasSpreadZero() {
+        quote(23150, "CE", MORNING.instant().minusSeconds(1), 80.00, 80.00);
+        ManualOrders.Candidate locked = manual().pick("NIFTY", "CE", DAY).candidates().stream()
+                .filter(c -> c.strike() == 23150).findFirst().orElseThrow();
+        assertThat(locked.refusal()).isNull();
+        assertThat(locked.spreadPct()).isZero();
+        assertThat(manual().pick("NIFTY", "CE", DAY).chosen().symbol()).isEqualTo("NIFTY 23150 CE");
+    }
+
     @Test
     void aLiveBuyOnKiteSendsTheEntryAndItsStopAndExitSellsIt() {
         Setup s = setup(BrokerType.ZERODHA, TradeMode.LIVE, V8);

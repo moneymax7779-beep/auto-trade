@@ -574,21 +574,26 @@ public final class ExecutionLoop implements AutoCloseable {
         }
         String u = underlying == null || underlying.isBlank() ? null : underlying.trim().toUpperCase(java.util.Locale.ROOT);
         FollowerRisk risk = risks.computeIfAbsent(account.id(), id -> FollowerRisk.load(Path.of(account.riskFile())));
-        BrokerConnections.Route route = connections.route(account, risk);
         try {
             return onLane(account, (epoch, borrowed) -> {
                 List<String> lines = new ArrayList<>();
                 lines.addAll(manual().cancelNotRun(account, u, actor));
                 List<Long> open = manual().openPositions(account.id(), u);
-                if (!open.isEmpty() && route.venue() == null) {
+                if (open.isEmpty()) {
+                    // code review 9 Nov 2026: no broker route is opened for nothing to sell (an idle workspace account
+                    // has none by design, and a route that cannot open was a 500 instead of this answer)
+                    if (lines.isEmpty()) {
+                        lines.add("no manual " + (u == null ? "" : u + " ") + "position or buy to exit");
+                    }
+                    return lines;
+                }
+                BrokerConnections.Route route = connections.route(account, risk);
+                if (route.venue() == null) {
                     lines.add("not exited: " + route.description());
                     return lines;
                 }
                 for (long positionId : open) {
                     lines.addAll(flattenHere(account, risk, route, epoch, borrowed, day, "TRADER_EXIT", positionId));
-                }
-                if (lines.isEmpty()) {
-                    lines.add("no manual " + (u == null ? "" : u + " ") + "position or buy to exit");
                 }
                 return lines;
             });

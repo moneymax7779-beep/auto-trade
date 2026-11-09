@@ -190,7 +190,7 @@ public final class ManualOrders {
         double ask = r.get("ask") == null ? 0 : ((Number) r.get("ask")).doubleValue();
         long askQty = ((Number) r.get("ask_qty")).longValue();
         Instant at = ((Timestamp) r.get("recv_ts")).toInstant();
-        double spread = bid > 0 && ask > bid ? 100 * (ask - bid) / ((ask + bid) / 2) : Double.NaN;
+        double spread = bid > 0 && ask >= bid ? 100 * (ask - bid) / ((ask + bid) / 2) : Double.NaN;   // locked book: 0
         String refusal = null;
         if (held.containsKey(token)) {
             refusal = "held by this account's " + held.get(token);
@@ -257,8 +257,9 @@ public final class ManualOrders {
             throw new IllegalArgumentException("manual buys only from " + FIRST_BUY + " to " + LAST_BUY
                     + " IST (square-off 15:20)");
         }
-        if (tradingDay.idle(account)) {
-            throw new IllegalArgumentException(account.displayName() + " is not today's trading account of its workspace");
+        String notTarget = notEntryTarget(account, day);
+        if (notTarget != null) {
+            throw new IllegalArgumentException(notTarget);
         }
         if (expectedSymbol == null || expectedSymbol.isBlank()) {
             // review 9 Nov 2026: never "whatever is best now" unseen; the trader confirms the contract
@@ -319,6 +320,27 @@ public final class ManualOrders {
         audit.put("spot", round(pick.spot()));
         kills.audit(account, actor, "MANUAL_BUY", audit);
         return new Placed(ids[0], ids[1], pick, quantity, account.tradeMode().name());
+    }
+
+    /**
+     * A DAILY_SWITCH workspace takes entries only on its entry target now (the chosen paper account, or the chosen
+     * broker's paper twin unless the day is LIVE there): any other of its accounts is refused here, before anything is
+     * written (code review 9 Nov 2026: {@code idle} let a twin on a LIVE day, or a real account still holding a position
+     * on a PAPER day, through, and the turn then rejected the written buy as TARGET_CHANGED). Null = may take a buy.
+     * Replayed days (another date than today) are left alone, as {@link FollowerSimulator} does.
+     */
+    public String notEntryTarget(BrokerAccount account, LocalDate day) {
+        if (!day.equals(TradingDay.today()) || !tradingDay.dailySwitch(account.tenantId())) {
+            return null;
+        }
+        Long target = tradingDay.entryTargetNow(account.tenantId());
+        if (Long.valueOf(account.id()).equals(target)) {
+            return null;
+        }
+        String name = target == null ? null : jdbc.queryForList("select display_name from acct.broker_account where id = ?",
+                String.class, target).stream().findFirst().orElse(String.valueOf(target));
+        return account.displayName() + " is not its workspace's entry account now (" + (name == null
+                ? "trading is Off today" : "entries go to " + name) + "): nothing sent";
     }
 
     /**
