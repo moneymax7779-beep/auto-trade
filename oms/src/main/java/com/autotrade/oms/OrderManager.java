@@ -53,6 +53,11 @@ import com.autotrade.strategy.PositionView;
  *       with the combined premium paid, and both legs are closed at the target or the stop. A leg
  *       whose entry does not fill is re-priced at the new ask every exit-chase interval (up to the
  *       exit-chase limit); a leg that never fills closes the other leg, so no naked leg is kept.</li>
+ *   <li>A-358 (PAPER only): {@link #enterShortStraddle} sells a call and a put to open. Every short branch keys on
+ *       {@link ManagedPosition#direction} == SHORT: the entry is a SELL limit at the bid minus the entry buffer, the
+ *       risk file's short margin is the capital in use, the pair is bought back when its combined ask reaches the stop
+ *       above the combined credit, exits are BUY limits at the ask plus the exit buffer, and settlement buys back at
+ *       intrinsic value. The long path is unchanged.</li>
  * </ul>
  */
 public final class OrderManager implements Consumer<OrderUpdate> {
@@ -64,8 +69,15 @@ public final class OrderManager implements Consumer<OrderUpdate> {
     private record Role(ManagedPosition position, String role) {
     }
 
-    /** A straddle's combined exit: fractions above / below the combined premium paid. */
-    private record Bracket(double target, double stop) {
+    /**
+     * A straddle's combined exit: fractions above / below the combined premium paid. {@code shortLegs} (A-358): the legs
+     * were sold, so the stop is the combined ask {@code stop} above the credit and the target (if any) the ask
+     * {@code target} below it.
+     */
+    private record Bracket(double target, double stop, boolean shortLegs) {
+        Bracket(double target, double stop) {
+            this(target, stop, false);
+        }
     }
 
     private final String account;
@@ -142,7 +154,8 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         for (ManagedPosition leg : held) {
             double[] legQuote = lastQuotes.get(leg.contract.token());
             legs.add(new PositionView.Leg(leg.side, leg.contract.strike(), leg.quantity, leg.averageCost,
-                    legQuote == null || !(legQuote[0] > 0) ? Double.NaN : legQuote[0]));
+                    legQuote == null || !(legQuote[0] > 0) ? Double.NaN : legQuote[0],
+                    legQuote == null || !(legQuote[1] > 0) ? Double.NaN : legQuote[1]));
         }
         return new PositionView(true, position.side, position.lots(), position.averageCost, position.openedAt, bid,
                 closedToday, valueRatio(held), List.copyOf(legs));
@@ -151,7 +164,8 @@ public final class OrderManager implements Consumer<OrderUpdate> {
     /**
      * Exchange cash settlement of an option expiring today at {@code price} (its intrinsic value) for every live position
      * in it, when the broker settles itself (the paper broker; a real broker's are settled by the exchange): the
-     * position's working sells fill at that price, or one is placed first, and it closes as {@code EXPIRY_SETTLEMENT}.
+     * position's working sells (a short's working buys, A-358) fill at that price, or one is placed first, and it closes
+     * as {@code EXPIRY_SETTLEMENT}.
      */
     public synchronized void settleAtExpiry(long token, double price) {
         if (!(broker instanceof ExpirySettlement settlement)) {
@@ -173,7 +187,10 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         }
     }
 
-    /** What {@code legs} are worth at their bids over what they cost; NaN while any leg is not fully open or unquoted. */
+    /**
+     * What {@code legs} are worth at their bids over what they cost (short legs, A-358: what buying them back at the
+     * asks costs over the credit received); NaN while any leg is not fully open or unquoted.
+     */
     private double valueRatio(List<ManagedPosition> legs) {
         double paid = 0;
         double value = 0;
@@ -183,9 +200,9 @@ public final class OrderManager implements Consumer<OrderUpdate> {
                 return Double.NaN;
             }
             double[] quote = lastQuotes.get(leg.contract.token());
-            double bid = quote != null ? quote[0] : leg.lastBid;
+            double mark = leg.isShort() ? (quote != null ? quote[1] : leg.lastAsk) : (quote != null ? quote[0] : leg.lastBid);
             paid += leg.averageCost * leg.quantity;
-            value += bid * leg.quantity;
+            value += mark * leg.quantity;
         }
         return paid > 0 && value >= 0 ? value / paid : Double.NaN;
     }
@@ -273,6 +290,58 @@ public final class OrderManager implements Consumer<OrderUpdate> {
             buy(leg, lots, stage);
         }
         brackets.put(key(strategyId, underlying), new Bracket(targetPct / 100.0, stopPct / 100.0));
+        return decision;
+    }
+
+    /**
+     * A-358 (PAPER only): sells {@code lots} of a call and a put together for {@code strategyId}, each as a SELL limit at
+     * the bid minus the entry buffer. The risk file must allow shorts ({@code shorts.margin_per_lot}, {@code shorts.max_lots});
+     * {@code lots} x the margin per lot is the capital this position ties up (the capital check and every later entry's
+     * free capital count it). Neither leg gets a resting stop; the pair is bought back when its combined ask reaches
+     * {@code stopPct} above the combined credit (checked on every quote). No target: the strategy exits it, or it settles.
+     */
+    public synchronized RiskDecision enterShortStraddle(String strategyId, String underlying, Contract call, Contract put,
+                                                        int lots, String stage, MarketContext market, double stopPct) {
+        if (!positionsOf(strategyId, underlying).isEmpty()) {
+            return reject(strategyId, underlying, "SELL STRADDLE", strategyId + " already holds a position in "
+                    + underlying);
+        }
+        if (!limits.shortsAllowed()) {
+            return reject(strategyId, underlying, "SELL STRADDLE",
+                    "short selling is not enabled: the risk file has no shorts.margin_per_lot / shorts.max_lots");
+        }
+        if (lots < 1 || lots > limits.maxShortLots()) {
+            return reject(strategyId, underlying, "SELL STRADDLE", String.format(
+                    "%d lots short is over the risk file's shorts.max_lots %d", lots, limits.maxShortLots()));
+        }
+        if (!(stopPct > 0)) {
+            return reject(strategyId, underlying, "SELL STRADDLE", "a short straddle needs a stop above its credit");
+        }
+        double callBid = bidOf(call);
+        double putBid = bidOf(put);
+        if (!(callBid > 0) || !(putBid > 0)) {
+            return reject(strategyId, underlying, "SELL STRADDLE", "no bid for " + call.symbol() + " / " + put.symbol());
+        }
+        double margin = lots * limits.shortMarginPerLot();
+        Instant openedAt = clock.get();                     // one instant for both legs: risk v13 counts the pair as one trade
+        int held = lotsHeld(underlying);
+        RiskDecision decision = riskCheck(strategyId, underlying, false, lots, held, call, market, null, margin, live.size());
+        if (decision.approved()) {
+            decision = riskCheck(strategyId, underlying, false, lots, held + lots, put, market, null, 0, live.size() + 1);
+        }
+        if (!decision.approved()) {
+            return reject(strategyId, underlying, "SELL STRADDLE", decision.reason());
+        }
+        for (Contract contract : List.of(call, put)) {
+            OptionSide side = contract == call ? OptionSide.CE : OptionSide.PE;
+            ManagedPosition leg = new ManagedPosition(strategyId, underlying, side, contract, openedAt, side.name());
+            leg.direction = ManagedPosition.Direction.SHORT;
+            leg.margin = margin / 2;                       // the pair ties up the margin; each leg carries half
+            leg.stopFraction = 0;
+            live.put(leg.key(), leg);
+            sell(leg, lots, stage);
+        }
+        brackets.put(key(strategyId, underlying), new Bracket(Double.NaN, stopPct / 100.0, true));
         return decision;
     }
 
@@ -373,9 +442,9 @@ public final class OrderManager implements Consumer<OrderUpdate> {
             if (strategyId != null && !strategyId.equals(position.strategy)) {
                 continue;
             }
-            // while entries work, what they asked for; afterwards what was actually paid
-            total += working(position.entryOrders).isEmpty() ? position.averageCost * position.quantity
-                    : position.premiumInUse();
+            // while entries work, what they asked for; afterwards what was actually paid; a short: its margin
+            total += position.isShort() || !working(position.entryOrders).isEmpty() ? position.premiumInUse()
+                    : position.averageCost * position.quantity;
         }
         return total;
     }
@@ -385,8 +454,8 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         double total = 0;
         for (ManagedPosition position : live.values()) {
             if (underlying.test(position.underlying)) {
-                total += working(position.entryOrders).isEmpty() ? position.averageCost * position.quantity
-                        : position.premiumInUse();
+                total += position.isShort() || !working(position.entryOrders).isEmpty() ? position.premiumInUse()
+                        : position.averageCost * position.quantity;
             }
         }
         return total;
@@ -415,6 +484,11 @@ public final class OrderManager implements Consumer<OrderUpdate> {
     private double askOf(Contract contract) {
         double[] quote = lastQuotes.get(contract.token());
         return quote != null ? quote[1] : Double.NaN;
+    }
+
+    private double bidOf(Contract contract) {
+        double[] quote = lastQuotes.get(contract.token());
+        return quote != null ? quote[0] : Double.NaN;
     }
 
     /** Lots every strategy holds in {@code underlying} (the per-underlying risk limit is shared). */
@@ -471,8 +545,15 @@ public final class OrderManager implements Consumer<OrderUpdate> {
                 continue;
             }
             Bracket bracket = entry.getValue();
-            String reason = ratio >= 1 + bracket.target() ? "TARGET_" + Math.round(bracket.target() * 100)
-                    : ratio <= 1 - bracket.stop() ? "STOP_" + Math.round(bracket.stop() * 100) : null;
+            String reason;
+            if (bracket.shortLegs()) {                       // A-358: the asks rose against the credit (stop) or fell (target)
+                reason = ratio >= 1 + bracket.stop() ? "STOP_" + Math.round(bracket.stop() * 100)
+                        : Double.isFinite(bracket.target()) && ratio <= 1 - bracket.target()
+                        ? "TARGET_" + Math.round(bracket.target() * 100) : null;
+            } else {
+                reason = ratio >= 1 + bracket.target() ? "TARGET_" + Math.round(bracket.target() * 100)
+                        : ratio <= 1 - bracket.stop() ? "STOP_" + Math.round(bracket.stop() * 100) : null;
+            }
             if (reason != null) {
                 brackets.remove(entry.getKey());
                 for (ManagedPosition leg : legs) {
@@ -561,14 +642,24 @@ public final class OrderManager implements Consumer<OrderUpdate> {
             }
             return;
         }
-        double ask = askOf(position.contract);
-        if (!(ask > 0)) {
-            return;
+        double limit;
+        if (position.isShort()) {                            // A-358: a sold leg chases the bid downwards
+            double bid = bidOf(position.contract);
+            if (!(bid > 0)) {
+                return;
+            }
+            position.entryChases++;
+            limit = position.contract.roundDown(position.entryChases == limits.exitChaseMax() ? bid * 0.98
+                    : bid - limits.entryBufferTicks() * position.contract.tickSize());
+        } else {
+            double ask = askOf(position.contract);
+            if (!(ask > 0)) {
+                return;
+            }
+            position.entryChases++;
+            limit = position.contract.roundUp(position.entryChases == limits.exitChaseMax() ? ask * 1.02
+                    : ask + limits.entryBufferTicks() * position.contract.tickSize());
         }
-        position.entryChases++;
-        double limit = position.entryChases == limits.exitChaseMax() ? ask * 1.02
-                : ask + limits.entryBufferTicks() * position.contract.tickSize();
-        limit = position.contract.roundUp(limit);
         for (String id : entries) {
             broker.modify(id, position.orderQuantity.getOrDefault(id, 0L), limit, 0);
             position.orderSentAt.put(id, now);
@@ -593,12 +684,14 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         if (delta > 0) {
             position.orderFilled.put(update.clientOrderId(), update.filledQuantity());
             double price = update.lastFillPrice();
+            boolean shortLeg = position.isShort();           // A-358: an entry sells and an exit buys back
             if (role.role().equals("ENTRY")) {
                 position.averageCost = (position.averageCost * position.quantity + price * delta)
                         / (position.quantity + delta);
                 position.quantity += delta;
                 position.boughtQuantity += delta;
-                position.costs += costs.costs(session, position.contract.exchange(), Side.BUY, price, delta).total();
+                position.costs += costs.costs(session, position.contract.exchange(), shortLeg ? Side.SELL : Side.BUY,
+                        price, delta).total();
                 if (position.state == ManagedPosition.State.OPENING) {
                     position.state = ManagedPosition.State.OPEN;
                 }
@@ -606,9 +699,10 @@ public final class OrderManager implements Consumer<OrderUpdate> {
                     protect(position);
                 }
             } else {
-                position.realised += (price - position.averageCost) * delta;
+                position.realised += shortLeg ? (position.averageCost - price) * delta : (price - position.averageCost) * delta;
                 position.quantity -= delta;
-                position.costs += costs.costs(session, position.contract.exchange(), Side.SELL, price, delta).total();
+                position.costs += costs.costs(session, position.contract.exchange(), shortLeg ? Side.BUY : Side.SELL,
+                        price, delta).total();
                 if (role.role().equals("STOP")) {
                     if (position.exitReason == null) {
                         position.exitReason = "PREMIUM_STOP";
@@ -644,7 +738,7 @@ public final class OrderManager implements Consumer<OrderUpdate> {
     public synchronized boolean reconcile() {
         Map<Long, Long> expected = new HashMap<>();
         for (ManagedPosition position : live.values()) {
-            expected.merge(position.contract.token(), position.quantity, Long::sum);
+            expected.merge(position.contract.token(), position.isShort() ? -position.quantity : position.quantity, Long::sum);
         }
         Map<Long, Long> actual = new HashMap<>();
         for (BrokerPosition position : broker.positions()) {
@@ -865,8 +959,8 @@ public final class OrderManager implements Consumer<OrderUpdate> {
      * modified in place (never two live stops); only above the freeze quantity is it replaced.
      */
     private void protect(ManagedPosition position) {
-        if (position.stopFraction <= 0) {
-            return; // a straddle leg: the pair's combined bracket protects it
+        if (position.stopFraction <= 0 || position.isShort()) {
+            return; // a straddle leg: the pair's combined bracket protects it (a short leg never has a resting stop)
         }
         double plain = position.averageCost * (1 - position.stopFraction);
         // pyramid protection: after adds, the whole position loses at most what it risked before the first add
@@ -901,7 +995,11 @@ public final class OrderManager implements Consumer<OrderUpdate> {
             return;
         }
         position.state = ManagedPosition.State.EXITING;
-        sellAll(position, sellPrice(position));
+        if (position.isShort()) {
+            buyAll(position, buyPrice(position));             // A-358: a short closes by buying back
+        } else {
+            sellAll(position, sellPrice(position));
+        }
     }
 
     private void chaseExit(ManagedPosition position) {
@@ -934,6 +1032,60 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         while (remaining > 0) {
             long quantity = Math.min(remaining, slice);
             send(position, "EXIT", OrderSide.SELL, OrderType.LIMIT, quantity, limit, 0, position.exitOrders);
+            remaining -= quantity;
+        }
+        position.exitPricedAt = clock.get();
+    }
+
+    /**
+     * A-358: sells {@code lots} to open a short leg: a SELL limit at the bid minus the entry buffer, whole lots, split
+     * at the freeze quantity. No participation cap or depth slicing (a short straddle is one lot).
+     */
+    private void sell(ManagedPosition position, int lots, String stage) {
+        position.stages.add(stage);
+        double bid = bidOf(position.contract);
+        if (!(bid > 0)) {
+            bid = position.lastBid;
+        }
+        if (!(bid > 0)) {
+            listener.rejected(position.strategy, position.underlying, "SELL", "no bid for " + position.contract.symbol());
+            return;
+        }
+        double limit = position.contract.roundDown(bid - limits.entryBuffer(bid, position.contract.tickSize()));
+        position.entryLimit = limit;
+        position.entryPricedAt = clock.get();
+        long remaining = (long) lots * position.contract.lotSize();
+        long slice = (long) position.contract.maxLotsPerOrder() * position.contract.lotSize();
+        while (remaining > 0) {
+            long quantity = Math.min(remaining, slice);
+            send(position, "ENTRY", OrderSide.SELL, OrderType.LIMIT, quantity, limit, 0, position.entryOrders);
+            remaining -= quantity;
+        }
+    }
+
+    /** A-358: the mirror of {@link #sellPrice}: the ask plus the exit buffer, finally well through the ask. */
+    private double buyPrice(ManagedPosition position) {
+        double ask = position.lastAsk;
+        double[] quote = lastQuotes.get(position.contract.token());
+        if (quote != null && quote[1] > 0) {
+            ask = quote[1];
+        }
+        if (!(ask > 0)) {
+            ask = position.lastPrice > 0 ? position.lastPrice : position.averageCost;
+        }
+        double buffer = Math.max(limits.exitBufferTicks() * position.contract.tickSize(),
+                ask * limits.exitBufferPct() / 100);
+        double price = position.exitChases >= limits.exitChaseMax() ? ask / FINAL_EXIT_DISCOUNT : ask + buffer;
+        return position.contract.roundUp(price);
+    }
+
+    /** A-358: buys back a short leg's whole quantity at {@code limit}, split at the freeze quantity. */
+    private void buyAll(ManagedPosition position, double limit) {
+        long remaining = position.quantity;
+        long slice = (long) position.contract.maxLotsPerOrder() * position.contract.lotSize();
+        while (remaining > 0) {
+            long quantity = Math.min(remaining, slice);
+            send(position, "EXIT", OrderSide.BUY, OrderType.LIMIT, quantity, limit, 0, position.exitOrders);
             remaining -= quantity;
         }
         position.exitPricedAt = clock.get();

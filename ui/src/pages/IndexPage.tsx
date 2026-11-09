@@ -175,6 +175,6 @@ function liveAsStored(p: PositionRow, date: string): TradePositionRow {
     strategy_id: p.strategy ?? null, underlying: p.underlying, option_side: p.leg ? p.leg : p.side, symbol: p.symbol,
     opened_at: stamp(p.opened)!, closed_at: stamp(p.closed), stages: p.stages, exit_reason: p.exitReason,
     realised: p.realised ?? 0, costs: p.costs ?? 0, net: p.net, quantity: p.quantity, lot_size: p.lotSize ?? null,
-    average_cost: p.averageCost, average_exit: p.exitPrice ?? null,
+    average_cost: p.averageCost, average_exit: p.exitPrice ?? null, direction: p.direction ?? null,
   };
 }

@@ -31,7 +31,7 @@ interface AtData {
   date: string; time: string; underlying: string;
   decisions: { strategy_id: string; t: string; spot: number; ce_stage: string; pe_stage: string; state: Record<string, unknown> }[];
   snapshot: { t: string; phase: string; spot: number; features: Features } | null;
-  open: { strategy_id: string; option_side: string; symbol: string; opened_at: string; quantity: number; average_cost: number; mark: number | null }[];
+  open: { strategy_id: string; option_side: string; symbol: string; opened_at: string; quantity: number; average_cost: number; mark: number | null; direction?: string | null }[];
   closedNet: number;
 }
 
@@ -228,7 +228,10 @@ export function MomentInspector({ sessionId, date, underlying, replayTime }: { s
   const d = q.data;
   const f = flatten(d?.snapshot?.features);
   const keys = Object.keys(f).sort().filter((k) => !filter || k.toLowerCase().includes(filter.toLowerCase()));
-  const unrealised = (d?.open ?? []).reduce((a, p) => a + (p.mark != null ? (p.mark - p.average_cost) * p.quantity : 0), 0);
+  // a SHORT leg (A-358) gains when the mark falls below its credit
+  const legPnl = (p: { mark: number | null; average_cost: number; quantity: number; direction?: string | null }) =>
+    p.mark == null ? 0 : (p.direction === "SHORT" ? p.average_cost - p.mark : p.mark - p.average_cost) * p.quantity;
+  const unrealised = (d?.open ?? []).reduce((a, p) => a + legPnl(p), 0);
   return (
     <Panel title={<>{underlying} at {pin != null ? `${time.slice(0, 5)} (its close)` : time.slice(0, 8)} <span className="text-xs font-normal text-muted">{pin != null ? "pinned on the chart" : "the paused replay's clock"}</span></>}
       right={pin != null ? <button type="button" className="text-xs text-muted hover:text-text" onClick={() => setPin(null)}>unpin ✕</button> : undefined}>
@@ -248,8 +251,8 @@ export function MomentInspector({ sessionId, date, underlying, replayTime }: { s
               <div className="mb-1 font-semibold">Positions open then <span className="font-normal text-muted">(quantity bought, marked at the option's last trade by then)</span></div>
               {d.open.length === 0 ? <p className="text-muted">None.</p> : d.open.map((p) => (
                 <div key={p.symbol + p.opened_at} className="num">
-                  {p.strategy_id ? strategyShort(p.strategy_id) : ""} {p.symbol} · {p.quantity} @ {nf(p.average_cost, 2)} → {p.mark == null ? "–" : nf(p.mark, 2)}
-                  {p.mark != null && <span className={p.mark >= p.average_cost ? "text-up" : "text-down"}> ₹{nf((p.mark - p.average_cost) * p.quantity)}</span>}
+                  {p.strategy_id ? strategyShort(p.strategy_id) : ""} {p.direction === "SHORT" ? "SHORT " : ""}{p.symbol} · {p.quantity} @ {nf(p.average_cost, 2)} → {p.mark == null ? "–" : nf(p.mark, 2)}
+                  {p.mark != null && <span className={legPnl(p) >= 0 ? "text-up" : "text-down"}> ₹{nf(legPnl(p))}</span>}
                 </div>
               ))}
               <p className="num mt-1 text-muted">closed by then ₹{nf(d.closedNet)} · open ₹{nf(unrealised)} (before costs)</p>

@@ -160,7 +160,7 @@ class HistoryController {
     @GetMapping("/sessions/{id}/positions")
     List<Map<String, Object>> positions(@PathVariable long id) {
         return query("select id, strategy_id, underlying, option_side, symbol, " + ist("opened_at") + ", " + ist("closed_at")
-                + ", stages, exit_reason, realised, costs, net, quantity, lot_size, average_cost, average_exit "
+                + ", stages, exit_reason, realised, costs, net, quantity, lot_size, average_cost, average_exit, direction "
                 + "from trade.position where session_id = ? order by opened_at", id);
     }
 
@@ -255,7 +255,7 @@ class HistoryController {
         String mark = "(select o.ltp from md.option_tick o where o.session_date = ?::date and o.symbol = ? "
                 + "and o.recv_ts > ? and o.recv_ts <= ? order by o.recv_ts desc limit 1)";
         List<Map<String, Object>> open = query("select p.strategy_id, p.option_side, p.symbol, " + ist("p.opened_at") + ", "
-                + "p.quantity, p.average_cost, " + mark.replace("o.symbol = ?", "o.symbol = p.symbol") + " mark "
+                + "p.quantity, p.average_cost, p.direction, " + mark.replace("o.symbol = ?", "o.symbol = p.symbol") + " mark "
                 + "from trade.position p where p.session_id = ? and p.underlying = ? and p.quantity > 0 and p.opened_at <= ? "
                 + "and (p.closed_at is null or p.closed_at > ?) order by p.opened_at", day.toString(), from, at, id, underlying,
                 at, at);
@@ -274,6 +274,7 @@ class HistoryController {
                         row.put("opened_at", day + " " + p.get("opened"));
                         row.put("quantity", p.get("boughtQuantity"));        // as the stored rows: the quantity bought
                         row.put("average_cost", p.get("averageCost"));
+                        row.put("direction", p.get("direction"));             // A-358: SHORT legs are marked the other way
                         row.put("mark", jdbc.queryForList("select " + mark, Double.class, day.toString(), p.get("symbol"), from, at)
                                 .stream().findFirst().orElse(null));
                         open.add(row);
@@ -296,7 +297,7 @@ class HistoryController {
     List<Map<String, Object>> performance(@RequestParam(defaultValue = "PAPER_LIVE") String mode) {
         return query("select s.id session_id, s.session_date::text session_date, p.strategy_id, p.underlying, p.option_side, "
                 + "p.symbol, " + ist("p.opened_at") + ", " + ist("p.closed_at") + ", p.exit_reason, p.realised, p.costs, p.net, "
-                + "p.quantity, p.lot_size, p.average_cost, p.average_exit from trade.position p join trade.session s on s.id = p.session_id "
+                + "p.quantity, p.lot_size, p.average_cost, p.average_exit, p.direction from trade.position p join trade.session s on s.id = p.session_id "
                 + "where s.mode = ? and p.closed_at is not null and (s.mode <> 'PAPER_LIVE' or s.account not like 'SIGNAL-%') "
                 + "order by s.session_date, p.opened_at", mode);     // the live account only, never the signal source too
     }
