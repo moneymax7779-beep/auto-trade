@@ -218,6 +218,11 @@ class WorkspaceIT {
         jdbc.update("insert into exec.position (tenant_id, broker_account_id, entry_trade_intent_id, strategy_id, underlying, "
                 + "option_side, instrument_token, symbol, quantity_open, average_entry, opened_at, status) values "
                 + "(?, ?, ?, 'ma-cross', 'NIFTY', 'CE', 77, 'NIFTY 23000 CE', 65, 100, now(), 'OPEN')", asha, zerodha, intent);
+        // the Accounts page: each account's book today and the twin's link to its real account (user 9 Nov 2026)
+        assertThat(view("asha", zerodha).today()).isEqualTo(new AccountsController.DayBook(0, 0, 1));
+        assertThat(view("asha", zerodha).paperOf()).isNull();
+        assertThat(view("asha", twin).paperOf()).isEqualTo(zerodha);
+        assertThat(view("asha", twin).today()).isEqualTo(AccountsController.DayBook.NONE);
         workspaces.broker("asha", asha, new WorkspaceController.Broker(groww));
         assertThat(state("asha", asha)).containsEntry("broker", "Groww").containsEntry("mode", "PAPER");
         assertThat(reason(() -> workspaces.mode("asha", asha, new WorkspaceController.Mode("LIVE", "LIVE"))))
@@ -232,10 +237,15 @@ class WorkspaceIT {
                 + "charges = 40 where broker_account_id = ?", zerodha);
         Map<String, Object> loss = (Map<String, Object>) workspaces.today("asha", asha).get("lossLimit");
         assertThat(loss).containsEntry("reached", true).containsEntry("liveNetToday", -6040.0);
+        assertThat(view("asha", zerodha).today()).isEqualTo(new AccountsController.DayBook(-6040.0, 1, 0));
         assertThat(reason(() -> workspaces.mode("asha", asha, new WorkspaceController.Mode("LIVE", "LIVE"))))
                 .contains("daily loss limit");
         assertThat(code(() -> workspaces.limits("chitra", chitra, new WorkspaceController.Limits(1.0, null)))).isEqualTo(403);
         assertThat(code(() -> workspaces.limits("asha", asha, new WorkspaceController.Limits(-1.0, null)))).isEqualTo(400);
+    }
+
+    private static AccountsController.AccountView view(String user, long account) {
+        return api.accounts(user).stream().filter(a -> a.id() == account).findFirst().orElseThrow();
     }
 
     private static long liveIntent(long tenant, long account) {

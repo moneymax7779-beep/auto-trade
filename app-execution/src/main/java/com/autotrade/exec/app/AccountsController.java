@@ -57,8 +57,18 @@ class AccountsController {
         this.jdbc = new JdbcTemplate(dataSource);
     }
 
+    /**
+     * One account. {@code paperOf}: the real account this one is the paper twin of (null otherwise), so the page can
+     * show a twin under its account. {@code today}: the account's own book for today (IST): closed net after charges,
+     * closed trades, open positions — the same figures as the Today page (Accounts page layout, user 9 Nov 2026).
+     */
     record AccountView(long id, long tenantId, String name, String broker, String mode, String role, boolean enabled,
-                       double allocatedCapital, String riskFile, String connection, ExecutionLoop.AccountStatus lastTurn) {
+                       double allocatedCapital, String riskFile, String connection, ExecutionLoop.AccountStatus lastTurn,
+                       Long paperOf, DayBook today) {
+    }
+
+    record DayBook(double net, int trades, int open) {
+        static final DayBook NONE = new DayBook(0, 0, 0);
     }
 
     @GetMapping("/api/execution/accounts")
@@ -67,15 +77,32 @@ class AccountsController {
         Map<Long, ExecutionLoop.AccountStatus> turns = new LinkedHashMap<>();
         service.status().forEach(s -> turns.put(s.accountId(), s));
         List<AccountView> out = new ArrayList<>();
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
         for (long tenant : user.tenants()) {
             Map<Long, String> connections = accounts.connectionStatuses(tenant);
+            Map<Long, DayBook> books = dayBooks(tenant, today);
             for (BrokerAccount a : accounts.ofTenant(tenant)) {
                 out.add(new AccountView(a.id(), a.tenantId(), a.displayName(), a.brokerType().name(), a.tradeMode().name(),
                         a.role().name(), a.enabled(), a.allocatedCapital(), a.riskFile(), connections.get(a.id()),
-                        turns.get(a.id())));
+                        turns.get(a.id()), a.paperOf(), books.getOrDefault(a.id(), DayBook.NONE)));
             }
         }
         return out;
+    }
+
+    /** Today's book of every account of {@code tenant} with any position, in one query. */
+    private Map<Long, DayBook> dayBooks(long tenant, LocalDate day) {
+        Map<Long, DayBook> books = new LinkedHashMap<>();
+        java.sql.Date d = java.sql.Date.valueOf(day);
+        jdbc.query("select p.broker_account_id id, coalesce(sum(p.realised_gross - coalesce(p.charges, 0)) filter (where "
+                + "p.status = 'CLOSED' and (p.closed_at at time zone 'Asia/Kolkata')::date = ?), 0)::float8 net, count(*) "
+                + "filter (where p.status = 'CLOSED' and (p.closed_at at time zone 'Asia/Kolkata')::date = ?) trades, "
+                + "count(*) filter (where p.status <> 'CLOSED') open from exec.position p join acct.broker_account a "
+                + "on a.id = p.broker_account_id where a.tenant_id = ? group by p.broker_account_id", rs -> {
+                    books.put(rs.getLong("id"), new DayBook(Math.round(rs.getDouble("net") * 100) / 100.0,
+                            rs.getInt("trades"), rs.getInt("open")));
+                }, d, d, tenant);
+        return books;
     }
 
     record Session(String status) {

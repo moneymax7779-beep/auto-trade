@@ -3,7 +3,7 @@ import { useState } from "react";
 import {
   get, postJson, type AuditRow, type ExecMe, type ExecutionAccount, type KillSwitch, type WorkerStatus,
 } from "../api";
-import { ErrorNote, Loading, Panel, Table } from "../components/ui";
+import { ErrorNote, Loading, Panel, Stat, Table } from "../components/ui";
 import { AccountDetailPanel, AddAccountPanel } from "./AccountManagement";
 
 // Live execution: the caller's broker accounts across copy groups, kill switches, flatten and the audit log. Every call
@@ -29,6 +29,96 @@ const connectionTone = (c: string | null) =>
 const stateTone = (s: string | undefined) =>
   s === "RUNNING" ? "up" : s === "REFUSED" || s === "LEASE_HELD_ELSEWHERE" ? "warn" : s ? "down" : "muted";
 const modeTone = (m: string) => (m === "LIVE" ? "down" : m === "DRY_RUN" ? "accent" : "muted");
+
+const BROKER_LABELS: Record<string, string> = {
+  ZERODHA: "Zerodha (Kite)", UPSTOX: "Upstox", KOTAK_NEO: "Kotak Neo", GROWW: "Groww", PAPER: "Paper (simulated fills)",
+};
+const brokerName = (b: string) => BROKER_LABELS[b] ?? b;
+const connectionLabel = (c: string | null) => ({
+  ACTIVE: "LOGGED IN", TOKEN_EXPIRED: "LOGIN EXPIRED", DISCONNECTED: "DISCONNECTED", PENDING_CONNECT: "NOT CONNECTED",
+} as Record<string, string>)[c ?? ""] ?? c ?? "?";
+const modeRank = (m: string) => (m === "LIVE" ? 0 : m === "DRY_RUN" ? 1 : 2);
+
+type Row = { a: ExecutionAccount; twin: boolean };
+
+/**
+ * The trader's reading order: per workspace (the caller's own first), real broker accounts first (LIVE, then
+ * DRY_RUN, then PAPER), each followed by its paper twin; then stand-alone paper accounts; disabled accounts last.
+ */
+function orderAccounts(rows: ExecutionAccount[], tenantRank: (id: number) => number): Row[] {
+  const ids = new Set(rows.map((a) => a.id));
+  const twinsOf = new Map<number, ExecutionAccount[]>();
+  rows.forEach((a) => { if (a.paperOf != null && ids.has(a.paperOf)) twinsOf.set(a.paperOf, [...(twinsOf.get(a.paperOf) ?? []), a]); });
+  const rank = (t: number) => { const r = tenantRank(t); return r < 0 ? Number.MAX_SAFE_INTEGER : r; };
+  const heads = rows.filter((a) => a.paperOf == null || !ids.has(a.paperOf)).sort((x, y) =>
+    rank(x.tenantId) - rank(y.tenantId) || x.tenantId - y.tenantId
+    || Number(!x.enabled) - Number(!y.enabled)
+    || Number(x.broker === "PAPER") - Number(y.broker === "PAPER")
+    || modeRank(x.mode) - modeRank(y.mode)
+    || x.name.localeCompare(y.name));
+  return heads.flatMap((a) => [{ a, twin: false }, ...(twinsOf.get(a.id) ?? []).map((t) => ({ a: t, twin: true }))]);
+}
+
+const signed = (v: number) => (v > 0 ? "+" : v < 0 ? "−" : "") + rupees(Math.abs(v));
+const netTone = (v: number) => (v > 0 ? "text-up" : v < 0 ? "text-down" : "text-muted");
+
+function TodayCell({ a }: { a: ExecutionAccount }) {
+  if (!a.today) return <span className="text-muted">–</span>;
+  const { net, trades, open } = a.today;
+  return (
+    <div className="whitespace-nowrap">
+      <div className={`font-semibold ${netTone(net)}`}>{trades === 0 && net === 0 ? "–" : signed(net)}</div>
+      <div className="text-[11px] text-muted">{trades} closed{open > 0 && <span className="font-semibold text-warn"> · {open} open</span>}</div>
+    </div>
+  );
+}
+
+/** What a trader checks first: real money today, paper today, what is still open, and what needs a hand. */
+function FollowerSummary({ rows, killed }: { rows: ExecutionAccount[]; killed: Set<number> }) {
+  const live = rows.filter((a) => a.mode === "LIVE");
+  const sim = rows.filter((a) => a.mode !== "LIVE");
+  const net = (xs: ExecutionAccount[]) => xs.reduce((s, a) => s + (a.today?.net ?? 0), 0);
+  const open = rows.reduce((s, a) => s + (a.today?.open ?? 0), 0);
+  const issues: string[] = [];
+  rows.forEach((a) => {
+    if (!a.enabled) return;
+    if (a.broker !== "PAPER" && a.connection !== "ACTIVE") issues.push(`${a.name}: ${connectionLabel(a.connection).toLowerCase()}`);
+    const st = a.lastTurn?.state;
+    if (st && st !== "RUNNING" && st !== "IDLE") issues.push(`${a.name}: ${st.toLowerCase().replaceAll("_", " ")}`);
+    if (killed.has(a.id)) issues.push(`${a.name}: entries stopped`);
+  });
+  const hasBooks = rows.some((a) => a.today);
+  return (
+    <div className="mb-3 space-y-2 border-b border-line pb-3">
+      <div className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-4">
+        <Stat label={`LIVE today (${live.length} account${live.length === 1 ? "" : "s"})`}
+          value={hasBooks ? signed(net(live)) : "–"} tone={net(live) > 0 ? "up" : net(live) < 0 ? "down" : "muted"} />
+        <Stat label="LIVE capital" value={rupees(live.reduce((s, a) => s + a.allocatedCapital, 0))} />
+        <Stat label="PAPER / DRY_RUN today" value={hasBooks ? signed(net(sim)) : "–"}
+          tone={net(sim) > 0 ? "up" : net(sim) < 0 ? "down" : "muted"} />
+        <Stat label="Open positions" value={hasBooks ? open : "–"} tone={open > 0 ? "warn" : "muted"} />
+      </div>
+      {issues.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 text-xs">
+          <span className="text-muted">Needs attention:</span>
+          {issues.map((t) => <span key={t} className="rounded bg-warn/15 px-1.5 py-0.5 text-warn">{t}</span>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GroupHeading({ name, daily, accounts }: { name: string; daily: boolean; accounts: ExecutionAccount[] }) {
+  const net = accounts.reduce((s, a) => s + (a.today?.net ?? 0), 0);
+  return (
+    <div className="flex flex-wrap items-baseline gap-x-3 border-b border-line pb-1">
+      <span className="text-sm font-semibold">{name}</span>
+      <span className="text-xs text-muted">{daily ? "daily-switch workspace" : "own accounts"} · {accounts.length} account
+        {accounts.length === 1 ? "" : "s"}</span>
+      {accounts.some((a) => a.today) && <span className={`num text-xs ${netTone(net)}`}>today {signed(net)}</span>}
+    </div>
+  );
+}
 
 /** A destructive action that needs its word typed before it is sent. */
 function TypedConfirm({ word, label, busy, onConfirm }: {
@@ -98,6 +188,10 @@ export function AccountsPage() {
     mayAct: true, manages: true })) : [];
   const acting = legacy ? legacyTenants : [...tenants.values()].filter((t) => t.canStop ?? t.mayAct);
   const managed = legacy ? legacyTenants : [...tenants.values()].filter((t) => t.manages && t.control !== "DAILY_SWITCH");
+  // accounts whose own kill switch is engaged (entries and adds stop; exits run)
+  const killedAccounts = new Set((switches.data ?? []).filter((k) => k.scope === "ACCOUNT" && k.accountId != null)
+    .map((k) => k.accountId!));
+  const ordered = orderAccounts(rows, (id) => [...tenants.keys()].indexOf(id));
 
   return (
     <div className="space-y-4">
@@ -143,38 +237,63 @@ export function AccountsPage() {
       )}
 
       <Panel title="Follower accounts" right={<span className="text-xs text-muted">{rows.length} accounts</span>}>
-        <Table rows={rows} columns={[
-          { key: "n", label: "Account", render: (a) => <span className="font-semibold">{a.name}</span> },
-          ...(several ? [{ key: "o", label: "Owner", render: (a: ExecutionAccount) =>
-            <span className="text-xs">{tenants.get(a.tenantId)?.name ?? a.tenantId}</span> }] : []),
-          { key: "b", label: "Broker", render: (a) => a.broker },
-          { key: "m", label: "Mode", render: (a) => <Badge text={a.mode} tone={modeTone(a.mode)} /> },
-          { key: "c", label: "Session", render: (a) => a.broker === "PAPER" ? <span className="text-muted">–</span>
-              : <Badge text={a.connection ?? "?"} tone={connectionTone(a.connection)} /> },
-          { key: "cap", label: "Allocation", align: "right", render: (a) => rupees(a.allocatedCapital) },
-          { key: "r", label: "Route", render: (a) => <span className="text-xs">{a.lastTurn?.route ?? (a.enabled ? "not served" : "disabled")}</span> },
-          { key: "s", label: "Turn", render: (a) => a.lastTurn
-              ? <span title={a.lastTurn.lastResult}><Badge text={a.lastTurn.state} tone={stateTone(a.lastTurn.state)} />
-                  <span className="ml-2 text-xs text-muted">{time(a.lastTurn.lastRun)} · epoch {a.lastTurn.leaseEpoch ?? "–"}</span></span>
-              : <span className="text-muted">–</span> },
-          { key: "res", label: "Last result", render: (a) => <span className="text-xs text-muted">{a.lastTurn?.lastResult ?? ""}</span> },
-          { key: "a", label: "", render: (a) => (
-            <div className="flex flex-wrap gap-1.5">
+        <FollowerSummary rows={rows} killed={killedAccounts} />
+        <Table rows={ordered} rowStyle={(o) => (o.a.enabled || (o.a.today?.open ?? 0) > 0 ? undefined : { opacity: 0.55 })}
+          before={(o, i) => several && (i === 0 || ordered[i - 1].a.tenantId !== o.a.tenantId)
+            ? <GroupHeading name={tenants.get(o.a.tenantId)?.name ?? String(o.a.tenantId)} daily={daily(o.a.tenantId)}
+                accounts={rows.filter((r) => r.tenantId === o.a.tenantId)} />
+            : null}
+          columns={[
+          { key: "n", label: "Account", render: ({ a, twin }) => (
+            <div className={`whitespace-nowrap ${twin ? "pl-4" : ""}`}>
+              <div className={twin ? "text-muted" : "font-semibold"}>{twin && <span className="mr-1">↳</span>}{a.name}</div>
+              <div className="text-[11px] text-muted">{twin ? "paper twin (PAPER-day fills)" : brokerName(a.broker)}</div>
+            </div>
+          ) },
+          { key: "st", label: "Status", render: ({ a }) => (
+            <div className="flex min-w-36 flex-wrap items-center gap-1">
+              <Badge text={a.mode} tone={modeTone(a.mode)} />
+              {a.broker !== "PAPER" && <Badge text={connectionLabel(a.connection)} tone={connectionTone(a.connection)} />}
+              {killedAccounts.has(a.id) && <Badge text="ENTRIES STOPPED" tone="down" />}
+              {!a.enabled && <Badge text="DISABLED" tone="muted" />}
+            </div>
+          ) },
+          { key: "cap", label: "Capital", align: "right", render: ({ a }) => rupees(a.allocatedCapital) },
+          { key: "d", label: "Today", align: "right", render: ({ a }) => <TodayCell a={a} /> },
+          { key: "e", label: "Engine", render: ({ a }) => a.lastTurn
+              ? <span className="whitespace-nowrap" title={`lease epoch ${a.lastTurn.leaseEpoch ?? "–"}`}>
+                  <Badge text={a.lastTurn.state} tone={stateTone(a.lastTurn.state)} />
+                  <span className="ml-1.5 text-[11px] text-muted">{time(a.lastTurn.lastRun)}</span></span>
+              : <span className="text-xs text-muted">{a.enabled ? "not served" : "–"}</span> },
+          { key: "r", label: "Route · last result", render: ({ a }) => (
+            <div className="max-w-md text-xs" title={[a.lastTurn?.route, a.lastTurn?.lastResult].filter(Boolean).join("\n")}>
+              <div className="line-clamp-2">{a.lastTurn?.route ?? (a.enabled ? "no route: the worker does not serve it now"
+                : "disabled")}</div>
+              {a.lastTurn?.lastResult && <div className="line-clamp-2 text-muted">{a.lastTurn.lastResult}</div>}
+            </div>
+          ) },
+          { key: "a", label: "", render: ({ a }) => (
+            <div className="flex flex-nowrap justify-end gap-1.5 whitespace-nowrap">
               <button className="rounded border border-accent/60 px-2 py-0.5 text-xs text-accent hover:bg-accent/10"
                 onClick={() => setOpenAccount(openAccount === a.id ? null : a.id)}>
                 {openAccount === a.id ? "Close" : manages(a.tenantId) ? "Manage" : "Details"}</button>
               {mayAct(a.tenantId) && a.broker === "ZERODHA" && a.connection !== "ACTIVE" && (
-                <a className="rounded border border-line px-2 py-0.5 text-xs hover:bg-panel-2" target="_blank" rel="noreferrer"
-                  href={`/api/execution/accounts/${a.id}/kite/login`}>Log in to Kite</a>
+                <a className="whitespace-nowrap rounded border border-line px-2 py-0.5 text-xs hover:bg-panel-2" target="_blank"
+                  rel="noreferrer" href={`/api/execution/accounts/${a.id}/kite/login`}>Log in to Kite</a>
               )}
-              {canStop(a.tenantId) && <>
+              {/* a disabled account holding nothing can neither enter nor hold: no stop controls to misclick */}
+              {canStop(a.tenantId) && (a.enabled || (a.today?.open ?? 0) > 0) && <>
+              {!killedAccounts.has(a.id) && (
               <button className="rounded border border-warn/60 px-2 py-0.5 text-xs text-warn hover:bg-warn/10" disabled={act.isPending}
+                title="Stop new entries and adds on this account (exits still run)"
                 onClick={() => {
                   const reason = window.prompt(`Stop new entries on ${a.name}: reason`);
                   if (reason) act.mutate({ path: "/api/execution/kill-switches",
                     body: { scope: "ACCOUNT", accountId: a.id, reason }, done: `${a.name}: entries stopped` });
                 }}>Kill</button>
+              )}
               <button className="rounded border border-down/60 px-2 py-0.5 text-xs text-down hover:bg-down/10"
+                title="Stop entries, take broker stops off and sell every open position now"
                 onClick={() => setFlattenFor(flattenFor === a.id ? null : a.id)}>Flatten…</button>
               </>}
             </div>

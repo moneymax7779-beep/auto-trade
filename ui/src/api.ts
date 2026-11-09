@@ -495,6 +495,10 @@ export interface ExecutionAccount {
   riskFile: string;
   connection: string | null;
   lastTurn: AccountTurn | null;
+  /** the real account this one is the paper twin of (absent from older workers) */
+  paperOf?: number | null;
+  /** the account's own book today (IST): closed net after charges, closed trades, open positions */
+  today?: DayResult;
 }
 
 export interface KillSwitch {
