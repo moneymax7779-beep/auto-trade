@@ -219,10 +219,19 @@ class WorkspaceIT {
                 + "option_side, instrument_token, symbol, quantity_open, average_entry, opened_at, status) values "
                 + "(?, ?, ?, 'ma-cross', 'NIFTY', 'CE', 77, 'NIFTY 23000 CE', 65, 100, now(), 'OPEN')", asha, zerodha, intent);
         // the Accounts page: each account's book today and the twin's link to its real account (user 9 Nov 2026)
-        assertThat(view("asha", zerodha).today()).isEqualTo(new AccountsController.DayBook(0, 0, 1));
+        assertThat(view("asha", zerodha).today()).isEqualTo(new AccountsController.DayBook(0, 0, 1, 0, 0, 1));
         assertThat(view("asha", zerodha).paperOf()).isNull();
         assertThat(view("asha", twin).paperOf()).isEqualTo(zerodha);
         assertThat(view("asha", twin).today()).isEqualTo(AccountsController.DayBook.NONE);
+        // a PAPER-day trade on the twin, closed today, and one closed yesterday: today's paper only, never counted LIVE
+        long paperIntent = intent(asha, twin, "PAPER");
+        for (String closedAt : List.of("now()", "now() - interval '1 day'")) {
+            jdbc.update("insert into exec.position (tenant_id, broker_account_id, entry_trade_intent_id, strategy_id, "
+                    + "underlying, option_side, instrument_token, symbol, quantity_open, average_entry, opened_at, closed_at, "
+                    + "realised_gross, charges, status) values (?, ?, ?, 'ma-cross', 'NIFTY', 'PE', 78, 'NIFTY 23000 PE', 0, "
+                    + "100, now() - interval '1 day', " + closedAt + ", 1500, 20, 'CLOSED')", asha, twin, paperIntent);
+        }
+        assertThat(view("asha", twin).today()).isEqualTo(new AccountsController.DayBook(1480, 1, 0, 0, 0, 0));
         workspaces.broker("asha", asha, new WorkspaceController.Broker(groww));
         assertThat(state("asha", asha)).containsEntry("broker", "Groww").containsEntry("mode", "PAPER");
         assertThat(reason(() -> workspaces.mode("asha", asha, new WorkspaceController.Mode("LIVE", "LIVE"))))
@@ -237,7 +246,7 @@ class WorkspaceIT {
                 + "charges = 40 where broker_account_id = ?", zerodha);
         Map<String, Object> loss = (Map<String, Object>) workspaces.today("asha", asha).get("lossLimit");
         assertThat(loss).containsEntry("reached", true).containsEntry("liveNetToday", -6040.0);
-        assertThat(view("asha", zerodha).today()).isEqualTo(new AccountsController.DayBook(-6040.0, 1, 0));
+        assertThat(view("asha", zerodha).today()).isEqualTo(new AccountsController.DayBook(-6040.0, 1, 0, -6040.0, 1, 0));
         assertThat(reason(() -> workspaces.mode("asha", asha, new WorkspaceController.Mode("LIVE", "LIVE"))))
                 .contains("daily loss limit");
         assertThat(code(() -> workspaces.limits("chitra", chitra, new WorkspaceController.Limits(1.0, null)))).isEqualTo(403);
@@ -249,12 +258,16 @@ class WorkspaceIT {
     }
 
     private static long liveIntent(long tenant, long account) {
+        return intent(tenant, account, "LIVE");
+    }
+
+    private static long intent(long tenant, long account, String mode) {
         long batch = jdbc.queryForObject("insert into exec.trade_batch (tenant_id, source, idempotency_key, status) values "
                 + "(?, 'MANUAL', ?, 'DONE') returning id", Long.class, tenant, "it-" + account + "-" + System.nanoTime());
         return jdbc.queryForObject("insert into exec.trade_intent (tenant_id, trade_batch_id, broker_account_id, broker_type, "
                 + "execution_mode, strategy_id, priority, underlying, action, option_side, state, idempotency_key) values "
-                + "(?, ?, ?, 'ZERODHA', 'LIVE', 'ma-cross', 1, 'NIFTY', 'ENTER', 'CE', 'EXECUTED', ?) returning id", Long.class,
-                tenant, batch, account, "it-" + batch);
+                + "(?, ?, ?, 'ZERODHA', ?, 'ma-cross', 1, 'NIFTY', 'ENTER', 'CE', 'EXECUTED', ?) returning id", Long.class,
+                tenant, batch, account, mode, "it-" + batch);
     }
 
     @Test

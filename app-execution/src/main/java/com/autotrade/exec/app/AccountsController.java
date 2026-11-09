@@ -59,25 +59,29 @@ class AccountsController {
 
     /**
      * One account. {@code paperOf}: the real account this one is the paper twin of (null otherwise), so the page can
-     * show a twin under its account. {@code today}: the account's own book for today (IST): closed net after charges,
-     * closed trades, open positions — the same figures as the Today page (Accounts page layout, user 9 Nov 2026).
+     * show a twin under its account. {@code today}: the account's own book for today (IST), see {@link DayBook}
+     * (Accounts page layout, user 9 Nov 2026).
      */
     record AccountView(long id, long tenantId, String name, String broker, String mode, String role, boolean enabled,
                        double allocatedCapital, String riskFile, String connection, ExecutionLoop.AccountStatus lastTurn,
                        Long paperOf, DayBook today) {
     }
 
-    record DayBook(double net, int trades, int open) {
-        static final DayBook NONE = new DayBook(0, 0, 0);
+    /**
+     * Positions closed today (net after charges, count) and open now; the {@code live*} figures are the part entered
+     * with a LIVE intent (real money). Split by the intent, not by the account's mode now: an account switched back
+     * to PAPER after a LIVE morning still shows that morning as LIVE (code review 9 Nov 2026).
+     */
+    record DayBook(double net, int trades, int open, double liveNet, int liveTrades, int liveOpen) {
+        static final DayBook NONE = new DayBook(0, 0, 0, 0, 0, 0);
     }
-
     @GetMapping("/api/execution/accounts")
     List<AccountView> accounts(@RequestHeader(value = Access.HEADER, required = false) String subject) {
         Access.User user = access.user(subject);
         Map<Long, ExecutionLoop.AccountStatus> turns = new LinkedHashMap<>();
         service.status().forEach(s -> turns.put(s.accountId(), s));
         List<AccountView> out = new ArrayList<>();
-        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
+        LocalDate today = LocalDate.now(IST);
         for (long tenant : user.tenants()) {
             Map<Long, String> connections = accounts.connectionStatuses(tenant);
             Map<Long, DayBook> books = dayBooks(tenant, today);
@@ -90,19 +94,29 @@ class AccountsController {
         return out;
     }
 
-    /** Today's book of every account of {@code tenant} with any position, in one query. */
+    /** Today's book of every account of {@code tenant} with a position open now or closed today, in one query. */
     private Map<Long, DayBook> dayBooks(long tenant, LocalDate day) {
         Map<Long, DayBook> books = new LinkedHashMap<>();
-        java.sql.Date d = java.sql.Date.valueOf(day);
-        jdbc.query("select p.broker_account_id id, coalesce(sum(p.realised_gross - coalesce(p.charges, 0)) filter (where "
-                + "p.status = 'CLOSED' and (p.closed_at at time zone 'Asia/Kolkata')::date = ?), 0)::float8 net, count(*) "
-                + "filter (where p.status = 'CLOSED' and (p.closed_at at time zone 'Asia/Kolkata')::date = ?) trades, "
-                + "count(*) filter (where p.status <> 'CLOSED') open from exec.position p join acct.broker_account a "
-                + "on a.id = p.broker_account_id where a.tenant_id = ? group by p.broker_account_id", rs -> {
-                    books.put(rs.getLong("id"), new DayBook(Math.round(rs.getDouble("net") * 100) / 100.0,
-                            rs.getInt("trades"), rs.getInt("open")));
-                }, d, d, tenant);
+        java.sql.Timestamp from = java.sql.Timestamp.from(day.atStartOfDay(IST).toInstant());
+        jdbc.query("select p.broker_account_id id, i.execution_mode = 'LIVE' live, "
+                + "coalesce(sum(p.realised_gross - coalesce(p.charges, 0)) filter (where p.status = 'CLOSED'), 0)::float8 net, "
+                + "count(*) filter (where p.status = 'CLOSED') trades, count(*) filter (where p.status <> 'CLOSED') open "
+                + "from exec.position p join exec.trade_intent i on i.id = p.entry_trade_intent_id "
+                + "where p.tenant_id = ? and (p.status <> 'CLOSED' or p.closed_at >= ?) group by 1, 2", rs -> {
+                    long id = rs.getLong("id");
+                    boolean live = rs.getBoolean("live");
+                    double net = rs.getDouble("net");
+                    int trades = rs.getInt("trades"), open = rs.getInt("open");
+                    DayBook b = books.getOrDefault(id, DayBook.NONE);
+                    books.put(id, new DayBook(cents(b.net() + net), b.trades() + trades, b.open() + open,
+                            live ? cents(b.liveNet() + net) : b.liveNet(), b.liveTrades() + (live ? trades : 0),
+                            b.liveOpen() + (live ? open : 0)));
+                }, tenant, from);
         return books;
+    }
+
+    private static double cents(double v) {
+        return Math.round(v * 100) / 100.0;
     }
 
     record Session(String status) {

@@ -497,8 +497,9 @@ export interface ExecutionAccount {
   lastTurn: AccountTurn | null;
   /** the real account this one is the paper twin of (absent from older workers) */
   paperOf?: number | null;
-  /** the account's own book today (IST): closed net after charges, closed trades, open positions */
-  today?: DayResult;
+  /** the account's own book today (IST): closed net after charges, closed trades, open positions; live* = the part
+   *  entered with a LIVE intent (real money), whatever the account's mode is now */
+  today?: DayResult & { liveNet: number; liveTrades: number; liveOpen: number };
 }
 
 export interface KillSwitch {

@@ -59,6 +59,19 @@ function orderAccounts(rows: ExecutionAccount[], tenantRank: (id: number) => num
   return heads.flatMap((a) => [{ a, twin: false }, ...(twinsOf.get(a.id) ?? []).map((t) => ({ a: t, twin: true }))]);
 }
 
+/** Today's books added up; live* = entered with a LIVE intent. Accounts without a book (older worker) add nothing. */
+function dayTotals(xs: ExecutionAccount[]) {
+  const t = { net: 0, trades: 0, open: 0, liveNet: 0, liveTrades: 0, liveOpen: 0 };
+  xs.forEach((a) => {
+    const d = a.today;
+    if (!d) return;
+    t.net += d.net; t.trades += d.trades; t.open += d.open;
+    t.liveNet += d.liveNet ?? 0; t.liveTrades += d.liveTrades ?? 0; t.liveOpen += d.liveOpen ?? 0;
+  });
+  return t;
+}
+const tone = (v: number) => (v > 0 ? "up" : v < 0 ? "down" : "muted") as "up" | "down" | "muted";
+
 const signed = (v: number) => (v > 0 ? "+" : v < 0 ? "−" : "") + rupees(Math.abs(v));
 const netTone = (v: number) => (v > 0 ? "text-up" : v < 0 ? "text-down" : "text-muted");
 
@@ -69,6 +82,8 @@ function TodayCell({ a }: { a: ExecutionAccount }) {
     <div className="whitespace-nowrap">
       <div className={`font-semibold ${netTone(net)}`}>{trades === 0 && net === 0 ? "–" : signed(net)}</div>
       <div className="text-[11px] text-muted">{trades} closed{open > 0 && <span className="font-semibold text-warn"> · {open} open</span>}</div>
+      {(a.today.liveTrades ?? 0) + (a.today.liveOpen ?? 0) > 0 && (a.today.liveTrades !== trades || a.today.liveOpen !== open) && (
+        <div className="text-[11px] text-down">of which LIVE {signed(a.today.liveNet)}</div>)}
     </div>
   );
 }
@@ -76,14 +91,15 @@ function TodayCell({ a }: { a: ExecutionAccount }) {
 /** What a trader checks first: real money today, paper today, what is still open, and what needs a hand. */
 function FollowerSummary({ rows, killed }: { rows: ExecutionAccount[]; killed: Set<number> }) {
   const live = rows.filter((a) => a.mode === "LIVE");
-  const sim = rows.filter((a) => a.mode !== "LIVE");
-  const net = (xs: ExecutionAccount[]) => xs.reduce((s, a) => s + (a.today?.net ?? 0), 0);
-  const open = rows.reduce((s, a) => s + (a.today?.open ?? 0), 0);
+  const b = dayTotals(rows);
   const issues: string[] = [];
   rows.forEach((a) => {
     if (!a.enabled) return;
-    if (a.broker !== "PAPER" && a.connection !== "ACTIVE") issues.push(`${a.name}: ${connectionLabel(a.connection).toLowerCase()}`);
     const st = a.lastTurn?.state;
+    // an IDLE account (a workspace's real account that is not the day's broker) needs no login today
+    if (a.broker !== "PAPER" && a.connection !== "ACTIVE" && st !== "IDLE") {
+      issues.push(`${a.name}: ${connectionLabel(a.connection).toLowerCase()}`);
+    }
     if (st && st !== "RUNNING" && st !== "IDLE") issues.push(`${a.name}: ${st.toLowerCase().replaceAll("_", " ")}`);
     if (killed.has(a.id)) issues.push(`${a.name}: entries stopped`);
   });
@@ -91,17 +107,19 @@ function FollowerSummary({ rows, killed }: { rows: ExecutionAccount[]; killed: S
   return (
     <div className="mb-3 space-y-2 border-b border-line pb-3">
       <div className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-4">
-        <Stat label={`LIVE today (${live.length} account${live.length === 1 ? "" : "s"})`}
-          value={hasBooks ? signed(net(live)) : "–"} tone={net(live) > 0 ? "up" : net(live) < 0 ? "down" : "muted"} />
-        <Stat label="LIVE capital" value={rupees(live.reduce((s, a) => s + a.allocatedCapital, 0))} />
-        <Stat label="PAPER / DRY_RUN today" value={hasBooks ? signed(net(sim)) : "–"}
-          tone={net(sim) > 0 ? "up" : net(sim) < 0 ? "down" : "muted"} />
-        <Stat label="Open positions" value={hasBooks ? open : "–"} tone={open > 0 ? "warn" : "muted"} />
+        <Stat label={`LIVE today (real money, ${b.liveTrades} closed)`} value={hasBooks ? signed(b.liveNet) : "–"}
+          tone={tone(b.liveNet)} />
+        <Stat label={`LIVE-eligible capital (${live.length} account${live.length === 1 ? "" : "s"})`}
+          value={rupees(live.reduce((s, a) => s + a.allocatedCapital, 0))} />
+        <Stat label={`PAPER / DRY_RUN today (${b.trades - b.liveTrades} closed)`} value={hasBooks ? signed(b.net - b.liveNet) : "–"}
+          tone={tone(b.net - b.liveNet)} />
+        <Stat label="Open positions (live · paper)" value={hasBooks ? `${b.liveOpen} · ${b.open - b.liveOpen}` : "–"}
+          tone={b.open > 0 ? "warn" : "muted"} />
       </div>
       {issues.length > 0 && (
         <div className="flex flex-wrap items-center gap-1.5 text-xs">
           <span className="text-muted">Needs attention:</span>
-          {issues.map((t) => <span key={t} className="rounded bg-warn/15 px-1.5 py-0.5 text-warn">{t}</span>)}
+          {issues.map((t, i) => <span key={i} className="rounded bg-warn/15 px-1.5 py-0.5 text-warn">{t}</span>)}
         </div>
       )}
     </div>
@@ -109,13 +127,16 @@ function FollowerSummary({ rows, killed }: { rows: ExecutionAccount[]; killed: S
 }
 
 function GroupHeading({ name, daily, accounts }: { name: string; daily: boolean; accounts: ExecutionAccount[] }) {
-  const net = accounts.reduce((s, a) => s + (a.today?.net ?? 0), 0);
+  const b = dayTotals(accounts);
   return (
     <div className="flex flex-wrap items-baseline gap-x-3 border-b border-line pb-1">
       <span className="text-sm font-semibold">{name}</span>
       <span className="text-xs text-muted">{daily ? "daily-switch workspace" : "own accounts"} · {accounts.length} account
         {accounts.length === 1 ? "" : "s"}</span>
-      {accounts.some((a) => a.today) && <span className={`num text-xs ${netTone(net)}`}>today {signed(net)}</span>}
+      {/* real money and paper are never added together */}
+      {accounts.some((a) => a.today) && <span className="num text-xs">
+        {b.liveTrades + b.liveOpen > 0 && <span className={netTone(b.liveNet)}>LIVE {signed(b.liveNet)} · </span>}
+        <span className={netTone(b.net - b.liveNet)}>paper {signed(b.net - b.liveNet)}</span></span>}
     </div>
   );
 }
@@ -238,7 +259,7 @@ export function AccountsPage() {
 
       <Panel title="Follower accounts" right={<span className="text-xs text-muted">{rows.length} accounts</span>}>
         <FollowerSummary rows={rows} killed={killedAccounts} />
-        <Table rows={ordered} rowStyle={(o) => (o.a.enabled || (o.a.today?.open ?? 0) > 0 ? undefined : { opacity: 0.55 })}
+        <Table rows={ordered} rowStyle={(o) => (o.a.enabled || o.a.today == null || o.a.today.open > 0 ? undefined : { opacity: 0.55 })}
           before={(o, i) => several && (i === 0 || ordered[i - 1].a.tenantId !== o.a.tenantId)
             ? <GroupHeading name={tenants.get(o.a.tenantId)?.name ?? String(o.a.tenantId)} daily={daily(o.a.tenantId)}
                 accounts={rows.filter((r) => r.tenantId === o.a.tenantId)} />
@@ -252,7 +273,10 @@ export function AccountsPage() {
           ) },
           { key: "st", label: "Status", render: ({ a }) => (
             <div className="flex min-w-36 flex-wrap items-center gap-1">
-              <Badge text={a.mode} tone={modeTone(a.mode)} />
+              {a.mode === "LIVE" && daily(a.tenantId)
+                ? <span title="May trade real money; whether today is LIVE is the workspace's switch on the Today page">
+                    <Badge text="LIVE-ELIGIBLE" tone="down" /></span>
+                : <Badge text={a.mode} tone={modeTone(a.mode)} />}
               {a.broker !== "PAPER" && <Badge text={connectionLabel(a.connection)} tone={connectionTone(a.connection)} />}
               {killedAccounts.has(a.id) && <Badge text="ENTRIES STOPPED" tone="down" />}
               {!a.enabled && <Badge text="DISABLED" tone="muted" />}
@@ -282,7 +306,7 @@ export function AccountsPage() {
                   rel="noreferrer" href={`/api/execution/accounts/${a.id}/kite/login`}>Log in to Kite</a>
               )}
               {/* a disabled account holding nothing can neither enter nor hold: no stop controls to misclick */}
-              {canStop(a.tenantId) && (a.enabled || (a.today?.open ?? 0) > 0) && <>
+              {canStop(a.tenantId) && (a.enabled || a.today == null || a.today.open > 0) && <>
               {!killedAccounts.has(a.id) && (
               <button className="rounded border border-warn/60 px-2 py-0.5 text-xs text-warn hover:bg-warn/10" disabled={act.isPending}
                 title="Stop new entries and adds on this account (exits still run)"
