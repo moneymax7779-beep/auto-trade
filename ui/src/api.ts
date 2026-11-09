@@ -48,6 +48,8 @@ export interface PositionRow {
   exitReason: string | null;
   opened: string | null;
   closed: string | null;
+  /** A-358: LONG or SHORT (sold to open). */
+  direction?: string | null;
 }
 
 export interface MarketState {
@@ -186,6 +188,8 @@ export interface TradePositionRow {
   lot_size?: number | null;
   average_cost?: number | null;
   average_exit?: number | null;
+  /** A-358: LONG (bought to open; every row before V31) or SHORT (sold to open: average_cost is the credit). */
+  direction?: string | null;
   underlying: string;
   option_side: string;
   symbol: string;
@@ -311,6 +315,8 @@ export interface PerformanceRow {
   lot_size: number | null;
   average_cost: number | null;
   average_exit: number | null;
+  /** A-358: LONG or SHORT (sold to open); undefined on rows older than V31 means LONG. */
+  direction?: string | null;
 }
 
 // ---------------------------------------------------------------- execution workers (Accounts page)

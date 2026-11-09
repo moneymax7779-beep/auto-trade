@@ -1,0 +1,29 @@
+# ess-v1 (A-358, 9 Nov 2026): the A-292 NIFTY expiry short straddle, run as a PAPER shadow. The rule is A-292's exactly
+# (chosen on Oct 2024 - Sep 2025 out of 30 variants, tested once on Sep 2025 - Sep 2026: PF 1.40, +Rs 15,850 a lot a year,
+# not statistically significant; plan docs/plans/2026-11-01-expiry-short-straddle-shadow.md): on NIFTY's own expiry day
+# sell the ATM call and put at 12:00, 1 lot each; buy both back when their combined ask is 50 % above the credit (the OMS
+# bracket, on every quote) or when a one-minute index close is beyond strike +- credit (this strategy); otherwise hold and
+# let both legs settle at intrinsic value at the close. Every value is fixed at registration, not tuned. PAPER only: the
+# OMS sells only with risk v19's `shorts` section and a signal-source session refuses SELL_STRADDLE.
+version: ess-v1
+strategy: expiry-short-straddle
+status: UNCALIBRATED
+source: "ledger A-292 (1 Nov 2026) rule; A-358 forward shadow (registered 9 Nov 2026); values fixed, not tuned"
+
+scope:
+  dte: 0                               # the index's own expiry day only
+  underlyings: [NIFTY]                 # A-292 was NIFTY only; SENSEX untested
+  entry_from: "12:00"                  # the 12:00 decision minute ...
+  entry_until: "12:05"                 # ... a refused entry may retry inside this window only
+
+position:
+  lots: 1                              # one lot of each leg (risk v19 shorts.max_lots 1)
+  strike_offset: 0                     # ATM straddle
+
+exits:
+  stop_pct: 50                         # buy both back when the combined ask >= 1.5 x the credit received
+  break_even_exit: true                # buy both back when a one-minute index close is beyond strike +- credit
+                                       # otherwise hold: both legs are cash-settled at intrinsic value at the close (15:30)
+
+retry:
+  refused_retry_min: 1                 # an entry refused before any position existed may try again after this

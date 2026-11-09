@@ -152,6 +152,11 @@ public final class PaperBroker implements BrokerGateway, ExpirySettlement, Consu
         return positions;
     }
 
+    /**
+     * Cash settlement at expiry: a long holding's working sells fill up to the quantity held, a short holding's (negative
+     * quantity, A-358) working buys fill up to the quantity owed, both at {@code price}; every other working order of the
+     * contract is cancelled.
+     */
     @Override
     public synchronized void settle(long instrumentToken, double price) {
         Holding holding = holdings.get(instrumentToken);
@@ -160,9 +165,10 @@ public final class PaperBroker implements BrokerGateway, ExpirySettlement, Consu
             if (order.status.isTerminal() || order.request.instrumentToken() != instrumentToken) {
                 continue;
             }
-            if (order.request.side() == OrderSide.SELL && held > 0) {
-                long quantity = Math.min(order.remaining(), held);
-                held -= quantity;
+            boolean closes = order.request.side() == OrderSide.SELL ? held > 0 : held < 0;
+            if (closes) {
+                long quantity = Math.min(order.remaining(), Math.abs(held));
+                held -= order.request.side() == OrderSide.SELL ? quantity : -quantity;
                 order.filled += quantity;
                 order.notional += quantity * price;
                 order.status = order.remaining() == 0 ? OrderStatus.FILLED : OrderStatus.PARTIALLY_FILLED;
@@ -271,12 +277,15 @@ public final class PaperBroker implements BrokerGateway, ExpirySettlement, Consu
     private void book(Order order, long quantity, double price) {
         Holding holding = holdings.computeIfAbsent(order.request.instrumentToken(), t -> new Holding());
         holding.symbol = order.request.symbol();
-        if (order.request.side() == OrderSide.BUY) {
-            holding.averagePrice = (holding.averagePrice * holding.quantity + price * quantity)
-                    / (holding.quantity + quantity);
-            holding.quantity += quantity;
+        long signed = order.request.side() == OrderSide.BUY ? quantity : -quantity;
+        boolean opens = holding.quantity == 0 || Long.signum(holding.quantity) == Long.signum(signed);
+        if (opens) {
+            // a buy onto a long, or a sale onto a short (A-358): the average price of what is held moves with the fill
+            long held = Math.abs(holding.quantity);
+            holding.averagePrice = (holding.averagePrice * held + price * quantity) / (held + quantity);
+            holding.quantity += signed;
         } else {
-            holding.quantity -= quantity;
+            holding.quantity += signed;                         // closing: the average of what remains is unchanged
             if (holding.quantity == 0) {
                 holding.averagePrice = 0;
             }

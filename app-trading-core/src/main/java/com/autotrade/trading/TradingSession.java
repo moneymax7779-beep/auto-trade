@@ -120,6 +120,8 @@ public final class TradingSession {
     private static final BudgetSizing NO_BUDGET = new BudgetSizing(Double.NaN);
     private final Map<String, Decision> lastDecisions = new LinkedHashMap<>();
     private final Map<String, Double> lastSpot = new HashMap<>();
+    /** A-358: the last raw index print per underlying (the closing value once the feed has run past the close). */
+    private final Map<String, Double> lastIndexPrice = new HashMap<>();
     private final List<String> recentRejections = new ArrayList<>();
     private final AtomicLong events = new AtomicLong();
     private long sessionId;
@@ -224,23 +226,29 @@ public final class TradingSession {
 
     /**
      * When the feed ran to the options' close (15:30 IST), an option expiring today that is still held (one nobody bid
-     * for, so the exit could not sell it) settles for cash at its intrinsic value against the last spot, as the exchange
-     * settles it. A feed that ended earlier (zt-tiger-v2 history stops at 15:15) leaves it to the end-of-session exit.
+     * for, so the exit could not sell it; or a short leg the square-off left alone, A-358) settles for cash at its
+     * intrinsic value against the last spot, the session's closing index value, as the exchange settles it. A feed that
+     * ended earlier (zt-tiger-v2 history stops at 15:15) leaves it to the end-of-session exit.
      */
     private void settleExpired() {
         if (clock.get().atZone(MarketTime.IST).toLocalTime().isBefore(OPTIONS_CLOSE)) {
             return;
         }
         for (ManagedPosition position : List.copyOf(oms.livePositions())) {
-            double spot = lastSpot.getOrDefault(position.underlying(), Double.NaN);
+            // a short (A-358) settles against the last raw index print, the exchange's closing value; the features'
+            // spot stops following the index after the close (6 Oct 2026: 22717.95 vs the 22776.1 close) and would
+            // mis-settle it. Longs keep the snapshot spot they always used.
+            double spot = position.direction() == ManagedPosition.Direction.SHORT
+                    ? lastIndexPrice.getOrDefault(position.underlying(), lastSpot.getOrDefault(position.underlying(), Double.NaN))
+                    : lastSpot.getOrDefault(position.underlying(), Double.NaN);
             double strike = position.contract().strike();
             if (!contracts.expiresToday(position.contract().token()) || !Double.isFinite(spot) || !Double.isFinite(strike)) {
                 continue;
             }
             double intrinsic = Math.max(0, position.side() == OptionSide.CE ? spot - strike : strike - spot);
             double price = Math.floor(intrinsic * 20) / 20;                   // whole ticks of 0.05
-            log.info("{} {} settled at expiry: {} at {} (spot {})", position.underlying(), position.contract().symbol(),
-                    position.quantity(), price, spot);
+            log.info("{} {} {}settled at expiry: {} at {} (spot {})", position.underlying(), position.contract().symbol(),
+                    position.direction() == ManagedPosition.Direction.SHORT ? "short " : "", position.quantity(), price, spot);
             oms.settleAtExpiry(position.contract().token(), price);
         }
     }
@@ -285,6 +293,8 @@ public final class TradingSession {
             if (event instanceof OptionTick tick) {
                 contracts.accept(tick);
                 oms.observe(tick);
+            } else if (event instanceof com.autotrade.core.event.IndexTick index && index.price() > 0) {
+                lastIndexPrice.put(index.underlying(), index.price());
             }
             if (ReferenceData.INDIA_VIX.equals(event.underlying())) {
                 // Market-wide context: every underlying's engine takes India VIX.
@@ -310,7 +320,7 @@ public final class TradingSession {
             oms.onTimer(now);
             LocalTime time = now.atZone(MarketTime.IST).toLocalTime();
             if (risk.squareOffDue(time) && !squaredOff && !oms.livePositions().isEmpty()) {
-                oms.exitAll("SQUARE_OFF");
+                squareOff("SQUARE_OFF");
                 squaredOff = true;
             }
             Instant last = feed.lastEventTime();
@@ -357,7 +367,22 @@ public final class TradingSession {
             }
         }
         if (squareOff && !oms.livePositions().isEmpty()) {
-            oms.exitAll("SQUARE_OFF");
+            squareOff("SQUARE_OFF");
+        }
+    }
+
+    /**
+     * The square-off closes every position except a short leg (A-358) of an option expiring today: the exchange settles
+     * that for cash at the closing index, which {@link #settleExpired} applies at the session's end, whereas buying it
+     * back now would price it off the post-close book. Long positions are closed exactly as before.
+     */
+    private void squareOff(String reason) {
+        for (ManagedPosition position : oms.livePositions()) {
+            if (position.direction() == ManagedPosition.Direction.SHORT
+                    && contracts.expiresToday(position.contract().token())) {
+                continue;
+            }
+            oms.exit(position.strategy(), position.underlying(), reason);
         }
     }
 
@@ -371,10 +396,12 @@ public final class TradingSession {
             candidate(strategyId, underlying, snapshot, decision, intent, false, reason);
             return;
         }
-        if (intent.action() == OrderIntent.Action.ENTER || intent.action() == OrderIntent.Action.ENTER_STRADDLE) {
+        if (intent.action() == OrderIntent.Action.ENTER || intent.action() == OrderIntent.Action.ENTER_STRADDLE
+                || intent.action() == OrderIntent.Action.SELL_STRADDLE) {
             String streak = losingStreakRefusal(strategyId, underlying);     // risk v13 (A-071)
             if (streak != null) {
-                String what = intent.action() == OrderIntent.Action.ENTER ? "ENTER " + intent.side() : "ENTER STRADDLE";
+                String what = intent.action() == OrderIntent.Action.ENTER ? "ENTER " + intent.side()
+                        : intent.action() == OrderIntent.Action.SELL_STRADDLE ? "SELL STRADDLE" : "ENTER STRADDLE";
                 rejected(strategyId, underlying, what, streak);
                 candidate(strategyId, underlying, snapshot, decision, intent, false, streak);
                 log.info("{} {} {} {} REJECTED: {}", time, underlying, strategyId, what, streak);
@@ -506,6 +533,32 @@ public final class TradingSession {
                     signals.entered(clock.get(), strategyId, underlying, OptionSide.PE, put.get(), oms.ask(put.get()),
                             straddleBudget, 0, intent.stage().name(), intent.reason(), group, legs);
                 }
+            }
+            case SELL_STRADDLE -> {                                            // A-358: PAPER only
+                if (signals != null) {
+                    // never on a signal source: a short would otherwise be copied to a member's broker account
+                    String reason = "SELL STRADDLE is PAPER-only: refused on a signal-source session";
+                    rejected(strategyId, underlying, "SELL STRADDLE", reason);
+                    candidate(strategyId, underlying, snapshot, decision, intent, false, reason);
+                    log.warn("{} {} {} SELL STRADDLE REJECTED: {}", time, underlying, strategyId, reason);
+                    return;
+                }
+                double atm = snapshot.options().atmStrike();
+                double step = snapshot.options().strikeStep();
+                var call = contracts.find(underlying, intent.legStrike(OptionSide.CE, atm, step), OptionSide.CE);
+                var put = contracts.find(underlying, intent.legStrike(OptionSide.PE, atm, step), OptionSide.PE);
+                if (call.isEmpty() || put.isEmpty()) {
+                    rejected(strategyId, underlying, "SELL STRADDLE", "no quotes for the chosen strikes yet");
+                    candidate(strategyId, underlying, snapshot, decision, intent, false, "no quotes for the chosen strikes yet");
+                    return;
+                }
+                double shortStop = intent.stopPctOr(slot.factory().premiumStopPct());
+                RiskDecision result = oms.enterShortStraddle(strategyId, underlying, call.get(), put.get(), intent.lots(),
+                        intent.stage().name(), market, shortStop);
+                log.info("{} {} {} SELL STRADDLE {} + {} {} lot(s), stop +{} % of the credit {}", time, underlying,
+                        strategyId, call.get().symbol(), put.get().symbol(), intent.lots(), Math.round(shortStop),
+                        result.approved() ? "APPROVED" : "REJECTED: " + result.reason());
+                candidate(strategyId, underlying, snapshot, decision, intent, result.approved(), result.reason());
             }
             case ADD -> {
                 int lots = sizings.getOrDefault(strategyId + "|" + underlying, NO_BUDGET).lots(intent.lots());
@@ -840,20 +893,26 @@ public final class TradingSession {
         m.put("quantity", p.quantity());
         m.put("boughtQuantity", p.boughtQuantity());
         m.put("lotSize", p.contract().lotSize());
+        boolean shortLeg = p.direction() == ManagedPosition.Direction.SHORT;          // A-358
+        m.put("direction", p.direction().name());
         m.put("averageCost", Math.round(p.averageCost() * 100) / 100.0);
-        m.put("premiumPaid", Math.round(p.averageCost() * p.boughtQuantity()));
+        m.put("premiumPaid", Math.round(p.averageCost() * p.boughtQuantity()));     // a short: the credit received
         double bid = p.lastBid();
+        double ask = p.lastAsk();
         m.put("bid", Double.isFinite(bid) ? bid : null);
-        m.put("value", p.quantity() > 0 && Double.isFinite(bid) ? Math.round(bid * p.quantity()) : null);
+        m.put("ask", Double.isFinite(ask) ? ask : null);
+        double mark = shortLeg ? ask : bid;
+        m.put("value", p.quantity() > 0 && Double.isFinite(mark) ? Math.round(mark * p.quantity()) : null);
         m.put("unrealised", Math.round(p.unrealised()));
         m.put("realised", Math.round(p.realised()));
         m.put("costs", Math.round(p.costs()));
-        // closed: the average exit from the realised P&L over everything bought
+        // closed: the average exit from the realised P&L over everything bought (a short: everything sold, bought back)
         m.put("exitPrice", p.quantity() == 0 && p.boughtQuantity() > 0
-                ? Math.round((p.averageCost() + p.realised() / p.boughtQuantity()) * 100) / 100.0 : null);
+                ? Math.round((shortLeg ? p.averageCost() - p.realised() / p.boughtQuantity()
+                        : p.averageCost() + p.realised() / p.boughtQuantity()) * 100) / 100.0 : null);
         double[] bracket = oms.bracket(p.strategy(), p.underlying());   // a straddle's, or a single leg's (A-283)
-        m.put("targetPct", bracket == null ? null : bracket[0]);
-        m.put("stopPct", bracket == null ? null : bracket[1]);
+        m.put("targetPct", bracket == null || !Double.isFinite(bracket[0]) ? null : bracket[0]);
+        m.put("stopPct", bracket == null || !Double.isFinite(bracket[1]) ? null : bracket[1]);
         m.put("stages", p.stages());
         m.put("net", Math.round(p.net()));
         m.put("exitReason", p.exitReason());
