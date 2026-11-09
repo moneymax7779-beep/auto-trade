@@ -502,6 +502,22 @@ export interface ExecutionAccount {
   today?: DayResult & { liveNet: number; liveTrades: number; liveOpen: number };
 }
 
+/** GET/POST /api/execution/accounts/{id}/live-strategies: the owner's choice of LIVE strategies (V32, 9 Nov 2026) */
+export interface LiveStrategyChoice {
+  id: number;
+  account: string;
+  riskFile: string;
+  /** what the risk file lets trade LIVE (the list to choose from) */
+  available: string[];
+  /** what trades LIVE until the owner chooses */
+  defaults: string[];
+  /** the owner's choice; null = the defaults */
+  chosen: string[] | null;
+  /** what trades LIVE now */
+  effective: string[];
+  canEdit: boolean;
+}
+
 export interface KillSwitch {
   id: number;
   tenantId: number | null;

@@ -272,6 +272,45 @@ class LiveIT {
         assertThat(kite.requests("place")).isZero();
     }
 
+    /** V32 (user 9 Nov 2026): the owner's choice decides what trades LIVE, within the risk file's list. */
+    @Test
+    void theOwnersChoiceOfLiveStrategiesRefusesADeselectedOne() {
+        long group = group();
+        BrokerAccount a = account(group, true, "ma-cross", "oi-burst-cross");
+        FollowerRisk risk = FollowerRisk.load(Path.of(V7));
+        LiveStrategies live = new LiveStrategies(dataSource);
+        assertThat(live.chosen(a.id())).isNull();
+        assertThat(live.effective(a.id(), risk)).containsExactly("early-confirm-runner", "ma-cross", "oi-burst-cross");
+        live.choose(a.id(), risk, List.of("oi-burst-cross"));                     // ma-cross deselected
+        assertThat(live.effective(a.id(), risk)).containsExactly("oi-burst-cross");
+        enter(group, signalSession(group), "ma-cross", 0);
+        try (BrokerConnections registry = registry()) {
+            follower(registry, a).run(a, group, DAY);
+        }
+        assertThat(intentState(a)).isEqualTo("REJECTED_LIVE_STRATEGY");
+        assertThat(kite.requests("place")).isZero();
+        // never wider than the file: a strategy it does not list cannot be chosen
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> live.choose(a.id(), risk, List.of("opening-drive")))
+                .hasMessageContaining("not allowed LIVE by the risk file: [opening-drive]");
+        live.choose(a.id(), risk, null);                                           // back to the defaults
+        assertThat(live.chosen(a.id())).isNull();
+    }
+
+    /** follower-risk v9: every live-set strategy may be chosen; v7's three trade until the owner chooses. */
+    @Test
+    void riskV9OffersTheLiveSetAndDefaultsToV7sList() {
+        FollowerRisk v9 = FollowerRisk.load(Path.of("../config/risk/follower-risk.v9.yaml"));
+        FollowerRisk v7 = FollowerRisk.load(Path.of(V7));
+        assertThat(v9.live().strategies()).containsExactlyInAnyOrder("early-confirm-runner", "expiry-trend-rider",
+                "ma-cross", "oi-burst-cross", "wall-break-rider", "break-retest-runner");
+        assertThat(v9.live().defaults()).isEqualTo(v7.live().strategies());
+        assertThat(v7.live().defaults()).isEqualTo(v7.live().strategies());   // a file without defaults: all of its list
+        assertThat(v9.live().maxLotsPerOrder()).isEqualTo(v7.live().maxLotsPerOrder());
+        assertThat(v9.live().maxOpenPositions()).isEqualTo(v7.live().maxOpenPositions());
+        assertThat(v9.maxOpenPositions()).isEqualTo(v7.maxOpenPositions());
+        assertThat(v9.maxLotsPerUnderlying()).isEqualTo(v7.maxLotsPerUnderlying());
+    }
+
     @Test
     void anEngagedGlobalLiveSwitchRefusesEntries() {
         long group = group();

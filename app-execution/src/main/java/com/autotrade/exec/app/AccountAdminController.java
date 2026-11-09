@@ -69,7 +69,7 @@ class AccountAdminController {
     private static final double MAX_CAPITAL = 100_000_000;               // Rs 10 Cr: a typo guard, not a policy
     private static final String DEFAULT_RISK = "config/risk/follower-risk.v3.yaml";
     /** A member's real broker account: the risk file with LIVE limits, one lot an entry (what LIVE eligibility needs). */
-    private static final String MEMBER_BROKER_RISK = "config/risk/follower-risk.v7.yaml";
+    private static final String MEMBER_BROKER_RISK = "config/risk/follower-risk.v9.yaml";   // v9: owner-chosen LIVE strategies
 
     private final Access access;
     private final AccountStore accounts;

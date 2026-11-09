@@ -8,6 +8,7 @@ import javax.sql.DataSource;
 
 import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -21,6 +22,7 @@ import com.autotrade.account.BrokerType;
 import com.autotrade.account.TradeMode;
 import com.autotrade.execution.FollowerRisk;
 import com.autotrade.execution.KillSwitches;
+import com.autotrade.execution.LiveStrategies;
 
 /**
  * {@code POST /api/execution/accounts/{id}/live}: the account owner's own LIVE switch (the Kite pilot, user 2 Nov 2026).
@@ -100,7 +102,7 @@ class LiveSwitchController {
             detail.put("riskFile", a.riskFile());
             detail.put("maxLotsPerOrder", risk.live().maxLotsPerOrder());
             detail.put("maxOpenPositions", risk.live().maxOpenPositions());
-            detail.put("strategies", new java.util.TreeSet<>(risk.live().strategies()));
+            detail.put("strategies", new com.autotrade.execution.LiveStrategies(jdbc.getDataSource()).effective(id, risk));
             audit.audit(accounts.byId(id).orElseThrow(), user.subject(), "LIVE_ON", detail);
         } else {
             int changed = jdbc.update("update acct.broker_account set trade_mode = 'DRY_RUN', live_trading_enabled = false, "
@@ -112,6 +114,80 @@ class LiveSwitchController {
         BrokerAccount now = accounts.byId(id).orElseThrow();
         return Map.of("id", id, "account", now.displayName(), "mode", now.tradeMode().name(),
                 "liveTradingEnabled", now.liveTradingEnabled());
+    }
+
+    /**
+     * The account's LIVE strategies (V32, user 9 Nov 2026: the owner selects or deselects from every strategy the risk
+     * file lets trade LIVE): {@code available} (the risk file's live.strategies), {@code defaults} (its
+     * live.default_strategies), {@code chosen} (the owner's choice, null = the defaults), {@code effective} (what
+     * trades LIVE now) and {@code canEdit} (the platform admin only).
+     */
+    @GetMapping("/api/execution/accounts/{id}/live-strategies")
+    Map<String, Object> liveStrategies(@RequestHeader(value = Access.HEADER, required = false) String subject,
+                                       @PathVariable long id) {
+        Access.User user = access.user(subject);
+        BrokerAccount a = accounts.byId(id).filter(x -> user.sees(x.tenantId()))
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "no such account"));
+        return liveView(user, a);
+    }
+
+    /** {@code strategies}: the strategies to trade LIVE (an empty list: none); null with {@code reset}: the defaults. */
+    record LiveChoice(java.util.List<String> strategies, Boolean reset) {
+    }
+
+    @PostMapping("/api/execution/accounts/{id}/live-strategies")
+    Map<String, Object> chooseLiveStrategies(@RequestHeader(value = Access.HEADER, required = false) String subject,
+                                             @PathVariable long id, @RequestBody LiveChoice body) {
+        Access.User user = access.user(subject);
+        BrokerAccount a = accounts.byId(id).filter(x -> user.sees(x.tenantId()))
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "no such account"));
+        // the owner's decision (user 9 Nov 2026: "As the owner I should be able to select or deselect"): members and
+        // tenant owners see it, only the platform admin changes it
+        Access.require(user.admin(), "only the platform owner chooses LIVE strategies");
+        require(a.role().name().equals("FOLLOWER_TRADE") && a.brokerType() != BrokerType.PAPER,
+                a.displayName() + " is not a broker follower account");
+        boolean reset = Boolean.TRUE.equals(body.reset());
+        require(reset || body.strategies() != null, "strategies: the list to trade LIVE (or reset: true)");
+        FollowerRisk risk = risk(a);
+        LiveStrategies live = new LiveStrategies(jdbc.getDataSource());
+        java.util.List<String> before = live.effective(a.id(), risk);
+        try {
+            live.choose(a.id(), risk, reset ? null : body.strategies());
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage());
+        }
+        Map<String, Object> detail = new LinkedHashMap<>();
+        detail.put("before", before);
+        detail.put("after", live.effective(a.id(), risk));
+        detail.put("reset", reset);
+        detail.put("riskFile", a.riskFile());
+        audit.audit(a, user.subject(), "LIVE_STRATEGIES", detail);
+        return liveView(user, a);
+    }
+
+    private Map<String, Object> liveView(Access.User user, BrokerAccount a) {
+        FollowerRisk risk = risk(a);
+        LiveStrategies live = new LiveStrategies(jdbc.getDataSource());
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("id", a.id());
+        out.put("account", a.displayName());
+        out.put("riskFile", Path.of(a.riskFile()).getFileName().toString());
+        out.put("available", risk.live() == null ? java.util.List.of()
+                : java.util.List.copyOf(new java.util.TreeSet<>(risk.live().strategies())));
+        out.put("defaults", risk.live() == null ? java.util.List.of()
+                : java.util.List.copyOf(new java.util.TreeSet<>(risk.live().defaults())));
+        out.put("chosen", live.chosen(a.id()));
+        out.put("effective", live.effective(a.id(), risk));
+        out.put("canEdit", user.admin() && risk.live() != null);
+        return out;
+    }
+
+    private static FollowerRisk risk(BrokerAccount a) {
+        try {
+            return FollowerRisk.load(Path.of(a.riskFile()));
+        } catch (RuntimeException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "risk file " + a.riskFile() + " not readable");
+        }
     }
 
     private static void require(boolean ok, String message) {

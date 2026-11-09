@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import {
   get, postJson, type AccountDetails, type CredentialProfile, type ExecMe, type ExecPosition, type LedgerRow,
+  type LiveStrategyChoice,
 } from "../api";
 import { ErrorNote, Loading, Panel, Table } from "../components/ui";
 
@@ -310,6 +311,7 @@ export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDo
         )}
 
         {kite && canManage && !dailySwitch && <LiveSwitch account={a} onDone={onDone} />}
+        {a.broker !== "PAPER" && <LiveStrategiesPicker accountId={a.id} onDone={onDone} />}
 
         <div>
           <div className="mb-2 flex items-center gap-2">
@@ -367,6 +369,65 @@ export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDo
  * condition again (risk file with live limits, one lot an entry, today's Kite session, no open position); typing the
  * account's name confirms. Back to DRY_RUN only with no position open.
  */
+/**
+ * The owner's choice of LIVE strategies on a broker account (user, 9 Nov 2026: "As the owner I should be able to select
+ * or deselect from all the available live strategies"): from the risk file's list, stored per account, audited. Only
+ * the platform admin edits; everyone else sees what trades LIVE. Exits of held positions always run.
+ */
+function LiveStrategiesPicker({ accountId, onDone }: { accountId: number; onDone: (text: string, ok: boolean) => void }) {
+  const client = useQueryClient();
+  const choice = useQuery({ queryKey: ["live-strategies", accountId], refetchInterval: 30000,
+    queryFn: () => get<LiveStrategyChoice>(`/api/execution/accounts/${accountId}/live-strategies`) });
+  const [picked, setPicked] = useState<string[] | null>(null);
+  const save = useMutation({
+    mutationFn: (body: { strategies?: string[]; reset?: boolean }) =>
+      postJson<LiveStrategyChoice>(`/api/execution/accounts/${accountId}/live-strategies`, body),
+    onSuccess: (r) => {
+      onDone(`${r.account}: LIVE strategies now ${r.effective.join(", ") || "none"}`, true);
+      setPicked(null);
+      client.setQueryData(["live-strategies", accountId], r);
+      ["exec-audit", "exec-accounts"].forEach((k) => client.invalidateQueries({ queryKey: [k] }));
+    },
+    onError: (e) => onDone(e instanceof Error ? e.message : String(e), false),
+  });
+  if (choice.error) return <ErrorNote error={choice.error} />;
+  if (!choice.data) return null;
+  const c = choice.data;
+  if (c.available.length === 0) return null;                 // a risk file without LIVE limits: nothing to choose
+  const current = picked ?? c.effective;
+  const changed = picked != null && [...picked].sort().join() !== [...c.effective].sort().join();
+  const toggle = (s: string) => setPicked(current.includes(s) ? current.filter((x) => x !== s) : [...current, s]);
+  return (
+    <div className="rounded border border-line p-3 text-sm">
+      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
+        LIVE strategies · {c.chosen == null ? "risk-file default" : "owner's choice"} · {c.riskFile}
+      </div>
+      <div className="flex flex-wrap gap-x-4 gap-y-1.5">
+        {c.available.map((s) => (
+          <label key={s} className={`flex items-center gap-1.5 ${c.canEdit ? "cursor-pointer" : "text-muted"}`}>
+            <input type="checkbox" checked={current.includes(s)} disabled={!c.canEdit || save.isPending}
+              onChange={() => toggle(s)} />
+            {s}{c.defaults.includes(s) && <span className="text-[10px] text-muted">default</span>}
+          </label>
+        ))}
+      </div>
+      {c.canEdit ? (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <button className={primary} disabled={!changed || save.isPending}
+            onClick={() => save.mutate({ strategies: current })}>{save.isPending ? "Saving…" : "Save LIVE strategies"}</button>
+          {picked != null && <button className={button} disabled={save.isPending} onClick={() => setPicked(null)}>Undo</button>}
+          {c.chosen != null && <button className={button} disabled={save.isPending}
+            onClick={() => save.mutate({ reset: true })}>Back to the default</button>}
+          <span className="text-xs text-muted">Applies to the next LIVE entry or add; exits of held positions always run.
+            A strategy also needs the account to follow it (Strategies above).</span>
+        </div>
+      ) : (
+        <p className="mt-2 text-xs text-muted">Trades LIVE: {c.effective.join(", ") || "none"}. The platform owner chooses.</p>
+      )}
+    </div>
+  );
+}
+
 function LiveSwitch({ account, onDone }: { account: AccountDetails; onDone: (text: string, ok: boolean) => void }) {
   const client = useQueryClient();
   const [confirm, setConfirm] = useState("");

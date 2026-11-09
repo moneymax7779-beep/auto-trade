@@ -130,7 +130,7 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
         KiteReads kite = new KiteReads(account, true);
         return new Live(new LiveGuard(kite, limits, kite::lotSize), "LIVE: Kite " + kiteApiBase.getHost()
                 + ", product MIS, at most " + limits.maxLotsPerOrder() + " lot(s) a buy and "
-                + limits.maxOpenPositions() + " contracts, strategies " + new java.util.TreeSet<>(limits.strategies()));
+                + limits.maxOpenPositions() + " contracts, LIVE strategies as chosen on the Accounts page");
     }
 
     /** The account's open positions, held by the new simulator (a restart: the broker would still hold them). */

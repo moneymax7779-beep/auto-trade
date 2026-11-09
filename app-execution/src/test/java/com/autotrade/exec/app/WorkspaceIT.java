@@ -144,7 +144,7 @@ class WorkspaceIT {
         AccountStore accounts = new AccountStore(dataSource);
         BrokerAccount z = accounts.byId(zerodha).orElseThrow();
         assertThat(z.tradeMode().name()).isEqualTo("PAPER");
-        assertThat(z.riskFile()).endsWith("follower-risk.v7.yaml");
+        assertThat(z.riskFile()).endsWith("follower-risk.v9.yaml");
         assertThat(z.sizeStepPct()).isZero();
         Long twin = jdbc.queryForObject("select id from acct.broker_account where paper_of_account_id = ?", Long.class, zerodha);
         assertThat(accounts.byId(twin).orElseThrow().brokerType().name()).isEqualTo("PAPER");

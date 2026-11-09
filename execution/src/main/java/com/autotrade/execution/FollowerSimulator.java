@@ -95,6 +95,7 @@ public final class FollowerSimulator {
     private final QuoteSource quotes;            // null: capital-refused adds are not retried
     private final KillSwitches kills;
     private final TradingDay tradingDay;
+    private final LiveStrategies liveStrategies;
 
     public FollowerSimulator(DataSource dataSource, CostModel costs, FollowerRisk risk, double simulatedBrokerFunds) {
         this(dataSource, costs, risk, simulatedBrokerFunds, null);
@@ -117,6 +118,7 @@ public final class FollowerSimulator {
         this.quotes = quotes;
         this.kills = new KillSwitches(dataSource);
         this.tradingDay = new TradingDay(dataSource);
+        this.liveStrategies = new LiveStrategies(dataSource);
     }
 
     private String workerId;                     // set by an execution worker: claim intents before running them
@@ -529,9 +531,12 @@ public final class FollowerSimulator {
         if (switched != null) {
             return reject(p, switched.substring(0, switched.indexOf(':')), switched.substring(switched.indexOf(':') + 2));
         }
-        if ((day.account.tradeMode() == TradeMode.LIVE || TradeMode.LIVE.name().equals(p.mode()))
-                && (risk.live() == null || !risk.live().strategies().contains(p.strategyId()))) {
-            return reject(p, "LIVE_STRATEGY", p.strategyId() + " is not one of the risk file's LIVE strategies");
+        if (day.account.tradeMode() == TradeMode.LIVE || TradeMode.LIVE.name().equals(p.mode())) {
+            // the owner's choice of LIVE strategies within the risk file's list (V32, user 9 Nov 2026)
+            List<String> live = liveStrategies.effective(day.account.id(), risk);
+            if (!live.contains(p.strategyId())) {
+                return reject(p, "LIVE_STRATEGY", p.strategyId() + " is not one of the account's LIVE strategies " + live);
+            }
         }
         if (venue.live()) {
             // code review 3 Nov 2026: a LIVE entry follows its signal at once or not at all (a worker that was down, a lease

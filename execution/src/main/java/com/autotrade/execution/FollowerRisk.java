@@ -19,13 +19,27 @@ public record FollowerRisk(String version, CapitalLimits limits, int maxOpenPosi
      * v7 (the Kite LIVE pilot, user 2 Nov 2026): a LIVE account's hard limits, checked again in front of the broker
      * connection ({@link LiveGuard}): lots per buy order, contracts held at once, and the only strategies it may enter.
      */
-    public record LiveLimits(int maxLotsPerOrder, int maxOpenPositions, java.util.Set<String> strategies) {
+    /**
+     * {@code strategies}: what may trade LIVE on an account (v9: what the owner may choose from); {@code defaults}: what
+     * trades LIVE on an account the owner has not chosen for (live.default_strategies; a file without them: all of
+     * {@code strategies}). See {@link LiveStrategies}.
+     */
+    public record LiveLimits(int maxLotsPerOrder, int maxOpenPositions, java.util.Set<String> strategies,
+                             java.util.Set<String> defaults) {
 
         public LiveLimits {
             if (maxLotsPerOrder < 1 || maxOpenPositions < 1 || strategies == null || strategies.isEmpty()) {
                 throw new IllegalArgumentException("live: max_lots_per_order, max_open_positions >= 1 and strategies");
             }
             strategies = java.util.Set.copyOf(strategies);
+            defaults = defaults == null ? strategies : java.util.Set.copyOf(defaults);
+            if (!strategies.containsAll(defaults)) {
+                throw new IllegalArgumentException("live: default_strategies must be among live.strategies");
+            }
+        }
+
+        public LiveLimits(int maxLotsPerOrder, int maxOpenPositions, java.util.Set<String> strategies) {
+            this(maxLotsPerOrder, maxOpenPositions, strategies, null);
         }
     }
 
@@ -51,8 +65,12 @@ public record FollowerRisk(String version, CapitalLimits limits, int maxOpenPosi
                 c.has("combined.max_open_premium_pct") ? new Combined(c.getDouble("combined.max_open_premium_pct"),
                         c.getInt("combined.max_lots_per_contract"), c.getBoolean("combined.share_liquidity")) : null,
                 c.has("live.max_lots_per_order") ? new LiveLimits(c.getInt("live.max_lots_per_order"),
-                        c.getInt("live.max_open_positions"), ((java.util.List<?>) c.get("live.strategies")).stream()
-                        .map(String::valueOf).collect(java.util.stream.Collectors.toSet())) : null);
+                        c.getInt("live.max_open_positions"), names(c.get("live.strategies")),
+                        c.has("live.default_strategies") ? names(c.get("live.default_strategies")) : null) : null);
+    }
+
+    private static java.util.Set<String> names(Object list) {
+        return ((java.util.List<?>) list).stream().map(String::valueOf).collect(java.util.stream.Collectors.toSet());
     }
 
     /** The budget multiplier for an entry at this RVOL (risk v17: the factor at or above the threshold, else 1). */

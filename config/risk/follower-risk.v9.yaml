@@ -1,0 +1,51 @@
+# follower-risk v9 (user 9 Nov 2026: "As the owner I should be able to select or deselect from all the available live
+# strategies"; "now I don't want to keep live for ecr-11"): v7 with the LIVE strategy list split in two. live.strategies
+# is now the list the owner may choose from (the whole live set of PAPER-1); live.default_strategies is what an account
+# trades LIVE until the owner chooses (v7's list). The owner's choice per account is stored in the database
+# (acct.broker_account.live_strategies, V32), audited LIVE_STRATEGIES, and checked by the risk engine at every LIVE entry
+# and add; exits of a held position are never stopped by it. Every other limit is v7's, unchanged.
+version: follower-risk-v9
+name: follower-risk
+status: UNCALIBRATED
+
+capital:
+  daily_loss_pct: 10                   # v5: Rs 20,000 on Rs 2,00,000 (user's limit); v3 had 22 as paper-risk v17
+  max_premium_per_trade_pct: 100
+  max_open_premium_pct: 100            # premium in use + this entry <= equity (paper-risk v17's capital check)
+  broker_funds_buffer_pct: 10          # the broker's available funds must exceed the entry premium by 10 %
+
+positions:
+  max_open_positions: 2                # v7 pilot (v6: 4)
+  max_lots_per_underlying: 2           # v7 pilot (v6: 400)
+
+sizing:                                # as paper-risk v17
+  rvol_boost_threshold: 1.5
+  rvol_boost_factor: 1.5
+
+simulation:                            # PAPER followers (simulated fills) only
+  adverse_bps: 0
+
+orders:                                # as paper-risk v17 orders (PAPER-1's OMS)
+  entry_buffer_ticks: 4                # marketable limit: the broker's ask + 4 ticks
+  entry_timeout_sec: 10                # what is unfilled after this is cancelled; the position is what filled
+  exit_buffer_ticks: 4                 # sell limit: bid − max(4 ticks, exit_buffer_pct of the bid)
+  exit_buffer_pct: 1.0
+  exit_chase_sec: 2                    # an unfilled exit is re-priced at the new touch after this
+  exit_chase_max: 6                    # re-pricings before the exit crosses exit_cross_pct through the touch
+  exit_cross_pct: 5
+  tick: 0.05                           # index option price step
+  poll_ms: 250                         # how often the order book is pulled while an order works
+  dry_run_market: BROKER               # v6: DRY_RUN reads the broker (funds, quotes + depth, instruments); orders simulated
+
+broker_stop:                           # plan section 3: catastrophic stop resting at the broker after every entry fill
+  default_stop_pct: 25                 # when the signal carries no stop_pct (the strategies publish theirs)
+  limit_offset_pct: 5                  # its limit this far below the trigger (paper-risk v17 stop_limit_offset_pct)
+
+live:                                  # v7: the LIVE pilot's hard limits (LiveGuard checks them again at the broker)
+  max_lots_per_order: 1
+  max_open_positions: 2
+  # v9: the strategies the owner may choose to trade LIVE on an account (the live set of PAPER-1); the account's choice
+  # (acct.broker_account.live_strategies, Accounts page) is what trades LIVE, never wider than this list
+  strategies: [early-confirm-runner, expiry-trend-rider, ma-cross, oi-burst-cross, wall-break-rider, break-retest-runner]
+  # an account the owner has not chosen for: v7's list, so moving a v7 account to v9 changes nothing
+  default_strategies: [early-confirm-runner, ma-cross, oi-burst-cross]

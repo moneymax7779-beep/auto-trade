@@ -65,6 +65,7 @@ class LiveSwitchIT {
         owner = accounts.ensureUser("local-owner", "me");
         accounts.ensureMembership(tenant, owner, "OWNER");
         accounts.ensureMembership(tenant, accounts.ensureUser("kc-trader", "trader"), "TRADER");
+        accounts.ensureMembership(tenant, accounts.ensureUser("kc-admin", "admin"), "ADMIN");
         profile = jdbc.queryForObject("insert into acct.broker_credential_profile (tenant_id, broker_type, scope, name, "
                 + "api_key_ref, api_secret_ref) values (?, 'ZERODHA', 'TENANT_SHARED', 'KITE-1', 'env:KITE_API_KEY', "
                 + "'env:KITE_API_SECRET') returning id", Long.class, tenant);
@@ -106,6 +107,43 @@ class LiveSwitchIT {
         } catch (ResponseStatusException e) {
             return e.getStatusCode().value() + " " + e.getReason();
         }
+    }
+
+    /** V32 (user 9 Nov 2026): the platform owner selects or deselects LIVE strategies; everyone else only sees them. */
+    @Test
+    void onlyThePlatformOwnerChoosesLiveStrategiesWithinTheRiskFile() {
+        long id = account("../config/risk/follower-risk.v9.yaml", 0, false);
+        Map<String, Object> view = api.liveStrategies("local-owner", id);
+        assertThat(view.get("available")).isEqualTo(List.of("break-retest-runner", "early-confirm-runner",
+                "expiry-trend-rider", "ma-cross", "oi-burst-cross", "wall-break-rider"));
+        assertThat(view.get("effective")).isEqualTo(List.of("early-confirm-runner", "ma-cross", "oi-burst-cross"));
+        assertThat(view.get("chosen")).isNull();
+        assertThat(view.get("canEdit")).isEqualTo(false);
+        assertThat(api.liveStrategies("kc-admin", id).get("canEdit")).isEqualTo(true);
+
+        // an OWNER of the tenant or a TRADER may not change it
+        assertThat(refusal(() -> api.chooseLiveStrategies("local-owner", id,
+                new LiveSwitchController.LiveChoice(List.of("ma-cross"), null)))).startsWith("403");
+        assertThat(refusal(() -> api.chooseLiveStrategies("kc-trader", id,
+                new LiveSwitchController.LiveChoice(List.of("ma-cross"), null)))).startsWith("403");
+        // the owner drops ecr and adds wall-break-rider
+        Map<String, Object> after = api.chooseLiveStrategies("kc-admin", id, new LiveSwitchController.LiveChoice(
+                List.of("ma-cross", "oi-burst-cross", "wall-break-rider"), null));
+        assertThat(after.get("effective")).isEqualTo(List.of("ma-cross", "oi-burst-cross", "wall-break-rider"));
+        assertThat(after.get("chosen")).isEqualTo(List.of("ma-cross", "oi-burst-cross", "wall-break-rider"));
+        // never wider than the risk file
+        assertThat(refusal(() -> api.chooseLiveStrategies("kc-admin", id,
+                new LiveSwitchController.LiveChoice(List.of("opening-drive"), null))))
+                .startsWith("400 not allowed LIVE by the risk file: [opening-drive]");
+        // none at all is a valid choice; reset goes back to the file's default
+        assertThat(api.chooseLiveStrategies("kc-admin", id, new LiveSwitchController.LiveChoice(List.of(), null))
+                .get("effective")).isEqualTo(List.of());
+        assertThat(api.chooseLiveStrategies("kc-admin", id, new LiveSwitchController.LiveChoice(null, true))
+                .get("chosen")).isNull();
+        assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? and action = "
+                + "'LIVE_STRATEGIES'", Integer.class, id)).isEqualTo(3);
+        assertThat(jdbc.queryForObject("select detail->>'after' from exec.audit_log where broker_account_id = ? and "
+                + "action = 'LIVE_STRATEGIES' order by id limit 1", String.class, id)).contains("wall-break-rider");
     }
 
     @Test
