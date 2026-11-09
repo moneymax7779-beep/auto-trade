@@ -1,6 +1,15 @@
 # NIFTY expiry short straddle as a PAPER shadow — build plan (1 Nov 2026)
 
-Status: **documented, not built** (user, 1 Nov: "don't build now just document it"). PAPER only; nothing reaches a broker
+Status: **built, not merged, not deployed** (user, 9 Nov: "Do this task here: Build the A-292 expiry short-straddle PAPER
+shadow"; before that 1 Nov: "don't build now just document it"). Code on branch `feature/ess-shadow` (worktree
+`../auto-trade-ess`, from main f82d279); ledger row A-358 registers the forward read. What differs from sections 3-5 below:
+the long-straddle settlement slice (`Contract.strike`, `settleAtExpiry`, `PositionView.legs`) was already on main, so
+nothing had to be merged first; the margin and lot cap live in a `shorts` section of `paper-risk.v19.yaml` (= v17
+otherwise); the 15:36 square-off leaves a short leg of an option expiring today alone and the session's end settles it
+at intrinsic value against the closing index (the last index print; a 15:30 snapshot still carried a pre-close spot and
+mis-settled 29 Sep by 35 points), so a zt replay that ends 15:15 buys it back at the ask instead; `PositionView.Leg`
+carries the ask. The shadow entry and the v19 risk file are in
+`application.yml` on the branch, so merging deploys them: that decision is the user's. PAPER only; nothing reaches a broker
 or a follower account. The broader buy/sell design (books, overnight positions, margin, separate account) is
 [2026-10-24-buy-sell-design.md](2026-10-24-buy-sell-design.md); this plan is the smallest slice of it that runs one
 intraday short straddle on expiry day.
@@ -139,6 +148,62 @@ paper broker already accepts a SELL with no holding (its holding goes negative),
 | Stop slippage | exit buffer as risk v17 for buys, mirrored |
 | Also shadow the 14:00 entry (A-292's top train variant, both halves not positive) | no |
 | Read date | 20 expiries (~mid-March 2027) |
+
+## 7a. Build record (9 Nov 2026, A-358)
+
+What was built, on branch `feature/ess-shadow` (worktree `../auto-trade-ess`, from main f82d279), with every change to a
+shared code path keyed on `ManagedPosition.Direction.SHORT` so the long path is untouched:
+
+| Module | Change |
+|---|---|
+| strategy-api | `OrderIntent.Action.SELL_STRADDLE` + `OrderIntent.shortStraddle(...)`; `PositionView.Leg.ask` |
+| risk | `RiskLimits.shortMarginPerLot` / `maxShortLots` (`shorts.margin_per_lot`, `shorts.max_lots`), `shortsAllowed()`; `paper-risk.v19.yaml` = v17 + `shorts` (₹1,20,000 a lot, max 1) |
+| oms | `ManagedPosition.direction`, `margin`, `lastAsk()`, ask-marked `unrealised`; `OrderManager.enterShortStraddle` (SELL limit at bid − buffer, both legs at one instant, margin as capital in use, bracket on the asks, no target), `sell` / `buyPrice` / `buyAll`, bid-side leg chase, short fill accounting (SELL-to-open pays STT, BUY-to-close pays stamp), reconcile with −quantity, `settleAtExpiry` buys back |
+| broker-paper | `settle` fills a short holding's working buys; `book` keeps a sensible average for a short |
+| app-trading-core | `SELL_STRADDLE` in `act` (refused on a signal-source session; risk v13 streak check; candidate rows); the square-off leaves expiring shorts alone; `settleExpired` settles a short against the last raw index print (the closing value); `trade.position.direction` written (`V31__position_direction.sql`) and read by the positions, performance, alerts and inspector endpoints; UI marks SHORT rows and signs their P&L |
+| strategy-egb | `ExpiryShortStraddle` (+ config, factory, provider), `expiry-short-straddle.v1.yaml` |
+| tests | 20 new: `OrderManagerShortStraddleTest` (10), `PaperBrokerShortTest` (3), `ExpiryShortStraddleTest` (8, after the review); full `mvn install` green |
+
+Independent review (a second model reading only the code) and its outcome:
+
+| # | Finding | Outcome |
+|---|---|---|
+| 1 | One-trade-a-day not enforced when the pair opens and is unwound inside one 60 s snapshot (a leg not filled → partner `LEG_NOT_FILLED`, or an ask spike stop): the flat view looked like a refusal and the strategy re-sold two minutes later | **Fixed**: flat with `closedToday > 0` ends the day; test added |
+| 2 | Break-even judged on a half-filled pair (the executor lists both legs at once, the unfilled one with quantity 0), halving the band | **Fixed**: the break-even needs both legs filled; test fixture corrected |
+| 3 | Settling at the first ≥ 15:30 snapshot used a pre-close spot (29 Sep: 22680.9 vs the 22716.2 close, 35 points) | **Fixed**: the square-off skips expiring shorts; the session's end settles them against the last raw index print (the features' spot itself lags the close: 6 Oct 22717.95 vs 22776.1) |
+| 4 | The ask-based stop reads each leg's latest ask, not simultaneous quotes, and a 0DTE ask can print 1.5× for one tick | **Kept, recorded**: the long straddle's bid bracket has the same shape; A-292 was defined on minute closes, so the forward record will be somewhat more stop-prone than the study |
+| 5 | Paper broker's holding average was garbage for a short | **Fixed** (reporting only; fills were right) |
+| 6 | Migration numbering: V30 is another branch's (`strategy controls`, applied to the Mac DB 9 Nov 13:02); V31 here | **Open**: assign the final number at merge (next free on main and on both DBs); a Mac replay needs `--spring.flyway.ignore-migration-patterns=*:missing` until that branch merges |
+| 7 | The break-even EXIT was re-emitted every minute while the legs were being bought back | **Fixed** (asked once) |
+| 8 | Cash settlement is booked as a BUY with brokerage and stamp; the writer pays none at expiry | **Kept, recorded**: the same approximation the long path makes (≈ ₹30–50 a leg, conservative) |
+| 9 | Risk v13's streak count groups legs by `openedAt`, which differed per leg | **Fixed** for the short (one instant for both legs); the long straddle is unchanged |
+| 10 | Margin ₹1,20,000 a lot is below a typical SPAN + exposure (₹1.3–1.6 L) | **Kept, recorded**: PAPER estimate, replace with the broker's figure before any real account (none is planned) |
+
+Long-path regression: the live six (ecr-v11, etr-v1, mac-v34, obc-v13, wbr-v13, brtr-v1) replayed together on the own-capture
+days 27 Oct and 29 Oct on an image of plain main f82d279 and on this branch's image: results in section 7b.
+
+## 7b. Mechanics replays and regression (9 Nov 2026, final code, image ess3)
+
+Own-capture NIFTY expiries, ess-v1 alone, ₹5 L, risk v19, base fills (descriptive, in-sample: A-292 read these days):
+
+| Day | Credit (pts) | Exit | Points kept | A-292 points | Net ₹ |
+|---|---|---|---|---|---|
+| 29 Sep | 119.45 | settled, close 22716.2 | +85.70 | +86.1 | +5,417 |
+| 6 Oct | 94.90 | settled, close 22776.1 | +18.85 | +19.0 | +1,073 |
+| 13 Oct | 89.50 | break-even up 14:20 | −26.70 | −29.1 | −1,889 |
+| 19 Oct | 116.25 | break-even down 13:23 | −36.50 | −41.0 | −2,529 |
+| 27 Oct | 102.50 | break-even down 13:23 | −35.25 | −37.7 | −2,446 |
+| **Total** | | | **+6.1** | **−2.7** | **−374** (realised +397, costs 771) |
+
+The break-even days lose a few points less than the study because the engine buys back at the ask plus the exit buffer at the
+minute it sees the close outside the band (the study used closes × 1.03); the settled days match to within 0.4 points.
+Costs (₹150 a day for four orders) are what turn a +6-point week into a small loss: the forward read must be after costs.
+
+Long-path regression, the live six together, plain main f82d279 vs this branch: 27 Oct 3 positions −₹1,30,539 (costs 1,198,
+kill switch engaged) and 29 Oct 5 positions +₹3,29,234 (costs 3,542) on both; a row-by-row diff of every position is empty.
+
+Still open before the shadow runs: the user's merge and deploy decision; the migration number (V30 belongs to another
+branch); `application.yml` on the branch already lists the shadow file and risk v19.
 
 ## 7. Estimate and risk
 
