@@ -66,7 +66,8 @@ public final class FollowerSimulator {
                            String side, long token, String instrumentKey, String symbol, int lotSize, double price,
                            double budget, double referenceCapital, int lots, String legGroup, Instant at, String reason,
                            double sizeMultiplier, double strategyLots, double intendedLots, double liquidityLots,
-                           double rvol, double callAsk, double putAsk, double bookQuantity, double stopPct) {
+                           double rvol, double callAsk, double putAsk, double bookQuantity, double stopPct,
+                           int fixedLots) {
     }
 
     /** A broker exit is sent this many times at most, this far apart (code review 3 Nov 2026). */
@@ -338,6 +339,9 @@ public final class FollowerSimulator {
             return resumable ? resumeEntry(day, p)
                     : skip(p, "ALREADY_HELD", "the account already holds this strategy's position");
         }
+        if (p.fixedLots() > 0) {
+            return enterFixed(day, p);
+        }
         double price = buyPrice(p.price());
         double budget = scaledBudget(day, p);
         double free = day.equity - openPremium(day.account.id());
@@ -386,6 +390,35 @@ public final class FollowerSimulator {
             return notFilled(day, p, fill);
         }
         long positionId = insertPosition(day, p, p.side(), fill, step == 0 ? Double.NaN : scale);
+        protect(day, p, positionId);
+        reconcileIfUnknown(day, p, fill);
+        return done(p, fill.quantity());
+    }
+
+    /**
+     * A trader's manual buy (9 Nov 2026, {@link ManualOrders}): exactly the decision's {@code fixed_lots}, no budget
+     * scaling, size step, liquidity share or replay ceiling; every check of {@link #check} still applies (kill switches,
+     * the LIVE strategy list and entry times, daily loss, positions, lots per underlying, capital, broker funds) and the
+     * order goes through the venue as any entry (marketable limit, what is unfilled after the timeout cancelled, then
+     * its broker stop).
+     */
+    private String enterFixed(Day day, Pending p) {
+        boolean resumable = venue.broker() && hasOrders(p.intentId(), "ENTRY");
+        double price = buyPrice(p.price());
+        if (!(price > 0)) {
+            return resumable ? resumeEntry(day, p) : reject(p, "SIZE", "no price to buy at");
+        }
+        long lots = p.fixedLots();
+        long quantity = lots * p.lotSize();
+        String refused = check(day, p, false, 1, lots, quantity * price);
+        if (refused != null) {
+            return resumable ? resumeEntry(day, p) : refused;
+        }
+        FollowerVenue.Fill fill = order(day.account, p, "ENTRY", "BUY", quantity, price, 1);
+        if (fill.quantity() == 0) {
+            return notFilled(day, p, fill);
+        }
+        long positionId = insertPosition(day, p, p.side(), fill, Double.NaN);
         protect(day, p, positionId);
         reconcileIfUnknown(day, p, fill);
         return done(p, fill.quantity());
@@ -1306,7 +1339,7 @@ public final class FollowerSimulator {
             + "(d.context->>'strategy_lots')::float8 as strategy_lots, (d.context->>'intended_lots')::float8 as intended_lots, "
             + "(d.context->>'liquidity_lots')::float8 as liquidity_lots, (d.context->>'rvol_tod')::float8 as rvol_tod, "
             + "(d.context->>'call_ask')::float8 as call_ask, (d.context->>'put_ask')::float8 as put_ask, "
-            + "(d.context->>'stop_pct')::float8 as stop_pct, "
+            + "(d.context->>'stop_pct')::float8 as stop_pct, (d.context->>'fixed_lots')::float8::int as fixed_lots, "
             // replay depth ceiling: what the signal account's own position got filled through the same book
             + "(select tp.quantity from trade.position tp where tp.session_id = d.signal_session_id "
             + "and tp.strategy_id = d.strategy_id and tp.underlying = d.underlying and tp.symbol = d.symbol "
@@ -1362,6 +1395,6 @@ public final class FollowerSimulator {
                 rs.getInt("lots"), rs.getString("leg_group"), rs.getTimestamp("decided_at").toInstant(),
                 rs.getString("reason"), rs.getDouble("size_multiplier"), orNaN(rs, "strategy_lots"),
                 orNaN(rs, "intended_lots"), orNaN(rs, "liquidity_lots"), orNaN(rs, "rvol_tod"), orNaN(rs, "call_ask"),
-                orNaN(rs, "put_ask"), bookQuantity(rs), orNaN(rs, "stop_pct"));
+                orNaN(rs, "put_ask"), bookQuantity(rs), orNaN(rs, "stop_pct"), rs.getInt("fixed_lots"));
     }
 }

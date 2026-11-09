@@ -78,6 +78,8 @@ public final class ExecutionLoop implements AutoCloseable {
     private final BrokerConnections connections;
     private final BrokerReconciler reconciler;
     private final TradingDay tradingDay;
+    /** The trader's manual buys ({@link ManualOrders}); tests set its clock. */
+    private final ManualOrders manualOrders;
     private final Map<Long, ExecutorService> lanes = new ConcurrentHashMap<>();
     private final Map<Long, Future<?>> busy = new ConcurrentHashMap<>();
     private final Map<Long, AccountLease> leases = new ConcurrentHashMap<>();
@@ -134,6 +136,7 @@ public final class ExecutionLoop implements AutoCloseable {
         this.connections = new BrokerConnections(dataSource, brokerFunds, adapters);
         this.reconciler = new BrokerReconciler(dataSource, costs);
         this.tradingDay = new TradingDay(dataSource);
+        this.manualOrders = new ManualOrders(dataSource);
     }
 
     /**
@@ -499,6 +502,109 @@ public final class ExecutionLoop implements AutoCloseable {
         });
     }
 
+    private ManualOrders manual() {
+        return manualOrders;
+    }
+
+    /** Tests: the manual orders' clock. */
+    ExecutionLoop manualClock(java.time.Clock clock) {
+        manual().withClock(clock);
+        return this;
+    }
+
+    /**
+     * The contract a manual BUY CE / BUY PE on the account would take now (the confirmation shows it); see
+     * {@link ManualOrders#pick}.
+     */
+    public ManualOrders.Pick manualQuote(long accountId, String underlying, String side, LocalDate day) {
+        BrokerAccount account = accounts.byId(accountId).orElseThrow(() -> new IllegalArgumentException("no account "
+                + accountId));
+        return manual().pick(account, underlying, side, day);
+    }
+
+    /**
+     * The trader's BUY CE / BUY PE on one follower account ({@link ManualOrders}): written as a decision of strategy
+     * {@link ManualOrders#STRATEGY} in a copy group this worker serves and the account follows, with one intent for the
+     * account only; the decision's notification runs the account's turn at once. IllegalArgumentException when refused.
+     */
+    public ManualOrders.Placed manualBuy(long accountId, String underlying, String side, String expectedSymbol, String actor,
+                                         LocalDate day) {
+        BrokerAccount account = accounts.byId(accountId).orElseThrow(() -> new IllegalArgumentException("no account "
+                + accountId));
+        if (account.tradeMode() == TradeMode.LIVE) {
+            // review 9 Nov 2026: refused here, not as a REJECTED intent after the fact (the file as it is now)
+            FollowerRisk risk = FollowerRisk.load(Path.of(account.riskFile()));
+            if (risk.live() == null || !risk.live().strategies().contains(ManualOrders.STRATEGY)) {
+                throw new IllegalArgumentException(account.displayName() + "'s risk file " + account.riskFile()
+                        + " does not allow manual LIVE orders (follower-risk v8 does): nothing sent");
+            }
+        }
+        return manual().buy(account, manualGroup(account), underlying, side, expectedSymbol, actor, day);
+    }
+
+    /**
+     * A served copy group the account follows (its turn runs only those groups' intents): its own tenant's first (review
+     * 9 Nov 2026: never a group shared to it by another tenant when its own will do).
+     */
+    long manualGroup(BrokerAccount account) {
+        List<Long> served = groups();
+        List<Long> followed = jdbc.queryForList("select g.id from acct.copy_group g where exists (select 1 from "
+                + "acct.strategy_subscription s where s.copy_group_id = g.id and s.broker_account_id = ? and s.enabled) "
+                + "order by (g.tenant_id = ?) desc, g.id", Long.class, account.id(), account.tenantId());
+        for (long group : followed) {
+            if (served.contains(group)) {
+                return group;
+            }
+        }
+        throw new IllegalArgumentException(account.displayName() + " follows no copy group this worker serves: "
+                + "subscribe it to a strategy first");
+    }
+
+    /**
+     * The trader's EXIT of manual orders ({@code underlying} null = every index), on the account's own lane: a manual
+     * buy whose turn has not run yet is cancelled (nothing sent), then every open manual position is sold as the
+     * per-position Exit sells it (stop off first, the exit chased; a broker-routed account's entry still working ends its
+     * turn first, so what filled of it is what is sold), audited POSITION_EXIT. The account keeps trading.
+     */
+    public List<String> manualExit(long accountId, String underlying, String actor, LocalDate day) throws Exception {
+        BrokerAccount account = accounts.byId(accountId).orElseThrow(() -> new IllegalArgumentException("no account "
+                + accountId));
+        if (account.role() == com.autotrade.account.AccountRole.SIGNAL_SOURCE) {
+            throw new IllegalArgumentException(account.displayName() + " is a signal source: its positions are not orders");
+        }
+        String u = underlying == null || underlying.isBlank() ? null : underlying.trim().toUpperCase(java.util.Locale.ROOT);
+        FollowerRisk risk = risks.computeIfAbsent(account.id(), id -> FollowerRisk.load(Path.of(account.riskFile())));
+        BrokerConnections.Route route = connections.route(account, risk);
+        try {
+            return onLane(account, (epoch, borrowed) -> {
+                List<String> lines = new ArrayList<>();
+                lines.addAll(manual().cancelNotRun(account, u, actor));
+                List<Long> open = manual().openPositions(account.id(), u);
+                if (!open.isEmpty() && route.venue() == null) {
+                    lines.add("not exited: " + route.description());
+                    return lines;
+                }
+                for (long positionId : open) {
+                    lines.addAll(flattenHere(account, risk, route, epoch, borrowed, day, "TRADER_EXIT", positionId));
+                }
+                if (lines.isEmpty()) {
+                    lines.add("no manual " + (u == null ? "" : u + " ") + "position or buy to exit");
+                }
+                return lines;
+            });
+        } catch (java.util.concurrent.TimeoutException e) {
+            // review 9 Nov 2026: the EXIT is still queued on the account's lane and runs when its turn ends; it is not a
+            // failure the trader should answer by selling in the broker's app too
+            return List.of("EXIT queued behind the account's running turn: it sells when that turn ends; watch the orders "
+                    + "here before doing anything in the broker's app");
+        } catch (IllegalStateException e) {
+            if (!String.valueOf(e.getMessage()).startsWith("another worker")) {
+                throw e;
+            }
+            return List.of("not exited here: " + e.getMessage());
+        }
+    }
+
     private List<String> flattenOnLane(BrokerAccount account, LocalDate day, String reason) throws Exception {
         return flattenOnLane(account, day, reason, null);
     }
@@ -510,19 +616,24 @@ public final class ExecutionLoop implements AutoCloseable {
             return List.of("not flattened: " + route.description());
         }
         try {
-            return onLane(account, (epoch, borrowed) -> {
-                FollowerSimulator simulator = borrowed
-                        ? new FollowerSimulator(dataSource, costs, risk, route.venue(), quotes).asWorker(workerId, epoch)
-                        : simulators.computeIfAbsent(account.id(), id -> new FollowerSimulator(dataSource, costs, risk,
-                                route.venue(), quotes).asWorker(workerId, epoch));
-                return simulator.flatten(account, day, this::flattenPrice, reason, positionId);
-            });
+            return onLane(account, (epoch, borrowed) -> flattenHere(account, risk, route, epoch, borrowed, day, reason,
+                    positionId));
         } catch (IllegalStateException e) {
             if (!String.valueOf(e.getMessage()).startsWith("another worker")) {
                 throw e;
             }
             return List.of("not flattened here: " + e.getMessage());
         }
+    }
+
+    /** A flatten already on the account's lane, under its lease ({@code borrowed}: a simulator of its own). */
+    private List<String> flattenHere(BrokerAccount account, FollowerRisk risk, BrokerConnections.Route route, long epoch,
+                                     boolean borrowed, LocalDate day, String reason, Long positionId) {
+        FollowerSimulator simulator = borrowed
+                ? new FollowerSimulator(dataSource, costs, risk, route.venue(), quotes).asWorker(workerId, epoch)
+                : simulators.computeIfAbsent(account.id(), id -> new FollowerSimulator(dataSource, costs, risk,
+                        route.venue(), quotes).asWorker(workerId, epoch));
+        return simulator.flatten(account, day, this::flattenPrice, reason, positionId);
     }
 
     /** Work on an account's own lane, under its lease (borrowed for the call when this worker does not hold it). */
