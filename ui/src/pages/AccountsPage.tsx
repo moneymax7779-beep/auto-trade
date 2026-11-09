@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import {
-  get, postJson, type AuditRow, type ExecMe, type ExecutionAccount, type KillSwitch, type WorkerStatus,
+  get, postJson, type AuditRow, type ExecMe, type ExecutionAccount, type GlobalLiveStrategies, type KillSwitch,
+  type WorkerStatus,
 } from "../api";
 import { ErrorNote, Loading, Panel, Stat, Table } from "../components/ui";
 import { AccountDetailPanel, AddAccountPanel } from "./AccountManagement";
@@ -141,6 +142,81 @@ function GroupHeading({ name, daily, accounts }: { name: string; daily: boolean;
   );
 }
 
+/**
+ * The owner's global LIVE strategies (user, 9 Nov 2026: "as admin ... select or deselect the live strategies at global";
+ * standing until changed, not per day). A strategy not ticked trades on paper accounts only, never with real money. An
+ * account with its own list (its Manage panel) keeps it; neither goes beyond the account's risk file.
+ */
+function GlobalLivePanel({ onDone }: { onDone: (text: string, ok: boolean) => void }) {
+  const client = useQueryClient();
+  const q = useQuery({ queryKey: ["live-strategies-global"], refetchInterval: 30000,
+    queryFn: () => get<GlobalLiveStrategies>("/api/execution/live-strategies") });
+  const [picked, setPicked] = useState<string[] | null>(null);
+  const save = useMutation({
+    mutationFn: (body: { strategies?: string[]; reset?: boolean }) =>
+      postJson<GlobalLiveStrategies>("/api/execution/live-strategies", body),
+    onSuccess: (r) => {
+      onDone(`LIVE strategies (all accounts): ${r.global == null ? "each account's default" : r.global.join(", ") || "none"}`,
+        true);
+      setPicked(null);
+      client.setQueryData(["live-strategies-global"], r);
+      ["exec-audit", "exec-accounts", "live-strategies"].forEach((k) => client.invalidateQueries({ queryKey: [k] }));
+    },
+    onError: (e) => onDone(e instanceof Error ? e.message : String(e), false),
+  });
+  if (q.error) return <ErrorNote error={q.error} />;
+  if (!q.data || q.data.available.length === 0) return null;
+  const g = q.data;
+  // not set: what the accounts trade now by their defaults (the union), so the boxes start where things are
+  const startingPoint = g.global ?? [...new Set(g.accounts.filter((a) => a.source === "DEFAULT").flatMap((a) => a.effective))];
+  const current = picked ?? startingPoint;
+  const changed = picked != null && [...picked].sort().join() !== [...startingPoint].sort().join();
+  const toggle = (s: string) => setPicked(current.includes(s) ? current.filter((x) => x !== s) : [...current, s]);
+  const own = g.accounts.filter((a) => a.source === "ACCOUNT");
+  return (
+    <Panel title="LIVE strategies · all accounts" right={<span className="text-xs text-muted">
+      {g.global == null ? "not set: each account's risk-file default" : "your global list"}</span>}>
+      <div className="flex flex-wrap gap-x-5 gap-y-2 text-sm">
+        {g.available.map((s) => (
+          <label key={s} className={`flex items-center gap-1.5 ${g.canEdit ? "cursor-pointer" : "text-muted"}`}>
+            <input type="checkbox" checked={current.includes(s)} disabled={!g.canEdit || save.isPending}
+              onChange={() => toggle(s)} />
+            <span className={current.includes(s) ? "font-semibold" : "text-muted"}>{s}</span>
+            <span className={`text-[10px] font-semibold ${current.includes(s) ? "text-down" : "text-muted"}`}>
+              {current.includes(s) ? "LIVE" : "PAPER"}</span>
+          </label>
+        ))}
+      </div>
+      {g.canEdit && (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button className="rounded bg-accent px-3 py-1 text-sm font-semibold text-white disabled:opacity-40"
+            disabled={!changed || save.isPending} onClick={() => save.mutate({ strategies: current })}>
+            {save.isPending ? "Saving…" : "Save for all accounts"}</button>
+          {picked != null && <button className="rounded border border-line px-3 py-1 text-sm hover:bg-panel-2"
+            disabled={save.isPending} onClick={() => setPicked(null)}>Undo</button>}
+          {g.global != null && <button className="rounded border border-line px-3 py-1 text-sm hover:bg-panel-2"
+            disabled={save.isPending} onClick={() => save.mutate({ reset: true })}>Back to each account's default</button>}
+          <span className="text-xs text-muted">Unticked = PAPER only: no real order from it on any account. Applies from the
+            next LIVE entry or add; exits of held positions always run. Stays until you change it.</span>
+        </div>
+      )}
+      <div className="mt-3 border-t border-line pt-2 text-xs">
+        {g.accounts.map((a) => (
+          <div key={a.id} className="flex flex-wrap gap-x-2">
+            <span className="font-semibold">{a.account}</span>
+            <span className="text-muted">{a.mode} ·</span>
+            <span>{a.effective.join(", ") || "nothing LIVE"}</span>
+            <span className="text-muted">({a.source === "ACCOUNT" ? "its own list, set on its Manage panel"
+              : a.source === "GLOBAL" ? "global list" : "risk-file default"})</span>
+          </div>
+        ))}
+        {own.length > 0 && <p className="mt-1 text-warn">{own.map((a) => a.account).join(", ")} keep their own list; open
+          Manage → LIVE strategies → "Follow the global list" to put them under this one.</p>}
+      </div>
+    </Panel>
+  );
+}
+
 /** A destructive action that needs its word typed before it is sent. */
 function TypedConfirm({ word, label, busy, onConfirm }: {
   word: string; label: string; busy: boolean; onConfirm: (reason: string) => void;
@@ -256,6 +332,8 @@ export function AccountsPage() {
           <button className="ml-3 text-muted" onClick={() => setMessage(null)}>dismiss</button>
         </div>
       )}
+
+      {me.data?.admin && <GlobalLivePanel onDone={(text, ok) => setMessage({ ok, text })} />}
 
       <Panel title="Follower accounts" right={<span className="text-xs text-muted">{rows.length} accounts</span>}>
         <FollowerSummary rows={rows} killed={killedAccounts} />

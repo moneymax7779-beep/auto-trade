@@ -296,6 +296,36 @@ class LiveIT {
         assertThat(live.chosen(a.id())).isNull();
     }
 
+    /** V33: the owner's global list governs every account without its own list; a strategy left out stays PAPER. */
+    @Test
+    void theGlobalListRefusesAStrategyLeftOutOnEveryAccountWithoutItsOwnList() {
+        long group = group();
+        BrokerAccount a = account(group, true, "ma-cross", "oi-burst-cross");
+        BrokerAccount own = account(group, true, "ma-cross");
+        FollowerRisk risk = FollowerRisk.load(Path.of(V7));
+        LiveStrategies live = new LiveStrategies(dataSource);
+        try {
+            live.choose(own.id(), risk, List.of("ma-cross"));                       // keeps its own list
+            live.chooseGlobal(List.of("oi-burst-cross"), risk.live().strategies(), "it");
+            assertThat(live.source(a.id())).isEqualTo(LiveStrategies.Source.GLOBAL);
+            assertThat(live.effective(a.id(), risk)).containsExactly("oi-burst-cross");
+            assertThat(live.source(own.id())).isEqualTo(LiveStrategies.Source.ACCOUNT);
+            assertThat(live.effective(own.id(), risk)).containsExactly("ma-cross");
+            enter(group, signalSession(group), "ma-cross", 0);
+            try (BrokerConnections registry = registry()) {
+                follower(registry, a).run(a, group, DAY);
+            }
+            assertThat(intentState(a)).isEqualTo("REJECTED_LIVE_STRATEGY");
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> live.chooseGlobal(List.of("opening-drive"),
+                    risk.live().strategies(), "it")).hasMessageContaining("not a LIVE strategy of any account's risk file");
+            live.chooseGlobal(null, risk.live().strategies(), "it");
+            assertThat(live.global()).isNull();
+            assertThat(live.source(a.id())).isEqualTo(LiveStrategies.Source.DEFAULT);
+        } finally {
+            jdbc.update("delete from acct.live_strategy_policy");                 // other tests run without a global list
+        }
+    }
+
     /** follower-risk v9: every live-set strategy may be chosen; v7's three trade until the owner chooses. */
     @Test
     void riskV9OffersTheLiveSetAndDefaultsToV7sList() {

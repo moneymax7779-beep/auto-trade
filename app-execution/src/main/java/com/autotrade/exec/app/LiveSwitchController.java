@@ -177,8 +177,94 @@ class LiveSwitchController {
         out.put("defaults", risk.live() == null ? java.util.List.of()
                 : java.util.List.copyOf(new java.util.TreeSet<>(risk.live().defaults())));
         out.put("chosen", live.chosen(a.id()));
+        out.put("global", live.global());
+        out.put("source", live.source(a.id()).name());
         out.put("effective", live.effective(a.id(), risk));
         out.put("canEdit", user.admin() && risk.live() != null);
+        return out;
+    }
+
+    // ------------------------------------------------------------------------------------------- the global list (V33)
+
+    /**
+     * The owner's global LIVE strategies (user 9 Nov 2026: "as admin ... select or deselect the live strategies at
+     * global", standing until changed): {@code available} (every strategy some follower account's risk file lets trade
+     * LIVE), {@code global} (the list; null = not set, each account's default), {@code accounts} (every broker follower
+     * account the caller sees: where its list comes from and what trades LIVE on it now) and {@code canEdit}.
+     */
+    @GetMapping("/api/execution/live-strategies")
+    Map<String, Object> globalLiveStrategies(@RequestHeader(value = Access.HEADER, required = false) String subject) {
+        Access.User user = access.user(subject);
+        return globalView(user);
+    }
+
+    @PostMapping("/api/execution/live-strategies")
+    Map<String, Object> chooseGlobalLiveStrategies(@RequestHeader(value = Access.HEADER, required = false) String subject,
+                                                   @RequestBody LiveChoice body) {
+        Access.User user = access.user(subject);
+        Access.require(user.admin(), "only the platform owner chooses LIVE strategies");
+        boolean reset = Boolean.TRUE.equals(body.reset());
+        require(reset || body.strategies() != null, "strategies: the list to trade LIVE (or reset: true)");
+        LiveStrategies live = new LiveStrategies(jdbc.getDataSource());
+        java.util.List<String> before = live.global();
+        try {
+            live.chooseGlobal(reset ? null : body.strategies(), available(), user.subject());
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, e.getMessage());
+        }
+        Map<String, Object> detail = new LinkedHashMap<>();
+        detail.put("before", before == null ? "default" : before);
+        java.util.List<String> after = live.global();
+        detail.put("after", after == null ? "default" : after);
+        audit.audit(null, null, user.subject(), "LIVE_STRATEGIES_GLOBAL", detail);
+        return globalView(user);
+    }
+
+    /** Every strategy that some enabled broker follower account's risk file lets trade LIVE. */
+    private java.util.Set<String> available() {
+        java.util.Set<String> out = new java.util.TreeSet<>();
+        for (String file : jdbc.queryForList("select distinct risk_file from acct.broker_account where account_role = "
+                + "'FOLLOWER_TRADE' and broker_type <> 'PAPER' and enabled", String.class)) {
+            try {
+                FollowerRisk risk = FollowerRisk.load(Path.of(file));
+                if (risk.live() != null) {
+                    out.addAll(risk.live().strategies());
+                }
+            } catch (RuntimeException e) {
+                // an unreadable file offers nothing; the account's own view says so
+            }
+        }
+        return out;
+    }
+
+    private Map<String, Object> globalView(Access.User user) {
+        LiveStrategies live = new LiveStrategies(jdbc.getDataSource());
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("available", java.util.List.copyOf(available()));
+        out.put("global", live.global());
+        java.util.List<Map<String, Object>> rows = new java.util.ArrayList<>();
+        for (long tenant : user.tenants()) {
+            for (BrokerAccount a : accounts.ofTenant(tenant)) {
+                if (!a.role().name().equals("FOLLOWER_TRADE") || a.brokerType() == BrokerType.PAPER) {
+                    continue;
+                }
+                Map<String, Object> r = new LinkedHashMap<>();
+                r.put("id", a.id());
+                r.put("account", a.displayName());
+                r.put("mode", a.tradeMode().name());
+                r.put("source", live.source(a.id()).name());
+                java.util.List<String> effective;
+                try {
+                    effective = live.effective(a.id(), FollowerRisk.load(Path.of(a.riskFile())));
+                } catch (RuntimeException e) {
+                    effective = java.util.List.of();
+                }
+                r.put("effective", effective);
+                rows.add(r);
+            }
+        }
+        out.put("accounts", rows);
+        out.put("canEdit", user.admin());
         return out;
     }
 

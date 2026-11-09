@@ -511,10 +511,22 @@ export interface LiveStrategyChoice {
   available: string[];
   /** what trades LIVE until the owner chooses */
   defaults: string[];
-  /** the owner's choice; null = the defaults */
+  /** the account's own choice; null = it follows the global list (or, with none, its default) */
   chosen: string[] | null;
+  /** the owner's global list (V33); null = not set */
+  global?: string[] | null;
+  /** where the account's list comes from now */
+  source?: "ACCOUNT" | "GLOBAL" | "DEFAULT";
   /** what trades LIVE now */
   effective: string[];
+  canEdit: boolean;
+}
+
+/** GET/POST /api/execution/live-strategies: the owner's global LIVE list (V33, 9 Nov 2026) */
+export interface GlobalLiveStrategies {
+  available: string[];
+  global: string[] | null;
+  accounts: { id: number; account: string; mode: string; source: "ACCOUNT" | "GLOBAL" | "DEFAULT"; effective: string[] }[];
   canEdit: boolean;
 }
 

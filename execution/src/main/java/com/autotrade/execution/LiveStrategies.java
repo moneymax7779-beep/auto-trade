@@ -11,6 +11,7 @@ import javax.sql.DataSource;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
+ * The owner's choice of LIVE strategies: globally (V33, every account without its own choice) and per account (V32).
  * The owner's choice of LIVE strategies per account (user, 9 Nov 2026: "As the owner I should be able to select or
  * deselect from all the available live strategies"). The account's risk file says what may trade LIVE
  * ({@code live.strategies}) and what does until the owner chooses ({@code live.default_strategies}); the choice is
@@ -43,15 +44,68 @@ public final class LiveStrategies {
         return rows.isEmpty() ? null : rows.getFirst();
     }
 
-    /** What trades LIVE on the account now: the choice (or the defaults) within the risk file's list; sorted. */
+    /** Where an account's LIVE list comes from: its own choice, the global list, or its risk file's default. */
+    public enum Source { ACCOUNT, GLOBAL, DEFAULT }
+
+    /** The owner's global LIVE list (V33), sorted; null when never set. */
+    public List<String> global() {
+        List<List<String>> rows = jdbc.query("select strategies from acct.live_strategy_policy where id = 1",
+                (rs, n) -> {
+                    List<String> out = new ArrayList<>();
+                    for (Object o : (Object[]) rs.getArray(1).getArray()) {
+                        out.add(String.valueOf(o));
+                    }
+                    return List.copyOf(new TreeSet<>(out));
+                });
+        return rows.isEmpty() ? null : rows.getFirst();
+    }
+
+    /** Where the account's LIVE list comes from now. */
+    public Source source(long accountId) {
+        return chosen(accountId) != null ? Source.ACCOUNT : global() != null ? Source.GLOBAL : Source.DEFAULT;
+    }
+
+    /**
+     * What trades LIVE on the account now, sorted: its own choice, else the global list, else its risk file's defaults;
+     * always within the risk file's list.
+     */
     public List<String> effective(long accountId, FollowerRisk risk) {
         if (risk == null || risk.live() == null) {
             return List.of();
         }
         List<String> chosen = chosen(accountId);
+        if (chosen == null) {
+            chosen = global();
+        }
         Set<String> picked = new TreeSet<>(chosen == null ? risk.live().defaults() : chosen);
         picked.retainAll(risk.live().strategies());
         return List.copyOf(picked);
+    }
+
+    /**
+     * Records the owner's global list ({@code strategies} null = not set: each account's default); IllegalArgumentException
+     * for a strategy outside {@code available} (what some account's risk file lets trade LIVE). Empty = nothing LIVE.
+     */
+    public void chooseGlobal(Collection<String> strategies, Set<String> available, String actor) {
+        if (strategies == null) {
+            jdbc.update("delete from acct.live_strategy_policy where id = 1");
+            return;
+        }
+        Set<String> wanted = new TreeSet<>();
+        for (String s : strategies) {
+            if (s != null && !s.isBlank()) {
+                wanted.add(s.trim());
+            }
+        }
+        Set<String> unknown = new TreeSet<>(wanted);
+        unknown.removeAll(available);
+        if (!unknown.isEmpty()) {
+            throw new IllegalArgumentException("not a LIVE strategy of any account's risk file: " + unknown
+                    + " (may choose from " + new TreeSet<>(available) + ")");
+        }
+        jdbc.update("insert into acct.live_strategy_policy (id, strategies, changed_by) values (1, ?::text[], ?) "
+                + "on conflict (id) do update set strategies = excluded.strategies, changed_by = excluded.changed_by, "
+                + "changed_at = now()", "{" + String.join(",", wanted) + "}", actor);
     }
 
     /**

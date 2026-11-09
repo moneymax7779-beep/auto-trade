@@ -400,7 +400,8 @@ function LiveStrategiesPicker({ accountId, onDone }: { accountId: number; onDone
   return (
     <div className="rounded border border-line p-3 text-sm">
       <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
-        LIVE strategies · {c.chosen == null ? "risk-file default" : "owner's choice"} · {c.riskFile}
+        LIVE strategies · {c.source === "ACCOUNT" ? "this account's own choice" : c.source === "GLOBAL"
+          ? "the global list" : "risk-file default"} · {c.riskFile}
       </div>
       <div className="flex flex-wrap gap-x-4 gap-y-1.5">
         {c.available.map((s) => (
@@ -417,9 +418,10 @@ function LiveStrategiesPicker({ accountId, onDone }: { accountId: number; onDone
             onClick={() => save.mutate({ strategies: current })}>{save.isPending ? "Saving…" : "Save LIVE strategies"}</button>
           {picked != null && <button className={button} disabled={save.isPending} onClick={() => setPicked(null)}>Undo</button>}
           {c.chosen != null && <button className={button} disabled={save.isPending}
-            onClick={() => save.mutate({ reset: true })}>Back to the default</button>}
-          <span className="text-xs text-muted">Applies to the next LIVE entry or add; exits of held positions always run.
-            A strategy also needs the account to follow it (Strategies above).</span>
+            onClick={() => save.mutate({ reset: true })}>Follow the global list</button>}
+          <span className="text-xs text-muted">Saving here gives this account its own list (overrides the global list on
+            the Accounts page). Applies to the next LIVE entry or add; exits always run. A strategy also needs the account
+            to follow it (Strategies above).</span>
         </div>
       ) : (
         <p className="mt-2 text-xs text-muted">Trades LIVE: {c.effective.join(", ") || "none"}. The platform owner chooses.</p>
