@@ -90,6 +90,13 @@ autotrade:
       # VWAP-side rule (A-340: 12 expiry tick days +33.36 L vs v9 +32.23 L, 3 extra small wins; in-sample; trades only on an
       # index's expiry day, 10:30-14:30). Last, so the other four take the capital first (A-338: wbr crowds when it goes first).
       - config/strategy/wall-break-rider.v13.yaml
+      # 2026-11-09 (user: "ok add to live", after A-355): brtr-v1 = break-retest runner (ORH/ORL/PDH/PDL break, retest within
+      # 20 min, stop at the retest's extreme close, 3-min VWAP trail, flat 15:15; Rs 1,25,000 premium budget, user 9 Nov).
+      # Best brtr version on every completed test: 28 tick days +6.94 L PF 2.25, 2025 bars +13.82 L PF 1.35, 2026 bars +8.34 L
+      # PF 1.30 (May-Sep 2026 negative); v2-v12 and bcr-v1 all FAIL (A-326, A-349, A-351..A-355). Not tested inside the set
+      # (A-145 / A-262: a profitable addition can cost the others capital). Last, so the other five take the capital first.
+      # PAPER-1 only: no account subscribes to break-retest-runner.
+      - config/strategy/break-retest-runner.v1.yaml
       # zbf-v10 removed 2026-10-19 after one live session (A-149, user 19 Oct ~16:50: "remove zbf-v10 from the live set"):
       # live 19 Oct only (A-148), 3 trades, 3 losses, -Rs 1,49,446 (the set's day -Rs 1,16,673; without it +Rs 32,774).
       # Its file and code stay; it returns only through a new registered test.
