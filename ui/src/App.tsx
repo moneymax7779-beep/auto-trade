@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { NavLink, Route, Routes } from "react-router";
+import { Navigate, NavLink, Route, Routes } from "react-router";
 import { get } from "./api";
 import { AccountsPage } from "./pages/AccountsPage";
 import { BrokersPage } from "./pages/BrokersPage";
@@ -31,25 +31,26 @@ const NAV = [
 ] as const;
 
 /**
- * A family member or viewer (signed in without the operator role) sees the Overview without its controls (user, 5 Nov
- * 2026), their own workspace (trader workspaces, 7 Nov 2026: Today's broker and PAPER/LIVE switch, their brokers and
- * logins, settings), their accounts and the index chart pages; the rest is the owner's.
+ * A family member or viewer (signed in without the operator role) sees the index charts with the trades and nothing
+ * more (user, 10 Nov 2026: "Other than Owner, all other accounts ... should only see the chart and trades, nothing
+ * more"; the Overview they had from 5 Nov is the owner's again), and their own workspace to run their trading (trader
+ * workspaces, 7 Nov 2026: Today's broker and PAPER/LIVE switch, their brokers and logins, settings, their accounts).
  */
 const MEMBER_NAV = [
-  ["/live", "Overview"],
+  ["/index/NIFTY", "NIFTY"],          // the index charts, read-only: the chart and the trades only (10 Nov 2026)
+  ["/index/SENSEX", "SENSEX"],
+  ["/index/BANKNIFTY", "BANKNIFTY"],
   ["/today", "Today"],
   ["/brokers", "Brokers"],
   ["/accounts", "My accounts"],
   ["/settings", "Settings"],
-  ["/index/NIFTY", "NIFTY"],          // the same index chart pages as the owner's (user, 29 Oct 2026), read-only
-  ["/index/SENSEX", "SENSEX"],
-  ["/index/BANKNIFTY", "BANKNIFTY"],
 ] as const;
 
 export function App() {
   const me = useQuery({ queryKey: ["me"], queryFn: () => get<Me>("/api/me"), staleTime: 60_000 });
   if (me.isLoading) return null;
-  const member = me.data?.mode === "oidc" && !me.data.operator;
+  // fails closed: if /api/me cannot be read, the member's menu (the server refuses the rest anyway)
+  const member = !me.data || (me.data.mode === "oidc" && !me.data.operator);
   const nav = member ? MEMBER_NAV : NAV;
   return (
     <WorkspaceProvider>
@@ -75,8 +76,8 @@ export function App() {
       <main className="mx-auto max-w-7xl px-4 py-4">
         {member ? (
           <Routes>
-            <Route path="/" element={<LivePage canAct={false} />} />
-            <Route path="/live" element={<LivePage canAct={false} />} />
+            <Route path="/" element={<Navigate to="/index/NIFTY" replace />} />
+            <Route path="/live" element={<Navigate to="/index/NIFTY" replace />} />
             <Route path="/index/:underlying" element={<IndexPage />} />
             <Route path="/today" element={<TodayPage />} />
             <Route path="/brokers" element={<BrokersPage />} />

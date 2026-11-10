@@ -61,7 +61,7 @@ class SecurityConfigTest {
                 "/api/execution", "/actuator/info", "/api/surges", "/api/sessions/7/positions", "/api/sessions/7/decisions",
                 "/api/oi-tape/strikes", "/api/runs", "/api/equity", "/api/sessions/7/rejections", "/api/close-auction",
                 "/api/live/ticks", "/api/replay-control", "/api/sessions/7/trade-context", "/api/sessions/7/at", "/api/structure",
-                "/api/day-context", "/api/sessions/7/structure"})
+                "/api/day-context", "/api/sessions/7/structure", "/api/oi-tape/days"})
         String read() {
             return "ok";
         }
@@ -182,19 +182,23 @@ class SecurityConfigTest {
 
         /**
          * 29 Oct 2026, family members: without the operator role, /api/me, the execution API (tenant-scoped) and, read-only,
-         * what the index chart pages and (5 Nov 2026) the Overview read; nothing else, and no POST.
+         * what the index chart pages read; nothing else, and no POST. 10 Nov 2026 (user: members see "the chart and trades,
+         * nothing more"): the Overview's and the index panels' data (equity, refusals, OI tape, auction, structure, day
+         * context) are the operator's again.
          */
         @Test
         void aMemberWithoutTheOperatorRoleReachesTheirAccountsAndTheChartsOnly(WebApplicationContext context) throws Exception {
             MockMvc mvc = mvc(context);
             for (String path : List.of("/api/me", "/api/execution", "/api/execution/accounts", "/api/sessions", "/api/surges",
-                    "/api/sessions/7/positions", "/api/oi-tape/strikes", "/api/equity", "/api/sessions/7/rejections",
-                    "/api/close-auction", "/api/live/ticks", "/api/structure", "/api/day-context")) {
+                    "/api/sessions/7/positions", "/api/live/ticks", "/api/oi-tape/days")) {
                 mvc.perform(get(path).with(user("member"))).andExpect(status().isOk());
             }
-            // the replay controls and a session's trade data and minute inspector are the operator's
+            // everything around the chart, the replay controls and a session's trade data and minute inspector are the
+            // operator's
             for (String path : List.of("/api/configs", "/actuator/info", "/api/sessions/7/decisions", "/api/runs",
-                    "/api/replay-control", "/api/sessions/7/trade-context", "/api/sessions/7/at", "/api/sessions/7/structure")) {
+                    "/api/replay-control", "/api/sessions/7/trade-context", "/api/sessions/7/at", "/api/sessions/7/structure",
+                    "/api/oi-tape/strikes", "/api/equity", "/api/sessions/7/rejections", "/api/close-auction", "/api/structure",
+                    "/api/day-context")) {
                 mvc.perform(get(path).with(user("member"))).andExpect(status().isForbidden());
                 mvc.perform(get(path).with(user("satya", "ROLE_OPERATOR"))).andExpect(status().isOk());
             }

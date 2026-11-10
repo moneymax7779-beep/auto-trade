@@ -21,6 +21,9 @@ export interface LevelToggles {
   auction: boolean;
 }
 const KEY = "chart-level-toggles";
+/** Every level, line and overlay off (a member's plain chart, 10 Nov 2026). */
+export const NO_LEVELS: LevelToggles = { prior: false, today: false, period: false, months: false, lines: false, maxPain: false,
+  zones: "off", auction: false };
 const DEFAULT: LevelToggles = { prior: true, today: true, period: true, months: true, lines: true, maxPain: true, zones: "strong", auction: true };
 
 /** /api/oi-tape/max-pain: [time, max-pain strike, strikes with OI] where it changes, and the last step. */
@@ -50,12 +53,12 @@ export function tagName(name: string) {
     .replace(/ \/ /g, "/");
 }
 
-export function useLevels(date: string | undefined, underlying: string, live?: boolean) {
+export function useLevels(date: string | undefined, underlying: string, live?: boolean, on = true) {
   return useQuery({
     queryKey: ["levels", date ?? "today", underlying],
     queryFn: () => get<LevelsData>(`/api/levels?underlying=${underlying}${date ? `&date=${date}` : ""}`),
     refetchInterval: live ? 30_000 : false,
-    enabled: !!underlying,
+    enabled: !!underlying && on,
   });
 }
 

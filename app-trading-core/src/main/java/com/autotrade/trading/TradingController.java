@@ -1,5 +1,6 @@
 package com.autotrade.trading;
 
+import java.security.Principal;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -19,14 +20,24 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api")
 class TradingController {
 
-    private final SessionRunner runner;
+    /**
+     * What a member's index chart reads from the status (user, 10 Nov 2026: members see the chart and the trades only):
+     * the session, its day and clock, and its open and closed trades; not the strategies' states, capital, limits, kill
+     * switches, refusals or the schedule.
+     */
+    static final List<String> MEMBER_STATUS = List.of("status", "session", "date", "mode", "lastEvent", "openPositions",
+            "closedPositions");
 
-    TradingController(SessionRunner runner) {
+    private final SessionRunner runner;
+    private final AuthProperties auth;
+
+    TradingController(SessionRunner runner, AuthProperties auth) {
         this.runner = runner;
+        this.auth = auth;
     }
 
     @GetMapping("/status")
-    ResponseEntity<Map<String, Object>> status() {
+    ResponseEntity<Map<String, Object>> status(Principal principal) {
         TradingSession session = runner.current();
         Map<String, Object> status = new LinkedHashMap<>();
         if (session == null) {
@@ -35,6 +46,9 @@ class TradingController {
             status.putAll(session.status());
         }
         status.put("schedule", runner.schedule());
+        if (auth.member(principal)) {
+            status.keySet().retainAll(MEMBER_STATUS);
+        }
         return ResponseEntity.ok(status);
     }
 
