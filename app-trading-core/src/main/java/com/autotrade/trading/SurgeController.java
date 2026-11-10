@@ -1,5 +1,6 @@
 package com.autotrade.trading;
 
+import java.security.Principal;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.LocalTime;
@@ -57,20 +58,23 @@ class SurgeController {
     private final ChartDb db;
     private final JdbcTemplate jdbc;
     private final TradingProperties properties;
+    private final AuthProperties auth;
     private final Map<String, Map<LocalTime, Double>> medians = new ConcurrentHashMap<>();
     private final Map<String, Cached> cache = new ConcurrentHashMap<>();
     /** A surge's flow is fixed once minute t + 1 has closed: computed once per day, underlying and minute. */
     private final Map<String, Map<String, Object>> flows = new ConcurrentHashMap<>();
     private volatile HikariDataSource zt;
 
-    SurgeController(ChartDb db, TradingProperties properties) {
+    SurgeController(ChartDb db, TradingProperties properties, AuthProperties auth) {
         this.db = db;
+        this.auth = auth;
         this.jdbc = db.jdbc();                               // the charts pool, never the engine's (28 Oct 2026)
         this.properties = properties;
     }
 
     @GetMapping("/surges")
-    Map<String, Object> surges(@RequestParam(required = false) String date) {
+    Map<String, Object> surges(@RequestParam(required = false) String date, Principal principal) {
+        boolean member = auth.member(principal);
         LocalDate day = date != null ? LocalDate.parse(date) : latestDay();
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("date", day == null ? null : day.toString());
@@ -78,13 +82,26 @@ class SurgeController {
         if (day != null) {
             // every recorded index (BANKNIFTY too, for its chart); the surge alerts read the traded ones only (SurgeAlerter)
             for (String underlying : properties.trading().underlyings()) {
-                underlyings.add(cached(day, underlying));
+                underlyings.add(member ? chartOnly(cached(day, underlying)) : cached(day, underlying));
             }
         }
         result.put("underlyings", underlyings);
         result.put("rule", Map.of("surgeMin", SURGE_MIN, "historySessions", HISTORY_SESSIONS,
                 "futuresOiMinPct", SurgeFlow.FUTURES_OI_MIN * 100, "optionsOiMinPct", SurgeFlow.OPTIONS_OI_MIN * 100));
         return result;
+    }
+
+    /**
+     * A member's chart (user, 10 Nov 2026: the chart and the trades only): the index by minute and the futures volume
+     * under it; no surges, OI flow or expiries.
+     */
+    static Map<String, Object> chartOnly(Map<String, Object> full) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("underlying", full.get("underlying"));
+        out.put("index", full.getOrDefault("index", List.of()));
+        out.put("volume", full.getOrDefault("volume", List.of()));
+        out.put("surges", List.of());
+        return out;
     }
 
     LocalDate latestDay() {

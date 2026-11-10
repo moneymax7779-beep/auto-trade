@@ -5,6 +5,8 @@ import { get, type SessionStructure } from "../api";
 /** ma-cross's own view of the index (4 Nov 2026): its EMAs of 3-minute closes, 3-minute candles, each trade's stop / target. */
 export interface StructureToggles { emas: boolean; candles: boolean; stops: boolean }
 const STRUCTURE_KEY = "chart-structure-toggles";
+/** No candles, EMAs or stops (a member's plain chart, 10 Nov 2026). */
+export const NO_STRUCTURE: StructureToggles = { emas: false, candles: false, stops: false };
 const STRUCTURE_DEFAULT: StructureToggles = { emas: true, candles: false, stops: true };
 export const EMA9_COLOR = "#0ea5e9", EMA20_3M_COLOR = "#6d28d9";
 export const STOP_COLOR = "#dc2626", TARGET_COLOR = "#16a34a";
@@ -51,10 +53,10 @@ export function StructureTogglesBar({ toggles, onChange, stops = true }:
  * The index chart's structure: a session's (with its ma-cross trades' stops) when one is given, else the day's alone;
  * refreshed while live (a 3-minute bar is added once it has closed).
  */
-export function useStructure(date: string | undefined, underlying: string, sessionId?: number, live?: boolean) {
+export function useStructure(date: string | undefined, underlying: string, sessionId?: number, live?: boolean, on = true) {
   return useQuery({
     queryKey: ["structure", sessionId != null ? `session-${sessionId}` : date ?? "none", underlying],
-    enabled: sessionId != null || !!date,
+    enabled: on && (sessionId != null || !!date),
     queryFn: () => get<SessionStructure>(sessionId != null
       ? `/api/sessions/${sessionId}/structure?underlying=${underlying}`
       : `/api/structure?date=${date}&underlying=${underlying}`),

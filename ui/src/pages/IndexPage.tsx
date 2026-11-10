@@ -3,6 +3,7 @@ import { Link, NavLink, useParams, useSearchParams } from "react-router";
 import { get, parseSide, type LastDecisionRow, type PositionRow, type SessionRow, type Status, type TradePositionRow, isPrimaryLive } from "../api";
 import { AlertBanner } from "../components/AlertBanner";
 import { DayContextCard } from "../components/DayContextPanels";
+import { LiveBooks } from "../components/LiveBookPanel";
 import { LivePositions } from "../components/LivePositions";
 import { MarketCard } from "../components/MarketCard";
 import { splitDecisionKey, storedScores, StrategyMatrix, strategyShort } from "../components/strategies";
@@ -34,6 +35,10 @@ export function IndexPage() {
   const me = useQuery({ queryKey: ["me"], queryFn: () => get<{ mode: string; operator: boolean }>("/api/me"), staleTime: 60_000 });
   // off until /api/me answers (a viewer never sees operator controls, even for a moment or when the call fails)
   const inspect = !!me.data && (me.data.mode !== "oidc" || me.data.operator);
+  if (me.isLoading) return <Loading what="sign-in" />;
+  // everyone but the owner (operator role) sees the chart and the trades only (user, 10 Nov 2026: "Other than Owner, all
+  // other accounts, Follower Demo and whoever it is should only see the chart and trades, nothing more")
+  const plain = !inspect;
   if (status.isLoading) return <Loading what="live status" />;
   if (status.error) return <ErrorNote error={status.error} />;
   const s = status.data!;
@@ -49,10 +54,11 @@ export function IndexPage() {
   const chartDays = running && !days.includes(s.date!) ? [s.date!, ...days] : days;
   const ci = day ? chartDays.indexOf(day) : -1;
   const nav: DayNav = { prev: ci >= 0 ? chartDays[ci + 1] : undefined, next: ci > 0 ? chartDays[ci - 1] : undefined, go };
+  const sessionOf = (d: string) => liveSessions.filter((r) => r.session_date === d).map((r) => r.id).sort((a, b) => b - a)[0];
 
   return (
     <div className="space-y-4">
-      <AlertBanner />
+      {!plain && <AlertBanner />}
       <div className="flex flex-wrap items-center gap-2">
         {INDICES.map((u) => (
           <NavLink key={u} to={`/index/${u}${picked ? `?date=${picked}` : ""}`}
@@ -74,15 +80,20 @@ export function IndexPage() {
             <button type="button" className="ml-1 rounded border border-accent px-2 py-0.5 text-xs text-accent" onClick={() => go(null)}>live</button>
           )}
         </div>
-        <Link to="/live" className="ml-auto text-xs text-accent hover:underline">← overview</Link>
+        {!plain && <Link to="/live" className="ml-auto text-xs text-accent hover:underline">← overview</Link>}
       </div>
+      {/* a member's own LIVE accounts (open and closed positions, Exit, booking a hand exit): on the Overview until
+          10 Nov 2026, which is the owner's now; their real-money trades must stay in reach */}
+      {plain && <LiveBooks />}
       {CONTEXT_ONLY.has(underlying) && (
-        <p className="text-xs text-muted">{underlying} is recorded for context (chart, futures volume, PCR, levels); no strategy trades it.</p>
+        <p className="text-xs text-muted">{plain ? `${underlying} is shown for context; no strategy trades it.`
+          : `${underlying} is recorded for context (chart, futures volume, PCR, levels); no strategy trades it.`}</p>
       )}
 
-      {showLive ? <LiveDay underlying={underlying} s={s} nav={nav} inspect={inspect} /> : day
-        ? <PastDay key={day} underlying={underlying} day={day} nav={nav} inspect={inspect}
-            sessionId={liveSessions.filter((r) => r.session_date === day).map((r) => r.id).sort((a, b) => b - a)[0]} />
+      {showLive ? (plain ? <PlainLiveDay underlying={underlying} s={s} nav={nav} />
+        : <LiveDay underlying={underlying} s={s} nav={nav} inspect={inspect} />) : day
+        ? (plain ? <PlainPastDay key={day} underlying={underlying} day={day} nav={nav} sessionId={sessionOf(day)} />
+          : <PastDay key={day} underlying={underlying} day={day} nav={nav} inspect={inspect} sessionId={sessionOf(day)} />)
         : <p className="text-sm text-muted">No live session recorded yet.</p>}
     </div>
   );
@@ -160,6 +171,41 @@ function PastDay({ underlying, day, sessionId, nav, inspect }: { underlying: str
       )}
       <Panel title={`Trades on ${underlying} · ${day}`}>
         <TradesTable rows={trades} showStrategy empty={sessionId == null ? "No live session of this day is recorded on this server (its market data is)."
+          : positions.isLoading ? "Loading…" : "No trades on this index that day."} />
+      </Panel>
+    </>
+  );
+}
+
+/** A member's view of the running session on this index: the chart and the trades, nothing more (user, 10 Nov 2026). */
+function PlainLiveDay({ underlying, s, nav }: { underlying: string; s: Status; nav: DayNav }) {
+  const mine = <T extends { underlying: string }>(rows: T[] | undefined) => (rows ?? []).filter((r) => r.underlying === underlying);
+  const open = mine(s.openPositions), closed = mine(s.closedPositions);
+  const until = s.mode === "PAPER_REPLAY" && s.lastEvent ? s.lastEvent.slice(0, 8).padEnd(8, ":00").slice(0, 8) : undefined;
+  return (
+    <>
+      <SurgePanel plain live date={s.date} underlying={underlying} nav={nav} until={until}
+        trades={chartTrades([...open, ...closed].filter((p) => p.opened).map((p) => liveAsStored(p, s.date!)), underlying, null, strategyShort, noSpot)} />
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Panel title="Open positions"><LivePositions rows={open} closed={false} empty="Flat." /></Panel>
+        <Panel title="Closed today"><LivePositions rows={closed} closed empty="No closed positions yet." /></Panel>
+      </div>
+    </>
+  );
+}
+
+/** A member's view of an earlier day on this index: the chart and the trades, nothing more (user, 10 Nov 2026). */
+function PlainPastDay({ underlying, day, sessionId, nav }: { underlying: string; day: string; sessionId?: number; nav: DayNav }) {
+  const positions = useQuery({
+    queryKey: ["positions", sessionId], enabled: sessionId != null,
+    queryFn: () => get<TradePositionRow[]>(`/api/sessions/${sessionId}/positions`),
+  });
+  const trades = (positions.data ?? []).filter((p) => p.underlying === underlying);
+  return (
+    <>
+      <SurgePanel plain date={day} underlying={underlying} nav={nav} trades={chartTrades(trades, underlying, null, strategyShort, noSpot)} />
+      <Panel title={`Trades on ${underlying} · ${day}`}>
+        <TradesTable rows={trades} showStrategy empty={sessionId == null ? "No trades recorded for this day."
           : positions.isLoading ? "Loading…" : "No trades on this index that day."} />
       </Panel>
     </>
