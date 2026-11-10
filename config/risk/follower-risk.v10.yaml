@@ -1,8 +1,8 @@
 # follower-risk v10 (user 10 Nov 2026: "LIVE slots first" -> "Yes, prepare v10"; ledger A-371 / A-372): v9 with the open-
 # position limit raised from 2 to 3, in both positions.max_open_positions (the risk engine) and live.max_open_positions
-# (LiveGuard at the broker). A-372 (offline, 28 own tick days, the five LIVE strategies' alone trades at 1 lot): 2 slots
-# took +1,59,327 per lot, 3 slots +1,96,197 (+15,802 / +21,069 by half, still up without each half's best day; worst day
-# -5,838 vs -7,484; most premium open at once Rs 33,962 vs 25,873). Every other limit is v9's, unchanged: 1 lot per order,
+# (LiveGuard at the broker). A-372 (offline, 28 own tick days, the five LIVE strategies' alone trades at 1 lot, Kite
+# 1-lot costs): 2 slots took +1,58,867 per lot, 3 slots +1,95,653 (+15,751 / +21,035 by half, still up without each
+# half's best day; worst day -5,870 vs -7,510; most premium open at once Rs 33,962 vs 25,873). Every other limit is v9's, unchanged: 1 lot per order,
 # 2 lots per index, daily loss 10 %, the LIVE strategy list and defaults.
 version: follower-risk-v10
 name: follower-risk

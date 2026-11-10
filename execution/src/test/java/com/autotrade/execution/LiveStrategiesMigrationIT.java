@@ -45,7 +45,9 @@ class LiveStrategiesMigrationIT {
                         200_000, EquityMode.FIXED, LocalDate.now(), "config/risk/follower-risk.v7.yaml", 0);
                 long v3 = accounts.ensureFollowerAccount(tenant, owner, "PAPER-V3", BrokerType.PAPER, TradeMode.PAPER,
                         200_000, EquityMode.FIXED, LocalDate.now(), "config/risk/follower-risk.v3.yaml", 100);
-                Flyway.configure().dataSource(dataSource).locations("classpath:db/migration").load().migrate();
+                // target 33: this test is about V32 (V33 adds the global LIVE policy the reads need; V34 later moves v9 accounts
+                // on to v10, FollowerRiskV10MigrationIT)
+                Flyway.configure().dataSource(dataSource).locations("classpath:db/migration").target("33").load().migrate();
 
                 JdbcTemplate jdbc = new JdbcTemplate(dataSource);
                 assertThat(jdbc.queryForObject("select risk_file from acct.broker_account where id = ?", String.class, v7))
