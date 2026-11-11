@@ -349,10 +349,19 @@ class MembersController {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("code", code.toString());
         out.put("bot", bot);
-        out.put("link", bot == null ? null : "https://t.me/" + bot + "?start=" + code);
+        out.put("link", startLink(bot, code.toString()));
         out.put("send", "/start " + code);
         out.put("expiresInMinutes", 30);
         return out;
+    }
+
+    /**
+     * The bot's start link with the code. telegram.me, not t.me: some Indian broadband DNS sends t.me to the ISP's own
+     * block server (11 Nov 2026: t.me resolved to 49.205.171.201 and Chrome gave ERR_SSL_PROTOCOL_ERROR), while
+     * telegram.me is Telegram's own and opens the same chat.
+     */
+    static String startLink(String bot, String code) {
+        return bot == null ? null : "https://telegram.me/" + bot + "?start=" + code;
     }
 
     @PostMapping("/api/execution/me/telegram/check")

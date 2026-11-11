@@ -116,7 +116,7 @@ class TelegramNotifier {
         return settings().get("TELEGRAM_BOT_TOKEN") != null;
     }
 
-    /** The bot's username (for a t.me link), or null when it cannot be read. */
+    /** The bot's username (for a telegram.me link), or null when it cannot be read. */
     String botUsername() {
         String token = settings().get("TELEGRAM_BOT_TOKEN");
         if (token == null) {
