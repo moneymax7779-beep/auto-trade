@@ -16,7 +16,7 @@ export function SettingsPage() {
   const client = useQueryClient();
   const { me, current } = useWorkspace();
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
-  const [link, setLink] = useState<{ code: string; link: string | null; send: string } | null>(null);
+  const [link, setLink] = useState<{ code: string; bot: string | null; link: string | null; send: string } | null>(null);
   const [hours, setHours] = useState("2");
   const [reason, setReason] = useState("");
   const done = (text: string, ok = true) => {
@@ -25,7 +25,7 @@ export function SettingsPage() {
   };
   const fail = (e: unknown) => setMessage({ ok: false, text: e instanceof Error ? e.message : String(e) });
   const start = useMutation({
-    mutationFn: () => postJson<{ code: string; link: string | null; send: string }>("/api/execution/me/telegram/link", {}),
+    mutationFn: () => postJson<{ code: string; bot: string | null; link: string | null; send: string }>("/api/execution/me/telegram/link", {}),
     onSuccess: (r) => setLink(r),
     onError: fail,
   });
@@ -63,7 +63,7 @@ export function SettingsPage() {
         </div>
         {link && (
           <div className="mt-3 rounded border border-accent/40 p-3 text-sm">
-            <p>Send <code className="font-semibold">{link.send}</code> to the bot
+            <p>Send <code className="font-semibold">{link.send}</code> to {link.bot ? <code className="font-semibold">@{link.bot}</code> : "the bot"} in Telegram
               {link.link && <> (or open <a className="underline" href={link.link} target="_blank" rel="noreferrer">{link.link}</a> and press Start)</>},
               then press Check. The code works for 30 minutes.</p>
             <button className={`${button} mt-2`} disabled={check.isPending} onClick={() => check.mutate()}>Check</button>
