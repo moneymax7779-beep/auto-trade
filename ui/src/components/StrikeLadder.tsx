@@ -1,8 +1,9 @@
-import { useMemo, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { get } from "../api";
 import { useMaxPain } from "./levels";
 import { CALL, PUT, big, px, useWidth } from "./oiShared";
+import { NO_CELLS, cellKey, hugeCells, pulseStep, type PulseMemo } from "./oiHuge";
 import { ErrorNote } from "./ui";
 
 /**
@@ -123,6 +124,18 @@ export function Strikes({ underlying, date, at, pinned, live }: { underlying: st
     wc: ((r[19] as N[] | undefined) ?? []).slice(0, WINDOWS.length), wp: ((r[19] as N[] | undefined) ?? []).slice(WINDOWS.length, 2 * WINDOWS.length),
   })), [d]);
   const whoOf = (s: Side): Who => (opts.who === "iv" ? s.who : null);
+  const hugeOrNull = useMemo(() => hugeCells(rows, opts.size), [rows, opts.size]);
+  const huge = hugeOrNull ?? NO_CELLS;
+  // the cells that newly became huge on a live step blink (see pulseStep); the placeholder ladder shown while the next
+  // one loads is the previous view's, so it is skipped
+  const pulseMemo = useRef<PulseMemo | null>(null);
+  const [pulse, setPulse] = useState<ReadonlySet<string>>(NO_CELLS);
+  useEffect(() => {
+    if (!d?.at || q.isPlaceholderData) return;
+    const { memo, fresh } = pulseStep(pulseMemo.current, `${underlying}|${date}|${String(back)}|${opts.size}`, d.at, !!live && !pinned, hugeOrNull);
+    pulseMemo.current = memo;
+    if (fresh) setPulse((p) => (fresh.size || p.size ? fresh : p));
+  }, [d, hugeOrNull, q.isPlaceholderData, underlying, date, back, opts.size, live, pinned]);
   const movers = (key: "c" | "p", sign: 1 | -1) => rows.filter((r) => r[key].d != null && sign * (r[key].d as number) > 0)
     .sort((a, b) => sign * ((b[key].d as number) - (a[key].d as number))).slice(0, 2);
   const mv = (key: "c" | "p", sign: 1 | -1) => movers(key, sign).map((r) => `${strikeText(r.k)} ${big(r[key].d, true)}`).join(", ") || "–";
@@ -169,8 +182,8 @@ export function Strikes({ underlying, date, at, pinned, live }: { underlying: st
           </div>
           <div className="mt-2">
             {d && rows.length > 0 && (opts.layout === "mirror"
-              ? <Mirror d={d} rows={rows} W={W} opts={opts} whoOf={whoOf} underlying={underlying} />
-              : <Stacked d={d} rows={rows} W={W} opts={opts} whoOf={whoOf} underlying={underlying} />)}
+              ? <Mirror d={d} rows={rows} W={W} opts={opts} whoOf={whoOf} underlying={underlying} huge={huge} pulse={pulse} />
+              : <Stacked d={d} rows={rows} W={W} opts={opts} whoOf={whoOf} underlying={underlying} huge={huge} pulse={pulse} />)}
           </div>
           <Legend d={d} at={at} opts={opts} openIv={typeof back !== "number" || back > 1800} />
         </>
@@ -258,31 +271,52 @@ function gammaText(g: N, oi: N, spot: N | undefined) {
 }
 const nfCr = (v: number) => v.toLocaleString("en-IN", { maximumFractionDigits: v >= 100 ? 0 : 1 });
 
-function rowTitle(r: Strike, spot?: number | null) {
+function rowTitle(r: Strike, spot?: number | null, huge: ReadonlySet<string> = NO_CELLS) {
   const one = (name: string, s: Side) => `${name}: OI ${big(s.oi)} (${big(s.d, true)}, ${pctText(s.pct)})`
     + ` · IV ${ivText(s.iv0)} → ${ivText(s.iv)} · premium ${px(s.px0)} → ${px(s.px)} · traded ${big(s.vol)}`
     + (s.who ? ` · ${WHO_HELP[s.who]}` : "");
   const win = (w: N[]) => WINDOWS.map((m, n) => `${m} ${big(w[n] ?? null, true)}`).join(", ");
-  return `${strikeText(r.k)}\n${one("calls", r.c)}\n${one("puts", r.p)}`
+  const big2 = (["c", "p"] as const).filter((k) => huge.has(cellKey(r.k, k))).map((k) => (k === "c" ? "calls" : "puts"));
+  return `${strikeText(r.k)}${big2.length ? ` · huge change in the ${big2.join(" and ")}` : ""}\n${one("calls", r.c)}\n${one("puts", r.p)}`
     + (r.wc.length ? `\nOI change · calls: ${win(r.wc)} · puts: ${win(r.wp)}` : "")
     + (r.gc != null || r.gp != null ? `\ngamma · calls: ${gammaText(r.gc, r.c.oi, spot)}\ngamma · puts: ${gammaText(r.gp, r.p.oi, spot)}` : "");
 }
 
-interface LadderProps { d: StrikesData; rows: Strike[]; W: number; opts: Opts; whoOf: (s: Side) => Who; underlying: string }
+/** huge / pulse: the change cells to tint and to blink, keyed "strike:c" / "strike:p" (see oiHuge.ts). */
+interface LadderProps { d: StrikesData; rows: Strike[]; W: number; opts: Opts; whoOf: (s: Side) => Who; underlying: string; huge: ReadonlySet<string>; pulse: ReadonlySet<string> }
+
+/** A huge change's tint behind its number and label, in the side's colour; {@code pulse} blinks it a few times first. */
+function HugeTint({ x, y, w, h, color, pulse }: { x: number; y: number; w: number; h: number; color: string; pulse: boolean }) {
+  return <rect x={x} y={y} width={w} height={h} rx={4} fill={color} fillOpacity={0.16} stroke={color} strokeOpacity={0.7} strokeWidth={1.2}
+    className={pulse ? "oi-huge-pulse" : undefined} />;
+}
 
 /** Below this width (a phone) the columns shrink: one-letter who-traded chips, short wall tags, a narrower gamma column. */
 const COMPACT = 760;
 const WHO_LETTER: Record<Exclude<Who, null>, string> = { WRITING: "W", BUYING: "B", COVERING: "C", CLOSING: "X" };
 
-const changeText = (s: Side, opts: Opts) => (opts.size === "pct" ? pctText(s.pct) : s.d != null ? big(s.d, true) : "–");
+/** A percentage for the narrow change column: from 1,000 % in k / M ("+21M %"), the exact figure is in the row's tooltip. */
+const pctShort = (v: N) => (v == null || Math.abs(v) < 1000 ? pctText(v) : `${v > 0 ? "+" : "−"}${big(Math.abs(v))} %`);
+const changeText = (s: Side, opts: Opts) => (opts.size === "pct" ? pctShort(s.pct) : s.d != null ? big(s.d, true) : "–");
+
+/** The rows' height and the change column's type (bigger since 11 Nov 2026, user: "Make these bigger size"). */
+const ROW_H = 26, CHIP_H = 18;
+/**
+ * The side colours are light (amber about 2.1:1 on white, the blue about 2.5:1), so the numbers and labels are drawn in a
+ * darker shade of the same hue, about 5:1; bars and tints keep the light colour.
+ */
+const ink = (color: string) => `color-mix(in oklab, ${color} 66%, black)`;
+/** A change number's style: 13 px, smaller when a long one ("+4900 %") would not fit its {@code room} (monospace, 0.6 em a character). */
+const changeStyle = (text: string, room: number, color: string) => ({ fill: ink(color), fontSize: `${Math.min(13, Math.max(9, room / (0.61 * text.length)))}px` });
+const changeClass = (huge: boolean) => `num ${huge ? "font-bold" : "font-semibold"}`;
 
 function WhoChip({ x, y, w, who, color, compact }: { x: number; y: number; w: number; who: Who; color: string; compact?: boolean }) {
   if (!who) return null;
   const st = whoStyle(who, color);
   return (
     <g>
-      <rect x={x} y={y} width={w} height={14} rx={3} fill={st.fill} opacity={st.opacity} />
-      <text x={x + w / 2} y={y + 10.5} textAnchor="middle" className="text-[10px] font-semibold" style={{ fill: st.text }}>{compact ? WHO_LETTER[who] : WHO_TEXT[who]}</text>
+      <rect x={x} y={y} width={w} height={CHIP_H} rx={4} fill={st.fill} opacity={st.opacity} />
+      <text x={x + w / 2} y={y + CHIP_H / 2 + 4} textAnchor="middle" className="text-[12px] font-semibold" style={{ fill: st.text === "var(--color-muted)" ? st.text : ink(st.text) }}>{compact ? WHO_LETTER[who] : WHO_TEXT[who]}</text>
       <title>{WHO_HELP[who]}</title>
     </g>
   );
@@ -385,12 +419,12 @@ function Frame({ W, need, label, children }: { W: number; need: number; label: s
 }
 
 /** The ladder as it always was: call (top) and put (bottom) bars from the left, the changes on the right; options add columns. */
-function Stacked({ d, rows, W: box, opts, whoOf, underlying }: LadderProps) {
+function Stacked({ d, rows, W: box, opts, whoOf, underlying, huge, pulse }: LadderProps) {
   const tags = opts.walls ? wallTags(d) : new Map<number, Tag[]>();
   const mx = Math.max(1, ...rows.flatMap((r) => [r.c.oi ?? 0, r.p.oi ?? 0, r.c.oi0 ?? 0, r.p.oi0 ?? 0]));
   const gMax = gammaMax(rows);
-  const compact = box < COMPACT, who = opts.who !== "off", chipW = compact ? 16 : 58, dW = compact ? 46 : 56;
-  const rowH = 22, tagW = opts.walls ? (compact ? 44 : 84) : 0, labW = 64 + tagW, deltaW = who ? 2 * (dW + chipW + 6) : 112,
+  const compact = box < COMPACT, who = opts.who !== "off", chipW = compact ? 20 : 70, dW = compact ? 54 : 64;
+  const rowH = ROW_H, tagW = opts.walls ? (compact ? 44 : 84) : 0, labW = 64 + tagW, deltaW = who ? 2 * (dW + chipW + 6) : 112,
     gW = opts.gamma ? (compact ? 36 : 64) : 0, mW = opts.multi ? (compact ? 140 : 260) : 0, top = opts.multi ? 16 : 6;
   const minBar = compact ? 60 : 120, need = labW + minBar + gW + mW + deltaW + 8, W = Math.max(box, need);
   const barW = W - labW - deltaW - gW - mW - 8;
@@ -399,7 +433,7 @@ function Stacked({ d, rows, W: box, opts, whoOf, underlying }: LadderProps) {
   const xs = (v: number) => labW + (v / mx) * barW;
   const y = d.strikeStep ? priceY(rows[0].k, d.strikeStep, top, rowH) : null;
   const spotY = d.spot != null && y && rows.length > 1 ? y(d.spot) : null;
-  const cDx = who ? W - deltaW + dW : W - deltaW / 2 - 4, pDx = who ? W - deltaW / 2 + dW : W - 4;
+  const cDx = who ? W - deltaW + dW : W - deltaW / 2 - 4, pDx = who ? W - deltaW / 2 + dW : W - 4, room = who ? dW - 6 : deltaW / 2 - 8;
   return (
     <Frame W={box} need={need} label="strike ladder">
     <svg viewBox={`0 0 ${W} ${H}`} width={W > box ? W : "100%"} role="img" aria-label={`${underlying} OI by strike at ${d.at}`}>
@@ -420,17 +454,19 @@ function Stacked({ d, rows, W: box, opts, whoOf, underlying }: LadderProps) {
             {r.c.oi0 != null && <line x1={xs(r.c.oi0)} x2={xs(r.c.oi0)} y1={y0 + 1} y2={y0 + 3 + bh} stroke="var(--color-text)" strokeWidth={1.5} />}
             {r.p.oi != null && <rect x={labW} y={y0 + 4 + bh} width={Math.max(0, xs(r.p.oi) - labW)} height={bh} rx={2} fill={PUT} opacity={0.85} />}
             {r.p.oi0 != null && <line x1={xs(r.p.oi0)} x2={xs(r.p.oi0)} y1={y0 + 3 + bh} y2={y0 + 5 + 2 * bh} stroke="var(--color-text)" strokeWidth={1.5} />}
-            {opts.gamma && <GammaBar x={labW + barW + 8} y={y0 + 5} w={gW - 14} gc={r.gc} gp={r.gp} max={gMax} />}
+            {opts.gamma && <GammaBar x={labW + barW + 8} y={y0 + (rowH - 11) / 2} w={gW - 14} gc={r.gc} gp={r.gp} max={gMax} />}
             {opts.multi && <>
               <line x1={mX + mW / 2} x2={mX + mW / 2} y1={y0} y2={y0 + rowH} stroke="var(--color-line)" />
               <WindowBars x0={mX + mW / 2} half={mHalf} y={y0 + 2} h={bh} w={r.wc} now={r.c.oi} max={mMax} color={CALL} opts={opts} />
               <WindowBars x0={mX + mW / 2} half={mHalf} y={y0 + 4 + bh} h={bh} w={r.wp} now={r.p.oi} max={mMax} color={PUT} opts={opts} />
             </>}
-            <text x={cDx} y={y0 + rowH / 2 + 4} textAnchor="end" className="fill-current text-[10px] num" style={{ fill: CALL }}>{changeText(r.c, opts)}</text>
-            <text x={pDx} y={y0 + rowH / 2 + 4} textAnchor="end" className="fill-current text-[10px] num" style={{ fill: PUT }}>{changeText(r.p, opts)}</text>
-            {who && <WhoChip x={cDx + 4} y={y0 + 4} w={chipW} who={whoOf(r.c)} color={CALL} compact={compact} />}
-            {who && <WhoChip x={pDx + 4} y={y0 + 4} w={chipW} who={whoOf(r.p)} color={PUT} compact={compact} />}
-            <title>{rowTitle(r, d.spot)}</title>
+            {huge.has(cellKey(r.k, "c")) && <HugeTint x={cDx - (who ? dW - 2 : deltaW / 2 - 4)} y={y0 + 1} w={who ? dW + chipW + 4 : deltaW / 2 - 2} h={rowH - 2} color={CALL} pulse={pulse.has(cellKey(r.k, "c"))} />}
+            {huge.has(cellKey(r.k, "p")) && <HugeTint x={pDx - (who ? dW - 2 : deltaW / 2 - 4)} y={y0 + 1} w={who ? dW + chipW + 4 : deltaW / 2 - 2} h={rowH - 2} color={PUT} pulse={pulse.has(cellKey(r.k, "p"))} />}
+            <text x={cDx} y={y0 + rowH / 2 + 4.5} textAnchor="end" className={changeClass(huge.has(cellKey(r.k, "c")))} style={changeStyle(changeText(r.c, opts), room, CALL)}>{changeText(r.c, opts)}</text>
+            <text x={pDx} y={y0 + rowH / 2 + 4.5} textAnchor="end" className={changeClass(huge.has(cellKey(r.k, "p")))} style={changeStyle(changeText(r.p, opts), room, PUT)}>{changeText(r.p, opts)}</text>
+            {who && <WhoChip x={cDx + 4} y={y0 + (rowH - CHIP_H) / 2} w={chipW} who={whoOf(r.c)} color={CALL} compact={compact} />}
+            {who && <WhoChip x={pDx + 4} y={y0 + (rowH - CHIP_H) / 2} w={chipW} who={whoOf(r.p)} color={PUT} compact={compact} />}
+            <title>{rowTitle(r, d.spot, huge)}</title>
           </g>
         );
       })}
@@ -446,15 +482,19 @@ function Stacked({ d, rows, W: box, opts, whoOf, underlying }: LadderProps) {
 }
 
 /** Puts to the left of the strike, calls to the right, the changes on the outside; wall tags sit at the bar ends. */
-function Mirror({ d, rows, W: box, opts, whoOf, underlying }: LadderProps) {
+function Mirror({ d, rows, W: box, opts, whoOf, underlying, huge, pulse }: LadderProps) {
   const tags = opts.walls ? wallTags(d) : new Map<number, Tag[]>();
   const mx = Math.max(1, ...rows.flatMap((r) => [r.c.oi ?? 0, r.p.oi ?? 0, r.c.oi0 ?? 0, r.p.oi0 ?? 0]));
   const gMax = gammaMax(rows);
   // compact (a phone): one-letter chips, and the walls colour the strike label instead of a tag beside the bars
-  const compact = box < COMPACT, who = opts.who !== "off", chipW = compact ? 16 : 58;
-  const rowH = 22, top = 20, dW = compact ? 46 : 52, cols = dW + (who ? chipW + 6 : 0), gW = opts.gamma ? (compact ? 36 : 64) : 0,
-    tagW = opts.walls && !compact ? 84 : 0, cw = compact ? 56 : 66, mW = opts.multi ? (compact ? 90 : 180) : 0;
-  const minHalf = compact ? 50 : 60, need = 2 * cols + 2 * mW + gW + cw + 2 * (tagW + 6 + minHalf), W = Math.max(box, need);
+  const compact = box < COMPACT, who = opts.who !== "off", chipW = compact ? 20 : 70;
+  const rowH = ROW_H, top = 20, dW = compact ? 54 : 62, cols = dW + (who ? chipW + 6 : 0), gW = opts.gamma ? (compact ? 36 : 64) : 0,
+    tagW = opts.walls && !compact ? 84 : 0, cw = compact ? 56 : 66, minHalf = compact ? 50 : 60;
+  // the change columns grew (11 Nov 2026): on a box just too narrow the window bars give up to 60 px a side (30 on a
+  // phone) when that saves the sideways scroll; when it scrolls anyway they keep their width
+  const fixed = 2 * cols + gW + cw + 2 * (tagW + 6 + minHalf), mFull = compact ? 90 : 180, mMin = mFull - (compact ? 30 : 60);
+  const mW = !opts.multi ? 0 : box >= fixed + 2 * mFull || box < fixed + 2 * mMin ? mFull : (box - fixed) / 2;
+  const need = fixed + 2 * mW, W = Math.max(box, need);
   const half = (W - 2 * cols - 2 * mW - gW - cw) / 2 - tagW - 6;
   const cx = cols + mW + tagW + half + cw / 2 + 4;
   const mMax = opts.multi ? windowMax(rows, opts) : 1, mHalf = mW / 2 - 5;
@@ -481,8 +521,9 @@ function Mirror({ d, rows, W: box, opts, whoOf, underlying }: LadderProps) {
         return (
           <g key={r.k}>
             {atm && <rect x={0} y={y0} width={W} height={rowH} fill="var(--color-accent)" opacity={0.08} />}
-            <text x={dW - 4} y={y0 + rowH / 2 + 4} textAnchor="end" className="text-[10px] num" style={{ fill: PUT }}>{changeText(r.p, opts)}</text>
-            {who && <WhoChip x={dW + 2} y={y0 + 4} w={chipW} who={whoOf(r.p)} color={PUT} compact={compact} />}
+            {huge.has(cellKey(r.k, "p")) && <HugeTint x={1} y={y0 + 1} w={cols - 2} h={rowH - 2} color={PUT} pulse={pulse.has(cellKey(r.k, "p"))} />}
+            <text x={dW - 4} y={y0 + rowH / 2 + 4.5} textAnchor="end" className={changeClass(huge.has(cellKey(r.k, "p")))} style={changeStyle(changeText(r.p, opts), dW - 6, PUT)}>{changeText(r.p, opts)}</text>
+            {who && <WhoChip x={dW + 2} y={y0 + (rowH - CHIP_H) / 2} w={chipW} who={whoOf(r.p)} color={PUT} compact={compact} />}
             {opts.multi && <>
               <line x1={mL} x2={mL} y1={y0} y2={y0 + rowH} stroke="var(--color-line)" />
               <WindowBars x0={mL} half={mHalf} y={by} h={bh} w={r.wp} now={r.p.oi} max={mMax} color={PUT} opts={opts} />
@@ -499,10 +540,11 @@ function Mirror({ d, rows, W: box, opts, whoOf, underlying }: LadderProps) {
             {r.c.oi0 != null && <line x1={right + len(r.c.oi0)} x2={right + len(r.c.oi0)} y1={by - 2} y2={by + bh + 2} stroke="var(--color-text)" strokeWidth={1.5} />}
             {callTags.length > 0 && <text x={right + Math.max(cl, r.c.oi0 != null ? len(r.c.oi0) : 0) + 6} y={y0 + rowH / 2 + 4}
               className="text-[10px] italic" style={{ fill: callTags[0].color }}>{callTags.map((t) => t.text).join(" · ")}<title>{callTags.map((t) => t.title).join("\n")}</title></text>}
-            <text x={outR + dW - 4} y={y0 + rowH / 2 + 4} textAnchor="end" className="text-[10px] num" style={{ fill: CALL }}>{changeText(r.c, opts)}</text>
-            {who && <WhoChip x={outR + dW + 2} y={y0 + 4} w={chipW} who={whoOf(r.c)} color={CALL} compact={compact} />}
-            {opts.gamma && <GammaBar x={W - gW + 6} y={y0 + 5} w={gW - 10} gc={r.gc} gp={r.gp} max={gMax} />}
-            <title>{rowTitle(r, d.spot)}</title>
+            {huge.has(cellKey(r.k, "c")) && <HugeTint x={outR + 1} y={y0 + 1} w={cols - 2} h={rowH - 2} color={CALL} pulse={pulse.has(cellKey(r.k, "c"))} />}
+            <text x={outR + dW - 4} y={y0 + rowH / 2 + 4.5} textAnchor="end" className={changeClass(huge.has(cellKey(r.k, "c")))} style={changeStyle(changeText(r.c, opts), dW - 6, CALL)}>{changeText(r.c, opts)}</text>
+            {who && <WhoChip x={outR + dW + 2} y={y0 + (rowH - CHIP_H) / 2} w={chipW} who={whoOf(r.c)} color={CALL} compact={compact} />}
+            {opts.gamma && <GammaBar x={W - gW + 6} y={y0 + (rowH - 11) / 2} w={gW - 10} gc={r.gc} gp={r.gp} max={gMax} />}
+            <title>{rowTitle(r, d.spot, huge)}</title>
           </g>
         );
       })}
@@ -527,6 +569,7 @@ function Legend({ d, at, opts, openIv }: { d?: StrikesData; at: string; opts: Op
     ? <>Bars: put OI to the left, call OI to the right at {d?.at ?? at}; the tick is where it stood at {d?.from ?? "…"}. Outside: the change{opts.size === "pct" ? " as a share of the strike's earlier OI" : ""}.</>
     : <>Bars: call (top) and put (bottom) OI at {d?.at ?? at}; the tick is where it stood at {d?.from ?? "…"}. Right: the change in calls and puts{opts.size === "pct" ? " as a share of the strike's earlier OI" : ""}.</>);
   parts.push(<> Hover a row for its OI, IV, premium and volume. The highlighted row is the ATM strike.</>);
+  parts.push(<> A boxed change is a huge one for this ladder: one of its side's two largest, at least 5 × the median change of all strikes and at least half the largest{opts.size === "pct" ? " (in % of strike, among strikes that held at least a quarter of their side's median OI)" : ""}; it blinks a few times when it first becomes one on a live update.</>);
   if (opts.who !== "off") parts.push(<> Who traded is read from the OI change against the change in the strike's IV (OI up and IV down: writers opening; OI down and IV up: writers buying back); blank when either change is small (OI under 0.5 % of the strike, IV under 0.1 point). Not from the premium: it mostly follows the index, so a rally would read as call buying and put writing whoever traded. An inference, not a record of who traded. On a narrow screen the labels are W, B, C and X.{d && fromPreOpen(d) && openIv ? " Over a window from the previous close the IV then is the strike's first IV of today (none is recorded before the open), so the label weighs a day's net OI change against the IV move since the open: many traders' opening and closing netted into one word." : ""}</>);
   if (opts.multi) parts.push(<> Changes 1 min–open: each strike's OI change over the last 1, 5, 15, 30 minutes and 1 hour, and since the day's first OI print, at once, as nested bars from the zero line (right: added, left: cut), 1 min darkest, 1 h palest and since open a dashed outline, one scale for all; the longest bar is drawn first so none hides another; a window reaching back before the open starts from the pre-open OI (the previous close){opts.size === "pct" ? " (as a share of the strike's OI at each window's start)" : ""}; hover a row for the numbers. A 1-minute window holds about one exchange OI update.</>);
   if (opts.walls) parts.push(<> Walls: the largest call OI above spot (call wall: within ATM ± 15; ceiling: within 6 strikes) and the largest put OI below it (put wall, floor); a wall moves only when another strike holds 5 % more OI; ↑ / ↓ and "was" mark a move inside the window.</>);
