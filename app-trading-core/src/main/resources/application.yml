@@ -118,84 +118,87 @@ autotrade:
     # 2026-10-12 (A-077, user: "yes set orc-v1 up in shadow"): opening-range continuation runs in shadow only, after
     # each live session, on SHADOW-1 (no capital shared with the live set), until it has 15-20 new days to judge.
     # 2026-10-12 (A-078, user: "make orc-v2 that can enter before 10:15"): v2 joins v1, each in its own shadow session.
-    shadow-strategy-files:
-      - config/strategy/opening-range-continuation.v1.yaml
-      - config/strategy/opening-range-continuation.v2.yaml
+    # 2026-11-11 (user, while the 11 Nov shadows were still replaying at 17:40: "stop the replays on GCP anyway we are
+    # doing in local"): GCP runs no shadow replays any more. The 29 files it ran are kept below as comments (their
+    # forward records on GCP end 11 Nov; only the Mac's nightly trackers in ~/.autotrade-sync replay strategies now).
+    shadow-strategy-files: []
+      # - config/strategy/opening-range-continuation.v1.yaml
+      # - config/strategy/opening-range-continuation.v2.yaml
       # 2026-10-12 (A-083, user: "put orb-v1 in shadow and test the capital reserve"): the 15-minute ORB, own session.
-      - config/strategy/opening-range-breakout.v1.yaml
+      # - config/strategy/opening-range-breakout.v1.yaml
       # 2026-10-12 23:40 (A-086, user: "yes we can put odm-v1 in shadow mode"): opening drive momentum, own session.
-      - config/strategy/opening-drive-momentum.v1.yaml
+      # - config/strategy/opening-drive-momentum.v1.yaml
       # 2026-10-12 23:55 (A-087 IV filter, A-088 breadth filter; user: "yes register both filter tests and run in shadow")
-      - config/strategy/opening-drive-momentum.v2.yaml
-      - config/strategy/opening-drive-momentum.v3.yaml
-      - config/strategy/opening-range-breakout.v2.yaml
-      - config/strategy/opening-range-breakout.v3.yaml
+      # - config/strategy/opening-drive-momentum.v2.yaml
+      # - config/strategy/opening-drive-momentum.v3.yaml
+      # - config/strategy/opening-range-breakout.v2.yaml
+      # - config/strategy/opening-range-breakout.v3.yaml
       # 2026-10-13 (A-093): odm-v5, the opening drive also on the expiring index (A-092 INCONCLUSIVE: no extra trade on 23
       # tick days; 13 Oct would have taken the NIFTY 0DTE call +Rs 2.50L); odm-v3 stays in shadow (odm-v4 is live).
-      - config/strategy/opening-drive-momentum.v5.yaml
+      # - config/strategy/opening-drive-momentum.v5.yaml
       # 2026-10-15 ~23:55 (A-114, user: "yes register A-114 and put odb-v9 in shadow"): odb-v3 + the 10:00 exit extended
       # to 15:15 only with futures RVOL >= 1 and the future on the trade's side of VWAP; own session, judged forward.
-      - config/strategy/opening-drive.v9.yaml
+      # - config/strategy/opening-drive.v9.yaml
       # 2026-10-24 (A-184, user: "keep it in shadow"): odb-v3 after it left the live set; own session, judged forward.
-      - config/strategy/opening-drive.v3.yaml
+      # - config/strategy/opening-drive.v3.yaml
       # 2026-10-19 ~19:00 (A-150, user: "add zbf-v10 as a shadow"): zbf-v10 after it left the live set (A-149); own session,
       # no capital shared with the live set, judged forward.
-      - config/strategy/zone-break-flow.v10.yaml
+      # - config/strategy/zone-break-flow.v10.yaml
       # 2026-10-21 ~22:45 (A-158, user: "yes register and build it and run in shadow"): the ATM OI burst (A-157's 3-minute
       # near-ATM OI burst with futures volume); ~23:00 (A-159, user: "Choose - Premium trail"): aob-v2, premium-trail exit,
       # replaces aob-v1 (opposite-burst exit) before v1 ever ran; own session.
-      - config/strategy/atm-oi-burst.v2.yaml
+      # - config/strategy/atm-oi-burst.v2.yaml
       # 2026-10-22 ~00:55 (A-161, user: "yes add v4 to shadow alongside v2"): aob-v4 = aob-v2 + the OI climax exit; own
       # session, same entries as v2, so the two compare the exit alone on new days.
-      - config/strategy/atm-oi-burst.v4.yaml
+      # - config/strategy/atm-oi-burst.v4.yaml
       # 2026-10-23 (A-172 PASS, user: "yes build odm-v9"): odm-v4 + the fresh-drive rule; own session, judged against
       # odm-v4 (live) on the same days before any live change.
-      - config/strategy/opening-drive-momentum.v9.yaml
+      # - config/strategy/opening-drive-momentum.v9.yaml
       # 2026-10-23 (A-179, user: "put covering-only aob variant and run replay"): aob-v5 = aob-v2 entering only on covering
       # bursts (A-178: covering +6.2 bp vs writing +1.5 bp on 17 tick days, CI includes zero); own session, judged forward.
-      - config/strategy/atm-oi-burst.v5.yaml
+      # - config/strategy/atm-oi-burst.v5.yaml
       # 2026-10-28 (A-255 PASS, user: "deploy v8 as it is on GCP"): obc-v8 = ATM +- 2 OI burst (3-minute share at the
       # A-250 95th percentile) with the close on its side of EMA20, the day's first event, continuation only, 09:21-11:00;
       # stop = the tighter of PDH/ORH (PDL/ORL) +- 0.1 % and 2 x ATR3m; ATR trail (arm +2, exit 3 off the best close);
       # counter-burst exit; flat 12:30. In sample on 29 tick days (+Rs 23.8 L); its own PAPER session, read at 30 trades.
-      - config/strategy/oi-burst-cross.v8.yaml
+      # - config/strategy/oi-burst-cross.v8.yaml
       # 2026-10-28 (A-260 PASS, user: "yes register and run both on tick days ... do what is needed"): obc-v11 = obc-v8
       # held to 15:15 instead of 12:30 (29 tick days +Rs 33.2 L vs v8 +Rs 23.8 L, better in both halves); own session,
       # judged forward against obc-v8 on the same days.
-      - config/strategy/oi-burst-cross.v11.yaml
+      # - config/strategy/oi-burst-cross.v11.yaml
       # 2026-10-29 (A-258, user: "yes port and deploy oba-v1 as shadow"): oba-v1 = obc-v8's signal at any time of the
       # day (09:21-14:30, up to 3 entries, flat 15:15); 29 tick days +Rs 39.7 L (H1 +7.7 L, H2 +32.0 L), in sample and
       # concentrated in a few trades; own session, judged forward.
-      - config/strategy/oi-burst-allday.v1.yaml
+      # - config/strategy/oi-burst-allday.v1.yaml
       # 2026-10-29 (A-267): oba-v4 = oba-v1 + A-266's gap rule (29 tick days +Rs 41.7 L vs +Rs 39.7 L, better in both halves;
       # held-out +Rs 15K on one changed trade); own session, judged forward against oba-v1 on the same days.
-      - config/strategy/oi-burst-allday.v4.yaml
+      # - config/strategy/oi-burst-allday.v4.yaml
       # 2026-10-30 (A-279, user: "go ahead" on the shadow): gfd-v4b = the gap fade with the data-driven entry (A-275) and the
       # exit at the previous-close fill; 2 years of bars +Rs 1.00 L PF 1.03 (A-277), so near break-even; own session, read
       # once at 30 forward trades.
-      - config/strategy/gap-fade.v4b.yaml
+      # - config/strategy/gap-fade.v4b.yaml
       # 2026-11-01 (A-295, user: "yes set up the v24 paper shadow"): els-v26, NIFTY expiry day, the first level cross in
       # 14:00-15:00 buys the closest-ask call / put pair, held to 15:29 (unsold legs settle at intrinsic); Rs 50,000 of
       # premium, lottery-sized (candles: positive both years, median trade -93 %); own session, read once at 20 expiries.
-      - config/strategy/expiry-level-straddle.v26.yaml
+      # - config/strategy/expiry-level-straddle.v26.yaml
       # 2026-11-01 (A-297, user: "do it"): odm-v4 out of the live set (see strategy-files); its own session keeps its
       # forward record next to odm-v1/v2/v3/v5/v9.
-      - config/strategy/opening-drive-momentum.v4.yaml
+      # - config/strategy/opening-drive-momentum.v4.yaml
       # 2026-11-06 (A-327, user: "yes register wbr-v3 and run it in shadow"): wbr-v3 (later-entry guard, no flip after a
       # loss, 40 % stop, no no-progress exit, trail +100/25, wall re-cross exit) and wbr-v2 as its control, expiry index
       # only, each its own session; read once at 20 expiry days (v3 must beat v2 on the same days).
-      - config/strategy/wall-break-rider.v3.yaml
-      - config/strategy/wall-break-rider.v2.yaml
+      # - config/strategy/wall-break-rider.v3.yaml
+      # - config/strategy/wall-break-rider.v2.yaml
       # 2026-11-07 (A-335, user: "put only v34 live and others on shadow"): mac-v1 (the former live version, the control),
       # mac-v20 (A-332: 60-min time stop only if the index never reached +1R) and mac-v37 (v20 + v34's early-fail exit,
       # never replayed as a pair); each its own session, read at 20 sessions against mac-v34 on the same days.
-      - config/strategy/ma-cross.v1.yaml
-      - config/strategy/ma-cross.v20.yaml
-      - config/strategy/ma-cross.v37.yaml
+      # - config/strategy/ma-cross.v1.yaml
+      # - config/strategy/ma-cross.v20.yaml
+      # - config/strategy/ma-cross.v37.yaml
       # 2026-11-09 (A-358, user: "Build the A-292 expiry short-straddle PAPER shadow"): the NIFTY expiry short straddle
       # (A-292's rule), PAPER only: its own SHADOW-1 session on every NIFTY expiry, read once at 20 expiries. Needs risk
       # v19's `shorts` section (risk-file above); a signal-source session refuses SELL_STRADDLE, so no member account sells.
-      - config/strategy/expiry-short-straddle.v1.yaml
+      # - config/strategy/expiry-short-straddle.v1.yaml
     recheck-window-ms: 3000
     start-at: "09:00"              # --mode=auto starts the live session at this IST time on trading days
     stop-after: "15:45"
