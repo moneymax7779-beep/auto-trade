@@ -199,11 +199,11 @@ export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDo
 
   const d = details.data;
   const [form, setForm] = useState<{ allocation: string; equityMode: string; loss: string; mode: string; enabled: boolean;
-    clientId: string; strategies: string[] } | null>(null);
+    clientId: string; strategies: string[]; size: number } | null>(null);
   useEffect(() => {
     if (d && form == null) {
       setForm({ allocation: String(d.allocatedCapital), equityMode: d.equityMode, loss: d.dailyLossLimit == null ? "" : String(d.dailyLossLimit),
-        mode: d.mode, enabled: d.enabled, clientId: d.clientId ?? "",
+        mode: d.mode, enabled: d.enabled, clientId: d.clientId ?? "", size: d.sizeStepPct,
         strategies: d.strategies.filter((s) => s.enabled).map((s) => s.strategy_id) });
     }
   }, [d, form]);
@@ -220,6 +220,7 @@ export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDo
       else if (loss != null && loss !== d.dailyLossLimit) body.dailyLossLimit = loss;
       if (form.mode !== d.mode) body.mode = form.mode;
       if (form.enabled !== d.enabled) body.enabled = form.enabled;
+      if (form.size !== d.sizeStepPct) body.sizeStepPct = form.size;
       if (!dailySwitch && d.broker === "ZERODHA" && form.clientId.trim() !== (d.clientId ?? "")) body.clientId = form.clientId.trim();
       const before = d.strategies.filter((s) => s.enabled).map((s) => s.strategy_id).sort().join(",");
       if ([...form.strategies].sort().join(",") !== before) body.strategies = form.strategies;
@@ -268,6 +269,7 @@ export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDo
               <span><span className="text-muted">Equity </span>{a.equityMode}</span>
               <span><span className="text-muted">Daily loss limit </span>{a.dailyLossLimit == null ? "risk file %" : rupees(a.dailyLossLimit)}</span>
               <span><span className="text-muted">Mode </span>{a.mode}</span>
+              <span><span className="text-muted">Size </span>{sizeLabel(a.sizeStepPct)}</span>
               <span><span className="text-muted">Following </span>
                 {a.strategies.filter((s) => s.enabled).map((s) => s.strategy_id).join(", ") || "nothing"}</span>
             </div>
@@ -297,6 +299,14 @@ export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDo
             </Field>}
             {kite && !dailySwitch && <Field label="Zerodha client id"><input className={input} value={form.clientId}
               onChange={(e) => setForm({ ...form, clientId: e.target.value.toUpperCase() })} /></Field>}
+            {a.broker !== "PAPER" && <Field label="Size per entry" hint={form.size > 0 && a.mode === "LIVE"
+                ? "LIVE: lots from the allocation, real money" : "full: lots from the allocation"}>
+              <select className={input} value={form.size} onChange={(e) => setForm({ ...form, size: Number(e.target.value) })}>
+                <option value={0}>{sizeLabel(0)}</option>
+                <option value={100}>{sizeLabel(100)}</option>
+                {a.sizeStepPct !== 0 && a.sizeStepPct !== 100 && <option value={a.sizeStepPct}>{sizeLabel(a.sizeStepPct)}</option>}
+              </select>
+            </Field>}
             <Field label="Enabled">
               <label className="flex items-center gap-1.5 text-sm text-text">
                 <input type="checkbox" checked={form.enabled} onChange={(e) => setForm({ ...form, enabled: e.target.checked })} />
@@ -371,7 +381,8 @@ export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDo
 
 /**
  * The account owner's LIVE switch (the Kite pilot, user 2 Nov 2026): real orders at Zerodha. The server checks every
- * condition again (risk file with live limits, one lot an entry, today's Kite session, no open position); typing the
+ * condition again (risk file with live limits, one lot an entry unless the file sizes LIVE from the allocation (v11),
+ * today's Kite session, no open position); typing the
  * account's name confirms. Back to DRY_RUN only with no position open.
  */
 /**
@@ -502,4 +513,9 @@ function LiveSwitch({ account, onDone }: { account: AccountDetails; onDone: (tex
       )}
     </div>
   );
+}
+
+/** An account's size step in words: 0 = the one-lot pilot, 100 = the allocation's full size. */
+function sizeLabel(step: number): string {
+  return step === 0 ? "One lot an entry" : step === 100 ? "Full (from the allocation)" : `${step} % of full size`;
 }

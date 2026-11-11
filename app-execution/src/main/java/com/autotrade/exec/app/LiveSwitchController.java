@@ -28,7 +28,8 @@ import com.autotrade.execution.LiveStrategies;
  * {@code POST /api/execution/accounts/{id}/live}: the account owner's own LIVE switch (the Kite pilot, user 2 Nov 2026).
  * Nothing else makes an account LIVE. On: an OWNER or ADMIN of the account's tenant types the account's name, and the
  * account must be an enabled Zerodha follower in DRY_RUN, on a risk file with {@code live} limits, at one lot an entry
- * ({@code size_step_pct} 0), with today's Kite session, and holding no position (a simulated one would be lost). Off:
+ * ({@code size_step_pct} 0) unless the file sizes LIVE from the allocation (v11: live.max_lots_per_order above 1), with
+ * today's Kite session, and holding no position (a simulated one would be lost). Off:
  * back to DRY_RUN, only while it holds no position (to stop entries with positions open, engage its kill switch; exits
  * are never blocked). Both are audited. The worker sees the change on its next turn and rebuilds the route.
  */
@@ -85,7 +86,6 @@ class LiveSwitchController {
             require(a.enabled() && a.role().name().equals("FOLLOWER_TRADE"), a.displayName() + " is not an enabled follower");
             require(com.autotrade.execution.LiveBrokers.live(a.brokerType()), a.brokerType() + " has no LIVE order adapter yet");
             require(a.tradeMode() == TradeMode.DRY_RUN, a.displayName() + " is " + a.tradeMode() + ", not DRY_RUN");
-            require(a.sizeStepPct() == 0, "the LIVE pilot trades one lot an entry: set the size step to 0 first");
             FollowerRisk risk;
             try {
                 risk = FollowerRisk.load(Path.of(a.riskFile()));
@@ -94,6 +94,9 @@ class LiveSwitchController {
             }
             require(risk.live() != null && risk.orders() != null, "risk file " + a.riskFile()
                     + " has no live limits (follower-risk v7 or later)");
+            require(a.sizeStepPct() == 0 || risk.live().maxLotsPerOrder() > 1, "the risk file " + a.riskFile()
+                    + " trades one lot an entry (live.max_lots_per_order 1): set the size step to 0, or move the account "
+                    + "to a risk file that sizes LIVE from the allocation (follower-risk v11)");
             Integer session = jdbc.queryForObject("select count(*) from acct.broker_session where broker_account_id = ? "
                     + "and status = 'ACTIVE' and expires_at > now()", Integer.class, id);
             require(session != null && session > 0, "no Kite session today: log in first");

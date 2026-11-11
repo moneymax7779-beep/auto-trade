@@ -112,6 +112,41 @@ class AccountAdminIT {
     }
 
     /**
+     * 11 Nov 2026: the size per entry is a setting (one lot / full); a LIVE account goes above one lot only on a risk file
+     * that sizes LIVE from the allocation (v11), and always back to one lot.
+     */
+    @Test
+    void aLiveAccountGoesToFullSizeOnlyOnV11AndBackToOneLotAnyTime() {
+        long id = ((Number) api.create("local-owner", zerodha("ZERODHA-SIZE", "AB5555", 100_000, 10_000.0)).get("id"))
+                .longValue();
+        // as ZERODHA-1 today: LIVE on v10 at one lot an entry (a new account starts at full size)
+        jdbc.update("update acct.broker_account set risk_file = '../config/risk/follower-risk.v10.yaml', trade_mode = 'LIVE', "
+                + "live_trading_enabled = true, size_step_pct = 0 where id = ?", id);
+        AccountAdminController.Settings full = new AccountAdminController.Settings(null, null, null, null, null, null, null,
+                null, 100.0);
+        try {
+            api.settings("local-owner", id, full);
+            throw new AssertionError("v10 must refuse full size");
+        } catch (ResponseStatusException e) {
+            assertThat(e.getReason()).as("v10 is the one-lot pilot").contains("one lot an entry");
+        }
+        assertThat(api.details("local-owner", id)).containsEntry("sizeStepPct", 0.0);
+
+        jdbc.update("update acct.broker_account set risk_file = '../config/risk/follower-risk.v11.yaml' where id = ?", id);
+        assertThat(api.settings("local-owner", id, full)).containsEntry("sizeStepPct", 100.0);
+        assertThat(jdbc.queryForObject("select detail ->> 'sizeStepPct' from exec.audit_log where broker_account_id = ? "
+                + "and action = 'ACCOUNT_SETTINGS' order by id desc limit 1", String.class, id)).isEqualTo("100.0");
+        assertThat(status(() -> api.settings("local-owner", id, new AccountAdminController.Settings(null, null, null, null,
+                null, null, null, null, 150.0)))).isEqualTo(400);
+        assertThat(status(() -> api.settings("kc-trader", id, new AccountAdminController.Settings(null, null, null, null,
+                null, null, null, null, 0.0)))).as("a trader does not change settings").isEqualTo(403);
+
+        jdbc.update("update acct.broker_account set risk_file = '../config/risk/follower-risk.v10.yaml' where id = ?", id);
+        assertThat(api.settings("local-owner", id, new AccountAdminController.Settings(null, null, null, null, null, null,
+                null, null, 0.0))).as("back to one lot on any file").containsEntry("sizeStepPct", 0.0);
+    }
+
+    /**
      * V35 (user 11 Nov 2026): an OFF strategy does not appear on a follower or demo account (its details, the strategies
      * it may take, a workspace's list); saving the account's strategies keeps its OFF subscription as it was, so it is
      * back when the owner switches it on; it cannot be added while OFF.

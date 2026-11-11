@@ -293,7 +293,6 @@ class WorkspaceController {
             Integer logins = jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? "
                     + "and action = 'SESSION_LOGIN'", Integer.class, id);
             require(logins != null && logins > 0, "no broker login has worked yet: log in once first");
-            require(a.sizeStepPct() == 0, "LIVE trades one lot an entry: set the size step to 0 first");
             FollowerRisk risk;
             try {
                 risk = FollowerRisk.load(Path.of(a.riskFile()));
@@ -302,6 +301,9 @@ class WorkspaceController {
             }
             require(risk.live() != null && risk.orders() != null, "risk file " + a.riskFile()
                     + " has no live limits (follower-risk v7 or later)");
+            require(a.sizeStepPct() == 0 || risk.live().maxLotsPerOrder() > 1, "the risk file " + a.riskFile()
+                    + " trades one lot an entry (live.max_lots_per_order 1): set the size step to 0, or move the account "
+                    + "to a risk file that sizes LIVE from the allocation (follower-risk v11)");
             int changed = jdbc.update("update acct.broker_account set trade_mode = 'LIVE', live_trading_enabled = true, "
                     + "updated_at = now() where id = ? and not live_trading_enabled" + NO_EXPOSURE, id);
             require(changed == 1, a.displayName() + " is already LIVE-eligible, or holds a position or a working order");

@@ -9,11 +9,14 @@ import com.autotrade.config.ThresholdConfig;
  * A follower's risk file (config/risk/follower-risk.vN.yaml): capital limits, position and lot limits, the RVOL boost
  * (v2), the simulated fill model and, from v3, the broker order rules ({@code orders}: null before v3, when only
  * simulated fills are possible). Limits a file does not set are off (v1: no position, lot or boost rules). From v7,
- * {@code live}: the limits a LIVE account trades under (null: the file cannot be used LIVE).
+ * {@code live}: the limits a LIVE account trades under (null: the file cannot be used LIVE). From v11,
+ * {@code dailyLossCountsOpen} (capital.daily_loss_counts_open): the day's loss is closed trades plus what the open
+ * positions would lose sold at the bid now, and reaching the limit sells every open position and stops entries for the
+ * day (before v11: closed trades only, and reaching it only refuses new entries).
  */
 public record FollowerRisk(String version, CapitalLimits limits, int maxOpenPositions, int maxLotsPerUnderlying,
                            double rvolBoostThreshold, double rvolBoostFactor, double adverseBps, OrderRules orders,
-                           Combined combined, LiveLimits live) {
+                           Combined combined, LiveLimits live, boolean dailyLossCountsOpen) {
 
     /**
      * v7 (the Kite LIVE pilot, user 2 Nov 2026): a LIVE account's hard limits, checked again in front of the broker
@@ -66,7 +69,8 @@ public record FollowerRisk(String version, CapitalLimits limits, int maxOpenPosi
                         c.getInt("combined.max_lots_per_contract"), c.getBoolean("combined.share_liquidity")) : null,
                 c.has("live.max_lots_per_order") ? new LiveLimits(c.getInt("live.max_lots_per_order"),
                         c.getInt("live.max_open_positions"), names(c.get("live.strategies")),
-                        c.has("live.default_strategies") ? names(c.get("live.default_strategies")) : null) : null);
+                        c.has("live.default_strategies") ? names(c.get("live.default_strategies")) : null) : null,
+                c.has("capital.daily_loss_counts_open") && c.getBoolean("capital.daily_loss_counts_open"));
     }
 
     private static java.util.Set<String> names(Object list) {

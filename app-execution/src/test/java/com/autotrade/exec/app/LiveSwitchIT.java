@@ -359,6 +359,13 @@ class LiveSwitchIT {
     }
 
     @Test
+    void anAccountOnV11GoesLiveAtFullSize() {
+        long fullSize = account("../config/risk/follower-risk.v11.yaml", 100, true);
+        api.live("local-owner", fullSize, new LiveSwitchController.Switch(true, name(fullSize)));
+        assertThat(mode(fullSize)).as("v11 sizes LIVE from the allocation: size step 100 is allowed").isEqualTo("LIVE/true");
+    }
+
+    @Test
     void anAccountWithAnOpenPositionIsNotSwitchedEitherWay() {
         long id = account(V7, 0, true);
         api.live("local-owner", id, new LiveSwitchController.Switch(true, name(id)));
