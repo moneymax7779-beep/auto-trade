@@ -121,23 +121,30 @@ export function ConfirmButton({ label, confirmLabel, onConfirm, tone = "danger",
   );
 }
 
-export function Table<T>({ rows, columns, empty = "Nothing yet.", rowStyle, before }: {
+export function Table<T>({ rows, columns, empty = "Nothing yet.", rowStyle, before, baseline = false }: {
   rows: T[];
-  columns: { key: string; label: string; render: (row: T) => ReactNode; align?: "right" }[];
+  /**
+   * width: the column's width (CSS, e.g. "5rem"). Tables that give the same widths line up with each other; a column
+   * without one takes the room left over, and every column still grows to fit its content.
+   */
+  columns: { key: string; label: string; render: (row: T) => ReactNode; align?: "right"; width?: string }[];
   empty?: string;
   /** Optional per-row style (e.g. a background band per group of rows). */
   rowStyle?: (row: T, i: number) => CSSProperties | undefined;
   /** Optional full-width row rendered above row i (e.g. a group heading); null for none. */
   before?: (row: T, i: number) => ReactNode;
+  /** Line the cells up on their first line of text (rows whose cells hold two lines, e.g. a P&L and its %). */
+  baseline?: boolean;
 }) {
   if (rows.length === 0) return <p className="text-sm text-muted">{empty}</p>;
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
+        {columns.some((c) => c.width) && <colgroup>{columns.map((c) => <col key={c.key} style={c.width ? { width: c.width } : undefined} />)}</colgroup>}
         <thead>
           <tr className="border-b border-line text-left text-xs text-muted">
             {columns.map((c) => (
-              <th key={c.key} className={`px-2 py-1.5 font-medium ${c.align === "right" ? "text-right" : ""}`}>{c.label}</th>
+              <th key={c.key} className={`px-2 py-1.5 align-bottom font-medium ${c.align === "right" ? "text-right" : ""}`}>{c.label}</th>
             ))}
           </tr>
         </thead>
@@ -151,7 +158,7 @@ export function Table<T>({ rows, columns, empty = "Nothing yet.", rowStyle, befo
                 )}
                 <tr className="border-b border-line/50 hover:bg-panel-2/50" style={rowStyle?.(row, i)}>
                   {columns.map((c) => (
-                    <td key={c.key} className={`px-2 py-1.5 ${c.align === "right" ? "num text-right" : ""}`}>{c.render(row)}</td>
+                    <td key={c.key} className={`px-2 py-1.5 ${baseline ? "align-baseline" : ""} ${c.align === "right" ? "num text-right" : ""}`}>{c.render(row)}</td>
                   ))}
                 </tr>
               </Fragment>
@@ -173,9 +180,10 @@ export function ErrorNote({ error }: { error: unknown }) {
 
 export function Pnl({ value }: { value: number | null | undefined }) {
   if (value == null || Number.isNaN(value)) return <span className="text-muted">–</span>;
+  const r = Math.round(value);   // the sign of what is shown: −0.4 is "₹0", not "−₹0"
   return (
-    <span className={`num ${value > 0 ? "text-up" : value < 0 ? "text-down" : ""}`}>
-      {value > 0 ? "+" : ""}₹{Math.round(value).toLocaleString("en-IN")}
+    <span className={`num ${r > 0 ? "text-up" : r < 0 ? "text-down" : ""}`}>
+      {r > 0 ? "+" : r < 0 ? "−" : ""}₹{Math.abs(r).toLocaleString("en-IN")}
     </span>
   );
 }
