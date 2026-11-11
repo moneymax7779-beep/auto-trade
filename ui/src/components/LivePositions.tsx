@@ -75,7 +75,7 @@ function BracketBar({ pct, stop, target }: { pct: number; stop: number; target: 
   const at = Math.max(0, Math.min(100, ((pct + stop) / span) * 100));
   const zero = (stop / span) * 100;
   return (
-    <div className="mt-1 w-40" title={`stop −${stop}% · target +${target}%`}>
+    <div className="mt-1 ml-auto w-full max-w-40" title={`stop −${stop}% · target +${target}%`}>
       <div className="relative h-1.5 rounded bg-panel-2">
         <div className="absolute top-[-2px] h-2.5 w-px bg-muted" style={{ left: `${zero}%` }} />
         <div className={`absolute top-[-3px] h-3 w-1.5 rounded ${pct >= 0 ? "bg-up" : "bg-down"}`} style={{ left: `calc(${at}% - 3px)` }} />
@@ -91,34 +91,37 @@ function BracketBar({ pct, stop, target }: { pct: number; stop: number; target: 
  */
 export function LivePositions({ rows, closed, empty }: { rows: PositionRow[]; closed: boolean; empty: string }) {
   const trades = group(rows);
+  // the same column widths for open and closed (user, 11 Nov 2026: "Align these properly"), so the two tables, one
+  // above the other, line up; the trade column takes what is left
   return (
     <Table
       rows={trades}
       empty={empty}
+      baseline
       columns={[
-        { key: "s", label: "Strategy", render: (t: LiveTrade) => <span className="text-xs">{t.strategy}</span> },
         {
-          key: "c", label: "Trade", render: (t: LiveTrade) => (
+          // the strategy sits under the trade, not in a column of its own: eleven columns did not fit beside each other
+          key: "c", label: "Trade · strategy", render: (t: LiveTrade) => (
             <div>
               <div className="whitespace-nowrap font-medium">{t.title}</div>
-              <div className="text-xs text-muted">{t.expiry} · {t.stages}</div>
+              <div className="text-xs text-muted"><span className="font-medium text-text">{t.strategy}</span> · {t.expiry} · {t.stages}</div>
             </div>
           ),
         },
-        { key: "l", label: "Lots", align: "right", render: (t: LiveTrade) => <PerLeg trade={t} value={(l) => l.lotSize ? String(Math.round(heldOrBought(l) / l.lotSize)) : "–"} /> },
-        { key: "q", label: "Qty", align: "right", render: (t: LiveTrade) => <PerLeg trade={t} value={(l) => heldOrBought(l).toLocaleString("en-IN")} /> },
-        { key: "e", label: "Entry ₹", align: "right", render: (t: LiveTrade) => <PerLeg trade={t} value={(l) => px(l.averageCost)} /> },
+        { key: "l", label: "Lots", width: "3.5rem", align: "right", render: (t: LiveTrade) => <PerLeg trade={t} value={(l) => l.lotSize ? String(Math.round(heldOrBought(l) / l.lotSize)) : "–"} /> },
+        { key: "q", label: "Qty", width: "4.75rem", align: "right", render: (t: LiveTrade) => <PerLeg trade={t} value={(l) => heldOrBought(l).toLocaleString("en-IN")} /> },
+        { key: "e", label: "Entry ₹", width: "5.75rem", align: "right", render: (t: LiveTrade) => <PerLeg trade={t} value={(l) => px(l.averageCost)} /> },
         {
-          key: "n", label: closed ? "Exit ₹" : "Now ₹ (bid)", align: "right",
+          key: "n", label: closed ? "Exit ₹" : "Now ₹ (bid)", width: "5.75rem", align: "right",
           render: (t: LiveTrade) => <PerLeg trade={t} value={(l) => px(closed ? l.exitPrice : l.bid)} />,
         },
-        { key: "p", label: "Premium paid", align: "right", render: (t: LiveTrade) => <span className="whitespace-nowrap">{rupees(t.paid)}</span> },
+        { key: "p", label: "Premium paid", width: "6rem", align: "right", render: (t: LiveTrade) => <span className="whitespace-nowrap">{rupees(t.paid)}</span> },
         {
-          key: "v", label: closed ? "Sold for" : "Value now", align: "right",
+          key: "v", label: closed ? "Sold for" : "Value now", width: "6rem", align: "right",
           render: (t: LiveTrade) => <span className="whitespace-nowrap">{t.value == null ? "–" : rupees(t.value)}</span>,
         },
         {
-          key: "pl", label: "P&L", align: "right", render: (t: LiveTrade) => {
+          key: "pl", label: "P&L", width: "5.75rem", align: "right", render: (t: LiveTrade) => {
             const pct = t.value != null && t.paid > 0 ? (t.value / t.paid - 1) * 100 : null;
             return (
               <div className="whitespace-nowrap">
@@ -130,8 +133,8 @@ export function LivePositions({ rows, closed, empty }: { rows: PositionRow[]; cl
             );
           },
         },
-        { key: "st", label: closed ? "Exit reason" : "State", render: (t: LiveTrade) => <span className="text-xs">{t.state}</span> },
-        { key: "t", label: "IST", render: (t: LiveTrade) => <span className="num whitespace-nowrap">{hhmm(t.opened)}–{hhmm(t.closed) ?? "now"}</span> },
+        { key: "st", label: closed ? "Exit reason" : "State", width: "5rem", render: (t: LiveTrade) => <span className="text-xs">{t.state}</span> },
+        { key: "t", label: "IST", width: "6.75rem", render: (t: LiveTrade) => <span className="num whitespace-nowrap">{hhmm(t.opened)}–{hhmm(t.closed) ?? "now"}</span> },
       ]}
     />
   );

@@ -130,7 +130,8 @@ function LiveDay({ underlying, s, nav, inspect }: { underlying: string; s: Statu
             cells={entries.map((e) => ({ strategy: e.strategy, underlying, time: e.view.time, ce: parseSide(e.view.CE), pe: parseSide(e.view.PE) }))} />
         </Panel>
       )}
-      <div className="grid gap-4 lg:grid-cols-2">
+      {/* one above the other (11 Nov 2026): side by side each 11-column table scrolled sideways in half the width */}
+      <div className="grid gap-4">
         <Panel title="Open positions"><LivePositions rows={open} closed={false} empty="Flat." /></Panel>
         <Panel title="Closed today"><LivePositions rows={closed} closed empty="No closed positions yet." /></Panel>
       </div>
@@ -186,7 +187,8 @@ function PlainLiveDay({ underlying, s, nav }: { underlying: string; s: Status; n
     <>
       <SurgePanel plain live date={s.date} underlying={underlying} nav={nav} until={until}
         trades={chartTrades([...open, ...closed].filter((p) => p.opened).map((p) => liveAsStored(p, s.date!)), underlying, null, strategyShort, noSpot)} />
-      <div className="grid gap-4 lg:grid-cols-2">
+      {/* one above the other (11 Nov 2026): side by side each 11-column table scrolled sideways in half the width */}
+      <div className="grid gap-4">
         <Panel title="Open positions"><LivePositions rows={open} closed={false} empty="Flat." /></Panel>
         <Panel title="Closed today"><LivePositions rows={closed} closed empty="No closed positions yet." /></Panel>
       </div>
