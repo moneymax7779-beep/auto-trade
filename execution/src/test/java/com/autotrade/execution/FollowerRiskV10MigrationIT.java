@@ -60,6 +60,8 @@ class FollowerRiskV10MigrationIT {
                 assertThat(jdbc.queryForObject(file, String.class, v3)).isEqualTo("config/risk/follower-risk.v3.yaml");
 
                 FollowerRisk v10 = FollowerRisk.load(Path.of("../config/risk/follower-risk.v10.yaml"));
+                // the reads need the newest tables (V35's OFF list); the risk files were checked above at this test's own target
+                Flyway.configure().dataSource(dataSource).locations("classpath:db/migration").load().migrate();
                 LiveStrategies live = new LiveStrategies(dataSource);
                 assertThat(live.effective(chosen, v10)).containsExactly("ma-cross", "wall-break-rider");
                 assertThat(live.effective(plain, v10)).containsExactly("early-confirm-runner", "ma-cross", "oi-burst-cross");

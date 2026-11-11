@@ -111,6 +111,38 @@ class AccountAdminIT {
         assertThat(api.pnl("local-owner", id, 30)).isEmpty();
     }
 
+    /**
+     * V35 (user 11 Nov 2026): an OFF strategy does not appear on a follower or demo account (its details, the strategies
+     * it may take, a workspace's list); saving the account's strategies keeps its OFF subscription as it was, so it is
+     * back when the owner switches it on; it cannot be added while OFF.
+     */
+    @Test
+    void anOffStrategyIsHiddenFromAccountsAndKeptForWhenItIsBackOn() {
+        long id = ((Number) api.create("local-owner", zerodha("ZERODHA-OFF", "AB9876", 200_000, 20_000.0)).get("id"))
+                .longValue();
+        jdbc.update("insert into acct.strategy_off (strategy, changed_by) values ('ma-cross', 'it')");
+        try {
+            assertThat(api.details("local-owner", id).get("strategies")).asString().doesNotContain("ma-cross")
+                    .contains("early-confirm-runner");
+            assertThat(api.strategyIds("local-owner")).doesNotContain("ma-cross").contains("early-confirm-runner");
+            // the form sends what it shows (ma-cross not among it): ma-cross stays subscribed
+            api.settings("local-owner", id, new AccountAdminController.Settings(null, null, null, null, null, null, null,
+                    List.of("early-confirm-runner", "oi-burst-cross")));
+            assertThat(jdbc.queryForList("select strategy_id from acct.strategy_subscription where broker_account_id = ? "
+                    + "and enabled order by 1", String.class, id))
+                    .containsExactly("early-confirm-runner", "ma-cross", "oi-burst-cross");
+            assertThat(status(() -> api.settings("local-owner", id, new AccountAdminController.Settings(null, null, null,
+                    null, null, null, null, List.of("ma-cross"))))).isEqualTo(400);
+            assertThat(status(() -> api.create("local-owner", zerodha("ZERODHA-OFF2", "AB9875", 100_000, null))))
+                    .isEqualTo(400);
+        } finally {
+            jdbc.update("delete from acct.strategy_off");
+        }
+        // switched back on: there again, as it was
+        assertThat(api.details("local-owner", id).get("strategies")).asString().contains("ma-cross");
+        assertThat(api.strategyIds("local-owner")).contains("ma-cross");
+    }
+
     @Test
     void creationIsValidatedAndNeverLive() {
         assertThat(status(() -> api.create("local-owner", zerodha("NO-ID", null, 100_000, null)))).isEqualTo(400);

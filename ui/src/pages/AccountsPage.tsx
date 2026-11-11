@@ -142,22 +142,27 @@ function GroupHeading({ name, daily, accounts }: { name: string; daily: boolean;
   );
 }
 
+type StrategyState = "OFF" | "PAPER" | "LIVE";
+const STATES: StrategyState[] = ["OFF", "PAPER", "LIVE"];
+const sameSet = (a: string[], b: string[]) => [...a].sort().join() === [...b].sort().join();
+
 /**
- * The owner's global LIVE strategies (user, 9 Nov 2026: "as admin ... select or deselect the live strategies at global";
- * standing until changed, not per day). A strategy not ticked trades on paper accounts only, never with real money. An
- * account with its own list (its Manage panel) keeps it; neither goes beyond the account's risk file.
+ * The owner's switch per strategy for every account (user, 9 Nov 2026: "as admin ... select or deselect the live
+ * strategies at global"; 11 Nov 2026: "select/disselect which strategies ... to be in PAPER/LIVE or disselect from both
+ * PAPER and LIVE"). Off: no new entry or add on any account (V35). Paper: paper accounts only. Live: paper and real money
+ * (V33, within each account's risk file). Standing until changed; exits of held positions always run.
  */
 function GlobalLivePanel({ onDone }: { onDone: (text: string, ok: boolean) => void }) {
   const client = useQueryClient();
   const q = useQuery({ queryKey: ["live-strategies-global"], refetchInterval: 30000,
     queryFn: () => get<GlobalLiveStrategies>("/api/execution/live-strategies") });
-  const [picked, setPicked] = useState<string[] | null>(null);
+  const [picked, setPicked] = useState<Record<string, StrategyState> | null>(null);
   const save = useMutation({
-    mutationFn: (body: { strategies?: string[]; reset?: boolean }) =>
+    mutationFn: (body: { strategies?: string[]; reset?: boolean; off?: string[] }) =>
       postJson<GlobalLiveStrategies>("/api/execution/live-strategies", body),
     onSuccess: (r) => {
-      onDone(`LIVE strategies (all accounts): ${r.global == null ? "each account's default" : r.global.join(", ") || "none"}`,
-        true);
+      onDone(`Strategies (all accounts): LIVE ${r.global == null ? "each account's default" : r.global.join(", ") || "none"}`
+        + ` · OFF ${r.off.join(", ") || "none"}`, true);
       setPicked(null);
       client.setQueryData(["live-strategies-global"], r);
       ["exec-audit", "exec-accounts", "live-strategies"].forEach((k) => client.invalidateQueries({ queryKey: [k] }));
@@ -165,41 +170,96 @@ function GlobalLivePanel({ onDone }: { onDone: (text: string, ok: boolean) => vo
     onError: (e) => onDone(e instanceof Error ? e.message : String(e), false),
   });
   if (q.error) return <ErrorNote error={q.error} />;
-  if (!q.data || q.data.available.length === 0) return null;
+  if (!q.data) return null;
   const g = q.data;
-  // not set: what the accounts trade now by their defaults (the union), so the boxes start where things are
-  const startingPoint = g.global ?? [...new Set(g.accounts.filter((a) => a.source === "DEFAULT").flatMap((a) => a.effective))];
-  const current = picked ?? startingPoint;
-  const changed = picked != null && [...picked].sort().join() !== [...startingPoint].sort().join();
-  const toggle = (s: string) => setPicked(current.includes(s) ? current.filter((x) => x !== s) : [...current, s]);
+  const running = g.running ?? [];
+  const offNow = g.off ?? [];
+  const names = [...new Set([...running, ...g.available, ...offNow])].sort();
+  if (names.length === 0) return null;
+  // not set: what the accounts trade now by their defaults (the union), so the switches start where things are
+  const liveNow = g.global ?? [...new Set(g.accounts.filter((a) => a.source === "DEFAULT").flatMap((a) => a.effective))];
+  const saved = (s: string): StrategyState => offNow.includes(s) ? "OFF" : liveNow.includes(s) ? "LIVE" : "PAPER";
+  const state = (s: string): StrategyState => picked?.[s] ?? saved(s);
+  const offNext = names.filter((s) => state(s) === "OFF");
+  const liveNext = names.filter((s) => state(s) === "LIVE");
+  const offChanged = !sameSet(offNext, offNow);
+  // OFF takes a strategy out of the LIVE list on the server, so a newly OFF one is not a LIVE change by itself. With no
+  // global list (each account on its risk-file default) the LIVE list is always sent, so what the switches show is what
+  // trades: otherwise a default strategy switched Off and back to Paper would trade LIVE again on those accounts.
+  const liveChanged = !sameSet(liveNext, liveNow.filter((s) => !offNext.includes(s)))
+    || (g.global == null && offChanged);
+  const changed = offChanged || liveChanged;
+  const toLive = liveNext.filter((s) => saved(s) !== "LIVE");
+  const fromLive = names.filter((s) => saved(s) === "LIVE" && state(s) !== "LIVE");
+  const toOff = offNext.filter((s) => !offNow.includes(s));
+  const backOn = offNow.filter((s) => !offNext.includes(s));
+  const liveAccounts = g.accounts.filter((a) => a.mode === "LIVE" && a.source !== "ACCOUNT").map((a) => a.account);
+  const set = (s: string, to: StrategyState) => setPicked((p) => ({ ...(p ?? {}), [s]: to }));
   const own = g.accounts.filter((a) => a.source === "ACCOUNT");
+  const tone = (st: StrategyState) => st === "LIVE" ? "bg-down text-white" : st === "PAPER" ? "bg-accent text-white"
+    : "bg-muted text-white";
   return (
-    <Panel title="LIVE strategies · all accounts" right={<span className="text-xs text-muted">
-      {g.global == null ? "not set: each account's risk-file default" : "your global list"}</span>}>
-      <div className="flex flex-wrap gap-x-5 gap-y-2 text-sm">
-        {g.available.map((s) => (
-          <label key={s} className={`flex items-center gap-1.5 ${g.canEdit ? "cursor-pointer" : "text-muted"}`}>
-            <input type="checkbox" checked={current.includes(s)} disabled={!g.canEdit || save.isPending}
-              onChange={() => toggle(s)} />
-            <span className={current.includes(s) ? "font-semibold" : "text-muted"}>{s}</span>
-            <span className={`text-[10px] font-semibold ${current.includes(s) ? "text-down" : "text-muted"}`}>
-              {current.includes(s) ? "LIVE" : "PAPER"}</span>
-          </label>
-        ))}
+    <Panel title="Strategies · all accounts" right={<span className="text-xs text-muted">
+      {g.global == null ? "LIVE list not set: each account's risk-file default" : "your global list"}</span>}>
+      <div className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2 xl:grid-cols-3">
+        {names.map((s) => {
+          const st = state(s);
+          const liveOk = g.available.includes(s);
+          const notRunning = running.length > 0 && !running.includes(s);
+          return (
+            <div key={s} className="flex flex-wrap items-center justify-between gap-2">
+              <span>
+                <span className={st === "OFF" ? "text-muted line-through" : "font-semibold"}>{s}</span>
+                {picked?.[s] != null && picked[s] !== saved(s) && <span className="ml-1 text-warn" title="not saved">•</span>}
+                {notRunning && <span className="ml-1 text-[10px] text-muted">not in the running set</span>}
+              </span>
+              <span role="group" aria-label={`${s}: off, paper or live`}
+                className="inline-flex overflow-hidden rounded border border-line text-[11px] font-semibold">
+                {STATES.map((to) => {
+                  const disabled = !g.canEdit || save.isPending || (to === "LIVE" && !liveOk);
+                  return (
+                    <button key={to} type="button" disabled={disabled} onClick={() => set(s, to)}
+                      aria-pressed={st === to}
+                      title={to === "LIVE" && !liveOk ? "No account's risk file lets it trade LIVE" : undefined}
+                      className={`px-2 py-0.5 ${st === to ? tone(to) : "text-muted hover:bg-panel-2"} disabled:cursor-not-allowed ${
+                        disabled && st !== to ? "opacity-40" : ""}`}>
+                      {to === "OFF" ? "Off" : to === "PAPER" ? "Paper" : "Live"}
+                    </button>
+                  );
+                })}
+              </span>
+            </div>
+          );
+        })}
       </div>
       {g.canEdit && (
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <button className="rounded bg-accent px-3 py-1 text-sm font-semibold text-white disabled:opacity-40"
-            disabled={!changed || save.isPending} onClick={() => save.mutate({ strategies: current })}>
+            disabled={!changed || save.isPending} onClick={() => save.mutate({
+              ...(liveChanged ? { strategies: liveNext } : {}), ...(offChanged ? { off: offNext } : {}) })}>
             {save.isPending ? "Saving…" : "Save for all accounts"}</button>
           {picked != null && <button className="rounded border border-line px-3 py-1 text-sm hover:bg-panel-2"
             disabled={save.isPending} onClick={() => setPicked(null)}>Undo</button>}
           {g.global != null && <button className="rounded border border-line px-3 py-1 text-sm hover:bg-panel-2"
-            disabled={save.isPending} onClick={() => save.mutate({ reset: true })}>Back to each account's default</button>}
-          <span className="text-xs text-muted">Unticked = PAPER only: no real order from it on any account. Applies from the
-            next LIVE entry or add; exits of held positions always run. Stays until you change it.</span>
+            disabled={save.isPending || picked != null} onClick={() => save.mutate({ reset: true })}>
+            LIVE back to each account's default</button>}
         </div>
       )}
+      {changed && (
+        <ul className="mt-2 space-y-0.5 text-xs">
+          {toLive.length > 0 && <li className="font-semibold text-down">Real money: {toLive.join(", ")} will trade LIVE
+            {liveAccounts.length > 0 ? ` on ${liveAccounts.join(", ")}` : " on LIVE accounts"} from its next entry.</li>}
+          {fromLive.length > 0 && <li>No longer LIVE: {fromLive.join(", ")}.</li>}
+          {toOff.length > 0 && <li>Off everywhere (no new entry or add, paper or real): {toOff.join(", ")}.</li>}
+          {backOn.length > 0 && <li>Back on: {backOn.join(", ")}.</li>}
+        </ul>
+      )}
+      <p className="mt-2 text-xs text-muted">
+        <b>Off</b>: no new entry or add from it on any account, paper or real (the live session still records what it
+        would have done). <b>Paper</b>: paper accounts only (PAPER-1 and the paper followers). <b>Live</b>: paper and real
+        money on LIVE accounts, within each account's risk file. Applies to the running session within seconds; exits of
+        open positions always run. Turning a strategy Off takes it out of every LIVE list, so switching it back on makes
+        it Paper. Which strategies run at all is still the deployed set.</p>
       <div className="mt-3 border-t border-line pt-2 text-xs">
         {g.accounts.map((a) => (
           <div key={a.id} className="flex flex-wrap gap-x-2">

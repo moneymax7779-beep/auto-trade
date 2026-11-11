@@ -527,6 +527,10 @@ public final class FollowerSimulator {
         if (killed != null) {
             return reject(p, "KILL_SWITCH", killed);
         }
+        if (liveStrategies.off().contains(p.strategyId())) {
+            // V35 (user 11 Nov 2026): the owner turned the strategy OFF; a signal published before the switch opens nothing
+            return reject(p, "STRATEGY_OFF", p.strategyId() + " is turned OFF by the owner (no new entry or add)");
+        }
         String switched = dailySwitchRefusal(day, add);
         if (switched != null) {
             return reject(p, switched.substring(0, switched.indexOf(':')), switched.substring(switched.indexOf(':') + 2));
