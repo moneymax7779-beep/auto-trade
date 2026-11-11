@@ -1,11 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import {
   get, postJson, type AuditRow, type ExecMe, type ExecutionAccount, type GlobalLiveStrategies, type KillSwitch,
   type WorkerStatus,
 } from "../api";
 import { ErrorNote, Loading, Panel, Stat, Table } from "../components/ui";
 import { AccountDetailPanel, AddAccountPanel } from "./AccountManagement";
+import { describeAudit } from "../components/auditText";
 
 // Live execution: the caller's broker accounts across copy groups, kill switches, flatten and the audit log. Every call
 // goes to the execution workers (app-execution) through trading-core; the workers scope it to the user's tenants.
@@ -41,6 +42,7 @@ const connectionLabel = (c: string | null) => ({
 const modeRank = (m: string) => (m === "LIVE" ? 0 : m === "DRY_RUN" ? 1 : 2);
 
 type Row = { a: ExecutionAccount; twin: boolean };
+type Col = { key: string; label: string; render: (row: Row) => ReactNode; align?: "right"; width?: string };
 
 /**
  * The trader's reading order: per workspace (the caller's own first), real broker accounts first (LIVE, then
@@ -105,8 +107,12 @@ function FollowerSummary({ rows, killed }: { rows: ExecutionAccount[]; killed: S
     if (killed.has(a.id)) issues.push(`${a.name}: entries stopped`);
   });
   const hasBooks = rows.some((a) => a.today);
+  // real-money figures only where real money can trade (11 Nov 2026: a paper-only account showed "LIVE today ₹0" and
+  // "LIVE-eligible capital ₹0"); paper-only shows its capital instead
+  const anyLive = live.length > 0 || b.liveTrades + b.liveOpen > 0;
   return (
     <div className="mb-3 space-y-2 border-b border-line pb-3">
+      {anyLive ? (
       <div className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-4">
         <Stat label={`LIVE today (real money, ${b.liveTrades} closed)`} value={hasBooks ? signed(b.liveNet) : "–"}
           tone={tone(b.liveNet)} />
@@ -117,6 +123,15 @@ function FollowerSummary({ rows, killed }: { rows: ExecutionAccount[]; killed: S
         <Stat label="Open positions (live · paper)" value={hasBooks ? `${b.liveOpen} · ${b.open - b.liveOpen}` : "–"}
           tone={b.open > 0 ? "warn" : "muted"} />
       </div>
+      ) : (
+      <div className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-4">
+        <Stat label={`Today, ${rows.some((a) => a.mode === "DRY_RUN") ? "PAPER / DRY_RUN" : "paper"} (${b.trades} closed)`}
+          value={hasBooks ? signed(b.net) : "–"} tone={tone(b.net)} />
+        {/* a paper twin mirrors its real account's capital: counted once */}
+        <Stat label="Capital" value={rupees(rows.filter((a) => a.enabled && a.paperOf == null).reduce((s, a) => s + a.allocatedCapital, 0))} />
+        <Stat label="Open positions" value={hasBooks ? String(b.open) : "–"} tone={b.open > 0 ? "warn" : "muted"} />
+      </div>
+      )}
       {issues.length > 0 && (
         <div className="flex flex-wrap items-center gap-1.5 text-xs">
           <span className="text-muted">Needs attention:</span>
@@ -316,6 +331,7 @@ export function AccountsPage() {
   const [flattenFor, setFlattenFor] = useState<number | null>(null);
   const [openAccount, setOpenAccount] = useState<number | null>(null);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  const [rawAudit, setRawAudit] = useState(false);
 
   const act = useMutation({
     mutationFn: ({ path, body }: { path: string; body: unknown; done: string }) => postJson<unknown>(path, body),
@@ -327,7 +343,8 @@ export function AccountsPage() {
     onError: (e) => setMessage({ ok: false, text: e instanceof Error ? e.message : String(e) }),
   });
 
-  if (accounts.isLoading) return <Loading what="accounts" />;
+  // until /me answers, nothing role-dependent is drawn (a viewer saw the "Execution worker" panel flash before)
+  if (accounts.isLoading || me.isLoading) return <Loading what="accounts" />;
   if (accounts.error) return <ErrorNote error={accounts.error} />;
   const rows = accounts.data!.filter((a) => a.role === "FOLLOWER_TRADE");
   const names = new Map(accounts.data!.map((a) => [a.id, a.name]));
@@ -349,10 +366,25 @@ export function AccountsPage() {
   const killedAccounts = new Set((switches.data ?? []).filter((k) => k.scope === "ACCOUNT" && k.accountId != null)
     .map((k) => k.accountId!));
   const ordered = orderAccounts(rows, (id) => [...tenants.keys()].indexOf(id));
+  // a VIEWER (user, 11 Nov 2026: "Organize it well"): one panel with their accounts and what they may do, the engine's
+  // internals (route, last result, lease) left out, and the account's history in plain words instead of the audit log
+  const readOnly = !legacy && !!me.data && !me.data.admin && me.data.tenants.length > 0
+    && me.data.tenants.every((t) => !t.mayAct && !t.manages && !(t.canStop ?? false));
+  // the history view follows the server: only a VIEWER gets the account-only, name-free history; an AUDITOR (read-only
+  // too) reads the whole audit log with its raw detail
+  const historyOnly = readOnly && me.data!.tenants.every((t) => t.role === "VIEWER");
+  const auditRows = audit.data ?? [];
+  const auditLines = new Map(auditRows.map((r, i) => [r.id, describeAudit(auditRows, i)]));
+  // what the accounts are, from the accounts themselves, not assumed (a viewer can follow a LIVE account)
+  const accountsNote = rows.some((a) => a.mode === "LIVE") ? "LIVE accounts place real orders with the broker."
+    : rows.every((a) => a.broker === "PAPER") ? "Paper only: simulated fills, no real orders."
+    : "PAPER and DRY_RUN only: no real orders.";
+  const engineText = (st: string) => (st === "RUNNING" ? "running" : st === "IDLE" ? "not trading today" : "stopped");
+  const lineTone = { down: "text-down", warn: "text-warn", up: "text-up", muted: "text-muted", plain: "" };
 
   return (
     <div className="space-y-4">
-      {me.data && !me.data.admin ? (
+      {readOnly ? null : me.data && !me.data.admin ? (
         <Panel title="Your access" right={s && (s.stale ? <Badge text="STALE" tone="down" /> : <Badge text="RUNNING" tone="up" />)}>
           <div className="space-y-1 text-sm">
             {me.data.tenants.map((t) => (
@@ -395,14 +427,29 @@ export function AccountsPage() {
 
       {me.data?.admin && <GlobalLivePanel onDone={(text, ok) => setMessage({ ok, text })} />}
 
-      <Panel title="Follower accounts" right={<span className="text-xs text-muted">{rows.length} accounts</span>}>
+      <Panel title={readOnly ? "Your accounts" : "Follower accounts"} right={readOnly
+        // the worker's health stays visible to a viewer (it was on the "Your access" panel this one replaces)
+        ? <span className="flex gap-1.5">{s?.stale && <Badge text="STALE" tone="down" />}<Badge text="READ-ONLY" tone="muted" /></span>
+        : <span className="text-xs text-muted">{rows.length} account{rows.length === 1 ? "" : "s"}</span>}>
+        {readOnly && me.data && (
+          <div className="mb-3 space-y-0.5 text-xs text-muted">
+            {me.data.tenants.map((t) => (
+              <div key={t.id}><span className="font-semibold text-text">{t.role.charAt(0) + t.role.slice(1).toLowerCase()}</span>
+                {" "}· follows {(t.follows ?? []).join(", ") || "nothing yet"} · you can see your accounts; the admin makes changes</div>
+            ))}
+            <div>{me.data.tenants.some((t) => t.control === "DAILY_SWITCH")
+              ? "Your day's broker and its PAPER/LIVE switch are on the Today page. Each broker account's paper twin (\"… paper\") "
+                + "holds what traded in PAPER. Open positions are squared off at 15:20."
+              : `${accountsNote} Open positions are squared off at 15:20.`}</div>
+          </div>
+        )}
         <FollowerSummary rows={rows} killed={killedAccounts} />
         <Table rows={ordered} rowStyle={(o) => (o.a.enabled || o.a.today == null || o.a.today.open > 0 ? undefined : { opacity: 0.55 })}
           before={(o, i) => several && (i === 0 || ordered[i - 1].a.tenantId !== o.a.tenantId)
             ? <GroupHeading name={tenants.get(o.a.tenantId)?.name ?? String(o.a.tenantId)} daily={daily(o.a.tenantId)}
                 accounts={rows.filter((r) => r.tenantId === o.a.tenantId)} />
             : null}
-          columns={[
+          columns={([
           { key: "n", label: "Account", render: ({ a, twin }) => (
             <div className={`whitespace-nowrap ${twin ? "pl-4" : ""}`}>
               <div className={twin ? "text-muted" : "font-semibold"}>{twin && <span className="mr-1">↳</span>}{a.name}</div>
@@ -418,6 +465,8 @@ export function AccountsPage() {
               {a.broker !== "PAPER" && <Badge text={connectionLabel(a.connection)} tone={connectionTone(a.connection)} />}
               {killedAccounts.has(a.id) && <Badge text="ENTRIES STOPPED" tone="down" />}
               {!a.enabled && <Badge text="DISABLED" tone="muted" />}
+              {readOnly && a.lastTurn && <span className="text-[11px] text-muted">
+                {s?.stale ? "engine stale" : engineText(a.lastTurn.state)} · {time(a.lastTurn.lastRun)}</span>}
             </div>
           ) },
           { key: "cap", label: "Capital", align: "right", render: ({ a }) => rupees(a.allocatedCapital) },
@@ -460,7 +509,7 @@ export function AccountsPage() {
               </>}
             </div>
           ) },
-        ]} />
+        ] as Col[]).filter((c) => !readOnly || (c.key !== "e" && c.key !== "r"))} />
         {flattenFor != null && (
           <div className="mt-3 rounded border border-down/40 p-3">
             <p className="mb-2 text-sm">
@@ -503,20 +552,30 @@ export function AccountsPage() {
       </Panel>
       </>}
 
-      <Panel title="Audit log" right={
+      <Panel title={historyOnly ? "Account history" : "Audit log"} right={<span className="flex items-center gap-2">
+        {!historyOnly && <label className="flex items-center gap-1 text-xs text-muted">
+          <input type="checkbox" checked={rawAudit} onChange={(e) => setRawAudit(e.target.checked)} />raw detail</label>}
+        {rows.length > 1 && (
         <select className="rounded border border-line bg-bg px-2 py-1 text-xs" value={auditAccount}
           onChange={(e) => setAuditAccount(e.target.value === "" ? "" : Number(e.target.value))}>
           <option value="">all accounts</option>
           {rows.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
         </select>
-      }>
+        )}</span>}>
         {audit.error ? <ErrorNote error={audit.error} /> : (
-          <Table rows={audit.data ?? []} empty="No actions yet." columns={[
-            { key: "t", label: "At", render: (r) => <span className="num text-xs">{dateTime(r.at)}</span> },
-            { key: "a", label: "Account", render: (r) => r.broker_account_id == null ? "–" : names.get(r.broker_account_id) ?? r.broker_account_id },
-            { key: "w", label: "By", render: (r) => <span className="text-xs">{r.actor}</span> },
-            { key: "x", label: "Action", render: (r) => <span className="font-semibold">{r.action}</span> },
-            { key: "d", label: "Detail", render: (r) => <span className="num break-all text-xs text-muted">{r.detail}</span> },
+          <Table rows={auditRows} empty={historyOnly ? "Nothing has changed on your accounts yet." : "No actions yet."} baseline columns={[
+            { key: "t", label: "When", width: "9.5rem", render: (r) => <span className="num whitespace-nowrap text-xs">{dateTime(r.at)}</span> },
+            ...(rows.length > 1 || !historyOnly ? [{ key: "a", label: "Account", width: "8rem", render: (r: (typeof auditRows)[number]) =>
+              <span className="whitespace-nowrap">{r.broker_account_id == null ? "–" : names.get(r.broker_account_id) ?? r.broker_account_id}</span> }] : []),
+            { key: "x", label: "What happened", render: (r) => {
+              const l = auditLines.get(r.id)!;
+              // the people who run the workspace can still read (and copy) the action code and raw detail
+              return <div>
+                <span className={`font-semibold ${lineTone[l.tone]}`}>{l.title}</span>
+                {l.text && <span className="text-muted"> · {l.text}</span>}
+                {rawAudit && !historyOnly && <div className="num mt-0.5 break-all text-[11px] text-muted">{r.action} {r.detail}</div>}</div>;
+            } },
+            { key: "w", label: "By", width: "7rem", render: (r) => <span className="whitespace-nowrap text-xs">{r.actor}</span> },
           ]} />
         )}
       </Panel>

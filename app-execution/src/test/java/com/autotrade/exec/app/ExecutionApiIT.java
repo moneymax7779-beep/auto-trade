@@ -38,7 +38,7 @@ class ExecutionApiIT {
     private static PostgreSQLContainer postgres;
     private static HikariDataSource dataSource;
     private static AccountsController api;
-    private static long aliceAccount, bobAccount;
+    private static long aliceAccount, bobAccount, aliceTenant, bobTenant;
 
     @BeforeAll
     static void start() {
@@ -52,6 +52,8 @@ class ExecutionApiIT {
         Flyway.configure().dataSource(dataSource).locations("classpath:db/migration").load().migrate();
         AccountStore accounts = new AccountStore(dataSource);
         long ta = accounts.ensureTenant("t-alice"), tb = accounts.ensureTenant("t-bob");
+        aliceTenant = ta;
+        bobTenant = tb;
         long alice = accounts.ensureUser("kc-alice", "alice"), bob = accounts.ensureUser("kc-bob", "bob");
         long viewer = accounts.ensureUser("kc-viewer", "viewer"), admin = accounts.ensureUser("kc-admin", "admin");
         accounts.ensureMembership(ta, alice, "OWNER");
@@ -135,6 +137,50 @@ class ExecutionApiIT {
                 .containsEntry("result", List.of("the worker has not started"));
         assertThat(api.audit("kc-alice", null)).extracting(r -> r.get("action")).contains("KILL_ACCOUNT", "KILL_RELEASED");
         assertThat(api.audit("kc-bob", null)).extracting(r -> r.get("action")).doesNotContain("KILL_ACCOUNT");
+    }
+
+    @Test
+    void aViewerReadsTheirAccountsHistoryOnlyAndNoUsernames() {
+        org.springframework.jdbc.core.JdbcTemplate jdbc = new org.springframework.jdbc.core.JdbcTemplate(dataSource);
+        String insert = "insert into exec.audit_log (tenant_id, broker_account_id, actor, action, detail) values (?, ?, ?, ?, "
+                + "'{\"reason\": \"it\"}'::jsonb)";
+        jdbc.update(insert, aliceTenant, null, "kc-admin", "MEMBER_ADDED");
+        jdbc.update(insert, aliceTenant, aliceAccount, "kc-admin", "BROKER_APP_KEYS_SET");
+        jdbc.update(insert, aliceTenant, aliceAccount, "kc-admin", "ACCOUNT_SETTINGS");
+        jdbc.update(insert, aliceTenant, aliceAccount, "worker-it", "EOD_SQUARE_OFF");
+        jdbc.update(insert, aliceTenant, aliceAccount, "execution", "LATE_FILL");
+
+        List<Map<String, Object>> viewer = api.audit("kc-viewer", null);
+        assertThat(viewer).extracting(r -> r.get("action")).contains("ACCOUNT_SETTINGS", "EOD_SQUARE_OFF")
+                .doesNotContain("MEMBER_ADDED", "BROKER_APP_KEYS_SET", "LATE_FILL");
+        assertThat(viewer).allSatisfy(r -> assertThat(r.get("broker_account_id")).isNotNull());
+        assertThat(viewer).extracting(r -> r.get("actor")).isSubsetOf("admin", "system", "you");
+        assertThat(viewer).filteredOn(r -> "ACCOUNT_SETTINGS".equals(r.get("action"))).extracting(r -> r.get("actor"))
+                .containsOnly("admin");
+        assertThat(viewer).filteredOn(r -> "EOD_SQUARE_OFF".equals(r.get("action"))).extracting(r -> r.get("actor"))
+                .containsOnly("system");
+        assertThat(api.audit("kc-viewer", aliceAccount)).extracting(r -> r.get("action")).doesNotContain("BROKER_APP_KEYS_SET");
+
+        // the owner and the admin read the whole log, with who did it
+        assertThat(api.audit("kc-alice", null)).extracting(r -> r.get("action"))
+                .contains("MEMBER_ADDED", "BROKER_APP_KEYS_SET", "ACCOUNT_SETTINGS", "EOD_SQUARE_OFF", "LATE_FILL");
+        assertThat(api.audit("kc-admin", null)).extracting(r -> r.get("actor")).contains("kc-admin", "worker-it");
+        // another tenant's owner: nothing of it
+        assertThat(api.audit("kc-bob", null)).extracting(r -> r.get("action")).doesNotContain("MEMBER_ADDED", "ACCOUNT_SETTINGS");
+
+        // a VIEWER in one workspace and OWNER of another: the first filtered and nameless, the second whole
+        AccountStore accounts = new AccountStore(dataSource);
+        long mixed = accounts.ensureUser("kc-mixed", "mixed");
+        accounts.ensureMembership(aliceTenant, mixed, "VIEWER");
+        accounts.ensureMembership(bobTenant, mixed, "OWNER");
+        jdbc.update(insert, bobTenant, null, "kc-bob", "MEMBER_ADDED");
+        List<Map<String, Object>> both = api.audit("kc-mixed", null);
+        assertThat(both).filteredOn(r -> Long.valueOf(aliceTenant).equals(r.get("tenant_id"))).extracting(r -> r.get("action"))
+                .contains("ACCOUNT_SETTINGS").doesNotContain("MEMBER_ADDED", "BROKER_APP_KEYS_SET", "LATE_FILL");
+        assertThat(both).filteredOn(r -> Long.valueOf(aliceTenant).equals(r.get("tenant_id"))).extracting(r -> r.get("actor"))
+                .isSubsetOf("admin", "system", "you");
+        assertThat(both).filteredOn(r -> Long.valueOf(bobTenant).equals(r.get("tenant_id")) && "MEMBER_ADDED".equals(r.get("action")))
+                .extracting(r -> r.get("actor")).containsOnly("kc-bob");
     }
 
     private interface Call {

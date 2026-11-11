@@ -295,6 +295,21 @@ class AccountsController {
         return out;
     }
 
+    /**
+     * What a VIEWER's history shows (11 Nov 2026): what happened to their own accounts, the settings they trade with and
+     * the stops and exits on them. Not the workspace's members, logins, broker apps, keys or support access, and not the
+     * engine's internals (late fills, retries, reconciliation): those are for the people who run the workspace.
+     */
+    static final List<String> VIEWER_ACTIONS = List.of("ACCOUNT_CREATED", "ACCOUNT_SETTINGS", "LIVE_ON", "LIVE_OFF",
+            "LIVE_ELIGIBLE_ON", "LIVE_ELIGIBLE_OFF", "LIVE_STRATEGIES", "TODAYS_BROKER", "KILL_ACCOUNT", "KILL_RELEASED",
+            "FLATTEN", "POSITION_EXIT", "MANUAL_EXIT", "EOD_SQUARE_OFF", "MODE_PAPER_SESSION_LOST", "MODE_PAPER_NEW_SESSION",
+            "BROKER_SESSION_LOST");
+
+    /**
+     * The audit log of the caller's tenants, newest first. Every role but VIEWER (an AUDITOR included) reads it whole; a
+     * VIEWER reads {@link #VIEWER_ACTIONS} on accounts only, and who did it as "you", "admin" (a person) or "system" (the
+     * engine), never a username (user, 11 Nov 2026: "is audit log required for Follower/Demo accounts?").
+     */
     @GetMapping("/api/execution/audit")
     List<Map<String, Object>> audit(@RequestHeader(value = Access.HEADER, required = false) String subject,
                                     @RequestParam(value = "account", required = false) Long accountId) {
@@ -303,9 +318,17 @@ class AccountsController {
             accounts.byId(accountId).filter(x -> user.sees(x.tenantId()))
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "no account " + accountId));
         }
-        return jdbc.queryForList("select id, tenant_id, broker_account_id, actor, action, detail::text detail, at "
-                        + "from exec.audit_log where tenant_id = any(?) and (?::bigint is null or broker_account_id = ?) "
-                        + "order by id desc limit 200", user.tenants().toArray(new Long[0]), accountId, accountId);
+        Long[] full = user.roles().entrySet().stream().filter(e -> !"VIEWER".equals(e.getValue())).map(Map.Entry::getKey)
+                .toArray(Long[]::new);
+        Long[] viewing = user.roles().entrySet().stream().filter(e -> "VIEWER".equals(e.getValue())).map(Map.Entry::getKey)
+                .toArray(Long[]::new);
+        return jdbc.queryForList("select l.id, l.tenant_id, l.broker_account_id, case when l.tenant_id = any(?) then l.actor "
+                        + "when l.actor = ? then 'you' when exists (select 1 from acct.app_user u where u.external_subject = "
+                        + "l.actor) then 'admin' else 'system' end actor, l.action, l.detail::text detail, l.at "
+                        + "from exec.audit_log l where (l.tenant_id = any(?) or (l.tenant_id = any(?) and l.broker_account_id "
+                        + "is not null and l.action = any(?))) and (?::bigint is null or l.broker_account_id = ?) "
+                        + "order by l.id desc limit 200", full, user.subject(), full, viewing,
+                VIEWER_ACTIONS.toArray(new String[0]), accountId, accountId);
     }
 
     /**
