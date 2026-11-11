@@ -346,8 +346,18 @@ class AccountAdminController {
         return n == null ? 0 : n;
     }
 
+    /**
+     * {@code sizeStepPct} (11 Nov 2026): the share of the allocation-sized entry an account takes, 0 = one lot an entry
+     * (the LIVE pilot), 100 = full size; a LIVE account above 0 needs a risk file that sizes LIVE from the allocation
+     * (live.max_lots_per_order above 1, follower-risk v11).
+     */
     record Settings(Double allocation, String equityMode, Double dailyLossLimit, Boolean clearDailyLossLimit, String mode,
-                    Boolean enabled, String clientId, List<String> strategies) {
+                    Boolean enabled, String clientId, List<String> strategies, Double sizeStepPct) {
+
+        Settings(Double allocation, String equityMode, Double dailyLossLimit, Boolean clearDailyLossLimit, String mode,
+                 Boolean enabled, String clientId, List<String> strategies) {
+            this(allocation, equityMode, dailyLossLimit, clearDailyLossLimit, mode, enabled, clientId, strategies, null);
+        }
     }
 
     @PostMapping("/api/execution/accounts/{id}/settings")
@@ -384,6 +394,24 @@ class AccountAdminController {
                 Double loss = lossLimit(body.dailyLossLimit(), allocation);
                 jdbc.update("update acct.broker_account set daily_loss_limit = ?, updated_at = now() where id = ?", loss, id);
                 changed.put("dailyLossLimit", loss);
+            }
+            if (body.sizeStepPct() != null && body.sizeStepPct() != a.sizeStepPct()) {
+                double step = body.sizeStepPct();
+                require(step >= 0 && step <= 100, "size: 0 (one lot an entry) to 100 (full size)");
+                if (step > 0 && (a.tradeMode() == TradeMode.LIVE || daily)) {
+                    com.autotrade.execution.FollowerRisk risk;
+                    try {
+                        risk = com.autotrade.execution.FollowerRisk.load(java.nio.file.Path.of(a.riskFile()));
+                    } catch (RuntimeException e) {
+                        throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "risk file " + a.riskFile()
+                                + " not readable");
+                    }
+                    require(risk.live() == null || risk.live().maxLotsPerOrder() > 1, a.displayName() + " trades LIVE "
+                            + "on " + risk.version() + ", one lot an entry: full size needs a risk file that sizes LIVE "
+                            + "from the allocation (follower-risk v11)");
+                }
+                jdbc.update("update acct.broker_account set size_step_pct = ?, updated_at = now() where id = ?", step, id);
+                changed.put("sizeStepPct", step);
             }
             if (body.mode() != null) {
                 require(!daily, "a member's account trades by the day's PAPER/LIVE switch, not a mode of its own");
@@ -456,7 +484,7 @@ class AccountAdminController {
         Map<String, Object> detail = new LinkedHashMap<>(changed);
         detail.put("before", Map.of("allocation", before.get("allocatedCapital"), "equityMode", before.get("equityMode"),
                 "dailyLossLimit", String.valueOf(before.get("dailyLossLimit")), "mode", before.get("mode"),
-                "enabled", before.get("enabled")));
+                "enabled", before.get("enabled"), "sizeStepPct", before.get("sizeStepPct")));
         audit.audit(accounts.byId(id).orElseThrow(), user.subject(), "ACCOUNT_SETTINGS", detail);
         return details(subject, id);
     }

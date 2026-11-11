@@ -32,7 +32,8 @@ class ExecutionAlerts {
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     private static final List<String> ACTIONS = List.of("KILL_ACCOUNT", "KILL_ACCOUNT_ALREADY_ENGAGED", "BROKER_SESSION_LOST",
             "INSTRUMENT_MAPPING_MISMATCH", "EOD_SQUARE_OFF", "FLATTEN", "END_OF_DAY", "EXIT_RETRY", "MODE_PAPER_SESSION_LOST",
-            "LATE_FILL", "SELLS_CUT");            // review 8 Nov 2026: a fill adopted late, our sells cut to the broker's holding
+            "LATE_FILL", "SELLS_CUT",             // review 8 Nov 2026: a fill adopted late, our sells cut to the broker's holding
+            "DAILY_LOSS_STOP");                   // v11: the daily loss with open positions reached: everything sold
 
     /** One message, and the member workspace it is also for (null: the admin's only). */
     record Alert(String text, Long memberTenant) {
@@ -98,7 +99,9 @@ class ExecutionAlerts {
                     + "Accounts page and release the switch there once it is understood."
                     : action.equals("MODE_PAPER_SESSION_LOST") ? "\nThe broker session was lost while LIVE: new signals "
                     + "paper-trade; open LIVE positions keep their broker stop and their exits wait for the next login. "
-                    + "Log in again, then switch LIVE again if you want." : ""), member));
+                    + "Log in again, then switch LIVE again if you want."
+                    : action.equals("DAILY_LOSS_STOP") ? "\nThe daily loss limit (closed + open) is reached: every open "
+                    + "position is being sold and no new entries today. It trades again tomorrow." : ""), member));
         }
         // today's LIVE orders placed since the worker started that filled or were rejected: one message each
         for (Map<String, Object> r : jdbc.queryForList("select e.id, e.role, e.order_side, e.quantity_filled, "

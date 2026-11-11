@@ -65,6 +65,7 @@ class LiveIT {
     private static final Clock CLOCK = Clock.fixed(DAY.atTime(LocalTime.parse(System.getProperty("execution.it.time",
             "10:00"))).atZone(IST).toInstant(), IST);
     private static final String V7 = "../config/risk/follower-risk.v7.yaml";
+    private static final String V11 = "../config/risk/follower-risk.v11.yaml";
     private static final int LOT = 65;
     private static final String[] KEYS = {"NSE_FO|47168", "NSE_FO|47169", "NSE_FO|47170"};
     private static final String[] SYMBOLS = {"NIFTY 23100 PE", "NIFTY 23150 PE", "NIFTY 23200 PE"};
@@ -128,13 +129,18 @@ class LiveIT {
 
     /** A ZERODHA follower on v7 at one lot an entry, switched LIVE ({@code live}) or LIVE without its switch. */
     private BrokerAccount account(long group, boolean live, String... strategies) {
+        return account(group, live, V7, 0, strategies);
+    }
+
+    /** A ZERODHA follower on {@code riskFile} at {@code sizeStep} (v11: 100 = full size from the allocation). */
+    private BrokerAccount account(long group, boolean live, String riskFile, double sizeStep, String... strategies) {
         int n = ++seq;
         AccountStore accounts = new AccountStore(dataSource);
         long tenant = accounts.ensureTenant("owner");
         long owner = accounts.ensureUser("kc-owner", "owner");
         accounts.ensureMembership(tenant, owner, "OWNER");
         long id = accounts.ensureFollowerAccount(tenant, owner, "KITE-L" + n, BrokerType.ZERODHA, TradeMode.DRY_RUN,
-                200_000, EquityMode.FIXED, DAY, V7, 0);
+                200_000, EquityMode.FIXED, DAY, riskFile, sizeStep);
         long profile = jdbc.queryForObject("insert into acct.broker_credential_profile (tenant_id, broker_type, name, "
                 + "api_key_ref, api_secret_ref) values (?, 'ZERODHA', ?, 'file:kite-key', 'file:kite-secret') returning id",
                 Long.class, tenant, "kite-app-" + n);
@@ -179,7 +185,7 @@ class LiveIT {
 
     /** The account's follower over its LIVE route, with the waits shortened. */
     private FollowerSimulator follower(BrokerConnections registry, BrokerAccount account) {
-        FollowerRisk risk = FollowerRisk.load(Path.of(V7));
+        FollowerRisk risk = FollowerRisk.load(Path.of(account.riskFile()));
         BrokerConnections.Route route = registry.route(account, risk);
         assertThat(route.venue()).as(route.description()).isNotNull();
         BrokerVenue venue = new BrokerVenue(dataSource, route.connection(), risk.orders().fast(), (k, u) -> 1755L, o -> { });
@@ -233,6 +239,64 @@ class LiveIT {
         assertThat(kite.requests("place")).as("the entry and its resting stop were sent to Kite").isEqualTo(2);
         assertThat(jdbc.queryForObject("select count(*) from exec.order_execution where broker_account_id = ? "
                 + "and role = 'STOP'", Integer.class, a.id())).isEqualTo(1);
+    }
+
+    @Test
+    void aV11LiveEntryIsSizedFromTheAllocationAndItsStopCoversAllOfIt() {
+        long group = group();
+        BrokerAccount a = account(group, true, V11, 100, "ma-cross");
+        enter(group, signalSession(group), "ma-cross", 0);
+        try (BrokerConnections registry = registry()) {
+            follower(registry, a).run(a, group, DAY);
+        }
+        // the signal's 40 lots on a 260,000 budget at 5 L reference capital; this account's 2 L: 104,000, 16 lots at 100
+        long held = jdbc.queryForObject("select quantity_open from exec.position where broker_account_id = ?", Long.class,
+                a.id());
+        assertThat(held).as("the allocation's share of the signal, not one lot").isEqualTo(16L * LOT);
+        assertThat(jdbc.queryForObject("select max(quantity_requested) from exec.order_execution where broker_account_id = ? "
+                + "and role = 'STOP'", Long.class, a.id())).as("the broker stop covers the whole position").isEqualTo(held);
+    }
+
+    @Test
+    void aV11DailyLossWithOpenPositionsSellsEverythingAndStopsEntriesForTheDay() {
+        long group = group();
+        BrokerAccount a = account(group, true, V11, 100, "ma-cross", "oi-burst-cross");
+        jdbc.update("update acct.broker_account set daily_loss_limit = 10000 where id = ?", a.id());
+        a = new AccountStore(dataSource).byId(a.id()).orElseThrow();
+        long session = signalSession(group);
+        enter(group, session, "ma-cross", 0);
+        try (BrokerConnections registry = registry()) {
+            FollowerSimulator follower = follower(registry, a);
+            follower.run(a, group, DAY);
+            long held = jdbc.queryForObject("select quantity_open from exec.position where broker_account_id = ?",
+                    Long.class, a.id());
+            assertThat(held).isEqualTo(16L * LOT);
+
+            // the bid drops 9 a unit: 1,040 x 9 = 9,360 open loss, under the 10,000 limit: nothing happens
+            kite.depth(KEYS[0], List.of(new Quote.Level(91.0, 65_000)), List.of(new Quote.Level(91.5, 65_000)), 91.2);
+            follower.run(a, group, DAY);
+            assertThat(jdbc.queryForObject("select status from exec.position where broker_account_id = ?", String.class,
+                    a.id())).isEqualTo("OPEN");
+
+            // 11 a unit: 11,440 open loss: past the limit, sold now (the next mark is 5 s later)
+            kite.depth(KEYS[0], List.of(new Quote.Level(89.0, 65_000)), List.of(new Quote.Level(89.5, 65_000)), 89.2);
+            FollowerSimulator later = follower.withClock(Clock.fixed(CLOCK.instant().plusSeconds(6), IST));
+            later.run(a, group, DAY);
+            assertThat(jdbc.queryForObject("select status || ' ' || quantity_open from exec.position "
+                    + "where broker_account_id = ?", String.class, a.id())).isEqualTo("CLOSED 0");
+            assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? "
+                    + "and action = 'DAILY_LOSS_STOP'", Integer.class, a.id())).isEqualTo(1);
+
+            // a new entry the same day is refused, here and by a fresh follower (a restarted worker)
+            enter(group, session, "oi-burst-cross", 1);
+            later.run(a, group, DAY);
+            assertThat(intentState(a)).isEqualTo("REJECTED_DAILY_LOSS");
+        }
+        try (BrokerConnections registry = registry()) {
+            enter(group, signalSession(group), "ma-cross", 2);
+            follower(registry, a).withClock(Clock.fixed(CLOCK.instant().plusSeconds(7), IST)).run(a, group, DAY);
+            assertThat(intentState(a)).isEqualTo("REJECTED_DAILY_LOSS");
+        }
     }
 
     @Test
