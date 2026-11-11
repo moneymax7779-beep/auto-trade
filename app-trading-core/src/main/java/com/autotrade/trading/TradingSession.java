@@ -135,6 +135,10 @@ public final class TradingSession {
     private volatile java.util.function.Consumer<com.autotrade.core.event.IndexTick> indexTap;
     private final Map<String, FeatureSnapshot> lastSnapshots = new LinkedHashMap<>();
     private SignalRecorder signals;                       // live execution L1: only on the signal-source session
+    /** V35: the strategies the owner turned OFF (none unless {@link #strategySwitch} attached a reader: live sessions). */
+    private volatile Supplier<Set<String>> switchedOff = Set::of;
+    /** strategy|underlying|intent|minute already recorded as refused for OFF (one row a minute, not one per snapshot). */
+    private final Set<String> offNoted = new HashSet<>();
 
     public TradingSession(Settings settings, LiveFeed feed, TradeStore store) {
         this.settings = settings;
@@ -263,6 +267,15 @@ public final class TradingSession {
         this.replayControl = control;
     }
 
+    /**
+     * V35 (user 11 Nov 2026): attaches the owner's OFF list. An OFF strategy's new entries and adds are refused here, so
+     * no paper or LIVE account opens anything from it (followers copy only what this session enters); its exits always
+     * run. Attached to live sessions only: replays and shadows stay reproducible from their files.
+     */
+    public void strategySwitch(Supplier<Set<String>> off) {
+        this.switchedOff = off == null ? Set::of : off;
+    }
+
     /** Saves every feature snapshot (the live decision evidence, and later IV history) through {@code writer}. */
     public void recordSnapshots(com.autotrade.md.store.SnapshotWriter writer) {
         this.snapshotWriter = writer;
@@ -386,6 +399,11 @@ public final class TradingSession {
         }
     }
 
+    /** V35: an OFF strategy's entries and adds are refused; its exits never are. */
+    static boolean refusedAsOff(Set<String> off, String strategyId, OrderIntent.Action action) {
+        return action != OrderIntent.Action.EXIT && off.contains(strategyId);
+    }
+
     /** One strategy's intent through risk and the OMS, in that strategy's name. */
     private void act(Slot slot, String underlying, FeatureSnapshot snapshot, Decision decision, OrderIntent intent,
                      MarketContext market, boolean stale, LocalTime time) {
@@ -394,6 +412,16 @@ public final class TradingSession {
             String reason = "snapshot " + Duration.between(snapshot.time(), Instant.now()).toSeconds() + " s old (catching up)";
             rejected(strategyId, underlying, intent.action() + (intent.side() == null ? "" : " " + intent.side()), reason);
             candidate(strategyId, underlying, snapshot, decision, intent, false, reason);
+            return;
+        }
+        if (refusedAsOff(switchedOff.get(), strategyId, intent.action())) {
+            String what = intent.action() + (intent.side() == null ? "" : " " + intent.side());
+            String reason = "turned OFF by the owner: no new entry or add on any paper or LIVE account";
+            if (offNoted.add(strategyId + "|" + underlying + "|" + what + "|" + time.withSecond(0).withNano(0))) {
+                rejected(strategyId, underlying, what, reason);
+                candidate(strategyId, underlying, snapshot, decision, intent, false, reason);
+                log.info("{} {} {} {} REJECTED: {}", time, underlying, strategyId, what, reason);
+            }
             return;
         }
         if (intent.action() == OrderIntent.Action.ENTER || intent.action() == OrderIntent.Action.ENTER_STRADDLE

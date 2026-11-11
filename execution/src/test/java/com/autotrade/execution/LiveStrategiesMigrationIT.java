@@ -54,6 +54,8 @@ class LiveStrategiesMigrationIT {
                         .isEqualTo("config/risk/follower-risk.v9.yaml");
                 assertThat(jdbc.queryForObject("select risk_file from acct.broker_account where id = ?", String.class, v3))
                         .isEqualTo("config/risk/follower-risk.v3.yaml");
+                // the reads need the newest tables (V35's OFF list); the risk files were checked above at this test's own target
+                Flyway.configure().dataSource(dataSource).locations("classpath:db/migration").load().migrate();
                 LiveStrategies live = new LiveStrategies(dataSource);
                 assertThat(live.chosen(v7)).isNull();
                 assertThat(live.effective(v7, FollowerRisk.load(java.nio.file.Path.of("../config/risk/follower-risk.v9.yaml"))))

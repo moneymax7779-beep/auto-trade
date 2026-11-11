@@ -517,15 +517,26 @@ export interface LiveStrategyChoice {
   global?: string[] | null;
   /** where the account's list comes from now */
   source?: "ACCOUNT" | "GLOBAL" | "DEFAULT";
+  /** turned OFF by the owner for every account (V35) */
+  off?: string[];
+  /** what this account may switch between PAPER and LIVE: the owner's LIVE strategies within its risk file, not OFF */
+  choosable?: string[];
+  /** in the risk file but on PAPER only by the owner's choice: not for this account to make LIVE */
+  paperOnly?: string[];
   /** what trades LIVE now */
   effective: string[];
   canEdit: boolean;
 }
 
-/** GET/POST /api/execution/live-strategies: the owner's global LIVE list (V33, 9 Nov 2026) */
+/** GET/POST /api/execution/live-strategies: the owner's global LIVE list (V33, 9 Nov 2026) and OFF list (V35, 11 Nov) */
 export interface GlobalLiveStrategies {
+  /** what some account's risk file lets trade LIVE */
   available: string[];
+  /** what the live PAPER session runs (PAPER-1's set, from its latest session) */
+  running: string[];
   global: string[] | null;
+  /** turned OFF by the owner: no new entry or add on any paper or LIVE account */
+  off: string[];
   accounts: { id: number; account: string; mode: string; source: "ACCOUNT" | "GLOBAL" | "DEFAULT"; effective: string[] }[];
   canEdit: boolean;
 }

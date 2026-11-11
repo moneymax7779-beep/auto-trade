@@ -310,7 +310,15 @@ class LiveIT {
             assertThat(live.source(a.id())).isEqualTo(LiveStrategies.Source.GLOBAL);
             assertThat(live.effective(a.id(), risk)).containsExactly("oi-burst-cross");
             assertThat(live.source(own.id())).isEqualTo(LiveStrategies.Source.ACCOUNT);
-            assertThat(live.effective(own.id(), risk)).containsExactly("ma-cross");
+            // user 11 Nov 2026: the owner's PAPER caps the account's own list (ma-cross is not in the owner's LIVE list)
+            assertThat(live.effective(own.id(), risk)).isEmpty();
+            enter(group, signalSession(group), "ma-cross", 0);
+            try (BrokerConnections registry = registry()) {
+                follower(registry, own).run(own, group, DAY);
+            }
+            assertThat(intentState(own)).isEqualTo("REJECTED_LIVE_STRATEGY");
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> live.choose(own.id(), risk, List.of("ma-cross")))
+                    .hasMessageContaining("on PAPER only");
             enter(group, signalSession(group), "ma-cross", 0);
             try (BrokerConnections registry = registry()) {
                 follower(registry, a).run(a, group, DAY);
@@ -323,6 +331,33 @@ class LiveIT {
             assertThat(live.source(a.id())).isEqualTo(LiveStrategies.Source.DEFAULT);
         } finally {
             jdbc.update("delete from acct.live_strategy_policy");                 // other tests run without a global list
+        }
+    }
+
+    /**
+     * V35 (user 11 Nov 2026): a strategy the owner turned OFF opens nothing on a LIVE account, even from a signal that
+     * reached the follower, whatever the account's lists say; it cannot be chosen LIVE while OFF.
+     */
+    @Test
+    void aStrategyTurnedOffIsRefusedOnALiveAccount() {
+        long group = group();
+        BrokerAccount a = account(group, true, "ma-cross", "oi-burst-cross");
+        FollowerRisk risk = FollowerRisk.load(Path.of(V7));
+        LiveStrategies live = new LiveStrategies(dataSource);
+        try {
+            live.choose(a.id(), risk, List.of("ma-cross", "oi-burst-cross"));
+            live.chooseOff(List.of("ma-cross"), java.util.Set.of("ma-cross", "oi-burst-cross"), "it");
+            assertThat(live.effective(a.id(), risk)).containsExactly("oi-burst-cross");
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> live.choose(a.id(), risk, List.of("ma-cross")))
+                    .hasMessageContaining("turned OFF for every account: [ma-cross]");
+            enter(group, signalSession(group), "ma-cross", 0);
+            try (BrokerConnections registry = registry()) {
+                follower(registry, a).run(a, group, DAY);
+            }
+            assertThat(intentState(a)).isEqualTo("REJECTED_STRATEGY_OFF");
+            assertThat(kite.requests("place")).isZero();
+        } finally {
+            jdbc.update("delete from acct.strategy_off");                         // other tests run with every strategy on
         }
     }
 

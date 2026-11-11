@@ -118,12 +118,12 @@ class LiveSwitchIT {
                 "expiry-trend-rider", "ma-cross", "oi-burst-cross", "wall-break-rider"));
         assertThat(view.get("effective")).isEqualTo(List.of("early-confirm-runner", "ma-cross", "oi-burst-cross"));
         assertThat(view.get("chosen")).isNull();
-        assertThat(view.get("canEdit")).isEqualTo(false);
+        // the account's OWNER manages it (user 11 Nov 2026: follower accounts switch the owner's LIVE strategies)
+        assertThat(view.get("canEdit")).isEqualTo(true);
         assertThat(api.liveStrategies("kc-admin", id).get("canEdit")).isEqualTo(true);
+        assertThat(api.liveStrategies("kc-trader", id).get("canEdit")).isEqualTo(false);
 
-        // an OWNER of the tenant or a TRADER may not change it
-        assertThat(refusal(() -> api.chooseLiveStrategies("local-owner", id,
-                new LiveSwitchController.LiveChoice(List.of("ma-cross"), null)))).startsWith("403");
+        // a TRADER may not change it
         assertThat(refusal(() -> api.chooseLiveStrategies("kc-trader", id,
                 new LiveSwitchController.LiveChoice(List.of("ma-cross"), null)))).startsWith("403");
         // the owner drops ecr and adds wall-break-rider
@@ -153,29 +153,32 @@ class LiveSwitchIT {
         long own = account("../config/risk/follower-risk.v9.yaml", 0, false);
         try {
             api.chooseLiveStrategies("kc-admin", own, new LiveSwitchController.LiveChoice(List.of("ma-cross"), null));
-            Map<String, Object> view = api.globalLiveStrategies("local-owner");
+            // the owner's set-up is not shown to anyone else (members: the chart and trades only)
+            assertThat(refusal(() -> api.globalLiveStrategies("local-owner"))).startsWith("403");
+            assertThat(refusal(() -> api.globalLiveStrategies("kc-trader"))).startsWith("403");
+            Map<String, Object> view = api.globalLiveStrategies("kc-admin");
             assertThat(view.get("available")).asString().contains("break-retest-runner", "early-confirm-runner",
                     "expiry-trend-rider", "ma-cross", "oi-burst-cross", "wall-break-rider");
             assertThat(view.get("global")).isNull();
-            assertThat(view.get("canEdit")).isEqualTo(false);
+            assertThat(view.get("canEdit")).isEqualTo(true);
             assertThat(refusal(() -> api.chooseGlobalLiveStrategies("local-owner",
-                    new LiveSwitchController.LiveChoice(List.of("ma-cross"), null)))).startsWith("403");
+                    new LiveSwitchController.GlobalChoice(List.of("ma-cross"), null, null)))).startsWith("403");
 
             // the owner takes ecr out of LIVE everywhere and adds wall-break-rider
-            Map<String, Object> after = api.chooseGlobalLiveStrategies("kc-admin", new LiveSwitchController.LiveChoice(
-                    List.of("ma-cross", "oi-burst-cross", "wall-break-rider"), null));
+            Map<String, Object> after = api.chooseGlobalLiveStrategies("kc-admin", new LiveSwitchController.GlobalChoice(
+                    List.of("ma-cross", "oi-burst-cross", "wall-break-rider"), null, null));
             assertThat(after.get("global")).isEqualTo(List.of("ma-cross", "oi-burst-cross", "wall-break-rider"));
             assertThat(api.liveStrategies("local-owner", follows).get("effective"))
                     .isEqualTo(List.of("ma-cross", "oi-burst-cross", "wall-break-rider"));
             assertThat(api.liveStrategies("local-owner", follows).get("source")).isEqualTo("GLOBAL");
             assertThat(api.liveStrategies("local-owner", own).get("effective")).isEqualTo(List.of("ma-cross"));
             assertThat(refusal(() -> api.chooseGlobalLiveStrategies("kc-admin",
-                    new LiveSwitchController.LiveChoice(List.of("opening-drive"), null))))
+                    new LiveSwitchController.GlobalChoice(List.of("opening-drive"), null, null))))
                     .startsWith("400 not a LIVE strategy of any account's risk file: [opening-drive]");
             // the account back under the global list; the global list back to the defaults
             api.chooseLiveStrategies("kc-admin", own, new LiveSwitchController.LiveChoice(null, true));
             assertThat(api.liveStrategies("local-owner", own).get("source")).isEqualTo("GLOBAL");
-            assertThat(api.chooseGlobalLiveStrategies("kc-admin", new LiveSwitchController.LiveChoice(null, true))
+            assertThat(api.chooseGlobalLiveStrategies("kc-admin", new LiveSwitchController.GlobalChoice(null, true, null))
                     .get("global")).isNull();
             assertThat(api.liveStrategies("local-owner", follows).get("effective"))
                     .isEqualTo(List.of("early-confirm-runner", "ma-cross", "oi-burst-cross"));
@@ -183,6 +186,140 @@ class LiveSwitchIT {
                     Integer.class)).isEqualTo(2);
         } finally {
             jdbc.update("delete from acct.live_strategy_policy");
+        }
+    }
+
+    /**
+     * V35 (user 11 Nov 2026): the owner turns a strategy OFF everywhere (no PAPER, no LIVE); OFF also takes it out of
+     * every LIVE list, so switching it back on makes it PAPER until LIVE is ticked again.
+     */
+    @Test
+    void theOwnerTurnsAStrategyOffOnPaperAndLive() {
+        long follows = account("../config/risk/follower-risk.v9.yaml", 0, false);
+        long own = account("../config/risk/follower-risk.v9.yaml", 0, false);
+        long session = jdbc.queryForObject("insert into trade.session (account, mode, session_date, feed, strategy_id, "
+                + "strategy_hash, configs, code_version, status) values ('PAPER-1', 'PAPER_LIVE', current_date, 'it', "
+                + "'ma-cross+oi-burst-cross+opening-drive', 'h', '{}'::jsonb, 'it', 'DONE') returning id", Long.class);
+        try {
+            api.chooseGlobalLiveStrategies("kc-admin", new LiveSwitchController.GlobalChoice(
+                    List.of("ma-cross", "oi-burst-cross"), null, null));
+            api.chooseLiveStrategies("kc-admin", own, new LiveSwitchController.LiveChoice(List.of("ma-cross"), null));
+            Map<String, Object> view = api.globalLiveStrategies("kc-admin");
+            assertThat(view.get("running")).isEqualTo(List.of("ma-cross", "oi-burst-cross", "opening-drive"));
+            assertThat(view.get("off")).isEqualTo(List.of());
+            assertThat(refusal(() -> api.chooseGlobalLiveStrategies("local-owner",
+                    new LiveSwitchController.GlobalChoice(null, null, List.of("ma-cross"))))).startsWith("403");
+
+            // ma-cross OFF (LIVE-eligible) and opening-drive OFF (runs on PAPER only, in no risk file)
+            Map<String, Object> after = api.chooseGlobalLiveStrategies("kc-admin",
+                    new LiveSwitchController.GlobalChoice(null, null, List.of("ma-cross", "opening-drive")));
+            assertThat(after.get("off")).isEqualTo(List.of("ma-cross", "opening-drive"));
+            assertThat(after.get("global")).isEqualTo(List.of("oi-burst-cross"));
+            assertThat(api.liveStrategies("local-owner", own).get("chosen")).isEqualTo(List.of());
+            assertThat(api.liveStrategies("local-owner", follows).get("effective")).isEqualTo(List.of("oi-burst-cross"));
+            assertThat(api.liveStrategies("local-owner", follows).get("off")).isEqualTo(List.of("ma-cross", "opening-drive"));
+
+            // never both LIVE and OFF, never an unknown strategy, and a refused request changes nothing
+            assertThat(refusal(() -> api.chooseGlobalLiveStrategies("kc-admin",
+                    new LiveSwitchController.GlobalChoice(List.of("ma-cross"), null, null))))
+                    .startsWith("400 a strategy cannot be both LIVE and OFF: [ma-cross]");
+            assertThat(refusal(() -> api.chooseGlobalLiveStrategies("kc-admin",
+                    new LiveSwitchController.GlobalChoice(List.of("oi-burst-cross"), null, List.of("oi-burst-cross")))))
+                    .startsWith("400 a strategy cannot be both LIVE and OFF");
+            assertThat(refusal(() -> api.chooseGlobalLiveStrategies("kc-admin",
+                    new LiveSwitchController.GlobalChoice(List.of(), null, List.of("no-such-strategy")))))
+                    .startsWith("400 not a running or LIVE-eligible strategy: [no-such-strategy]");
+            assertThat(refusal(() -> api.chooseGlobalLiveStrategies("kc-admin",
+                    new LiveSwitchController.GlobalChoice(null, null, null)))).startsWith("400");
+            assertThat(api.globalLiveStrategies("kc-admin").get("global")).isEqualTo(List.of("oi-burst-cross"));
+
+            // back on: PAPER, not LIVE; then the owner makes it LIVE again in the same request
+            Map<String, Object> on = api.chooseGlobalLiveStrategies("kc-admin",
+                    new LiveSwitchController.GlobalChoice(null, null, List.of("opening-drive")));
+            assertThat(on.get("off")).isEqualTo(List.of("opening-drive"));
+            assertThat(on.get("global")).isEqualTo(List.of("oi-burst-cross"));
+            assertThat(api.chooseGlobalLiveStrategies("kc-admin", new LiveSwitchController.GlobalChoice(
+                    List.of("ma-cross", "oi-burst-cross"), null, List.of())).get("global"))
+                    .isEqualTo(List.of("ma-cross", "oi-burst-cross"));
+            assertThat(api.liveStrategies("local-owner", follows).get("effective"))
+                    .isEqualTo(List.of("ma-cross", "oi-burst-cross"));
+
+            assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where action = 'STRATEGIES_OFF'",
+                    Integer.class)).isEqualTo(3);
+            // the account whose own list lost ma-cross has the change in its own history
+            assertThat(jdbc.queryForObject("select detail->>'reason' from exec.audit_log where broker_account_id = ? and "
+                    + "action = 'LIVE_STRATEGIES' order by id desc limit 1", String.class, own))
+                    .isEqualTo("turned OFF for every account: [ma-cross, opening-drive]");
+            // a null or blank name is ignored, never a server error
+            assertThat(api.chooseGlobalLiveStrategies("kc-admin", new LiveSwitchController.GlobalChoice(null, null,
+                    java.util.Arrays.asList("opening-drive", null, " "))).get("off")).isEqualTo(List.of("opening-drive"));
+            // a strategy since dropped from the deployed set and every risk file can still be kept OFF or switched on
+            jdbc.update("update trade.session set strategy_id = 'ma-cross+oi-burst-cross' where id = ?", session);
+            assertThat(api.chooseGlobalLiveStrategies("kc-admin", new LiveSwitchController.GlobalChoice(null, null,
+                    List.of("ma-cross", "opening-drive"))).get("off")).isEqualTo(List.of("ma-cross", "opening-drive"));
+            assertThat(api.chooseGlobalLiveStrategies("kc-admin", new LiveSwitchController.GlobalChoice(null, null,
+                    List.of("ma-cross"))).get("off")).isEqualTo(List.of("ma-cross"));
+            assertThat(refusal(() -> api.chooseGlobalLiveStrategies("kc-admin", new LiveSwitchController.GlobalChoice(
+                    null, null, List.of("ma-cross", "opening-drive"))))).startsWith("400 not a running or LIVE-eligible");
+            assertThat(jdbc.queryForObject("select detail->>'accountListsChanged' from exec.audit_log where action = "
+                    + "'STRATEGIES_OFF' order by id limit 1", String.class)).isEqualTo("[" + own + "]");
+
+            // the live session's reader: cached, and it sees a change after its interval
+            jdbc.update("delete from acct.strategy_off");
+            java.util.function.Supplier<java.util.Set<String>> reader =
+                    com.autotrade.execution.LiveStrategies.offReader(dataSource, java.time.Duration.ofHours(1));
+            assertThat(reader.get()).isEmpty();
+            jdbc.update("insert into acct.strategy_off (strategy, changed_by) values ('ma-cross', 'it')");
+            assertThat(reader.get()).isEmpty();
+            assertThat(com.autotrade.execution.LiveStrategies.offReader(dataSource, java.time.Duration.ZERO).get())
+                    .containsExactly("ma-cross");
+        } finally {
+            jdbc.update("delete from acct.strategy_off");
+            jdbc.update("delete from acct.live_strategy_policy");
+            jdbc.update("update acct.broker_account set live_strategies = null where id in (?, ?)", follows, own);
+            jdbc.update("delete from trade.session where id = ?", session);
+            // the global-list test counts its own audit rows
+            jdbc.update("delete from exec.audit_log where action in ('LIVE_STRATEGIES_GLOBAL', 'STRATEGIES_OFF')");
+        }
+    }
+
+    /**
+     * User 11 Nov 2026: "if choose PAPER ... Follower/Demo accounts shouldn't make it LIVE, only if choose LIVE -
+     * Follower/Demo accounts should switch from PAPER/LIVE": the account's owner switches the platform owner's LIVE
+     * strategies only; the owner's PAPER ones never trade LIVE, whatever the account's own list holds; OFF ones are hidden.
+     */
+    @Test
+    void anAccountsOwnerSwitchesOnlyTheOwnersLiveStrategies() {
+        long id = account("../config/risk/follower-risk.v9.yaml", 0, false);
+        try {
+            api.chooseLiveStrategies("local-owner", id, new LiveSwitchController.LiveChoice(
+                    List.of("ma-cross", "wall-break-rider"), null));                // no global list yet: the file's list
+            api.chooseGlobalLiveStrategies("kc-admin", new LiveSwitchController.GlobalChoice(
+                    List.of("ma-cross", "oi-burst-cross"), null, List.of("early-confirm-runner")));
+            Map<String, Object> view = api.liveStrategies("local-owner", id);
+            assertThat(view.get("choosable")).isEqualTo(List.of("ma-cross", "oi-burst-cross"));
+            assertThat(view.get("paperOnly")).isEqualTo(List.of("break-retest-runner", "expiry-trend-rider",
+                    "wall-break-rider"));
+            // wall-break-rider is still in the account's own list, but the owner has it on PAPER: it does not trade LIVE
+            assertThat(view.get("chosen")).isEqualTo(List.of("ma-cross", "wall-break-rider"));
+            assertThat(view.get("effective")).isEqualTo(List.of("ma-cross"));
+            // the account's owner switches oi-burst-cross to LIVE and ma-cross to PAPER, within the owner's LIVE list
+            assertThat(api.chooseLiveStrategies("local-owner", id, new LiveSwitchController.LiveChoice(
+                    List.of("oi-burst-cross"), null)).get("effective")).isEqualTo(List.of("oi-burst-cross"));
+            assertThat(refusal(() -> api.chooseLiveStrategies("local-owner", id, new LiveSwitchController.LiveChoice(
+                    List.of("wall-break-rider"), null)))).startsWith("400 the platform owner has [wall-break-rider] on PAPER only");
+            assertThat(refusal(() -> api.chooseLiveStrategies("local-owner", id, new LiveSwitchController.LiveChoice(
+                    List.of("early-confirm-runner"), null)))).startsWith("400 turned OFF for every account");
+            // the platform owner moves oi-burst-cross to PAPER: off LIVE on the account at once
+            api.chooseGlobalLiveStrategies("kc-admin", new LiveSwitchController.GlobalChoice(List.of("ma-cross"), null,
+                    null));
+            assertThat(api.liveStrategies("local-owner", id).get("effective")).isEqualTo(List.of());
+            assertThat(jdbc.queryForObject("select actor from exec.audit_log where broker_account_id = ? and action = "
+                    + "'LIVE_STRATEGIES' order by id desc limit 1", String.class, id)).isEqualTo("local-owner");
+        } finally {
+            jdbc.update("delete from acct.strategy_off");
+            jdbc.update("delete from acct.live_strategy_policy");
+            jdbc.update("delete from exec.audit_log where action in ('LIVE_STRATEGIES_GLOBAL', 'STRATEGIES_OFF')");
         }
     }
 

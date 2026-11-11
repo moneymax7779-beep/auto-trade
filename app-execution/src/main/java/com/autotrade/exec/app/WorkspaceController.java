@@ -408,8 +408,9 @@ class WorkspaceController {
             b.put("allocation", a.allocatedCapital());
             b.put("equityMode", a.equityMode().name());
             b.put("sizeStepPct", a.sizeStepPct());
-            b.put("strategies", jdbc.queryForList("select strategy_id from acct.strategy_subscription where "
-                    + "broker_account_id = ? and enabled order by strategy_id", String.class, a.id()));
+            b.put("strategies", jdbc.queryForList("select strategy_id from acct.strategy_subscription where "     // not OFF (V35)
+                    + "broker_account_id = ? and enabled and strategy_id not in (select strategy from acct.strategy_off) "
+                    + "order by strategy_id", String.class, a.id()));
             b.put("liveStrategies", liveStrategies(a));
             b.put("chosen", Long.valueOf(a.id()).equals(state.brokerAccountId()));
             Map<String, Object> paper = result(a.brokerType() == BrokerType.PAPER ? Long.valueOf(a.id()) : twin, today);

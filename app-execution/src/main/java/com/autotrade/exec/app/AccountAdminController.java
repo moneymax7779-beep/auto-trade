@@ -119,9 +119,11 @@ class AccountAdminController {
         out.put("session", jdbc.queryForList("select status, to_char(expires_at at time zone 'Asia/Kolkata', 'DD Mon HH24:MI') "
                 + "expires from acct.broker_session where broker_account_id = ? order by id desc limit 1", id).stream()
                 .findFirst().orElse(null));
+        // an OFF strategy (V35) is not shown to follower or demo accounts (user 11 Nov 2026); its subscription is kept
         out.put("strategies", jdbc.queryForList("select s.strategy_id, s.enabled, s.size_multiplier, g.name copy_group "
                 + "from acct.strategy_subscription s join acct.copy_group g on g.id = s.copy_group_id "
-                + "where s.broker_account_id = ? order by s.strategy_id", id));
+                + "where s.broker_account_id = ? and s.strategy_id not in (select strategy from acct.strategy_off) "
+                + "order by s.strategy_id", id));
         LocalDate today = LocalDate.now(IST);
         out.put("today", jdbc.queryForMap("select count(*) filter (where status = 'OPEN') open, "
                 + "count(*) filter (where status = 'CLOSED') closed, coalesce(sum(realised_gross - coalesce(charges, 0)) "
@@ -233,7 +235,19 @@ class AccountAdminController {
             ids.addAll(jdbc.queryForList("select distinct s.strategy_id from acct.strategy_subscription s join "
                     + "acct.broker_account a on a.id = s.broker_account_id where a.tenant_id = ?", String.class, tenant));
         }
+        ids.removeAll(off());                                   // V35: an OFF strategy is not offered (user 11 Nov 2026)
         return ids.stream().sorted().toList();
+    }
+
+    /** The strategies the platform owner turned OFF (V35): not shown, offered or subscribable on any account. */
+    private Set<String> off() {
+        return new com.autotrade.execution.LiveStrategies(jdbc.getDataSource()).off();
+    }
+
+    private void notOff(List<String> strategies) {
+        Set<String> refused = new java.util.TreeSet<>(strategies);
+        refused.retainAll(off());
+        require(refused.isEmpty(), "turned OFF by the platform owner: " + refused);
     }
 
     // ------------------------------------------------------------------------------------------------- writes
@@ -278,6 +292,7 @@ class AccountAdminController {
         }
         long group = copyGroup(tenant);
         List<String> strategies = strategyList(body.strategies());
+        notOff(strategies);
         Long profileId = profile;
         long id = tx.execute(t -> {
             Integer taken = jdbc.queryForObject("select count(*) from acct.broker_account where tenant_id = ? and display_name = ?",
@@ -413,16 +428,21 @@ class AccountAdminController {
             }
             if (body.strategies() != null) {
                 List<String> wanted = strategyList(body.strategies());
+                notOff(wanted);
+                // the OFF strategies are not shown, so they are not in the list sent: their subscriptions stay as they are
+                // (back as they were when the owner switches them on), and a position held in one keeps its exits
+                Set<String> off = off();
                 for (String held : jdbc.queryForList("select distinct strategy_id from exec.position where "
                         + "broker_account_id = any(?) and status <> 'CLOSED'", String.class,
                         (Object) (twin == null ? new Long[] {id} : new Long[] {id, twin}))) {
                     // an unsubscribed strategy's EXIT is no longer fanned out to this account (code review 3 Nov 2026)
-                    require(wanted.contains(held), a.displayName() + " holds an open " + held + " position: keep the "
+                    require(wanted.contains(held) || off.contains(held), a.displayName() + " holds an open " + held + " position: keep the "
                             + "strategy until it is closed");
                 }
                 long group = copyGroup(a.tenantId());
                 jdbc.update("update acct.strategy_subscription set enabled = false where broker_account_id = ? "
-                        + "and copy_group_id = ? and not (strategy_id = any(?))", id, group, wanted.toArray(new String[0]));
+                        + "and copy_group_id = ? and not (strategy_id = any(?)) and not (strategy_id = any(?))", id, group,
+                        wanted.toArray(new String[0]), off.toArray(new String[0]));
                 if (!wanted.isEmpty()) {
                     fanOut.subscribe(group, id, wanted, 1.0);
                 }

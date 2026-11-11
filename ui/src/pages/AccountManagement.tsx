@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import {
   get, postJson, type AccountDetails, type CredentialProfile, type ExecMe, type ExecPosition, type LedgerRow,
-  type LiveStrategyChoice,
+  type GlobalLiveStrategies, type LiveStrategyChoice,
 } from "../api";
 import { ErrorNote, Loading, Panel, Table } from "../components/ui";
 
@@ -21,12 +21,17 @@ function useStrategyIds() {
   const live = useQuery({ queryKey: ["strategies-live"], retry: false,
     queryFn: () => get<{ live: { strategy: string; version: string }[] }>("/api/strategies") });
   const published = useQuery({ queryKey: ["exec-strategy-ids"], queryFn: () => get<string[]>("/api/execution/strategy-ids") });
+  // the owner's switches (owner-only API): an OFF strategy is not offered (user 11 Nov 2026); the published ids already
+  // leave OFF ones out, the trading-core live set does not
+  const switches = useQuery({ queryKey: ["live-strategies-global"], retry: false,
+    queryFn: () => get<GlobalLiveStrategies>("/api/execution/live-strategies") });
   return useMemo(() => {
+    const off = new Set(switches.data?.off ?? []);
     const versions = new Map<string, string>();
     (live.data?.live ?? []).forEach((s) => versions.set(s.strategy, s.version));
     const ids = new Set<string>([...versions.keys(), ...(published.data ?? [])]);
-    return [...ids].sort().map((id) => ({ id, version: versions.get(id) }));
-  }, [live.data, published.data]);
+    return [...ids].filter((id) => !off.has(id)).sort().map((id) => ({ id, version: versions.get(id) }));
+  }, [live.data, published.data, switches.data]);
 }
 
 function StrategyPicker({ value, onChange }: { value: string[]; onChange: (v: string[]) => void }) {
@@ -370,9 +375,11 @@ export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDo
  * account's name confirms. Back to DRY_RUN only with no position open.
  */
 /**
- * The owner's choice of LIVE strategies on a broker account (user, 9 Nov 2026: "As the owner I should be able to select
- * or deselect from all the available live strategies"): from the risk file's list, stored per account, audited. Only
- * the platform admin edits; everyone else sees what trades LIVE. Exits of held positions always run.
+ * The account's LIVE strategies (user, 9 Nov 2026: "As the owner I should be able to select or deselect"; 11 Nov 2026:
+ * "if I Off the strategy shouldn't appear in Follower accounts/Demo accounts, also if choose PAPER ... shouldn't make it
+ * LIVE, only if choose LIVE - Follower/Demo accounts should switch from PAPER/LIVE"). Whoever manages the account switches
+ * each of the platform owner's LIVE strategies between Paper and Live for it; the owner's Paper ones are listed as paper
+ * only; OFF ones are not shown. Stored per account, audited; exits of held positions always run.
  */
 function LiveStrategiesPicker({ accountId, onDone }: { accountId: number; onDone: (text: string, ok: boolean) => void }) {
   const client = useQueryClient();
@@ -386,7 +393,7 @@ function LiveStrategiesPicker({ accountId, onDone }: { accountId: number; onDone
       onDone(`${r.account}: LIVE strategies now ${r.effective.join(", ") || "none"}`, true);
       setPicked(null);
       client.setQueryData(["live-strategies", accountId], r);
-      ["exec-audit", "exec-accounts"].forEach((k) => client.invalidateQueries({ queryKey: [k] }));
+      ["exec-audit", "exec-accounts", "live-strategies-global"].forEach((k) => client.invalidateQueries({ queryKey: [k] }));
     },
     onError: (e) => onDone(e instanceof Error ? e.message : String(e), false),
   });
@@ -394,37 +401,65 @@ function LiveStrategiesPicker({ accountId, onDone }: { accountId: number; onDone
   if (!choice.data) return null;
   const c = choice.data;
   if (c.available.length === 0) return null;                 // a risk file without LIVE limits: nothing to choose
+  const choosable = c.choosable ?? c.available.filter((s) => !(c.off ?? []).includes(s));
+  const paperOnly = c.paperOnly ?? [];
   const current = picked ?? c.effective;
   const changed = picked != null && [...picked].sort().join() !== [...c.effective].sort().join();
-  const toggle = (s: string) => setPicked(current.includes(s) ? current.filter((x) => x !== s) : [...current, s]);
+  const set = (s: string, live: boolean) => setPicked((p) => {
+    const base = p ?? c.effective;
+    return live ? [...new Set([...base, s])] : base.filter((x) => x !== s);
+  });
+  const toLive = current.filter((s) => !c.effective.includes(s));
   return (
     <div className="rounded border border-line p-3 text-sm">
       <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">
         LIVE strategies · {c.source === "ACCOUNT" ? "this account's own choice" : c.source === "GLOBAL"
-          ? "the global list" : "risk-file default"} · {c.riskFile}
+          ? "the owner's LIVE list" : "risk-file default"} · {c.riskFile}
       </div>
-      <div className="flex flex-wrap gap-x-4 gap-y-1.5">
-        {c.available.map((s) => (
-          <label key={s} className={`flex items-center gap-1.5 ${c.canEdit ? "cursor-pointer" : "text-muted"}`}>
-            <input type="checkbox" checked={current.includes(s)} disabled={!c.canEdit || save.isPending}
-              onChange={() => toggle(s)} />
-            {s}{c.defaults.includes(s) && <span className="text-[10px] text-muted">default</span>}
-          </label>
-        ))}
+      {choosable.length === 0 && <p className="text-xs text-muted">The platform owner has no strategy on LIVE for this
+        account: everything paper-trades.</p>}
+      <div className="grid gap-x-6 gap-y-1.5 sm:grid-cols-2">
+        {choosable.map((s) => {
+          const live = current.includes(s);
+          return (
+            <div key={s} className="flex items-center justify-between gap-2">
+              <span className={live ? "font-semibold" : ""}>{s}
+                {c.defaults.includes(s) && <span className="ml-1 text-[10px] text-muted">default</span>}
+                {picked != null && live !== c.effective.includes(s) && <span className="ml-1 text-warn" title="not saved">•</span>}
+              </span>
+              <span role="group" aria-label={`${s}: paper or live on this account`}
+                className="inline-flex overflow-hidden rounded border border-line text-[11px] font-semibold">
+                {[false, true].map((on) => (
+                  <button key={String(on)} type="button" aria-pressed={live === on}
+                    disabled={!c.canEdit || save.isPending} onClick={() => set(s, on)}
+                    className={`px-2 py-0.5 disabled:cursor-not-allowed ${live === on
+                      ? (on ? "bg-down text-white" : "bg-accent text-white") : "text-muted hover:bg-panel-2"}`}>
+                    {on ? "Live" : "Paper"}
+                  </button>
+                ))}
+              </span>
+            </div>
+          );
+        })}
       </div>
+      {paperOnly.length > 0 && <p className="mt-2 text-xs text-muted">Paper only (the platform owner's choice):
+        {" "}{paperOnly.join(", ")}.</p>}
       {c.canEdit ? (
         <div className="mt-2 flex flex-wrap items-center gap-2">
           <button className={primary} disabled={!changed || save.isPending}
-            onClick={() => save.mutate({ strategies: current })}>{save.isPending ? "Saving…" : "Save LIVE strategies"}</button>
+            onClick={() => save.mutate({ strategies: current.filter((s) => choosable.includes(s)) })}>
+            {save.isPending ? "Saving…" : "Save LIVE strategies"}</button>
           {picked != null && <button className={button} disabled={save.isPending} onClick={() => setPicked(null)}>Undo</button>}
-          {c.chosen != null && <button className={button} disabled={save.isPending}
-            onClick={() => save.mutate({ reset: true })}>Follow the global list</button>}
-          <span className="text-xs text-muted">Saving here gives this account its own list (overrides the global list on
-            the Accounts page). Applies to the next LIVE entry or add; exits always run. A strategy also needs the account
-            to follow it (Strategies above).</span>
+          {c.chosen != null && <button className={button} disabled={save.isPending || picked != null}
+            onClick={() => save.mutate({ reset: true })}>Follow the owner's LIVE list</button>}
+          {changed && toLive.length > 0 && <span className="text-xs font-semibold text-down">Real money: {toLive.join(", ")}
+            {" "}will trade LIVE on {c.account} from its next entry (when the account is LIVE).</span>}
+          <span className="text-xs text-muted">Saving gives this account its own list, always within the owner's LIVE
+            strategies. Applies to the next LIVE entry or add; exits always run. A strategy also needs the account to
+            follow it (Strategies above).</span>
         </div>
       ) : (
-        <p className="mt-2 text-xs text-muted">Trades LIVE: {c.effective.join(", ") || "none"}. The platform owner chooses.</p>
+        <p className="mt-2 text-xs text-muted">Trades LIVE: {c.effective.join(", ") || "none"}.</p>
       )}
     </div>
   );
