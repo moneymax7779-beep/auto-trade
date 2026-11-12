@@ -168,13 +168,22 @@ class LiveIT {
 
     /** An ENTER of {@code strategy} in contract {@code i}, decided at {@link #CLOCK}, fanned out. */
     private void enter(long group, long sessionId, String strategy, int i) {
+        enter(group, sessionId, strategy, i, Double.NaN);
+    }
+
+    /** The same, with the signal's futures RVOL ({@code rvol_tod}; NaN: none published). */
+    private void enter(long group, long sessionId, String strategy, int i, double rvol) {
         int n = jdbc.queryForObject("select count(*) from exec.signal_decision where copy_group_id = ?", Integer.class,
                 group) + 1;
         long token = 3_000_000_000L + Long.parseLong(KEYS[i].substring(7));
+        Map<String, Double> sizing = new java.util.HashMap<>(
+                Map.of("strategy_lots", 40.0, "intended_lots", 40.0, "liquidity_lots", 1000.0, "stop_pct", 25.0));
+        if (!Double.isNaN(rvol)) {
+            sizing.put("rvol_tod", rvol);
+        }
         new SignalDecisionStore(dataSource).insert(new SignalDecision(group, sessionId, DAY, CLOCK.instant(), strategy, 2,
                 "NIFTY", SignalDecision.Action.ENTER, "PE", null, "CONFIRMED", "IT", token, KEYS[i], SYMBOLS[i], LOT, 100,
-                260_000, 500_000, 0, group + ":" + sessionId + ":" + n,
-                Map.of("strategy_lots", 40.0, "intended_lots", 40.0, "liquidity_lots", 1000.0, "stop_pct", 25.0)));
+                260_000, 500_000, 0, group + ":" + sessionId + ":" + n, sizing));
         new FanOut(dataSource).fanOut(group, DAY);
     }
 
@@ -255,6 +264,59 @@ class LiveIT {
         assertThat(held).as("the allocation's share of the signal, not one lot").isEqualTo(16L * LOT);
         assertThat(jdbc.queryForObject("select max(quantity_requested) from exec.order_execution where broker_account_id = ? "
                 + "and role = 'STOP'", Long.class, a.id())).as("the broker stop covers the whole position").isEqualTo(held);
+    }
+
+    /**
+     * v12 (A-378): at size step 40 % an entry whose signal carries RVOL >= 2.5 is taken at full size; below 2.5, or with no
+     * RVOL published, the step applies exactly as on v11. The 2 L account's budget is 1,04,000 (16 lots at 100); at RVOL
+     * 3.0 the v17 boost (1.5x on spare capital) makes it 1,56,000 = 24 lots.
+     */
+    @Test
+    void aV12EntryAtHighRvolIsFullSizeOtherwiseTheSizeStepApplies() {
+        String v12 = "../config/risk/follower-risk.v12.yaml";
+        long[] lots = new long[5];
+        Object[][] cases = {{v12, 3.0}, {V11, 3.0}, {v12, 2.0}, {V11, 2.0}, {v12, Double.NaN}};
+        for (int c = 0; c < cases.length; c++) {
+            long group = group();
+            BrokerAccount a = account(group, true, (String) cases[c][0], 40, "ma-cross");
+            enter(group, signalSession(group), "ma-cross", 0, (Double) cases[c][1]);
+            try (BrokerConnections registry = registry()) {
+                follower(registry, a).run(a, group, DAY);
+            }
+            lots[c] = jdbc.queryForObject("select coalesce(sum(quantity_open), 0) from exec.position "
+                    + "where broker_account_id = ?", Long.class, a.id()) / LOT;
+        }
+        assertThat(lots[0]).as("v12, RVOL 3.0: full size (boosted)").isEqualTo(24);
+        assertThat(lots[1]).as("v11, RVOL 3.0: 40 % of 24").isEqualTo(9);
+        assertThat(lots[2]).as("v12, RVOL 2.0: the step applies, 40 % of the boosted 24").isEqualTo(9);
+        assertThat(lots[3]).as("v11, RVOL 2.0").isEqualTo(9);
+        assertThat(lots[4]).as("v12, no RVOL published: 40 % of 16").isEqualTo(6);
+    }
+
+    /**
+     * A-378's arms as they run: PAPER followers (simulated fills, no broker) on v12 and v11 at 40 %. The same signal at
+     * RVOL 3.0 gives the v12 arm full size and the v11 arm 40 %; at RVOL 1.0 (no boost) both take 40 % of 16 lots.
+     */
+    @Test
+    void paperArmsOnV12AndV11DifferOnlyOnHighRvolEntries() {
+        String v12 = "../config/risk/follower-risk.v12.yaml";
+        Object[][] cases = {{v12, 3.0, 24L}, {V11, 3.0, 9L}, {v12, 1.0, 6L}, {V11, 1.0, 6L}};
+        for (Object[] c : cases) {
+            long group = group();
+            int n = ++seq;
+            AccountStore accounts = new AccountStore(dataSource);
+            long tenant = accounts.ensureTenant("owner");
+            long owner = accounts.ensureUser("kc-owner", "owner");
+            long id = accounts.createFollowerAccount(tenant, owner, "PAPER-A378-" + n, BrokerType.PAPER, TradeMode.PAPER,
+                    200_000, EquityMode.FIXED, DAY, (String) c[0], 40);
+            new FanOut(dataSource).withClock(CLOCK).subscribe(group, id, List.of("ma-cross"), 1.0);
+            BrokerAccount a = accounts.byId(id).orElseThrow();
+            enter(group, signalSession(group), "ma-cross", 0, (Double) c[1]);
+            new FollowerSimulator(dataSource, costs, FollowerRisk.load(Path.of(a.riskFile())), 1e9).withClock(CLOCK)
+                    .run(a, group, DAY);
+            assertThat(jdbc.queryForObject("select coalesce(sum(quantity_open), 0) from exec.position "
+                    + "where broker_account_id = ?", Long.class, id) / LOT).as(c[0] + " at RVOL " + c[1]).isEqualTo(c[2]);
+        }
     }
 
     @Test

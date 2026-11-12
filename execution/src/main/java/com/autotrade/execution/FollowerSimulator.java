@@ -504,7 +504,7 @@ public final class FollowerSimulator {
         double step = day.account.sizeStepPct();
         if (step == 0) {
             lots = 1;                                                                   // the one-lot pilot
-        } else if (step < 100) {
+        } else if (step < 100 && !risk.fullSizeAt(p.rvol())) {                          // v12 (A-378): high RVOL = full
             lots = (long) Math.floor(lots * step / 100);
             scale = scale * step / 100;
         }
@@ -634,7 +634,7 @@ public final class FollowerSimulator {
         double step = day.account.sizeStepPct();
         if (step == 0 && lots >= 1) {
             lots = 1;
-        } else if (step > 0 && step < 100) {
+        } else if (step > 0 && step < 100 && !risk.fullSizeAt(ce.rvol())) {           // v12 (A-378), as enter()
             lots = (long) Math.floor(lots * step / 100);
         }
         for (Pending leg : List.of(ce, pe)) {                            // replay depth ceiling, per leg
