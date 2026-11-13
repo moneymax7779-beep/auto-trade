@@ -365,7 +365,7 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
      * (by IV), who traded the puts, the calls' gamma × OI, the puts' gamma × OI (each side from its own IV, else the
      * other side's), [the call OI change over each of
      * {@link #WINDOWS} and since the day's first OI print, then the put OI change over the same] (null where the earlier
-     * OI is not known)]; the OI prints in the
+     * OI is not known), {@link #sincePrint the volume since each side's last OI print}]; the OI prints in the
      * window; and the
      * structure: the call wall, near ceiling, near floor and put wall (each with the step it took its strike and the
      * strike before), the ATM IV and one standard deviation of the index to the close.
@@ -409,9 +409,10 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
                     num(cPx), num(cPx0), num(pPx), num(pPx0), num(windowVolume(d.callVol, k, i, j)),
                     num(windowVolume(d.putVol, k, i, j)),
                     who(c, c0, cIv, cIv0, MIN_IV_CHANGE), who(p, p0, pIv, pIv0, MIN_IV_CHANGE), num(cG), num(pG),
-                    windowChanges(calls, puts, k, i, open)));
+                    windowChanges(calls, puts, k, i, open), sincePrint(calls, d.callVol, puts, d.putVol, k, i)));
         }
         out.put("rows", rows);
+        out.put("headsUp", headsUp(d, calls, puts, spots, step, i));
         out.put("extras", d.extras);
         int[] pr = prints(calls, puts, spots, step, j, i);
         out.put("prints", pr[0]);
@@ -675,6 +676,182 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
             }
             out.add(change(now, oiAt(side, k, open)));
         }
+        return out;
+    }
+
+    /** How far back a contract's last OI print may be for its volume since then to be read (10 minutes of steps). */
+    static final int PRINT_LOOKBACK = 600 / STEP;
+
+    /**
+     * [call volume since the calls' last OI print, the step that print came in, put volume since theirs, its step]
+     * at step {@code i} (user 13 Nov 2026, after A-383: volume between two prints tells how big the next OI change will be,
+     * corr 0.62, but not whether OI will rise or fall). The volume counts from the end of the print's step, so trades in
+     * that step after the print are left out (at most 30 s). See {@link #lastPrintStep} for contracts off the clock.
+     */
+    private static List<Object> sincePrint(Map<Double, double[]> calls, Map<Double, float[]> callVol,
+                                           Map<Double, double[]> puts, Map<Double, float[]> putVol, double k, int i) {
+        List<Object> out = new ArrayList<>(4);
+        for (int side = 0; side < 2; side++) {
+            Map<Double, double[]> oi = side == 0 ? calls : puts;
+            int last = lastPrintStep(oi.get(k), i);
+            out.add(num(volumeSince(oi, side == 0 ? callVol : putVol, k, i)));
+            out.add(last < 0 ? null : time(last));
+        }
+        return out;
+    }
+
+    /**
+     * The step a contract's OI last changed in, up to step {@code i}: -1 when it has not changed yet today and it is still
+     * within the first {@link #PRINT_LOOKBACK} steps with a pre-open OI (counted from the open), else
+     * {@link Integer#MIN_VALUE} when there is no change in the last {@link #PRINT_LOOKBACK} steps: off the exchange's clock
+     * (a strike the capture started recording mid-day, a deep strike that trades without its OI moving), which would
+     * otherwise carry everything traded since the open.
+     */
+    static int lastPrintStep(double[] carried, int i) {
+        if (carried == null) {
+            return Integer.MIN_VALUE;
+        }
+        for (int s = i; s >= 0 && s > i - PRINT_LOOKBACK; s--) {
+            if (changed(carried, s)) {
+                return s;
+            }
+        }
+        return i < PRINT_LOOKBACK && !Double.isNaN(carried[0]) ? -1 : Integer.MIN_VALUE;
+    }
+
+    /** Contracts traded since the contract's last OI print at step {@code i}; NaN when there is none to count from. */
+    private static double volumeSince(Map<Double, double[]> oi, Map<Double, float[]> vol, double k, int i) {
+        int last = lastPrintStep(oi.get(k), i);
+        return last == Integer.MIN_VALUE ? Double.NaN : windowVolume(vol, k, i, last);
+    }
+
+    /** The next-print heads-up's state at a step (see {@link #heads}). */
+    enum HeadsState { BUILDING, JUST_PRINTED, NONE }
+
+    /** A ladder cell: a strike's calls or puts, with the volume traded since their last OI print. */
+    record Cell(double strike, boolean call, double volume) {}
+
+    /** The heads-up at one step: its state, the cells judged (every cell with a reading) and the ones flagged. */
+    record Heads(HeadsState state, List<Cell> cells, List<Cell> flags) {}
+
+    static final int HEADS_MIN_CELLS = 6, HEADS_PER_SIDE = 2, HEADS_RESOLVE_STEPS = 2;
+    static final double HEADS_MEDIAN_TIMES = 3, HEADS_SHARE_OF_MAX = 0.5;
+
+    /**
+     * Where a big OI change is likely at the next print, at step {@code s} (user 13 Nov 2026, after A-383). Over the
+     * ladder's cells (ATM ± {@value #STRIKES} at that step) with a {@link #volumeSince volume since their last print}: on
+     * each side the {@value #HEADS_PER_SIDE} largest, kept when at least {@value #HEADS_MEDIAN_TIMES} × the median non-zero
+     * volume of all cells and at least half the largest. On 11 own-capture days (both indices, every third step) 44 % of
+     * the flagged cells were among their side's two largest changes at the next print, against 5 % of the other cells and
+     * 30-34 % of the two largest-OI or most-traded-today strikes per side. JUST_PRINTED when fewer than half the cells with
+     * a reading traded since their print (a print has just come in: most are at about zero, and a few hundred contracts on
+     * a strike not yet printed would pass the relative test; 12 Nov 11:24:30: 8 of 61 cells, the largest 1,235); NONE when
+     * fewer than {@value #HEADS_MIN_CELLS} traded or there is no index price.
+     */
+    static Heads heads(Day d, Map<Double, double[]> calls, Map<Double, double[]> puts, double[] spots, double step, int s) {
+        double sp = spots[s];
+        if (Double.isNaN(sp)) {
+            return new Heads(HeadsState.NONE, List.of(), List.of());
+        }
+        double atm = Math.round(sp / step) * step;
+        List<Cell> read = new ArrayList<>();
+        for (boolean call : new boolean[] {true, false}) {
+            Map<Double, double[]> oi = call ? calls : puts;
+            for (double k : oi.keySet()) {
+                if (Math.abs(k - atm) <= STRIKES * step + 1e-6) {
+                    double v = volumeSince(oi, call ? d.callVol : d.putVol, k, s);
+                    if (!Double.isNaN(v)) {
+                        read.add(new Cell(k, call, v));
+                    }
+                }
+            }
+        }
+        List<Cell> traded = read.stream().filter(c -> c.volume() > 0).toList();
+        if (read.size() >= HEADS_MIN_CELLS && traded.size() < 0.5 * read.size()) {
+            return new Heads(HeadsState.JUST_PRINTED, read, List.of());
+        }
+        if (traded.size() < HEADS_MIN_CELLS) {
+            return new Heads(HeadsState.NONE, read, List.of());
+        }
+        double[] v = traded.stream().mapToDouble(Cell::volume).sorted().toArray();
+        double median = v[v.length / 2], max = v[v.length - 1];
+        List<Cell> flags = new ArrayList<>();
+        for (boolean call : new boolean[] {true, false}) {
+            traded.stream().filter(c -> c.call() == call).sorted((a, b) -> Double.compare(b.volume(), a.volume()))
+                    .limit(HEADS_PER_SIDE)
+                    .filter(c -> c.volume() >= HEADS_MEDIAN_TIMES * median && c.volume() >= HEADS_SHARE_OF_MAX * max)
+                    .forEach(flags::add);
+        }
+        return new Heads(HeadsState.BUILDING, read, flags);
+    }
+
+    /**
+     * The heads-up at step {@code i} and how it has done today: its state and flags [strike, "c"/"p", volume]; the check
+     * of the latest one: the flags of the last step before a print against that print, read as each judged cell's OI
+     * change in the print's step and the next ({@value #HEADS_RESOLVE_STEPS} steps: a print rolls across the strikes over
+     * about 10 s, so it can run into the next step; a longer span would reach the following print), per flag [strike, side,
+     * volume, change (null: no change in this print), its rank by size among its side's changes, who traded by IV], and
+     * "complete" once both steps are in (before that the check is so far); and today's tally up to {@code i} over complete
+     * checks only, so it does not move as later steps come in: [flags among their side's two largest changes, flags], one
+     * heads-up per print (the steps between two prints repeat the same build-up).
+     */
+    static Map<String, Object> headsUp(Day d, Map<Double, double[]> calls, Map<Double, double[]> puts, double[] spots,
+                                       double step, int i) {
+        Heads[] h = new Heads[i + 1];
+        for (int s = 0; s <= i; s++) {
+            h[s] = heads(d, calls, puts, spots, step, s);
+        }
+        int hits = 0, flagged = 0;
+        Map<String, Object> check = null;
+        for (int p = 1; p <= i; p++) {
+            if (h[p].state() != HeadsState.JUST_PRINTED || h[p - 1].state() != HeadsState.BUILDING || h[p - 1].flags().isEmpty()) {
+                continue;
+            }
+            int f = p - 1;
+            // each judged cell's next OI change after step f
+            Map<Cell, double[]> next = new LinkedHashMap<>();             // cell -> [change, step]
+            for (Cell c : h[f].cells()) {
+                double[] oi = (c.call() ? calls : puts).get(c.strike());
+                for (int t = f + 1; t <= Math.min(i, f + HEADS_RESOLVE_STEPS); t++) {
+                    if (changed(oi, t)) {
+                        next.put(c, new double[] {oi[t + 1] - oi[t], t});
+                        break;
+                    }
+                }
+            }
+            boolean complete = i >= f + HEADS_RESOLVE_STEPS;
+            List<Object> cells = new ArrayList<>();
+            for (Cell c : h[f].flags()) {
+                double[] n = next.get(c);
+                Integer rank = null;
+                String who = null;
+                if (n != null) {
+                    rank = 1 + (int) next.entrySet().stream().filter(e -> e.getKey().call() == c.call()
+                            && Math.abs(e.getValue()[0]) > Math.abs(n[0])).count();
+                    double[] oi = (c.call() ? calls : puts).get(c.strike());
+                    int t = (int) n[1];
+                    Map<Double, float[]> iv = c.call() ? d.callIv : d.putIv;
+                    who = who(oi[t + 1], oi[t], at(iv, c.strike(), t), at(iv, c.strike(), f), MIN_IV_CHANGE);
+                }
+                if (complete) {
+                    flagged++;
+                    if (rank != null && rank <= HEADS_PER_SIDE) {
+                        hits++;
+                    }
+                }
+                cells.add(Arrays.asList(c.strike(), c.call() ? "c" : "p", c.volume(), n == null ? null : n[0], rank, who));
+            }
+            check = new LinkedHashMap<>();
+            check.put("flagsAt", time(f));
+            check.put("print", time(p));
+            check.put("cells", cells);
+            check.put("complete", complete);
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("state", h[i].state().name());
+        out.put("flags", h[i].flags().stream().map(c -> (Object) Arrays.asList(c.strike(), c.call() ? "c" : "p", c.volume())).toList());
+        out.put("check", check);
+        out.put("today", List.of(hits, flagged));
         return out;
     }
 
