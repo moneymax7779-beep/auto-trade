@@ -24,7 +24,8 @@ spring:
   task:
     scheduling:
       pool:
-        size: 4                       # the follower tick, the Kite session sweep and the 08:30 Telegram never wait on each other
+        size: 5                       # the follower tick, the Kite session sweep, the 08:30 Telegram and the Telegram reader's
+                                      # health check (a webhook read can take 15 s) never wait on each other
 
 server:
   address: 127.0.0.1
@@ -93,6 +94,15 @@ autotrade:
       api-base: ${AUTOTRADE_KITE_API_BASE:https://api.kite.trade}
       login-base: ${AUTOTRADE_KITE_LOGIN_BASE:https://kite.zerodha.com}
       telegram-file: ${AUTOTRADE_TELEGRAM_FILE:/app/telegram/bot.env}
+    # The command bot (Telegram controls T0 + T1, 16 Nov 2026; docs/runbooks/telegram-commands.md). Off by default: turn
+    # on in ONE deployment only (Telegram lets one reader use a bot's updates; a second gets 409), with a bot of its own
+    # (not the Mac's, not zt-tiger-v2's). alarm-file: a second bot for the reader's alarm (the command bot may be the
+    # thing in trouble); blank = the command bot's admin chat.
+    telegram:
+      commands: ${AUTOTRADE_TELEGRAM_COMMANDS:false}
+      alarm-file: ${AUTOTRADE_TELEGRAM_ALARM_FILE:}
+      confirm-seconds: 60
+      max-age-seconds: 60
     # Family members' Keycloak logins (trader workspaces, 7 Nov 2026): the autotrade-admin service account on the realm's
     # internal address (bin/keycloak/bootstrap.sh --admin-secret-file); blank url or secret = members' logins stay a
     # console job. The secret comes from the VM's root-only .env, never this file.

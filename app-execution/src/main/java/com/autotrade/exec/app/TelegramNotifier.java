@@ -33,7 +33,9 @@ import tools.jackson.databind.json.JsonMapper;
  *       with a one-time code ({@code acct.app_user.telegram_chat_id}); a person without a linked chat is skipped (the
  *       caller decides whether the admin hears instead);</li>
  *   <li>{@link #startMessages}: the {@code /start <code>} messages the bot holds, read without an offset, so nothing is
- *       consumed for anyone else reading the same bot.</li>
+ *       consumed for anyone else reading the same bot; where this worker takes commands ({@link TelegramGateway}, 16 Nov
+ *       2026) the gateway reads the bot with an offset and keeps every update in exec.telegram_update, and the
+ *       messages are read from there (asking Telegram as well would cut the gateway's long poll off with a 409).</li>
  * </ul>
  * No file or no settings: the message is logged instead. A failed send is logged, never thrown; the bot token is never
  * logged.
@@ -51,21 +53,46 @@ class TelegramNotifier {
     private final Path file;
     private final JdbcTemplate jdbc;                 // null: no database (tests): only the admin chat
     private final String api;
+    private final boolean storedUpdates;             // the gateway owns the bot's updates: /start messages from the table
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
 
     TelegramNotifier(KiteLoginProperties props) {
         this(props, null, "https://api.telegram.org");
     }
 
-    @Autowired
     TelegramNotifier(KiteLoginProperties props, DataSource dataSource) {
         this(props, dataSource, "https://api.telegram.org");
     }
 
+    @Autowired
+    TelegramNotifier(KiteLoginProperties props, DataSource dataSource, TelegramCommandProperties commands) {
+        this(props, dataSource, "https://api.telegram.org", commands != null && commands.commands());
+    }
+
     TelegramNotifier(KiteLoginProperties props, DataSource dataSource, String api) {
+        this(props, dataSource, api, false);
+    }
+
+    TelegramNotifier(KiteLoginProperties props, DataSource dataSource, String api, boolean storedUpdates) {
         this.file = Path.of(props.telegramFile());
         this.jdbc = dataSource == null ? null : new JdbcTemplate(dataSource);
         this.api = api.replaceAll("/+$", "");
+        this.storedUpdates = storedUpdates && dataSource != null;
+    }
+
+    /** The bot token (null: no bot set up). Read from the file each time, so a rotated token is used at once. */
+    String token() {
+        return settings().get("TELEGRAM_BOT_TOKEN");
+    }
+
+    /** The admin's chat id (null: none). */
+    String adminChat() {
+        return settings().get("TELEGRAM_CHAT_ID");
+    }
+
+    /** The Bot API's base address (a stub in tests). */
+    String api() {
+        return api;
     }
 
     /** To the platform admin's chat. */
@@ -138,6 +165,12 @@ class TelegramNotifier {
      * reached.
      */
     List<StartMessage> startMessages() {
+        if (storedUpdates) {
+            return jdbc.query("select chat_id, substring(text from 8) code from exec.telegram_update where kind = 'MESSAGE' "
+                    + "and chat_type = 'private' and text like '/start %' and received_at > now() - interval '24 hours' "
+                    + "order by update_id", (rs, n) -> new StartMessage(Long.toString(rs.getLong(1)),
+                    rs.getString(2).trim()));
+        }
         String token = settings().get("TELEGRAM_BOT_TOKEN");
         List<StartMessage> out = new ArrayList<>();
         if (token == null) {
