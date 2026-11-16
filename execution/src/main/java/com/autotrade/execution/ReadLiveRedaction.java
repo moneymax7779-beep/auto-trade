@@ -25,8 +25,15 @@ import tools.jackson.databind.node.ObjectNode;
  *       name: NIFTY), else replaced (a person's name in a profile);</li>
  *   <li>in every remaining string: an email address, a PAN ({@code ABCDE1234F}) and, outside id, number, token and time
  *       fields, an Indian mobile number ({@code [6-9]} and nine digits, optionally +91);</li>
+ *   <li>a string or number value that is exactly an Indian mobile number ({@code [6-9]} and nine digits, optionally
+ *       91 first) is replaced in any field (an id, number or count field too: {@code regNo}), unless the field is
+ *       clearly an order, trade or exchange id, a token, or a price, quantity, amount or time (review 16 Nov 2026);</li>
  *   <li>then the session's own values (token, sid, keys) wherever they still appear, in a body that is not JSON too.</li>
  * </ol>
+ * Contact fields are known by any word of their name too ({@code contact_no}, {@code regMobNo}, {@code phNo},
+ * {@code mob}: review 16 Nov 2026, the id/number exemption of rule 3 had let them through). A request path is redacted
+ * by {@link #redactPath}: identifier segments (the session's values, a client code, a segment after {@code user} or
+ * {@code client}) never reach the recorder's index.
  */
 public final class ReadLiveRedaction {
 
@@ -47,13 +54,18 @@ public final class ReadLiveRedaction {
             "username", "usershortname", "shortname", "fullname", "firstname", "middlename", "lastname", "displayname",
             "accountname", "holdername", "fathername", "mothername", "spousename", "avatarurl",
             // contact, tax id, birth, address
-            "email", "emailid", "mobile", "mobileno", "mobilenumber", "phone", "phoneno", "phonenumber", "pan", "panno",
+            "email", "emailid", "mobile", "mobileno", "mobilenumber", "phone", "phoneno", "phonenumber", "phno", "mob",
+            "mobno", "regmobno", "contact", "contactno", "contactnumber", "tel", "telephone", "pan", "panno",
             "pannumber", "dob", "dateofbirth", "birthdate", "address", "addressline1", "addressline2", "city", "pincode",
             "zipcode", "aadhaar", "aadhar");
 
     /** Any field whose normalised name contains one of these is never saved (bank and demat details). */
     static final List<String> FIELD_PARTS = List.of("bank", "ifsc", "micr", "demat", "nominee", "email", "mobile",
-            "phone", "password", "secret", "aadha");
+            "phone", "contact", "password", "secret", "aadha");
+
+    /** Any word of a field's name ({@code regMobNo}: reg, mob, no) that makes it a contact field. */
+    static final Set<String> CONTACT_WORDS = Set.of("mob", "mobile", "ph", "phone", "contact", "tel", "telephone",
+            "whatsapp");
 
     /** Beside one of these (normalised), {@code name} names the instrument and is kept. */
     static final Set<String> INSTRUMENT_FIELDS = Set.of("tradingsymbol", "instrumenttoken", "instrumentkey",
@@ -63,6 +75,21 @@ public final class ReadLiveRedaction {
     private static final Pattern EMAIL = Pattern.compile("[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}");
     private static final Pattern PAN = Pattern.compile("\\b[A-Z]{5}[0-9]{4}[A-Z]\\b");
     private static final Pattern MOBILE = Pattern.compile("(?<![0-9])(?:\\+?91[ -]?)?[6-9][0-9]{9}(?![0-9])");
+    /** A whole value that is an Indian mobile number. */
+    private static final Pattern EXACT_MOBILE = Pattern.compile("(?:\\+?91[ -]?)?[6-9][0-9]{9}");
+    /**
+     * A field that is clearly an order, trade or exchange id, a token, or a price, quantity, amount or time (normalised
+     * name): its ten-digit values stay (rule 3).
+     */
+    private static final Pattern SAFE_FIELD = Pattern.compile(".*(order|ordno|ordid|trade(?!r)|trdid|trdno|fillid|flid|"
+            + "fillno|exchange|exch|token|price|prc|qty|quantity|time|date|amount|amt|value|margin|cash|balance|pnl|"
+            + "premium|strike|lotsize|lotsz|ltp|avg|charges|brokerage).*|(tok|ts|tm|dt|val)");
+    /** A client code, user id or PAN in a path: upper-case letters and digits, both, 5 to 10 characters. */
+    private static final Pattern CODE = Pattern.compile("(?=[A-Z0-9]*[A-Z])(?=[A-Z0-9]*[0-9])[A-Z0-9]{5,10}");
+    /** Path segments after which the next segment names a person or an account. */
+    private static final Set<String> IDENTITY_SEGMENTS = Set.of("user", "users", "client", "clients", "ucc", "account",
+            "accounts", "customer", "customers", "uid", "userid", "clientid", "clientcode", "holder", "profile",
+            "profiles");
     /**
      * Words of a field name ({@code exchange_order_id}, {@code nOrdNo}, {@code fldQty}) that make its numeric-looking
      * strings ids, counts or times, never a phone number; a word ending in {@code id} or {@code qty} counts too.
@@ -114,6 +141,11 @@ public final class ReadLiveRedaction {
         if (FIELDS.contains(n)) {
             return true;
         }
+        for (String word : WORDS.split(field)) {
+            if (CONTACT_WORDS.contains(word.toLowerCase(Locale.ROOT))) {
+                return true;
+            }
+        }
         for (String part : FIELD_PARTS) {
             if (n.contains(part)) {
                 return true;
@@ -123,6 +155,11 @@ public final class ReadLiveRedaction {
     }
 
     private static void scrub(JsonNode node) {
+        scrub(node, null);
+    }
+
+    /** @param field the name of the field holding this node (an array's elements are judged by it), null at the top */
+    private static void scrub(JsonNode node, String field) {
         if (node instanceof ObjectNode o) {
             List<String> names = new ArrayList<>();
             o.properties().forEach(e -> names.add(e.getKey()));
@@ -133,27 +170,44 @@ public final class ReadLiveRedaction {
                     o.put(name, REDACTED);
                 } else if (value != null && value.isString()) {
                     String text = value.asString();
-                    String clean = patterns(text, !numericField(name));
+                    String clean = exactMobile(text, name) ? REDACTED : patterns(text, !numericField(name));
                     if (!clean.equals(text)) {
                         o.put(name, clean);
                     }
+                } else if (value != null && value.isIntegralNumber()) {
+                    if (exactMobile(value.asString(), name)) {
+                        o.put(name, REDACTED);
+                    }
                 } else {
-                    scrub(value);
+                    scrub(value, name);
                 }
             }
         } else if (node instanceof ArrayNode a) {
             for (int i = 0; i < a.size(); i++) {
                 JsonNode v = a.get(i);
                 if (v != null && v.isString()) {
-                    String clean = patterns(v.asString(), true);
+                    String clean = exactMobile(v.asString(), field) ? REDACTED : patterns(v.asString(), true);
                     if (!clean.equals(v.asString())) {
                         a.set(i, a.stringNode(clean));
                     }
+                } else if (v != null && v.isIntegralNumber()) {
+                    if (exactMobile(v.asString(), field)) {
+                        a.set(i, a.stringNode(REDACTED));
+                    }
                 } else {
-                    scrub(v);
+                    scrub(v, field);
                 }
             }
         }
+    }
+
+    /**
+     * Whether {@code value} is exactly an Indian mobile number in a field that is not clearly an order, trade or exchange
+     * id, a token, a price, a quantity, an amount or a time (rule 3).
+     */
+    static boolean exactMobile(String value, String field) {
+        return value != null && EXACT_MOBILE.matcher(value.trim()).matches()
+                && (field == null || !SAFE_FIELD.matcher(normalise(field)).matches());
     }
 
     static boolean numericField(String field) {
@@ -185,6 +239,54 @@ public final class ReadLiveRedaction {
                     ? name + "=" + REDACTED : pair);
         }
         return redact(out.toString(), values);
+    }
+
+    /**
+     * A request path ({@code /user/AB1234/orders}) without identifiers: a segment that is (or holds) one of the session's
+     * {@code values} (its token, keys, the client's own id), a client code, user id or PAN (upper-case letters and
+     * digits, 5 to 10 characters; our own order tags stay), a segment after {@code user}, {@code client},
+     * {@code account}, ... that holds a digit or is an upper-case code, and an email address, PAN or mobile number
+     * anywhere. Order ids (all digits) stay, so a recorded order-detail path still says which order it read.
+     */
+    public static String redactPath(String path, List<String> values) {
+        if (path == null) {
+            return null;
+        }
+        String[] parts = path.split("/", -1);
+        boolean afterIdentity = false;
+        for (int i = 0; i < parts.length; i++) {
+            String raw = parts[i];
+            if (raw.isEmpty()) {
+                continue;
+            }
+            String seg;
+            try {
+                seg = java.net.URLDecoder.decode(raw, java.nio.charset.StandardCharsets.UTF_8);
+            } catch (IllegalArgumentException e) {
+                seg = raw;
+            }
+            boolean ourTag = Canary.OUR_TAG.matcher(seg).matches();
+            boolean mask = known(seg, values) || (!ourTag && CODE.matcher(seg).matches())
+                    || (afterIdentity && !ourTag && (seg.chars().anyMatch(Character::isDigit)
+                    || seg.matches("[A-Z0-9]{4,}")))
+                    || EXACT_MOBILE.matcher(seg).matches();
+            afterIdentity = IDENTITY_SEGMENTS.contains(normalise(seg));
+            parts[i] = mask ? REDACTED : patterns(raw, true);
+        }
+        return String.join("/", parts);
+    }
+
+    private static boolean known(String segment, List<String> values) {
+        if (values == null) {
+            return false;
+        }
+        for (String v : values) {
+            if (v != null && v.length() >= 3 && (segment.equalsIgnoreCase(v) || (v.length() >= 4
+                    && segment.toLowerCase(Locale.ROOT).contains(v.toLowerCase(Locale.ROOT))))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private static String patterns(String text, boolean phones) {
