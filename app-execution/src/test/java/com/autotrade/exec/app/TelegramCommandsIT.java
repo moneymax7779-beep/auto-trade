@@ -136,7 +136,7 @@ class TelegramCommandsIT {
         String api = "http://127.0.0.1:" + stub.getAddress().getPort();
         KiteLoginProperties kite = new KiteLoginProperties(null, null, null, null, null, file.toString());
         notifier = new TelegramNotifier(kite, dataSource, api, true);
-        TelegramCommandProperties props = new TelegramCommandProperties(true, null, 60, 60);
+        TelegramCommandProperties props = new TelegramCommandProperties(true, null, 60, 60, false);
         TelegramCommands.Actions fake = new TelegramCommands.Actions() {
             @Override
             public List<String> flatten(long accountId, String actor, String reason) {
@@ -396,6 +396,32 @@ class TelegramCommandsIT {
             assertThat(status(id)).isEqualTo("REFUSED");
             assertThat(actions).as("a DRY_RUN card never flattens a PAPER (or LIVE) account").isEmpty();
             assertThat(lastCall("editMessageText").path("text").asString()).contains("is PAPER now, the card said DRY_RUN");
+        } finally {
+            jdbc.update("update acct.broker_account set trade_mode = 'DRY_RUN' where id = ?", aliceAccount);
+        }
+    }
+
+    @Test
+    void nothingIsSoldOnALiveAccountUnlessLiveExitsIsOnButAKillStillWorks() {
+        // review 16 Nov 2026: the plan's LIVE gate was not in the code; a card shown for a LIVE account was obeyed
+        long card = card("/flatten ALICE-1");
+        String nonce = jdbc.queryForObject("select nonce from exec.telegram_command where id = ?", String.class, card);
+        jdbc.update("update acct.broker_account set trade_mode = 'LIVE' where id = ?", aliceAccount);
+        try {
+            int before = commandCount();
+            assertThat(deliver(message(ALICE_CHAT, ALICE_CHAT, "private", "/flatten ALICE-1", 0))).isEqualTo("FORBIDDEN");
+            assertThat(lastSent()).contains("ALICE-1 is LIVE");
+            assertThat(deliver(message(ALICE_CHAT, ALICE_CHAT, "private", "/exit " + position, 0))).isEqualTo("FORBIDDEN");
+            assertThat(commandCount()).isEqualTo(before);
+            jdbc.update("update exec.telegram_command set trade_mode = 'LIVE' where id = ?", card);
+            deliver(callback(ALICE_CHAT, ALICE_CHAT, "c:" + card + ":" + nonce));
+            assertThat(status(card)).as("a LIVE card shown before the gate is refused at the tap too").isEqualTo("REFUSED");
+            assertThat(actions).isEmpty();
+            long kill = card("/kill ALICE-1");
+            String killNonce = jdbc.queryForObject("select nonce from exec.telegram_command where id = ?", String.class, kill);
+            deliver(callback(ALICE_CHAT, ALICE_CHAT, "c:" + kill + ":" + killNonce));
+            assertThat(status(kill)).isEqualTo("DONE");
+            assertThat(engaged()).isNotEmpty();
         } finally {
             jdbc.update("update acct.broker_account set trade_mode = 'DRY_RUN' where id = ?", aliceAccount);
         }

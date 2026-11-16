@@ -174,6 +174,13 @@ public final class ChartOrderEngine implements AutoCloseable {
             act(o, event, price, at);
         } catch (RuntimeException e) {
             log.warn("chart order #{}: {} failed: {}", o.id(), event, e.toString());
+            if (event == ChartLines.Event.STOP || event == ChartLines.Event.TARGET) {
+                // review 16 Nov 2026: marked acted before it ran, a failed exit (a database error on OPEN -> EXITING) was
+                // never tried again at that version, so the chart stop was off for the day; tried again EXIT_RETRY later.
+                // An entry is not: a missed entry is the safe side
+                retryAfter.put(o.id(), at.plus(EXIT_RETRY));
+                acted.remove(o.id(), o.version());
+            }
         }
     }
 
@@ -182,7 +189,7 @@ public final class ChartOrderEngine implements AutoCloseable {
             case ENTER -> enter(o, price, at);
             case VOID_STOP_FIRST -> end(o, "VOID", "the index reached the stop line (" + price + ") before the entry");
             case VOID_CHASE -> end(o, "VOID", "the first tick past the entry was " + price + ", beyond the no-chase limit of "
-                    + o.noChase() + " points: not chased");
+                    + o.noChase() + " points or at the target: not chased");
             case STOP -> exit(o, "STOP", price, at);
             case TARGET -> exit(o, "TARGET", price, at);
             default -> { }

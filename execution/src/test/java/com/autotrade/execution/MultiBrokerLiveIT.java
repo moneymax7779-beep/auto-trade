@@ -40,6 +40,7 @@ import com.autotrade.broker.Quote;
 import com.autotrade.groww.GrowwConfig;
 import com.autotrade.groww.GrowwSimulator;
 import com.autotrade.kotak.KotakSimulator;
+import com.autotrade.zerodha.KiteSimulator;
 import com.autotrade.upstox.orders.UpstoxConfig;
 import com.autotrade.upstox.orders.UpstoxSimulator;
 import com.zaxxer.hikari.HikariConfig;
@@ -225,6 +226,67 @@ class MultiBrokerLiveIT {
     }
 
     /**
+     * Holds the session lookup of the threads whose name starts with {@code holder} (they hold the connection's session
+     * lock there, about to build its gateway) until {@link #addListenerWhileTheGatewayIsBuilt} releases it.
+     */
+    private static final class HeldSessions implements BrokerSessions {
+        final java.util.concurrent.CountDownLatch inside = new java.util.concurrent.CountDownLatch(1);
+        final java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        private final String holder;
+        private final BrokerSessions.Access access;
+
+        HeldSessions(String holder, BrokerSessions.Access access) {
+            this.holder = holder;
+            this.access = access;
+        }
+
+        @Override
+        public Optional<BrokerSessions.Access> access(BrokerAccount account) {
+            if (Thread.currentThread().getName().startsWith(holder)) {
+                inside.countDown();
+                try {
+                    release.await(30, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            }
+            return Optional.of(access);
+        }
+    }
+
+    /**
+     * {@code onUpdate} on another thread while the holder of {@code held} is inside the session lock, about to build the
+     * gateway: once that thread waits on the connection's own monitor ({@code monitor}, its class name), the holder is let
+     * go, builds the gateway and hands it the listeners in the list; then {@code onUpdate} goes on.
+     */
+    private static void addListenerWhileTheGatewayIsBuilt(BrokerConnection connection, HeldSessions held, String monitor,
+                                                          java.util.function.Consumer<OrderUpdate> listener)
+            throws InterruptedException {
+        try {
+            assertThat(held.inside.await(10, java.util.concurrent.TimeUnit.SECONDS)).as("the holder is inside the session "
+                    + "lock").isTrue();
+            Thread adding = Thread.ofPlatform().daemon().name("adds-listener").start(() -> connection.onUpdate(listener));
+            java.lang.management.ThreadMXBean threads = java.lang.management.ManagementFactory.getThreadMXBean();
+            java.lang.management.ThreadInfo info = null;
+            for (long until = System.nanoTime() + 10_000_000_000L; System.nanoTime() < until && adding.isAlive(); ) {
+                info = threads.getThreadInfo(adding.threadId());
+                if (info != null && info.getThreadState() == Thread.State.BLOCKED && info.getLockName() != null
+                        && info.getLockName().contains(monitor)) {
+                    break;
+                }
+                Thread.sleep(1);
+            }
+            assertThat(info).isNotNull();
+            assertThat(info.getLockName()).as("onUpdate waits on the session's lock").contains(monitor);
+            held.release.countDown();
+            adding.join(10_000);
+            assertThat(adding.isAlive()).isFalse();
+        } finally {
+            held.release.countDown();                           // never leave the holder parked
+        }
+    }
+
+    /**
      * The race behind the Kotak case's 1-in-3 failure (16 Nov 2026): {@link #live} starts the scrip-master warm-up on its
      * own thread, and that thread's first session call builds the gateway and hands it every listener added so far. A
      * listener added at that moment (put in the list, then the gateway checked under the lock) was handed to the gateway
@@ -239,42 +301,47 @@ class MultiBrokerLiveIT {
                     "PE", LOT, 0.05));
             kotak.quote(KEY, 99.5, 6500, 100.0, 6500, 99.8);
             KotakSimulator.Session first = kotak.login();
-            BrokerSessions.Access access = new BrokerSessions.Access("member-key", first.token(), Map.of(
-                    KotakDryRunAdapter.SID, first.sid(), KotakDryRunAdapter.BASE_URL, kotak.baseUri().toString()));
-            java.util.concurrent.CountDownLatch warmUpInside = new java.util.concurrent.CountDownLatch(1);
-            java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
-            BrokerSessions sessions = a -> {
-                if (Thread.currentThread().getName().startsWith("kotak-live-warmup-")) {
-                    warmUpInside.countDown();                   // the warm-up holds the session's lock from here
-                    try {
-                        release.await();
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                    }
-                }
-                return Optional.of(access);
-            };
-            KotakDryRunAdapter adapter = new KotakDryRunAdapter(dataSource, 1e9, sessions, kotak::book,
-                    ReadLiveProbe.Settings.OFF, loopbackFor(account));
-            BrokerAdapter.Live live = adapter.live(account, ONE_LOT);
+            HeldSessions held = new HeldSessions("kotak-live-warmup-", new BrokerSessions.Access("member-key",
+                    first.token(), Map.of(KotakDryRunAdapter.SID, first.sid(), KotakDryRunAdapter.BASE_URL,
+                            kotak.baseUri().toString())));
+            BrokerAdapter.Live live = new KotakDryRunAdapter(dataSource, 1e9, held, kotak::book,
+                    ReadLiveProbe.Settings.OFF, loopbackFor(account)).live(account, ONE_LOT);
             assertThat(live.isRefused()).as(live.description()).isFalse();
-            assertThat(warmUpInside.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
-
             List<OrderUpdate> updates = new java.util.concurrent.CopyOnWriteArrayList<>();
-            Thread adding = Thread.ofPlatform().start(() -> live.connection().onUpdate(updates::add));
-            long until = System.nanoTime() + 10_000_000_000L;
-            while (adding.getState() != Thread.State.BLOCKED && adding.isAlive() && System.nanoTime() < until) {
-                Thread.onSpinWait();                            // onUpdate waits for the session's lock
-            }
-            assertThat(adding.getState()).isEqualTo(Thread.State.BLOCKED);
-            release.countDown();                                // the warm-up builds the gateway, then onUpdate goes on
-            adding.join(10_000);
-            assertThat(adding.isAlive()).isFalse();
+            addListenerWhileTheGatewayIsBuilt(live.connection(), held, "KotakSession", updates::add);
 
             live.connection().place(buy("F3E1", LOT));
             assertThat(live.connection().poll()).isEqualTo(1);
             assertThat(updates).singleElement().satisfies(u -> {
                 assertThat(u.clientOrderId()).isEqualTo("F3E1");
+                assertThat(u.status()).isEqualTo(OrderStatus.FILLED);
+                assertThat(u.lastFillQuantity()).isEqualTo(LOT);
+            });
+        }
+    }
+
+    /** The same race on the Kite connection (same pattern; it has no warm-up thread, so another call builds the gateway). */
+    @Test
+    void kiteListenerAddedWhileAnotherCallBuildsTheGatewayHearsEachReportOnce() throws Exception {
+        BrokerAccount account = liveAccount(BrokerType.ZERODHA, "AB4321");
+        try (KiteSimulator kite = new KiteSimulator(0, "real-key", "real-secret", 1_500)) {
+            kite.list(new KiteSimulator.Listing(47168, "NFO", "NIFTY26X0323100PE", "NIFTY", DAY.plusDays(2).toString(),
+                    23100, "PE", LOT, 0.05));
+            kite.depth(KEY, List.of(new Quote.Level(99.5, 6500)), List.of(new Quote.Level(100.0, 6500)), 99.8);
+            kite.funds(800_000);
+            HeldSessions held = new HeldSessions("reads-the-book", new BrokerSessions.Access("real-key", "day-token"));
+            BrokerAdapter.Live live = new ZerodhaDryRunAdapter(dataSource, 1e9, held, kite.baseUri(),
+                    loopbackFor(account)).live(account, ONE_LOT);
+            assertThat(live.isRefused()).as(live.description()).isFalse();
+            Thread reads = Thread.ofPlatform().daemon().name("reads-the-book").start(() -> live.connection().orders());
+            List<OrderUpdate> updates = new java.util.concurrent.CopyOnWriteArrayList<>();
+            addListenerWhileTheGatewayIsBuilt(live.connection(), held, "KiteReads", updates::add);
+            reads.join(10_000);
+
+            live.connection().place(buy("F4E1", LOT));
+            assertThat(live.connection().poll()).isEqualTo(1);
+            assertThat(updates).singleElement().satisfies(u -> {
+                assertThat(u.clientOrderId()).isEqualTo("F4E1");
                 assertThat(u.status()).isEqualTo(OrderStatus.FILLED);
                 assertThat(u.lastFillQuantity()).isEqualTo(LOT);
             });
@@ -429,6 +496,33 @@ class MultiBrokerLiveIT {
             }
             assertThat(kotak.requests() + upstox.requests() + groww.requests()).as("nothing reached a broker").isZero();
         }
+    }
+
+    @Test
+    void aLiveAccountWithAPositionRefusedItsRouteIsKilledAndAlerted() throws Exception {
+        // review 16 Nov 2026: only the egress refusal engaged the kill switch and alerted; the broker taken out of the
+        // LIVE setting (and every other refusal) left a LIVE account holding a position with no exits and no word
+        BrokerAccount kite = liveAccount(BrokerType.ZERODHA, "AB7777");
+        long batch = jdbc.queryForObject("insert into exec.trade_batch (tenant_id, source, idempotency_key, status) values "
+                + "(?, 'MANUAL', ?, 'DONE') returning id", Long.class, kite.tenantId(), "stranded-" + kite.id());
+        long intent = jdbc.queryForObject("insert into exec.trade_intent (tenant_id, trade_batch_id, broker_account_id, "
+                + "broker_type, execution_mode, strategy_id, priority, underlying, action, option_side, state, "
+                + "idempotency_key) values (?, ?, ?, 'ZERODHA', 'LIVE', 'ma-cross', 1, 'NIFTY', 'ENTER', 'PE', "
+                + "'EXECUTED', ?) returning id", Long.class, kite.tenantId(), batch, kite.id(), "stranded-" + kite.id());
+        jdbc.update("insert into exec.position (tenant_id, broker_account_id, entry_trade_intent_id, strategy_id, underlying, "
+                + "option_side, instrument_token, instrument_key, symbol, quantity_open, average_entry, opened_at, status) "
+                + "values (?, ?, ?, 'ma-cross', 'NIFTY', 'PE', 47168, ?, ?, 65, 100, now(), 'OPEN')", kite.tenantId(),
+                kite.id(), intent, KEY, SYMBOL);
+        List<BrokerAdapter> adapters = List.of(new ZerodhaDryRunAdapter(dataSource, 1e9));
+        try (BrokerConnections registry = new BrokerConnections(dataSource, 1e9, adapters)) {
+            registry.liveBrokers(LiveBrokers.of("", adapters)::live);
+            BrokerConnections.Route route = registry.route(kite, FollowerRisk.load(Path.of(V7)));
+            assertThat(route.venue()).isNull();
+        }
+        assertThat(new KillSwitches(dataSource).engaged(kite, "ma-cross", KEY)).startsWith("ACCOUNT: LIVE ROUTE: ")
+                .contains("ZERODHA is not configured LIVE on this worker");
+        assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? and action = "
+                + "'LIVE_ROUTE_REFUSED'", Integer.class, kite.id())).isEqualTo(1);
     }
 
     @Test

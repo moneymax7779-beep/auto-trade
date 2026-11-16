@@ -262,6 +262,25 @@ class CanaryTest {
 
     @ParameterizedTest
     @EnumSource(Broker.class)
+    void aTagThatDoesNotRoundTripIsCancelledByItsOrderIdAndReportedAsALeftover(Broker b) throws Exception {
+        // review 16 Nov 2026: the place succeeded, the book did not show the tag: the order was left working, unreported
+        Venue v = start(b);
+        Hooked hooked = new Hooked(v.gateway());
+        hooked.tagsLost = true;
+        Recorded journal = new Recorded();
+        Canary.Report r = new Canary(live(hooked), contract(), FAST, journal, Clock.systemUTC()).run();
+
+        assertThat(r.result()).isEqualTo(Canary.Result.FAIL);
+        assertThat(r.message()).contains("did not round-trip").contains("may still be working at the broker");
+        assertThat(names(r)).contains("SECURE_LOOKUP", "SECURE_CANCEL");
+        assertThat(r.leftWorking()).isTrue();
+        assertThat(r.leftover()).as("the kill switch and the alert").isTrue();
+        assertThat(journal.leftovers).singleElement().isEqualTo(r);
+        assertThat(v.gateway().orders()).as("cancelled at the broker").noneMatch(o -> !o.status().isTerminal());
+    }
+
+    @ParameterizedTest
+    @EnumSource(Broker.class)
     void theBrokersRefusalOfTheBuyFailsAndLeavesNothing(Broker b) throws Exception {
         Venue v = start(b);
         v.failPlace().accept("place");
@@ -305,6 +324,9 @@ class CanaryTest {
         assertThat(refused(v)).contains("no two-sided quote");
         // a book so low that the canary's prices could not stay below the bid and the ask
         v.book().quote(KEY, 0.05, 6500, 0.10, 6500, 0.05);
+        assertThat(refused(v)).contains("would not stay below");
+        // review 16 Nov 2026: bid 0.10: buy 0.05, modify 0.10 = the bid itself (it would join the best bid)
+        v.book().quote(KEY, 0.10, 6500, 0.15, 6500, 0.10);
         assertThat(refused(v)).contains("would not stay below");
         v.book().quote(KEY, 99.5, 6500, 100.0, 6500, 99.8);
         // a working order of ours in the contract
@@ -395,6 +417,8 @@ class CanaryTest {
         Runnable afterModify = () -> { };
         /** Orders the book shows beside the broker's own (another contract's). */
         final List<BrokerOrder> extra = new ArrayList<>();
+        /** The book does not echo our tags: no order is found by its tag. */
+        boolean tagsLost;
 
         Hooked(BrokerConnection g) {
             this.g = g;
@@ -408,12 +432,20 @@ class CanaryTest {
         @Override public Quote quote(String k) { return g.quote(k); }
         @Override
         public List<BrokerOrder> orders() {
-            List<BrokerOrder> all = new ArrayList<>(g.orders());
+            List<BrokerOrder> all = new ArrayList<>();
+            for (BrokerOrder o : g.orders()) {
+                all.add(!tagsLost ? o : new BrokerOrder(null, o.brokerOrderId(), o.instrumentKey(), o.symbol(), o.side(),
+                        o.type(), o.quantity(), o.filledQuantity(), o.averagePrice(), o.limitPrice(), o.triggerPrice(),
+                        o.status(), o.rawStatus(), o.message(), o.updatedAt(), o.product()));
+            }
             all.addAll(extra);
             return all;
         }
 
-        @Override public java.util.Optional<BrokerOrder> orderByTag(String t) { return g.orderByTag(t); }
+        @Override
+        public java.util.Optional<BrokerOrder> orderByTag(String t) {
+            return tagsLost ? java.util.Optional.empty() : g.orderByTag(t);
+        }
         @Override public List<BrokerTrade> trades() { return g.trades(); }
         @Override public List<BrokerPosition> positions() { return g.positions(); }
         @Override public int poll() { return g.poll(); }

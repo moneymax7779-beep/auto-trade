@@ -93,6 +93,12 @@ class BrokerRulesTest {
         assertThatThrownBy(() -> BrokerRules.load(outside)).hasMessageContaining("outside 15:00-15:30");
         Path noProduct = write(rule("KOTAK_NEO", null, "15:05", "15:15", "15:20"));
         assertThatThrownBy(() -> BrokerRules.load(noProduct)).hasMessageContaining("product");
+        // review 16 Nov 2026: the Kite adapter takes its product from here; a carry product was accepted
+        Path nrml = write(rule("ZERODHA", "NRML", "15:10", "15:20", "15:26"));
+        assertThatThrownBy(() -> BrokerRules.load(nrml)).hasMessageContaining("product NRML is not ZERODHA's intraday "
+                + "product MIS");
+        Path upstoxD = write(rule("UPSTOX", "D", "15:10", "15:20", "15:25"));
+        assertThatThrownBy(() -> BrokerRules.load(upstoxD)).hasMessageContaining("intraday product I");
         Path missing = write("""
                   ZERODHA: {product: MIS, last_live_entry: "15:10", square_off: "15:20", broker_auto_square_off: "15:26",
                             broker_auto_square_off_status: CONFIRMED, costs_file: "%s"}

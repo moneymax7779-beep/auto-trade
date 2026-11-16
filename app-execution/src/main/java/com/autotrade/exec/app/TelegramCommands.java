@@ -21,6 +21,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import com.autotrade.account.AccountStore;
 import com.autotrade.account.BrokerAccount;
+import com.autotrade.account.TradeMode;
 import com.autotrade.execution.KillSwitches;
 
 import tools.jackson.databind.JsonNode;
@@ -446,6 +447,12 @@ class TelegramCommands {
                 if (verb.equals("EXIT") && (positionId == null || openPosition(c, positionId) == null)) {
                     yield "Position " + positionId + " is not open.";
                 }
+                // review 16 Nov 2026: the plan's LIVE gate. Nothing here sells on a LIVE account until the user turns
+                // autotrade.execution.telegram.live-exits on; a kill (it only stops entries) works on LIVE either way
+                if (!verb.equals("KILL_ACCOUNT") && account.tradeMode() == TradeMode.LIVE && !props.liveExits()) {
+                    yield account.displayName() + " is LIVE: selling on a LIVE account over Telegram is off. /kill it here, "
+                            + "then exit on the web or in your broker's app.";
+                }
                 yield null;
             }
             default -> "unknown command";
@@ -464,8 +471,8 @@ class TelegramCommands {
                     + "nothing is sold (use /flatten or /exit). Release on the web only.";
             case "FLATTEN" -> {
                 StringBuilder s = new StringBuilder("FLATTEN " + a.displayName() + " (" + a.tradeMode() + "), workspace "
-                        + tenantName(a.tenantId()) + ".\nKill switch on, broker stops cancelled, then every open position "
-                        + "sold now:");
+                        + tenantName(a.tenantId()) + ".\nKill switch on, broker stops cancelled, then every position "
+                        + "auto-trade opened sold now (trades you placed yourself in the broker's app are NOT touched):");
                 List<Map<String, Object>> open = jdbc.queryForList("select id, symbol, quantity_open, average_entry from "
                         + "exec.position where broker_account_id = ? and status <> 'CLOSED' order by id", a.id());
                 open.forEach(p -> s.append("\n  #").append(p.get("id")).append(' ').append(p.get("symbol")).append(" qty ")
@@ -623,7 +630,12 @@ class TelegramCommands {
                             c.actor()) + " engaged on " + tenantName(tenant) + "; open positions: " + tenantOpen(tenant));
                     case "KILL_ACCOUNT" -> List.of("switch #" + kills.engage(a.tenantId(), "ACCOUNT", a.id(), null, null,
                             reason, c.actor()) + " engaged on " + a.displayName() + "; open positions: " + openCount(a.id()));
-                    case "FLATTEN" -> actions.flatten(a.id(), c.actor(), reason);
+                    case "FLATTEN" -> {
+                        // review 16 Nov 2026: the switch first, here (idempotent), so entries stop even when the worker
+                        // has not started and the flatten itself can do nothing yet
+                        kills.engageAccount(a, "FLATTEN by " + c.actor() + ": " + reason, c.actor());
+                        yield actions.flatten(a.id(), c.actor(), reason);
+                    }
                     case "EXIT" -> actions.exitPosition(a.id(), positionId, c.actor());
                     default -> throw new IllegalStateException(verb);
                 };

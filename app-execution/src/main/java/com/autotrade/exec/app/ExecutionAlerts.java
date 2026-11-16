@@ -36,6 +36,7 @@ class ExecutionAlerts {
             "DAILY_LOSS_STOP",                    // v11: the daily loss with open positions reached: everything sold
             "NET_SHORT",                          // 16 Nov 2026: a contract net short across products (hand NRML sell)
             "EGRESS_REFUSED",                     // 16 Nov 2026: a LIVE account with positions has no route (its address)
+            "LIVE_ROUTE_REFUSED",                 // review 16 Nov 2026: the same for any other LIVE refusal
             "CANARY_LEFTOVER");                   // 16 Nov 2026: a canary left a fill or an order at the broker
 
     /** One message, and the member workspace it is also for (null: the admin's only). */

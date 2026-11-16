@@ -38,8 +38,8 @@ import com.autotrade.broker.Quote;
  *       canary's working buy as a contract held, so a canary beside a real position could refuse a real entry at
  *       {@code maxOpenPositions});</li>
  *   <li>QUOTE: a two-sided quote, fresh; the buy price is {@code max(tick, bid x 0.5)} rounded down to the tick and the
- *       modify price one step lower (or one tick higher at the floor); both must stay below the ask and at or below the
- *       bid, else REFUSED (never marketable);</li>
+ *       modify price one step lower (or one tick higher at the floor); both must stay below the ask and below the bid
+ *       (review 16 Nov 2026: at the bid it joins the best bid and can fill), else REFUSED (never marketable);</li>
  *   <li>PLACE: one lot, LIMIT BUY, tagged {@code F0C<yyMMddHHmmssSSS>} (18 characters, its sell-back 19; our OMS tag scheme {@code F\d+[A-Z].*}: intent 0,
  *       role C, so the reconciler and every gateway read it back as ours, and no real intent has id 0);</li>
  *   <li>READ_BY_TAG: found in the order book by its tag (the tag round-trip), one lot, at our price;</li>
@@ -175,6 +175,8 @@ public final class Canary {
     private boolean securing;
     /** The place's outcome is unknown (a timeout the gateway could not resolve by tag). */
     private boolean placeUnknown;
+    /** The broker took the place (it answered with an order id the gateway keeps by tag). */
+    private boolean placeReturned;
     private final List<String> notes = new ArrayList<>();
 
     /**
@@ -312,6 +314,7 @@ public final class Canary {
         step("PLACE", () -> {
             placeSent = true;
             broker.place(buy);
+            placeReturned = true;
             return tag;
         }, t -> new Seen(true, null, null, "LIMIT BUY " + contract.lotSize() + " " + contract.symbol() + " at "
                 + price(buyPrice) + " (bid " + bid + ", ask " + ask + ")"));
@@ -387,7 +390,7 @@ public final class Canary {
         modifiedPrice = lower < buyPrice ? lower : buyPrice - tick >= tick ? floorToTick(buyPrice - tick)
                 : floorToTick(buyPrice + tick);
         for (double p : new double[] {buyPrice, modifiedPrice}) {
-            if (!(p < ask) || p > bid) {
+            if (!(p < ask) || !(p < bid)) {
                 throw new Stop(Result.REFUSED, "REFUSED: the canary's prices " + price(buyPrice) + " / "
                         + price(modifiedPrice) + " would not stay below the bid " + bid + " and the ask " + ask
                         + " (choose a contract with a wider price)");
@@ -417,7 +420,23 @@ public final class Canary {
             // the place was refused or never reached the broker (the book, read a few times, does not show it); a place of
             // unknown outcome may still show up late, so it is reported as possibly working
             notes.add("no order with tag " + tag + " in the book");
-            leftWorking = placeUnknown;
+            if (placeReturned) {
+                // review 16 Nov 2026: the broker took the order but its book does not show our tag (the very defect a
+                // canary looks for): it was left working with nothing reported. Cancelled by the id the place answered
+                // with; never confirmable by tag, so always reported as possibly working (kill switch, alert)
+                try {
+                    step("SECURE_CANCEL", () -> {
+                        broker.cancel(tag);
+                        return tag;
+                    }, t -> new Seen(true, null, null, "cancel sent by the place's order id (the book does not show "
+                            + "the tag)"));
+                } catch (RuntimeException e) {
+                    notes.add("the cancel failed: " + e.getMessage());
+                }
+                leftWorking = true;
+            } else {
+                leftWorking = placeUnknown;
+            }
             return;
         }
         BrokerOrder o = order.get();

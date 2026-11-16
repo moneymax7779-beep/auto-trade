@@ -92,7 +92,9 @@ export function IndexPage() {
       )}
 
       {showLive ? (plain ? <PlainLiveDay underlying={underlying} s={s} nav={nav} />
-        : <LiveDay underlying={underlying} s={s} nav={nav} inspect={inspect} />) : day
+        // keyed (review 16 Nov 2026): a draft drawn on NIFTY, or in a replay, never carries over to SENSEX or live
+        : <LiveDay key={`${underlying}-${s.mode === "PAPER_REPLAY" ? "replay" : "live"}`} underlying={underlying} s={s}
+            nav={nav} inspect={inspect} />) : day
         ? (plain ? <PlainPastDay key={day} underlying={underlying} day={day} nav={nav} sessionId={sessionOf(day)} />
           : <PastDay key={day} underlying={underlying} day={day} nav={nav} inspect={inspect} sessionId={sessionOf(day)} />)
         : <p className="text-sm text-muted">No live session recorded yet.</p>}

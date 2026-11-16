@@ -616,6 +616,27 @@ class BrokerVenueIT {
     }
 
     @Test
+    void aReleaseNeverAcceptsTheBrokerHoldingLessThanOurs() throws Exception {
+        // review 16 Nov 2026: the broker holding less than ours (a partial hand sale, a phantom position) means our stop or
+        // exit could oversell; a release accepted it, so the same difference later in the day engaged nothing
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        brokerFollower().run(s.broker(), s.group(), DAY);
+        sim.quote(KEY, 100, 1_000_000, 100, 1_000_000, 100);
+        gateway.place(new OrderRequest("MANUALS1", 3000047168L, KEY, SYMBOL, "NSE_FO", OrderSide.SELL, OrderType.LIMIT, 65,
+                99.8, 0, "MANUALS1"));
+        BrokerReconciler reconciler = new BrokerReconciler(dataSource, costs);
+        KillSwitches kills = new KillSwitches(dataSource);
+        reconciler.check(s.broker(), gateway);
+        reconciler.check(s.broker(), gateway);
+        assertThat(kills.engaged(s.broker(), "opening-drive", KEY)).contains("ours 2600, broker 2535");
+        assertThat(kills.release(accountSwitch(kills, s.broker()), s.broker().tenantId(), "satyacp99")).isTrue();
+        reconciler.check(s.broker(), gateway);
+        assertThat(kills.engaged(s.broker(), "opening-drive", KEY)).as("engaged again at once")
+                .contains("ours 2600, broker 2535");
+    }
+
+    @Test
     void aReconciliationSwitchReleasedByTheReconcilerItselfAcceptsNothing() throws Exception {
         Setup s = setup(false);
         decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);

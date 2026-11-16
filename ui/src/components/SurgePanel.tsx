@@ -704,6 +704,7 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
       const [x1, x2] = [...pointers.current.values()];
       pinch.current = { dist: Math.max(10, Math.abs(x2 - x1)), mid: a + (((x1 + x2) / 2 - L) / PW) * span, view };
       drag.current = null;
+      setLineDrag(null);                                // a line drag in progress is dropped, never sent
       return;
     }
     const held = drawnLineAt(p.x, p.y);
@@ -728,7 +729,8 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
     }
     const d = drag.current;
     if (d && d.kind === "line" && d.key) {
-      if (Math.abs(p.y - d.y) > 2) d.moved = true;
+      // review 16 Nov 2026: a move only after 5 units, mostly up or down (2 units let a sideways pan drift a line)
+      if (!d.moved && Math.abs(p.y - d.y) > 5 && Math.abs(p.y - d.y) > Math.abs(p.x - d.x)) d.moved = true;
       if (d.moved) setLineDrag({ key: d.key, price: linePrice(priceAtY(p.y)) });
       setHover(null);
       return;
@@ -768,7 +770,8 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
     const d = drag.current;
     drag.current = null;
     if (d && d.kind === "line") {
-      if (d.moved && d.key && lineDrag && drawing) drawing.onDrag(d.key, lineDrag.price);
+      // the price where the pointer was let go (the last render's may lag a move behind)
+      if (d.moved && d.key && drawing) drawing.onDrag(d.key, linePrice(priceAtY(toSvg(e).y)));
       setLineDrag(null);
       return;
     }
@@ -784,6 +787,17 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
       const m = Math.round(a + ((p.x - L) / PW) * span);
       if (p.x >= L && p.x <= W - R && m >= X0 && m <= X1) setPin(pin === m ? null : m);
     }
+  };
+
+  /**
+   * The browser took the gesture (a touch scroll, a lost pointer): nothing is committed (review 16 Nov 2026: cancel ran
+   * the release, so a touch on a line sent a move of the touch slop and then scrolled the page).
+   */
+  const onPointerCancel = (e: PointerEvent<SVGSVGElement>) => {
+    pointers.current.delete(e.pointerId);
+    if (pointers.current.size < 2) pinch.current = null;
+    drag.current = null;
+    setLineDrag(null);
   };
 
   const tip = hover == null ? null : (() => {
@@ -889,7 +903,7 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
           style={{ touchAction: "pan-y", cursor: lineDrag || (hover && drawnLineAt(X(hover.m), hover.y)) ? "ns-resize"
             : drag.current?.moved ? "grabbing" : drawing?.placing ? "copy" : "crosshair" }}
           aria-label={`${data.underlying} index and futures volume by minute with surges`}
-          onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}
+          onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerCancel}
           onPointerLeave={() => { if (!drag.current?.moved) setHover(null); }} onDoubleClick={reset}>
           <defs>
             <clipPath id={clipId}><rect x={L} y={T} width={PW} height={VY0 + VOL_H - T} /></clipPath>

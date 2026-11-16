@@ -71,6 +71,18 @@ class ChartLinesTest {
     }
 
     @Test
+    void aBreakoutWhoseEntryTickIsAlreadyAtTheTargetIsNotBought() {
+        // review 16 Nov 2026: target 5 past the entry, inside the no-chase band of 8: the entering tick could pass it
+        Lines close = new Lines("CE", 24_250, 24_200, 24_255, 2, 8);
+        assertThat(ChartLines.onArmed(close, Kind.BREAKOUT, 24_254)).isEqualTo(Event.ENTER);
+        assertThat(ChartLines.onArmed(close, Kind.BREAKOUT, 24_255)).isEqualTo(Event.VOID_CHASE);
+        assertThat(ChartLines.onArmed(close, Kind.FAR_BREAKOUT, 24_256)).isEqualTo(Event.VOID_CHASE);
+        Lines put = new Lines("PE", 24_250, 24_300, 24_245, 2, 8);
+        assertThat(ChartLines.onArmed(put, Kind.BREAKOUT, 24_246)).isEqualTo(Event.ENTER);
+        assertThat(ChartLines.onArmed(put, Kind.BREAKOUT, 24_245)).isEqualTo(Event.VOID_CHASE);
+    }
+
+    @Test
     void aPullbackFiresWhenTheIndexComesBackToTheLine() {
         assertThat(ChartLines.onArmed(CALL, Kind.PULLBACK, 24_251)).isEqualTo(Event.NONE);
         assertThat(ChartLines.onArmed(CALL, Kind.PULLBACK, 24_250)).isEqualTo(Event.ENTER);

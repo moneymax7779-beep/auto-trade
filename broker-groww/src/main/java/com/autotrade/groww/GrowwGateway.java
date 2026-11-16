@@ -96,6 +96,9 @@ public final class GrowwGateway implements BrokerConnection {
     private final Map<String, String> brokerIdByTag = new ConcurrentHashMap<>();
     private final Map<String, Integer> modificationsByTag = new ConcurrentHashMap<>();
     private final Map<String, BrokerOrder> lastSeen = new ConcurrentHashMap<>();
+    /** One poll at a time (review 16 Nov 2026): two polls interleaving their put and restore of {@link #lastSeen} could
+     *  report the same fill twice, with its fill quantity. */
+    private final Object pollLock = new Object();
     private final Map<String, List<BrokerTrade>> tradesOfFinished = new ConcurrentHashMap<>();
 
     /**
@@ -637,6 +640,12 @@ public final class GrowwGateway implements BrokerConnection {
 
     @Override
     public int poll() {
+        synchronized (pollLock) {
+            return pollOnce();
+        }
+    }
+
+    private int pollOnce() {
         int emitted = 0;
         for (BrokerOrder now : orders()) {
             BrokerOrder before = lastSeen.put(now.brokerOrderId(), now);

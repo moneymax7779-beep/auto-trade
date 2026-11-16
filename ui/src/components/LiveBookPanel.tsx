@@ -150,7 +150,7 @@ function KillBanner({ accountId, kills }: { accountId: number; kills: LiveBook["
         <div key={k.id} className="flex flex-wrap items-center gap-2">
           <span className="min-w-0 break-words">{k.text}</span>
           {k.releasable && (
-            <button onClick={() => { if (window.confirm(`Release this kill switch? ${k.text}\n\nThe account takes new entries again.${k.text.includes('RECONCILIATION') ? ' This exact difference will not stop it again today; a changed quantity or another contract will.' : ''}`)) release.mutate(k.id); }}
+            <button onClick={() => { if (window.confirm(`Release this kill switch? ${k.text}\n\nThe account takes new entries again.${k.text.includes('RECONCILIATION') ? ' If the broker holds more than ours (your own trade), this exact difference will not stop it again today; a changed quantity, another contract, or the broker holding less than ours will.' : ''}`)) release.mutate(k.id); }}
               disabled={release.isPending}
               className="rounded border border-rose-300 bg-white px-2 py-0.5 text-xs font-medium text-rose-700 hover:bg-rose-100 disabled:opacity-50">
               Release</button>

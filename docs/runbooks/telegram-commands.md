@@ -11,8 +11,8 @@ gate).
 | `/positions` | every member | open positions in your workspaces (`#id ACCOUNT MODE SYMBOL qty @avg`) |
 | `/whoami` | every member | your login and roles |
 | `/kill` · `/kill ACCOUNT` | OWNER / ADMIN / TRADER / SUPPORT (web rules) | workspace (TENANT) or account kill switch. **Nothing is sold** |
-| `/flatten` · `/flatten ACCOUNT` | same | kill switch on, broker stops cancelled, every open position sold (the web's Flatten) |
-| `/exit` · `/exit ID` | same | one position: broker stop cancelled, sold now; the account keeps trading (the web's Exit) |
+| `/flatten` · `/flatten ACCOUNT` | same | kill switch on, broker stops cancelled, every position auto-trade opened sold (the web's Flatten); trades placed by hand in the broker's app are not touched. On a LIVE account only with `AUTOTRADE_TELEGRAM_LIVE_EXITS=true` (default off) |
+| `/exit` · `/exit ID` | same | one position: broker stop cancelled, sold now; the account keeps trading (the web's Exit). LIVE: as `/flatten` |
 | `/killall` | platform admin | GLOBAL_LIVE switch |
 
 Every write shows a card (account, workspace, **mode**, what will be sold) with Confirm and Cancel on separate rows. It

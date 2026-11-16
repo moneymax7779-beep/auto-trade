@@ -160,13 +160,15 @@ public final class ChartLines {
 
     /** A waiting order on an index tick at {@code price}. */
     public static Event onArmed(Lines l, Kind kind, double price) {
-        double d = l.dir(), e = d * l.entry(), s = d * l.stop(), x = d * price;
+        double d = l.dir(), e = d * l.entry(), s = d * l.stop(), t = d * l.target(), x = d * price;
         if (x <= s && kind != Kind.FAR_BREAKOUT) {
             return Event.VOID_STOP_FIRST;
         }
         if (kind == Kind.BREAKOUT || kind == Kind.FAR_BREAKOUT) {
             if (x >= e + l.buffer()) {
-                return x - e > l.noChase() ? Event.VOID_CHASE : Event.ENTER;
+                // review 16 Nov 2026: a target inside the no-chase band (NIFTY: from 2 points) could be passed by the
+                // very tick that enters: bought, then sold on the next tick at the target. Not chased either
+                return x - e > l.noChase() || x >= t ? Event.VOID_CHASE : Event.ENTER;
             }
         } else if (x <= e) {
             return e - x > l.noChase() ? Event.VOID_CHASE : Event.ENTER;

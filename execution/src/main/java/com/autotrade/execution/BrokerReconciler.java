@@ -100,6 +100,9 @@ public final class BrokerReconciler {
         Map<String, Instant> differing = new TreeMap<>();
         List<String> differences = new ArrayList<>();
         List<String> repeated = new ArrayList<>();
+        // review 16 Nov 2026: only "the broker holds more than ours" can be accepted by a release (a hand buy, the 16 Nov
+        // case); the broker holding less means our stop or exit could oversell into a short, and engages every time
+        java.util.Set<String> acceptable = new java.util.HashSet<>();
         BrokerBooks books = new BrokerBooks(broker);
         for (String key : union(ours, theirs)) {
             long o = ours.getOrDefault(key, 0L), t = theirs.getOrDefault(key, 0L);
@@ -118,6 +121,9 @@ public final class BrokerReconciler {
             differing.put(key, since);
             String difference = key + ": ours " + o + ", broker " + t + (o == 0 ? MANUAL_NOTE : "");
             differences.add(difference);
+            if (t > o && o >= 0) {
+                acceptable.add(difference);
+            }
             if (again) {
                 repeated.add(difference);
             }
@@ -129,7 +135,8 @@ public final class BrokerReconciler {
         }
         if (!repeated.isEmpty()) {                                   // a contract that differed last time too
             java.util.Set<String> accepted = acceptedToday(account);
-            if (repeated.stream().allMatch(d -> accepted.contains(core(d)))) {
+            java.util.function.Predicate<String> released = d -> acceptable.contains(d) && accepted.contains(core(d));
+            if (repeated.stream().allMatch(released)) {
                 // 16 Nov 2026: a manual MIS trade in Kite re-engaged the switch seconds after each Release (three times)
                 String said = java.time.LocalDate.now(IST) + " " + repeated;
                 if (!said.equals(lastAccepted.put(account.id(), said))) {
@@ -139,7 +146,7 @@ public final class BrokerReconciler {
             } else {
                 lastAccepted.remove(account.id());
                 kills.engageAccount(account, "RECONCILIATION: " + String.join("; ", differences.stream()
-                        .filter(d -> !accepted.contains(core(d))).toList()), "reconciler");
+                        .filter(released.negate()).toList()), "reconciler");
             }
         }
         netShorts(account, books);
@@ -188,8 +195,9 @@ public final class BrokerReconciler {
     /**
      * The differences a user accepted today: those listed by a RECONCILIATION switch of the account that a user (not the
      * reconciler) released since the start of the IST day. Releasing says "I know: it is my manual trade"; the switch is
-     * not engaged again for the same contract with the same two quantities. A changed quantity on either side, another
-     * contract, or the next day engages it again. Kept in the database, so a restart does not forget a release.
+     * not engaged again for the same contract with the same two quantities, when the broker holds more than ours (see
+     * {@code acceptable} in {@link #check}). A changed quantity on either side, another contract, the next day, or the
+     * broker holding less than ours engages it again. Kept in the database, so a restart does not forget a release.
      */
     private java.util.Set<String> acceptedToday(BrokerAccount account) {
         java.util.Set<String> accepted = new java.util.HashSet<>();

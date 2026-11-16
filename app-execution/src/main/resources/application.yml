@@ -103,6 +103,8 @@ autotrade:
       alarm-file: ${AUTOTRADE_TELEGRAM_ALARM_FILE:}
       confirm-seconds: 60
       max-age-seconds: 60
+      # /flatten and /exit on a LIVE account: off until the user gives the go (plan section 5; /kill works regardless)
+      live-exits: ${AUTOTRADE_TELEGRAM_LIVE_EXITS:false}
     # Family members' Keycloak logins (trader workspaces, 7 Nov 2026): the autotrade-admin service account on the realm's
     # internal address (bin/keycloak/bootstrap.sh --admin-secret-file); blank url or secret = members' logins stay a
     # console job. The secret comes from the VM's root-only .env, never this file.

@@ -3,6 +3,9 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { get, postJson } from "../api";
 import { ErrorNote } from "./ui";
 
+/** How long a BUY card's price may be shown before a confirm is refused (review 16 Nov 2026). */
+const QUOTE_FRESH_MS = 30_000;
+
 /**
  * Manual trading (user, 9 Nov 2026: "buy PE or buy CE buttons so that application should immediately buy the best ATM
  * PE CE ... and when I click EXIT it should exit the order in LIVE/PAPER"). One follower account and one index at a time:
@@ -122,7 +125,10 @@ function ManualAccountView({ accountId, index }: { accountId: number; index: str
   const detail = useQuery({ queryKey: ["manual", accountId],
     queryFn: () => get<ManualDetail>(`/api/execution/accounts/${accountId}/manual`),
     refetchInterval: (q) => ((q.state.data?.orders ?? []).some(working) ? 1_000 : 5_000) });
-  const [confirm, setConfirm] = useState<{ kind: "BUY"; side: "CE" | "PE"; quote: ManualQuote } | { kind: "EXIT" } | null>(null);
+  // review 16 Nov 2026: the card keeps the account's mode and the quote's time from when it opened; a mode changed since
+  // (another tab switched the account LIVE) or a quote over QUOTE_FRESH_MS old needs a new BUY click, never this card
+  const [confirm, setConfirm] = useState<{ kind: "BUY"; side: "CE" | "PE"; quote: ManualQuote; mode: string; at: number }
+    | { kind: "EXIT" } | null>(null);
   const [note, setNote] = useState<string | null>(null);
   const refresh = () => {
     client.invalidateQueries({ queryKey: ["manual", accountId] });
@@ -130,9 +136,9 @@ function ManualAccountView({ accountId, index }: { accountId: number; index: str
     client.invalidateQueries({ queryKey: ["manual-accounts"] });
   };
   const quote = useMutation({
-    mutationFn: (side: "CE" | "PE") => get<ManualQuote>(
-      `/api/execution/accounts/${accountId}/manual/quote?underlying=${index}&side=${side}`),
-    onSuccess: (q, side) => setConfirm({ kind: "BUY", side, quote: q }),
+    mutationFn: (v: { side: "CE" | "PE"; mode: string }) => get<ManualQuote>(
+      `/api/execution/accounts/${accountId}/manual/quote?underlying=${index}&side=${v.side}`),
+    onSuccess: (q, v) => setConfirm({ kind: "BUY", side: v.side, quote: q, mode: v.mode, at: Date.now() }),
   });
   const buy = useMutation({
     mutationFn: (v: { underlying: string; side: string; symbol: string; live: boolean }) => postJson<{ intentId: number;
@@ -167,9 +173,9 @@ function ManualAccountView({ accountId, index }: { accountId: number; index: str
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <button className={`${btn} border-emerald-600 bg-emerald-600 text-white hover:bg-emerald-700`} disabled={busy || !!buyBlocked}
-          onClick={() => { setNote(null); buy.reset(); quote.mutate("CE"); }}>BUY {index} CE</button>
+          onClick={() => { setNote(null); buy.reset(); quote.mutate({ side: "CE", mode: a.mode }); }}>BUY {index} CE</button>
         <button className={`${btn} border-rose-600 bg-rose-600 text-white hover:bg-rose-700`} disabled={busy || !!buyBlocked}
-          onClick={() => { setNote(null); buy.reset(); quote.mutate("PE"); }}>BUY {index} PE</button>
+          onClick={() => { setNote(null); buy.reset(); quote.mutate({ side: "PE", mode: a.mode }); }}>BUY {index} PE</button>
         <button className={`${btn} border-line bg-bg text-text hover:bg-panel-2`}
           disabled={busy || !a.canExit || (openHere.length === 0 && !pending)}
           onClick={() => { setNote(null); exit.reset(); setConfirm({ kind: "EXIT" }); }}>EXIT {index}</button>
@@ -194,8 +200,19 @@ function ManualAccountView({ accountId, index }: { accountId: number; index: str
           </div>
           <div className="flex flex-wrap gap-2">
             <button className={`${btn} ${live ? "border-rose-700 bg-rose-700" : "border-accent bg-accent"} text-white`} disabled={buy.isPending}
-              onClick={() => buy.mutate({ underlying: confirm.quote.underlying, side: confirm.side, symbol: confirm.quote.symbol, live })}>
-              {buy.isPending ? "Sending…" : live ? `Confirm BUY ${confirm.side} LIVE` : `Confirm BUY ${confirm.side}`}</button>
+              onClick={() => {
+                if (confirm.mode !== a.mode) {
+                  setConfirm(null);
+                  setNote(`Not bought: ${a.name} changed from ${confirm.mode} to ${a.mode} since the card opened. Click BUY again.`);
+                } else if (Date.now() - confirm.at > QUOTE_FRESH_MS) {
+                  setConfirm(null);
+                  setNote(`Not bought: the price shown was over ${QUOTE_FRESH_MS / 1000} s old. Click BUY again for a fresh one.`);
+                } else {
+                  buy.mutate({ underlying: confirm.quote.underlying, side: confirm.side, symbol: confirm.quote.symbol,
+                    live: confirm.mode === "LIVE" });
+                }
+              }}>
+              {buy.isPending ? "Sending…" : confirm.mode === "LIVE" ? `Confirm BUY ${confirm.side} LIVE` : `Confirm BUY ${confirm.side}`}</button>
             <button className={`${btn} border-line bg-bg text-text`} disabled={buy.isPending} onClick={() => setConfirm(null)}>Cancel</button>
           </div>
           {buy.error && <p className="text-down">Not bought: {(buy.error as Error).message}</p>}
