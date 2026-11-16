@@ -245,7 +245,7 @@ Total ≈ 10–12 working days, plus a week of PAPER use before any LIVE switch.
 
 ## 8. As built: T0 + T1 (16 Nov 2026, `feature/telegram-controls`, uncommitted)
 
-Built: V38 (`exec.telegram_update`, `exec.telegram_command`, `exec.telegram_poller`), `TelegramBot`, `TelegramGateway`,
+Built: V39, first written as V38 (`exec.telegram_update`, `exec.telegram_command`, `exec.telegram_poller`), `TelegramBot`, `TelegramGateway`,
 `TelegramCommands`, `/start` linking read from the table while commands are on, `/status`'s `telegram` block,
 `TelegramCommandsIT` (14 cases against a stub Bot API), runbook `docs/runbooks/telegram-commands.md`. Off by default
 (`AUTOTRADE_TELEGRAM_COMMANDS`).
@@ -261,7 +261,7 @@ Where it differs from the design above, and why:
   Flatten handles it today. That case has not been checked.
 - **No separate priority outbox.** The acks are sent directly, and a 429 is retried once after `retry_after` (≤5 s).
 - `/flattenall` and `/login` are not in T1. `/login` is T3.
-- **Migration number:** V38 is also used by the uncommitted chart orders. Whichever merges second renumbers its file.
+- **Migration number:** chart orders merged first (V38__chart_orders), so this is V39 (renumbered at the merge into main).
 
 Not verified yet:
 - No real Telegram traffic.
@@ -290,7 +290,7 @@ Fixed:
 - On first enable (a day of messages waiting) or after a long outage every old message was answered, including every
   `/start`. Now no answer past 10 minutes; a stranger's flood gets one "not linked" per 10 minutes.
 - A forwarded `/flatten` (an old command passed on; its date is the forward's) ran. Now refused.
-- V38 (not applied anywhere yet: Mac DB at 37) edited in place: INCOMPLETE status; `on delete set null` on the account and
+- V38 (now V39; not applied anywhere yet: Mac DB at 37) edited in place: INCOMPLETE status; `on delete set null` on the account and
   position keys, so a cancelled card no longer blocks removing an account.
 Not changed, known: the action threads are daemons, so a deploy mid-flatten cuts it off (the restart then says FAILED,
 not run again, check positions); an admin's hand-set chat id gets command rights; `telegram_update` keeps every update

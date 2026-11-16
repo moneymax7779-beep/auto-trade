@@ -61,11 +61,16 @@ public final class ReplayAsLiveFeed implements LiveFeed {
                 if (!stopped) {
                     pace(event.receivedAt());
                 }
-                if (!stopped) {                                // a stop during the wait delivers nothing more
-                    last = event.receivedAt();
-                    sink.accept(event);
+                if (stopped) {
+                    // 15 Nov 2026: skipping the rest left the source reading the whole day (millions of rows, minutes)
+                    // before the session could end, so a stopped replay ends now and its cursors are closed
+                    throw Stopped.INSTANCE;
                 }
+                last = event.receivedAt();
+                sink.accept(event);
             });
+        } catch (Stopped ignored) {
+            // stopped: the session ends with what it has
         } finally {
             if (control != null) {
                 control.attached(false);
@@ -100,6 +105,15 @@ public final class ReplayAsLiveFeed implements LiveFeed {
                 Thread.currentThread().interrupt();
                 stopped = true;
             }
+        }
+    }
+
+    /** Thrown from the event callback to end the source's read once stopped (no stack trace: it is not an error). */
+    private static final class Stopped extends RuntimeException {
+        static final Stopped INSTANCE = new Stopped();
+
+        private Stopped() {
+            super("replay stopped", null, false, false);
         }
     }
 

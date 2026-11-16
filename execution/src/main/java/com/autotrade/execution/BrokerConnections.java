@@ -15,7 +15,6 @@ import com.autotrade.account.BrokerAccount;
 import com.autotrade.account.BrokerType;
 import com.autotrade.account.TradeMode;
 import com.autotrade.broker.BrokerConnection;
-import com.autotrade.zerodha.KiteSimulator;
 
 /**
  * The broker registry (live plan section 2a): which venue each follower account trades through.
@@ -26,9 +25,13 @@ import com.autotrade.zerodha.KiteSimulator;
  *       given it, {@link KotakDryRunAdapter}: the Kotak Neo adapter against its own simulator, DRY_RUN only) under a
  *       {@link BrokerVenue}. A broker without an adapter is refused.</li>
  *   <li>LIVE (the Kite pilot, user 2 Nov 2026): only an account the user switched LIVE ({@code live_trading_enabled}),
- *       on a risk file with {@code live} limits (v7+) and order rules, through an adapter that offers LIVE (Zerodha):
- *       its real broker connection behind a {@link LiveGuard}, under the same {@link BrokerVenue}. Anything else LIVE is
- *       refused, so nothing is sent. The day's login and the registered static IP are the user's.</li>
+ *       on a risk file with {@code live} limits (v7+) and order rules, of a broker in {@link LiveBrokers}, through an
+ *       adapter that offers LIVE: its real broker connection behind a {@link LiveGuard}, under the same
+ *       {@link BrokerVenue}. Anything else LIVE is refused, so nothing is sent. The day's login and the registered
+ *       static IP are the user's.</li>
+ *   <li>Egress (production gaps B1/B2, 16 Nov 2026): an account whose configured source address is not on this host gets
+ *       no route at all (its adapter's {@link BrokerAdapter#egressRefusal}); a LIVE connection of a broker that needs a
+ *       registered static IP is refused by the adapter without one ({@link AccountEgress#liveRefusal}).</li>
  * </ul>
  */
 public final class BrokerConnections implements AutoCloseable {
@@ -47,6 +50,17 @@ public final class BrokerConnections implements AutoCloseable {
     private final Map<Long, BrokerAdapter.DryRun> opened = new ConcurrentHashMap<>();
     /** Read-only connections of idle accounts ({@link #probeOnly}): never a venue, so nothing can be sent through them. */
     private final Map<Long, BrokerAdapter.DryRun> probes = new ConcurrentHashMap<>();
+    /**
+     * LIVE connections opened here, closed when their route is dropped (16 Nov 2026: Kotak's, Upstox's and Groww's hold
+     * HTTP clients of their own; Kite's has nothing to close).
+     */
+    private final Map<Long, BrokerConnection> liveOpened = new ConcurrentHashMap<>();
+    /**
+     * The brokers configured LIVE ({@link LiveBrokers}; review 16 Nov 2026: a LIVE route opens only for a broker that is
+     * both configured LIVE and whose adapter offers LIVE, so taking a broker out of the setting and restarting stops its
+     * LIVE accounts, not only the switch pages). Every broker until the worker sets it (tests).
+     */
+    private volatile java.util.function.Predicate<BrokerType> liveBrokers = b -> true;
 
     /** The registry with this build's adapters (Zerodha). */
     public BrokerConnections(DataSource dataSource, double simulatedBrokerFunds) {
@@ -58,6 +72,33 @@ public final class BrokerConnections implements AutoCloseable {
         this.simulatedBrokerFunds = simulatedBrokerFunds;
         this.freeze = new FreezeQuantities(dataSource);
         adapters.forEach(a -> this.adapters.put(a.broker(), a));
+    }
+
+    /**
+     * Review 16 Nov 2026: a LIVE account refused its route by the egress check (its address was added while it held
+     * positions, or the address left this host) has no venue, so neither our exits nor Flatten can reach the broker: its
+     * kill switch is engaged (no new entry when the address comes back before anyone looks) and EGRESS_REFUSED is
+     * audited, which the worker sends on Telegram. Its resting stops at the broker still protect it. Once per account
+     * and reason while the worker runs.
+     */
+    private void stranded(BrokerAccount account, String why) {
+        Integer open = new org.springframework.jdbc.core.JdbcTemplate(dataSource).queryForObject("select count(*) from "
+                + "exec.position where broker_account_id = ? and status <> 'CLOSED' and quantity_open > 0", Integer.class,
+                account.id());
+        if (open == null || open == 0 || !strandedSaid.add(account.id() + ":" + why)) {
+            return;
+        }
+        KillSwitches kills = new KillSwitches(dataSource);
+        kills.engageAccount(account, "EGRESS: " + why, "broker-registry");
+        kills.audit(account, "broker-registry", "EGRESS_REFUSED", Map.of("open_positions", open, "reason", why,
+                "rule", "no LIVE route from an address this host lacks: exits wait, resting broker stops still protect"));
+    }
+
+    private final java.util.Set<String> strandedSaid = ConcurrentHashMap.newKeySet();
+
+    /** The brokers configured LIVE (the worker's {@link LiveBrokers}); routes already open are not re-checked. */
+    public void liveBrokers(java.util.function.Predicate<BrokerType> configuredLive) {
+        this.liveBrokers = java.util.Objects.requireNonNull(configuredLive);
     }
 
     public Route route(BrokerAccount account, FollowerRisk risk) {
@@ -74,6 +115,11 @@ public final class BrokerConnections implements AutoCloseable {
         BrokerAdapter adapter = adapters.get(account.brokerType());
         if (adapter == null) {
             return new Route(null, null, "no order adapter for " + account.brokerType() + " yet");
+        }
+        String egress = adapter.egressRefusal(account);
+        if (egress != null) {
+            log.error("account {} ({}): route refused: {}", account.id(), account.displayName(), egress);
+            return new Route(null, null, "refused: " + egress);
         }
         try {
             BrokerAdapter.DryRun dryRun = adapter.dryRun(account, risk.orders());
@@ -95,10 +141,32 @@ public final class BrokerConnections implements AutoCloseable {
             return new Route(null, null, "LIVE refused: risk file " + risk.version() + " has no live limits");
         }
         BrokerAdapter adapter = adapters.get(account.brokerType());
+        if (adapter == null || !adapter.offersLive()) {
+            // 16 Nov 2026: Kotak, Upstox and Groww have LIVE connections now (production gaps C1), tested against their
+            // simulators only (and usable by the canary); none trades until its adapter offers LIVE after its gates and the
+            // user's go-ahead, and its broker is configured LIVE (LiveBrokers, checked by the LIVE switch)
+            return new Route(null, null, "LIVE refused: " + account.brokerType() + " is not a LIVE broker yet");
+        }
+        if (!liveBrokers.test(account.brokerType())) {
+            log.error("account {} ({}) is LIVE but {} is not configured LIVE (autotrade.execution.live-brokers): no route",
+                    account.id(), account.displayName(), account.brokerType());
+            return new Route(null, null, "LIVE refused: " + account.brokerType() + " is not configured LIVE on this worker");
+        }
+        String egress = adapter == null ? null : adapter.egressRefusal(account);
+        if (egress != null) {
+            log.error("account {} ({}): LIVE route refused: {}", account.id(), account.displayName(), egress);
+            stranded(account, egress);
+            return new Route(null, null, "LIVE refused: " + egress);
+        }
         BrokerAdapter.Live live = adapter == null ? null : adapter.live(account, risk.live());
         if (live == null) {
             return new Route(null, null, "LIVE refused: no LIVE adapter for " + account.brokerType());
         }
+        if (live.isRefused()) {
+            log.error("account {} ({}): LIVE route refused: {}", account.id(), account.displayName(), live.description());
+            return new Route(null, null, "LIVE refused: " + live.description());
+        }
+        liveOpened.put(account.id(), live.connection());
         BrokerVenue venue = new BrokerVenue(dataSource, live.connection(), risk.orders(), freeze::of, o -> { });
         log.warn("account {} ({}): LIVE orders go to {}", account.id(), account.displayName(), live.description());
         return new Route(venue, live.connection(), live.description());
@@ -128,6 +196,10 @@ public final class BrokerConnections implements AutoCloseable {
         if (adapter == null) {
             return "no READ_LIVE probe: no adapter for " + account.brokerType();
         }
+        String egress = adapter.egressRefusal(account);
+        if (egress != null) {
+            return "no READ_LIVE probe: " + egress;
+        }
         try {
             BrokerAdapter.DryRun d = adapter.dryRun(account, risk.orders());
             probes.put(account.id(), d);
@@ -153,17 +225,39 @@ public final class BrokerConnections implements AutoCloseable {
         }
     }
 
-    /** The Kite simulator of a ZERODHA DRY_RUN account (tests, fault drills); null when it has none. */
-    public KiteSimulator simulator(long accountId) {
+    /**
+     * The local simulator of a DRY_RUN account (tests, fault drills), whatever its broker (16 Nov 2026, A4: it was cast
+     * to the Kite simulator): {@code KiteSimulator}, {@code KotakSimulator}, {@code UpstoxSimulator} or
+     * {@code GrowwSimulator}; null when the account has none or its simulator is of another type.
+     */
+    public <T extends AutoCloseable> T simulator(long accountId, Class<T> type) {
+        AutoCloseable sim = simulator(accountId);
+        return type.isInstance(sim) ? type.cast(sim) : null;
+    }
+
+    /** The local simulator of a DRY_RUN account, of its broker's own type; null when it has none. */
+    public AutoCloseable simulator(long accountId) {
         BrokerAdapter.DryRun d = opened.get(accountId);
-        return d != null && d.resource() instanceof KiteSimulator sim ? sim : null;
+        return d == null ? null : d.resource();
     }
 
     /** Forgets an account's route (its lease was lost, its configuration changed): a new turn opens a fresh one. */
     public void drop(long accountId) {
         routes.remove(accountId);
         close(opened.remove(accountId));
+        closeLive(liveOpened.remove(accountId));
         closeProbe(accountId);
+    }
+
+    private static void closeLive(BrokerConnection c) {
+        if (c == null) {
+            return;
+        }
+        try {
+            c.close();
+        } catch (RuntimeException e) {
+            log.warn("closing a LIVE connection: {}", e.getMessage());
+        }
     }
 
     @Override
@@ -172,6 +266,8 @@ public final class BrokerConnections implements AutoCloseable {
         opened.clear();
         probes.values().forEach(BrokerConnections::close);
         probes.clear();
+        liveOpened.values().forEach(BrokerConnections::closeLive);
+        liveOpened.clear();
         routes.clear();
     }
 

@@ -49,7 +49,14 @@ public final class GrowwInstruments {
     /** One Groww option contract. {@code exchange} is Groww's (NSE or BSE). */
     public record Contract(String instrumentKey, String exchange, String tradingSymbol, String underlying,
                            LocalDate expiry, double strike, String type, int lotSize, double tickSize,
-                           long freezeQuantity) {
+                           long freezeQuantity, boolean buyAllowed, boolean sellAllowed) {
+
+        /** A contract both sides may trade (the file's {@code buy_allowed} / {@code sell_allowed} missing). */
+        public Contract(String instrumentKey, String exchange, String tradingSymbol, String underlying, LocalDate expiry,
+                        double strike, String type, int lotSize, double tickSize, long freezeQuantity) {
+            this(instrumentKey, exchange, tradingSymbol, underlying, expiry, strike, type, lotSize, tickSize,
+                    freezeQuantity, true, true);
+        }
 
         public long exchangeToken() {
             return Long.parseLong(instrumentKey.substring(instrumentKey.indexOf('|') + 1));
@@ -194,7 +201,14 @@ public final class GrowwInstruments {
             underlying = get(row, column, "name");
         }
         return new Contract(instrumentKey(exchange, Long.parseLong(token)), exchange, symbol, underlying, expiry, strike,
-                type, lot, tick, (long) GrowwHttp.number(get(row, column, "freeze_quantity"), 0));
+                type, lot, tick, (long) GrowwHttp.number(get(row, column, "freeze_quantity"), 0),
+                allowed(get(row, column, "buy_allowed")), allowed(get(row, column, "sell_allowed")));
+    }
+
+    /** {@code buy_allowed} / {@code sell_allowed}: only an explicit no (0, false, N, no) refuses; blank or absent allows. */
+    static boolean allowed(String raw) {
+        String v = raw == null ? "" : raw.trim().toLowerCase(java.util.Locale.ROOT);
+        return !(v.equals("0") || v.equals("false") || v.equals("n") || v.equals("no"));
     }
 
     private static String get(List<String> row, Map<String, Integer> column, String name) {

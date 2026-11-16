@@ -68,15 +68,18 @@ public final class FollowerSimulator {
                            String side, long token, String instrumentKey, String symbol, int lotSize, double price,
                            double budget, double referenceCapital, int lots, String legGroup, Instant at, String reason,
                            double sizeMultiplier, double strategyLots, double intendedLots, double liquidityLots,
-                           double rvol, double callAsk, double putAsk, double bookQuantity, double stopPct) {
+                           double rvol, double callAsk, double putAsk, double bookQuantity, double stopPct,
+                           int fixedLots) {
     }
 
     /** A broker exit is sent this many times at most, this far apart (code review 3 Nov 2026). */
     static final int EXIT_ATTEMPTS = 5;
     static final java.time.Duration EXIT_RETRY_AFTER = java.time.Duration.ofSeconds(10);
-    /** A LIVE entry older than this, or from this time of day, is refused (code review 3 Nov 2026). */
+    /**
+     * A LIVE entry older than this is refused (code review 3 Nov 2026); so is one from its broker's last LIVE entry
+     * ({@link BrokerRules}; 16 Nov 2026, A1: it was one 15:10 for every broker).
+     */
     static final java.time.Duration LIVE_ENTRY_MAX_AGE = java.time.Duration.ofSeconds(60);
-    static final java.time.LocalTime LIVE_LAST_ENTRY = java.time.LocalTime.of(15, 10);
     /**
      * Review 8 Nov 2026: a position whose broker stop is not confirmed armed this many times in a row (it is tried again
      * every turn) stops the account's entries (an alert); a stop the broker refused is tried again after
@@ -90,6 +93,8 @@ public final class FollowerSimulator {
 
     /** The wall clock of the LIVE entry checks (tests set their own). */
     private java.time.Clock clock = java.time.Clock.systemUTC();
+    /** Each broker's last LIVE entry ({@link #withBrokerRules}); none: every LIVE entry is refused. */
+    private BrokerRules brokerRules;
 
     private final JdbcTemplate jdbc;
     private final AccountStore accounts;
@@ -145,6 +150,15 @@ public final class FollowerSimulator {
     FollowerSimulator withProtectBackOff(java.time.Duration backOff) {
         this.protectBackOff = backOff;
         protectRetryAt.clear();
+        return this;
+    }
+
+    /**
+     * The broker rules whose last LIVE entry the account's broker is held to (the execution worker's; 16 Nov 2026, A1).
+     * Without them no LIVE entry is taken.
+     */
+    public FollowerSimulator withBrokerRules(BrokerRules rules) {
+        this.brokerRules = rules;
         return this;
     }
 
@@ -486,6 +500,9 @@ public final class FollowerSimulator {
             return resumable ? resumeEntry(day, p)
                     : skip(p, "ALREADY_HELD", "the account already holds this strategy's position");
         }
+        if (p.fixedLots() > 0) {
+            return enterFixed(day, p);
+        }
         double price = buyPrice(p.price());
         double budget = scaledBudget(day, p);
         double free = day.equity - openPremium(day.account.id());
@@ -534,6 +551,35 @@ public final class FollowerSimulator {
             return notFilled(day, p, fill);
         }
         long positionId = insertPosition(day, p, p.side(), fill, step == 0 ? Double.NaN : scale);
+        protect(day, p, positionId);
+        reconcileIfUnknown(day, p, fill);
+        return done(p, fill.quantity());
+    }
+
+    /**
+     * A trader's manual buy (9 Nov 2026, {@link ManualOrders}): exactly the decision's {@code fixed_lots}, no budget
+     * scaling, size step, liquidity share or replay ceiling; every check of {@link #check} still applies (kill switches,
+     * the LIVE strategy list and entry times, daily loss, positions, lots per underlying, capital, broker funds) and the
+     * order goes through the venue as any entry (marketable limit, what is unfilled after the timeout cancelled, then
+     * its broker stop).
+     */
+    private String enterFixed(Day day, Pending p) {
+        boolean resumable = venue.broker() && hasOrders(p.intentId(), "ENTRY");
+        double price = buyPrice(p.price());
+        if (!(price > 0)) {
+            return resumable ? resumeEntry(day, p) : reject(p, "SIZE", "no price to buy at");
+        }
+        long lots = p.fixedLots();
+        long quantity = lots * p.lotSize();
+        String refused = check(day, p, false, 1, lots, quantity * price);
+        if (refused != null) {
+            return resumable ? resumeEntry(day, p) : refused;
+        }
+        FollowerVenue.Fill fill = order(day.account, p, "ENTRY", "BUY", quantity, price, 1);
+        if (fill.quantity() == 0) {
+            return notFilled(day, p, fill);
+        }
+        long positionId = insertPosition(day, p, p.side(), fill, Double.NaN);
         protect(day, p, positionId);
         reconcileIfUnknown(day, p, fill);
         return done(p, fill.quantity());
@@ -691,8 +737,15 @@ public final class FollowerSimulator {
         if (venue.live()) {
             // code review 3 Nov 2026: a LIVE entry follows its signal at once or not at all (a worker that was down, a lease
             // taken over late: the decision's moment has passed), and none is opened just before the square-off
-            if (!java.time.LocalTime.now(clock.withZone(java.time.ZoneId.of("Asia/Kolkata"))).isBefore(LIVE_LAST_ENTRY)) {
-                return reject(p, "LATE_ENTRY", "no LIVE entry from " + LIVE_LAST_ENTRY + " IST (square-off 15:20)");
+            java.time.LocalTime last = brokerRules == null ? null : brokerRules.lastLiveEntry(day.account.brokerType());
+            if (last == null) {
+                return reject(p, "NO_BROKER_RULES", "no LIVE entry: no trading-day rules for "
+                        + day.account.brokerType());
+            }
+            if (!java.time.LocalTime.now(clock.withZone(java.time.ZoneId.of("Asia/Kolkata"))).isBefore(last)) {
+                return reject(p, "LATE_ENTRY", "no LIVE entry from " + last + " IST (" + day.account.brokerType()
+                        + " square-off " + brokerRules.squareOff(day.account.brokerType()) + ", " + brokerRules.version()
+                        + ")");
             }
             java.time.Duration age = java.time.Duration.between(p.at(), clock.instant());
             if (age.compareTo(LIVE_ENTRY_MAX_AGE) > 0) {
@@ -1461,7 +1514,7 @@ public final class FollowerSimulator {
             + "(d.context->>'strategy_lots')::float8 as strategy_lots, (d.context->>'intended_lots')::float8 as intended_lots, "
             + "(d.context->>'liquidity_lots')::float8 as liquidity_lots, (d.context->>'rvol_tod')::float8 as rvol_tod, "
             + "(d.context->>'call_ask')::float8 as call_ask, (d.context->>'put_ask')::float8 as put_ask, "
-            + "(d.context->>'stop_pct')::float8 as stop_pct, "
+            + "(d.context->>'stop_pct')::float8 as stop_pct, (d.context->>'fixed_lots')::float8::int as fixed_lots, "
             // replay depth ceiling: what the signal account's own position got filled through the same book
             + "(select tp.quantity from trade.position tp where tp.session_id = d.signal_session_id "
             + "and tp.strategy_id = d.strategy_id and tp.underlying = d.underlying and tp.symbol = d.symbol "
@@ -1517,6 +1570,6 @@ public final class FollowerSimulator {
                 rs.getInt("lots"), rs.getString("leg_group"), rs.getTimestamp("decided_at").toInstant(),
                 rs.getString("reason"), rs.getDouble("size_multiplier"), orNaN(rs, "strategy_lots"),
                 orNaN(rs, "intended_lots"), orNaN(rs, "liquidity_lots"), orNaN(rs, "rvol_tod"), orNaN(rs, "call_ask"),
-                orNaN(rs, "put_ask"), bookQuantity(rs), orNaN(rs, "stop_pct"));
+                orNaN(rs, "put_ask"), bookQuantity(rs), orNaN(rs, "stop_pct"), rs.getInt("fixed_lots"));
     }
 }

@@ -85,6 +85,30 @@ class UpstoxGatewayTest {
     }
 
     @Test
+    void severalOrderIdsForOnePlaceAreUnknownAndTheTagIsNeverPlacedAgain() {
+        // review 16 Nov 2026: slice is off, so two ids means two orders with our tag; one followed is not enough
+        sim.failNext("place", UpstoxSimulator.Fault.SPLIT_IDS);
+        assertThatThrownBy(() -> gateway.place(buy("F80E1", 65, 100.2))).satisfies(e -> {
+            assertThat(kind(e)).isEqualTo(Kind.UNKNOWN);
+            assertThat(e.getMessage()).contains("2 order ids").contains("reconcile");
+        });
+        int places = sim.requests("place");
+        gateway.place(buy("F80E1", 65, 100.2));                       // the venue's retry with the same tag
+        assertThat(sim.requests("place")).as("never placed twice").isEqualTo(places);
+    }
+
+    @Test
+    void aTagThatShowsUpAfterTheFirstRowIsEmitted() {
+        List<OrderUpdate> seen = new java.util.ArrayList<>();
+        gateway.onUpdate(seen::add);
+        sim.tagLate(1);
+        gateway.place(buy("F81E1", 65, 90.0));                        // rests below the ask
+        gateway.poll();                                               // first row: no tag
+        gateway.poll();                                               // the tag arrives: emitted though nothing else moved
+        assertThat(seen).extracting(OrderUpdate::clientOrderId).contains("F81E1");
+    }
+
+    @Test
     void onlyTheDaysTokenIsAcceptedAndItIsNeverInAMessage() {
         sim.strictSessions();
         assertThatThrownBy(() -> gateway.availableFunds()).satisfies(e -> {

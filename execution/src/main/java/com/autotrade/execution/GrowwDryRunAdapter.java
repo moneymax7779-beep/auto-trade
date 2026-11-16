@@ -50,8 +50,14 @@ import com.autotrade.groww.GrowwSimulator;
  *       go only to the simulator: the real connection is read-only ({@link ReadLiveConnection}), and the gateway itself
  *       refuses any order call to Groww's host.</li>
  * </ul>
- * There is no LIVE Groww connection: {@link #live} returns null, so an account switched LIVE gets no route (and Groww is
- * not in {@link LiveBrokers#LIVE}). LIVE needs the READ_LIVE sessions, the static IP and the canary of the plan first.
+ * LIVE ({@link #live}, production gaps C1, 16 Nov 2026; built and tested against the simulator, not reachable while Groww
+ * is not in {@link LiveBrokers}): the member's own session read on every call, orders to Groww through the LIVE
+ * config ({@link GrowwConfig#live}, the only one besides a simulator's whose gateway sends), behind a {@link LiveGuard}
+ * with the risk file's {@code live} limits and the lot size of today's checked instrument CSV; one gateway for the
+ * route's life (a new token is set on it), so its listeners, placed tags and last reports survive a login during the day.
+ * Only from the account's own egress address ({@link AccountEgress}; Groww takes orders only from the client's registered
+ * IP); the order limiter is the Groww client's, shared by every gateway of that client. LIVE needs the READ_LIVE
+ * sessions, the static IP and the canary of the plan first.
  */
 public final class GrowwDryRunAdapter implements BrokerAdapter {
 
@@ -65,8 +71,10 @@ public final class GrowwDryRunAdapter implements BrokerAdapter {
     private final BrokerSessions sessions;
     private final GrowwConfig groww;
     private final Function<String, Quote> liveQuotes;
-    private final DailyFile files;
+    private final DailyFile files = new DailyFile();
     private final ReadLiveProbe.Settings probe;
+    private final GrowwConfig liveConfig;
+    private final AccountEgress egress;
 
     public GrowwDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds) {
         this(dataSource, simulatedBrokerFunds, BrokerSessions.NONE);
@@ -92,13 +100,36 @@ public final class GrowwDryRunAdapter implements BrokerAdapter {
     /** @param probe how often a READ_LIVE route's {@link ReadLiveProbe} reads the real books, and where it saves them */
     public GrowwDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
                                GrowwConfig groww, Function<String, Quote> liveQuotes, ReadLiveProbe.Settings probe) {
+        this(dataSource, simulatedBrokerFunds, sessions, groww, liveQuotes, probe, GrowwConfig.live(), AccountEgress.NONE);
+    }
+
+    /**
+     * @param liveConfig the LIVE connection's config ({@link GrowwConfig#live}; {@link GrowwConfig#liveSimulator} in the
+     *                   LIVE-against-simulator tests); must be of the LIVE kind
+     * @param egress     the accounts' source addresses and the static-IP LIVE gate (production gaps B1/B2)
+     */
+    public GrowwDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
+                               GrowwConfig groww, Function<String, Quote> liveQuotes, ReadLiveProbe.Settings probe,
+                               GrowwConfig liveConfig, AccountEgress egress) {
+        if (liveConfig == null || !liveConfig.isLive()) {
+            throw new IllegalArgumentException("the Groww LIVE connection takes a LIVE config (GrowwConfig.live)");
+        }
+        if (groww.ordersAllowed()) {
+            throw new IllegalArgumentException("the READ_LIVE reads take a read-only config (GrowwConfig.real or at)");
+        }
         this.probe = probe == null ? ReadLiveProbe.Settings.OFF : probe;
         this.dataSource = dataSource;
         this.simulatedBrokerFunds = simulatedBrokerFunds;
         this.sessions = sessions;
         this.groww = groww;
         this.liveQuotes = liveQuotes;
-        this.files = new DailyFile(new GrowwHttp(groww));         // no session: the CSV is public
+        this.liveConfig = liveConfig;
+        this.egress = egress == null ? AccountEgress.NONE : egress;
+    }
+
+    @Override
+    public String egressRefusal(BrokerAccount account) {
+        return egress.refusal(account);
     }
 
     @Override
@@ -106,15 +137,44 @@ public final class GrowwDryRunAdapter implements BrokerAdapter {
         return BrokerType.GROWW;
     }
 
+    /**
+     * The product of our Groww orders: its config's ({@link GrowwConfig#INTRADAY}, MIS, for the reads and the simulator);
+     * checked against the broker rules at the worker's start (16 Nov 2026, A1).
+     */
+    @Override
+    public String product() {
+        return groww.product();
+    }
+
     @Override
     public DryRun dryRun(BrokerAccount account, OrderRules rules) throws IOException {
         return rules.brokerMarket() ? brokerMarket(account) : storedMarket(account);
     }
 
-    /** No LIVE Groww connection in this build (8 Nov 2026: DRY_RUN only, its gates first). */
+    /**
+     * The LIVE Groww connection (production gaps C1, 16 Nov 2026), behind its {@link LiveGuard}. Refused without the
+     * account's verified egress address (B2) and without a Groww client (UCC) pinned on the account.
+     */
     @Override
     public Live live(BrokerAccount account, FollowerRisk.LiveLimits limits) {
-        return null;
+        String refusal = egress.liveRefusal(account);
+        if (refusal != null) {
+            return Live.refused(refusal);
+        }
+        List<String> pinned = new JdbcTemplate(dataSource).queryForList("select external_broker_user_id from "
+                + "acct.broker_account where id = ?", String.class, account.id());
+        String user = pinned.isEmpty() || pinned.getFirst() == null || pinned.getFirst().isBlank() ? null
+                : pinned.getFirst().trim();
+        if (user == null) {
+            return Live.refused(account.displayName() + " has no Groww client pinned (log in once first)");
+        }
+        GrowwSession growwLive = new GrowwSession(account, liveConfig, user);
+        Thread.ofVirtual().name("groww-live-warmup-" + account.id()).start(growwLive::warmUp);     // off the orders
+        return new Live(new LiveGuard(growwLive, limits, growwLive::lotSize), "LIVE: Groww "
+                + liveConfig.apiBase().getHost() + " from " + egress.configured(account.id())
+                .map(java.net.InetAddress::getHostAddress).orElse("the default route") + ", product "
+                + liveConfig.product() + ", at most " + limits.maxLotsPerOrder() + " lot(s) a buy and "
+                + limits.maxOpenPositions() + " contracts, book from our live capture");
     }
 
     private DryRun storedMarket(BrokerAccount account) throws IOException {
@@ -134,7 +194,7 @@ public final class GrowwDryRunAdapter implements BrokerAdapter {
 
     private DryRun brokerMarket(BrokerAccount account) throws IOException {
         GrowwSimulator sim = new GrowwSimulator(0, 3_000);
-        GrowwReads reads = null;
+        GrowwSession reads = null;
         ReadLiveProbe readProbe = null;
         try {
             sim.funds(UNLIMITED_FUNDS);
@@ -142,8 +202,8 @@ public final class GrowwDryRunAdapter implements BrokerAdapter {
             GrowwGateway simulator = simulatorGateway(sim, simInstruments);
             Market listings = new Market(sim, simInstruments, dataSource);
             seedHoldings(account, sim, listings);
-            reads = new GrowwReads(account);
-            GrowwReads r = reads;
+            reads = new GrowwSession(account, groww, null);
+            GrowwSession r = reads;
             readProbe = new ReadLiveProbe(dataSource, account, "GROWW", reads, GrowwGateway::knownStatus, probe,
                     () -> sessions.access(account).map(a -> java.util.Arrays.asList(a.apiKey(), a.accessToken()))
                             .orElse(List.of()));
@@ -199,7 +259,7 @@ public final class GrowwDryRunAdapter implements BrokerAdapter {
      * Groww's checked instrument file has it, when the simulator does not have it (not in the checked list = refused);
      * what our simulated fills took in the last {@link ZerodhaDryRunAdapter#TAKEN_MEMORY} is taken off the levels.
      */
-    private static Quote book(Quote q, GrowwReads reads, GrowwSimulator sim, GrowwInstruments simInstruments) {
+    private static Quote book(Quote q, GrowwSession reads, GrowwSimulator sim, GrowwInstruments simInstruments) {
         String key = q.instrumentKey();
         if (sim.byKey(key) == null) {
             GrowwInstruments.Contract c = reads.contract(key);
@@ -223,20 +283,17 @@ public final class GrowwDryRunAdapter implements BrokerAdapter {
 
     /**
      * Groww's instrument CSV of the day, read once for every account of this worker (it is public and the same for
-     * everyone; tens of MB): a failure is retried after a minute, and yesterday's list is never served.
+     * everyone; tens of MB) by whichever account first needs it, through that account's own client (its egress address,
+     * production gaps B1; the CSV is fetched without the token): a failure is retried after a minute, and yesterday's
+     * list is never served.
      */
     private static final class DailyFile {
 
-        private final GrowwHttp http;
         private LocalDate day;
         private List<GrowwInstruments.Contract> contracts = List.of();
         private Instant lastAttempt = Instant.EPOCH;
 
-        DailyFile(GrowwHttp http) {
-            this.http = http;
-        }
-
-        synchronized List<GrowwInstruments.Contract> today(LocalDate today) throws IOException {
+        synchronized List<GrowwInstruments.Contract> today(LocalDate today, GrowwHttp http) throws IOException {
             if (today.equals(day)) {
                 return contracts;
             }
@@ -251,23 +308,54 @@ public final class GrowwDryRunAdapter implements BrokerAdapter {
     }
 
     /**
-     * The account's real Groww session, read only: the bearer token is looked up on every call (a login during the day
-     * takes effect at once; none = {@link Kind#SESSION}); the day's instrument file is checked against our contract master
-     * for this account once a day. Quotes come from {@code liveQuotes}, never from Groww. Order calls are not offered
-     * (and {@link ReadLiveConnection} and the gateway refuse them as well).
+     * The account's real Groww session: the bearer token is looked up on every call (a login during the day takes effect
+     * at once; none = {@link Kind#SESSION}) and set on the one gateway this session keeps for its life, so its listeners,
+     * placed tags and last reports survive a new login; every call leaves from the account's egress address (checked on
+     * every call: not on this host = SESSION). The day's instrument file is checked against our contract master for this
+     * account once a day. Quotes come from {@code liveQuotes}, never from Groww.
+     * <ul>
+     *   <li>Reads (a read config, READ_LIVE): order calls are not offered (and {@link ReadLiveConnection} and the gateway
+     *       refuse them as well).</li>
+     *   <li>LIVE (the LIVE config, production gaps C1): order calls go to Groww, always behind the {@link LiveGuard} that
+     *       {@link #live} puts in front, on the Groww client's shared order limiter.</li>
+     * </ul>
      */
-    private final class GrowwReads implements BrokerConnection {
+    private final class GrowwSession implements BrokerConnection {
 
         private final BrokerAccount account;
+        private final boolean orders;
         private final GrowwInstruments instruments = new GrowwInstruments(List.of());
-        private final GrowwHttp http = new GrowwHttp(groww);
-        private final GrowwGateway gateway = new GrowwGateway(groww, http, instruments, liveQuotes);
+        private final GrowwHttp http;
+        private final GrowwGateway gateway;
         private final Object dayLock = new Object();
         private LocalDate loadedDay;
         private Instant lastAttempt = Instant.EPOCH;
 
-        GrowwReads(BrokerAccount account) {
+        /** @param user the pinned Groww client (LIVE: its order limiter); null for reads */
+        GrowwSession(BrokerAccount account, GrowwConfig config, String user) {
             this.account = account;
+            this.orders = config.isLive();
+            // the configured address, on this host or not: the registry refused the route if not, and every call checks
+            GrowwConfig own = config.withEgress(egress.configured(account.id()).orElse(null));
+            this.http = new GrowwHttp(own);
+            this.gateway = new GrowwGateway(own, http, instruments, liveQuotes, orders ? user : null);
+        }
+
+        /** The contract's lot size in today's checked list, 0 when it is not there (the LIVE guard refuses). */
+        int lotSize(String instrumentKey) {
+            gateway();
+            loadToday();
+            return instruments.byInstrumentKey(instrumentKey).map(GrowwInstruments.Contract::lotSize).orElse(0);
+        }
+
+        /** The gateway for an order call: LIVE only, with today's checked list (an exit of a contract needs it too). */
+        private GrowwGateway orderGateway(String call) {
+            if (!orders) {
+                throw refused(call);
+            }
+            GrowwGateway g = gateway();
+            loadToday();
+            return g;
         }
 
         void tap(java.util.function.BiConsumer<String, String> tap) {
@@ -289,6 +377,7 @@ public final class GrowwDryRunAdapter implements BrokerAdapter {
                 throw new BrokerException(Kind.SESSION, "the Groww session of " + account.displayName()
                         + " has no token: log in again");
             }
+            egress.address(account);                                    // on this host, or SESSION: nothing is sent
             http.session(access.accessToken());
             return gateway;                                             // no download under this lock
         }
@@ -326,7 +415,7 @@ public final class GrowwDryRunAdapter implements BrokerAdapter {
             }
             lastAttempt = Instant.now();
             try {
-                GrowwInstruments fresh = new GrowwInstruments(files.today(today));
+                GrowwInstruments fresh = new GrowwInstruments(files.today(today, http));
                 GrowwMappingCheck.Result check = GrowwMappingCheck.apply(fresh, new JdbcTemplate(dataSource), today);
                 instruments.replaceWith(fresh);
                 loadedDay = today;
@@ -351,6 +440,12 @@ public final class GrowwDryRunAdapter implements BrokerAdapter {
         @Override
         public String name() {
             return "GROWW";
+        }
+
+        /** Every order of ours is MIS; a hand order of another product is not counted as held. */
+        @Override
+        public String product() {
+            return gateway.product();
         }
 
         @Override
@@ -390,31 +485,34 @@ public final class GrowwDryRunAdapter implements BrokerAdapter {
 
         @Override
         public int poll() {
-            throw refused("poll");
+            return orderGateway("poll").poll();
         }
 
         @Override
         public void onUpdate(Consumer<OrderUpdate> listener) {
-            throw refused("onUpdate");
+            if (!orders) {
+                throw refused("onUpdate");
+            }
+            gateway.onUpdate(listener);                                 // one gateway for the session's life
         }
 
         @Override
         public void place(OrderRequest request) {
-            throw refused("place");
+            orderGateway("place").place(request);
         }
 
         @Override
         public void modify(String clientOrderId, long quantity, double limitPrice, double triggerPrice) {
-            throw refused("modify");
+            orderGateway("modify").modify(clientOrderId, quantity, limitPrice, triggerPrice);
         }
 
         @Override
         public void cancel(String clientOrderId) {
-            throw refused("cancel");
+            orderGateway("cancel").cancel(clientOrderId);
         }
 
         private IllegalStateException refused(String call) {
-            return new IllegalStateException(call + " not offered: Groww has no LIVE connection in this build (reads only)");
+            return new IllegalStateException(call + " not offered: a READ_LIVE Groww connection (reads only)");
         }
     }
 

@@ -385,8 +385,16 @@ public final class BrokerVenue implements FollowerVenue {
                             throw e;
                         }
                         log.warn("exit {} re-price failed: {}", tag, e.getMessage());
+                        if (e instanceof com.autotrade.broker.PartlyFilledModifyRefused) {
+                            // validation 16 Nov 2026: the adapter will not re-price a partly filled order (the broker's
+                            // quantity may mean the rest): cancelled now, as at the chase's end; what is left is sold by a
+                            // new order (PARTIAL). Any other refusal (Kite's own) keeps chasing as before
+                            cancel(tag);
+                            cancelled = true;
+                            chases = rules.exitChaseMax() + 1;
+                        }
                     }
-                    window = elapsed + rules.exitChaseSec();
+                    window = elapsed + (cancelled ? Math.max(2, rules.exitChaseSec()) : rules.exitChaseSec());
                 }
             }
             sleep((long) rules.pollMs());
@@ -491,7 +499,7 @@ public final class BrokerVenue implements FollowerVenue {
                 // review 8 Nov 2026: what the broker's book holds and is not already being sold by others, plus what our
                 // own stops cover (they are re-sized or replaced). Less than the position (a hand sale in Kite): our guard
                 // would refuse the stop, so no row is written and nothing sent (no refused order every turn, no alert)
-                long free = LiveGuard.held(book, key) - LiveGuard.workingSells(book, key, "") + covered;   // "": no tag
+                long free = LiveGuard.free(book, key, "", broker.product()) + covered;              // "": no tag
                 if (free < open) {
                     return Protection.later(Protection.Later.BROKER_HOLDS_LESS, "the broker holds " + free + " free of "
                             + pos.get("symbol") + ", our position " + open);
@@ -883,7 +891,7 @@ public final class BrokerVenue implements FollowerVenue {
             return null;
         }
         try {
-            return LiveGuard.held(broker.orders(), instrumentKey);
+            return LiveGuard.holds(broker.orders(), instrumentKey, broker.product());
         } catch (BrokerException e) {
             if (e.kind() == Kind.SESSION) {
                 throw e;

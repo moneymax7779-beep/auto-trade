@@ -315,6 +315,13 @@ public final class GrowwSimulator implements AutoCloseable {
         pageCap = Math.max(1, Math.min(100, rows));
     }
 
+    /** Fault: a page of the order list with no rows answers "not found" (GA004, HTTP 404) instead of an empty list. */
+    public synchronized void notFoundWhenEmpty(boolean on) {
+        notFoundWhenEmpty = on;
+    }
+
+    private boolean notFoundWhenEmpty;
+
     /** Fault: every page of the order list after the first starts with the previous page's last row (a moving list). */
     public synchronized void pageOverlap(boolean on) {
         pageOverlap = on;
@@ -850,9 +857,12 @@ public final class GrowwSimulator implements AutoCloseable {
         } else {
             all = previousBook;                                 // later pages of the same read
         }
+        int from = Math.max(0, page * size - (pageOverlap && page > 0 ? 1 : 0));
+        if (notFoundWhenEmpty && from >= all.size()) {
+            return status(404, error(GrowwHttp.NOT_FOUND, "Resource not found"));
+        }
         ObjectNode answer = success();
         ArrayNode list = answer.putObject("payload").putArray("order_list");
-        int from = Math.max(0, page * size - (pageOverlap && page > 0 ? 1 : 0));
         for (int i = from; i < Math.min(all.size(), from + size); i++) {
             list.add(all.get(i));
         }

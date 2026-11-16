@@ -78,8 +78,12 @@ class AccountAdminController {
     private final KillSwitches audit;
     private final FanOut fanOut;
     private final ExecutionProperties properties;
+    /** The brokers with an order adapter, and which are LIVE (16 Nov 2026, A2: no longer ZERODHA by name). */
+    private final com.autotrade.execution.LiveBrokers liveBrokers;
 
-    AccountAdminController(Access access, DataSource dataSource, TransactionTemplate tx, ExecutionProperties properties) {
+    AccountAdminController(Access access, DataSource dataSource, TransactionTemplate tx, ExecutionProperties properties,
+                           com.autotrade.execution.LiveBrokers liveBrokers) {
+        this.liveBrokers = liveBrokers;
         this.access = access;
         this.accounts = new AccountStore(dataSource);
         this.jdbc = new JdbcTemplate(dataSource);
@@ -231,7 +235,8 @@ class AccountAdminController {
         for (long tenant : user.tenants()) {
             Long[] groups = accounts.followableCopyGroups(tenant).toArray(new Long[0]);
             ids.addAll(jdbc.queryForList("select distinct strategy_id from exec.signal_decision where copy_group_id = any(?) "
-                    + "and session_date > current_date - 60", String.class, (Object) groups));
+                    + "and session_date > current_date - 60 and strategy_id <> '"
+                    + com.autotrade.execution.ManualOrders.STRATEGY + "'", String.class, (Object) groups));
             ids.addAll(jdbc.queryForList("select distinct s.strategy_id from acct.strategy_subscription s join "
                     + "acct.broker_account a on a.id = s.broker_account_id where a.tenant_id = ?", String.class, tenant));
         }
@@ -269,8 +274,10 @@ class AccountAdminController {
         require(name != null && NAME.matcher(name).matches(), "name: 2-40 letters, digits, space, _ or -");
         BrokerType broker = parse(BrokerType.class, body.broker(), "broker");
         boolean daily = dailySwitch(tenant);
-        require(daily || broker == BrokerType.PAPER || broker == BrokerType.ZERODHA,
-                "broker: PAPER or ZERODHA (no order adapter for " + broker + " yet)");
+        // 16 Nov 2026 (A2): any broker the worker has an order adapter for (it was ZERODHA by name); such an account starts
+        // DRY_RUN against its adapter's simulator, and LIVE stays the LIVE switch's, for LIVE brokers only
+        require(daily || broker == BrokerType.PAPER || liveBrokers.hasAdapter(broker),
+                "broker: PAPER or one with an order adapter (none for " + broker + " yet)");
         TradeMode mode = daily ? TradeMode.PAPER : parse(TradeMode.class, body.mode() == null
                 ? (broker == BrokerType.PAPER ? "PAPER" : "DRY_RUN") : body.mode(), "mode");
         require(!daily || body.mode() == null || "PAPER".equalsIgnoreCase(body.mode().trim()),
@@ -284,9 +291,10 @@ class AccountAdminController {
         Double loss = lossLimit(body.dailyLossLimit(), allocation);
         String clientId = clientId(broker, body.clientId());
         Long profile = null;
-        if (broker == BrokerType.ZERODHA && !daily) {
-            require(clientId != null, "a Zerodha account needs its client id (e.g. AB1234)");
-            profile = profileId(tenant, body.credentialProfile());
+        if (broker != BrokerType.PAPER && !daily) {
+            require(clientId != null, broker == BrokerType.ZERODHA ? "a Zerodha account needs its client id (e.g. AB1234)"
+                    : "a " + broker + " account needs its client code (UCC)");
+            profile = profileId(tenant, broker, body.credentialProfile());
         } else if (broker != BrokerType.PAPER && trimmed(body.credentialProfile()) != null) {
             profile = profileId(tenant, broker, body.credentialProfile());
         }
@@ -463,6 +471,9 @@ class AccountAdminController {
                 for (String held : jdbc.queryForList("select distinct strategy_id from exec.position where "
                         + "broker_account_id = any(?) and status <> 'CLOSED'", String.class,
                         (Object) (twin == null ? new Long[] {id} : new Long[] {id, twin}))) {
+                    if (held.equals(com.autotrade.execution.ManualOrders.STRATEGY)) {
+                        continue;                  // a manual position is no subscription: its EXIT is the trader's
+                    }
                     // an unsubscribed strategy's EXIT is no longer fanned out to this account (code review 3 Nov 2026)
                     require(wanted.contains(held) || off.contains(held), a.displayName() + " holds an open " + held + " position: keep the "
                             + "strategy until it is closed");
@@ -653,22 +664,24 @@ class AccountAdminController {
         return ids.getFirst();
     }
 
-    /** A tenant's active broker app of this broker, by name. */
+    /**
+     * A tenant's active broker app (credential profile) of this broker: the one named, or with no name its only one
+     * (16 Nov 2026, A2: one lookup for every broker; the no-name case was Zerodha's only).
+     */
     private long profileId(long tenant, BrokerType broker, String name) {
-        List<Long> ids = jdbc.queryForList("select id from acct.broker_credential_profile where tenant_id = ? "
-                + "and broker_type = ? and status = 'ACTIVE' and name = ?", Long.class, tenant, broker.name(), name.trim());
-        require(ids.size() == 1, "no active " + broker + " app named " + name + " in this workspace");
-        return ids.getFirst();
-    }
-
-    private long profileId(long tenant, String name) {
-        List<Long> ids = name == null || name.isBlank()
-                ? jdbc.queryForList("select id from acct.broker_credential_profile where tenant_id = ? and broker_type = 'ZERODHA' "
-                        + "and status = 'ACTIVE'", Long.class, tenant)
-                : jdbc.queryForList("select id from acct.broker_credential_profile where tenant_id = ? and broker_type = 'ZERODHA' "
-                        + "and status = 'ACTIVE' and name = ?", Long.class, tenant, name);
-        require(ids.size() == 1, ids.isEmpty() ? "no active Zerodha app (credential profile) for this tenant"
-                : "several Zerodha apps: choose one");
+        String named = trimmed(name);
+        List<Long> ids = named == null
+                ? jdbc.queryForList("select id from acct.broker_credential_profile where tenant_id = ? and broker_type = ? "
+                        + "and status = 'ACTIVE'", Long.class, tenant, broker.name())
+                : jdbc.queryForList("select id from acct.broker_credential_profile where tenant_id = ? and broker_type = ? "
+                        + "and status = 'ACTIVE' and name = ?", Long.class, tenant, broker.name(), named);
+        String app = broker == BrokerType.ZERODHA ? "Zerodha" : broker.name();
+        if (named != null) {
+            require(ids.size() == 1, "no active " + app + " app named " + named + " in this workspace");
+        } else {
+            require(ids.size() == 1, ids.isEmpty() ? "no active " + app + " app (credential profile) for this tenant"
+                    : "several " + app + " apps: choose one");
+        }
         return ids.getFirst();
     }
 

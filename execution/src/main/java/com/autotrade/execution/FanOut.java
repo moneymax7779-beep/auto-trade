@@ -24,6 +24,9 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * a LIVE day with a session, else its paper twin, none when Off), and at most one ENTER intent is ever made for the
  * workspace's batch, so a switch landing between two ticks cannot send the same entry to both. ADD and EXIT go to every
  * subscribed account as above (an account holding nothing skips them).
+ * <p>
+ * <b>Manual orders</b> ({@link ManualOrders#STRATEGY}, 9 Nov 2026): never fanned out; followers do not copy a trader's
+ * BUY CE / BUY PE.
  */
 public final class FanOut {
 
@@ -53,7 +56,7 @@ public final class FanOut {
                 + "status) select t.tenant_id, d.copy_group_id, d.id, 'SIGNAL', 'SIG:' || d.idempotency_key, 'CREATED' "
                 + "from exec.signal_decision d join (select g.id, g.tenant_id from acct.copy_group g "
                 + "union select s.copy_group_id, s.tenant_id from acct.copy_group_share s) t on t.id = d.copy_group_id "
-                + "where d.copy_group_id = ? and d.session_date = ? "
+                + "where d.copy_group_id = ? and d.session_date = ? and d.strategy_id <> '" + ManualOrders.STRATEGY + "' "
                 + "on conflict (tenant_id, idempotency_key) do nothing", copyGroupId, date);
         // one intent per subscribed, eligible follower
         int created = jdbc.update("insert into exec.trade_intent (tenant_id, trade_batch_id, broker_account_id, broker_type, "
@@ -67,6 +70,8 @@ public final class FanOut {
                 + "join acct.strategy_subscription s on s.copy_group_id = d.copy_group_id and s.strategy_id = d.strategy_id "
                 + "and s.enabled join acct.broker_account a on a.id = s.broker_account_id "
                 + "where d.copy_group_id = ? and d.session_date = ? and a.account_role = 'FOLLOWER_TRADE' and a.enabled "
+                // a trader's manual order is never copied: its own batch and intent are written by ManualOrders
+                + "and d.strategy_id <> '" + ManualOrders.STRATEGY + "' "
                 + "and a.tenant_id = b.tenant_id "
                 + "and (coalesce(s.mode_override, a.trade_mode) <> 'LIVE' or a.live_trading_enabled) "
                 + "and (d.action = 'EXIT' or s.enabled_at <= d.decided_at "

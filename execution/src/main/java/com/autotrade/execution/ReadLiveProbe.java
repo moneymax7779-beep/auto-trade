@@ -20,6 +20,8 @@ import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -35,11 +37,6 @@ import com.autotrade.broker.BrokerOrder;
 import com.autotrade.broker.BrokerPosition;
 import com.autotrade.broker.BrokerTrade;
 
-import tools.jackson.databind.JsonNode;
-import tools.jackson.databind.json.JsonMapper;
-import tools.jackson.databind.node.ArrayNode;
-import tools.jackson.databind.node.ObjectNode;
-
 /**
  * READ_LIVE's proof of the books (code review 8 Nov 2026): a READ_LIVE route sends its orders, books and positions to
  * its simulator, so without this the adapter's real readers would never run before LIVE. Once when the route opens and
@@ -47,9 +44,11 @@ import tools.jackson.databind.node.ObjectNode;
  * {@code trades()} and {@code positions()} (reads only: it is handed the read-only side of the route and never places,
  * modifies or cancels), checks every row (an instrument key, a known status, a side, quantities not negative, a parsed
  * time), and writes a {@code READ_LIVE_PROBE} audit row per account with the counts and what did not parse. When given a
- * directory it also saves the answers' bodies, redacted (no token, sid or keys; by field name and by the session's own
- * values; never headers), under {@code <dir>/<broker>/<account>/<date>/}, one file per distinct answer: tomorrow's
- * contract tests. Nothing it does can affect trading: every failure is caught, logged and audited.
+ * directory it also saves the answers' bodies, redacted ({@link ReadLiveRedaction}: credentials, the holder's identity,
+ * contact and bank fields, the session's own values; never headers), under {@code <dir>/<broker>/<account>/<date>/}, one
+ * file per distinct answer: tomorrow's contract tests; and an account named for the {@link ReadLiveRecorder} has every
+ * distinct answer of its real session kept per endpoint and day. Nothing it does can affect trading: every failure is
+ * caught, logged and audited.
  * <p>
  * The same thread warms the route up first (the day's instrument list), so that download is off the order path.
  */
@@ -58,23 +57,27 @@ public final class ReadLiveProbe implements AutoCloseable {
     private static final Logger log = LoggerFactory.getLogger(ReadLiveProbe.class);
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     private static final DateTimeFormatter STAMP = DateTimeFormatter.ofPattern("HHmmss");
-    private static final JsonMapper JSON = JsonMapper.builder().build();
     private static final int EXAMPLES = 5;
-    /** Field names whose values are never saved (exact, lower case): credentials and the account holder's identity. */
-    static final Set<String> SECRET_FIELDS = Set.of("access_token", "accesstoken", "token", "auth", "authorization",
-            "sid", "hsservid", "rid", "jwt", "session", "sessionid", "consumer_key", "consumerkey", "api_key", "apikey",
-            "api_secret", "apisecret", "secret", "client_secret", "password", "mpin", "totp", "otp", "pan", "email",
-            "mobile", "phone", "user_id", "userid", "user_name", "username", "ucc", "actid", "uid", "client_id",
-            "clientid", "neo-fin-key");
-
     /**
-     * How often the probe runs ({@code every} null: never, only the warm-up runs) and where it saves the redacted answers
-     * ({@code dir} null: nowhere, the audit row only).
+     * Answers waiting for the recorder on the route's thread at most (review 16 Nov 2026: the queue was unbounded, and a
+     * slow disk with a busy route would hold every answer body in memory); more are dropped, with a warning a minute.
      */
-    public record Settings(Duration every, Path dir) {
+    static final int MAX_PENDING = 64;
+    private static final long DROP_WARN_NANOS = TimeUnit.MINUTES.toNanos(1);
+    /**
+     * How often the probe runs ({@code every} null: never, only the warm-up runs), where it saves the redacted answers
+     * ({@code dir} null: nowhere, the audit row only) and the opt-in {@link ReadLiveRecorder} (null: none; 16 Nov 2026,
+     * D2: each distinct answer per endpoint and day of the accounts it names, the probe's and every other read of the
+     * route's real session).
+     */
+    public record Settings(Duration every, Path dir, ReadLiveRecorder recorder) {
 
         /** No probe (tests that do not ask for one): the warm-up still runs. */
-        public static final Settings OFF = new Settings(null, null);
+        public static final Settings OFF = new Settings(null, null, null);
+
+        public Settings(Duration every, Path dir) {
+            this(every, dir, null);
+        }
 
         public boolean probes() {
             return every != null && !every.isZero() && !every.isNegative();
@@ -120,6 +123,12 @@ public final class ReadLiveProbe implements AutoCloseable {
     private final ThreadLocal<List<String[]>> capture = new ThreadLocal<>();
     private final Map<String, Integer> savedHashes = new HashMap<>();
     private volatile ScheduledExecutorService executor;
+    private final AtomicInteger pending = new AtomicInteger();
+    private final AtomicLong dropped = new AtomicLong();
+    private final AtomicLong droppedSinceWarn = new AtomicLong();
+    private final AtomicLong lastDropWarn = new AtomicLong(System.nanoTime() - DROP_WARN_NANOS);
+    /** The client's own id at the broker (acct.broker_account.external_broker_user_id), read once; "" when none. */
+    private volatile String clientId;
 
     /**
      * @param reads       the route's real-broker side (read-only: only its reads are called)
@@ -137,14 +146,111 @@ public final class ReadLiveProbe implements AutoCloseable {
         this.secrets = secrets == null ? List::of : secrets;
     }
 
-    /** What the adapter's HTTP client hands each answer to: kept only for a probe running on this thread. */
+    /**
+     * What the adapter's HTTP client hands each answer to: kept for a probe running on this thread; any other read of the
+     * route's real session (funds, a quote, the instrument list's JSON) goes to the recorder when the account is
+     * recorded, on the route's own thread, never on the caller's (16 Nov 2026: an entry's funds read is not slowed by a
+     * file write).
+     */
     public BiConsumer<String, String> tap() {
         return (call, body) -> {
             List<String[]> c = capture.get();
-            if (c != null && c.size() < 64) {
-                c.add(new String[] {call, body});
+            if (c != null) {
+                if (c.size() < 64) {
+                    c.add(new String[] {call, body});
+                }
+                return;
+            }
+            ScheduledExecutorService e = executor;
+            if (recording() && e != null && !e.isShutdown()) {
+                if (pending.incrementAndGet() > MAX_PENDING) {
+                    pending.decrementAndGet();
+                    drop();
+                    return;
+                }
+                try {
+                    e.execute(() -> {
+                        try {
+                            record(call, body);
+                        } finally {
+                            pending.decrementAndGet();
+                        }
+                    });
+                } catch (RuntimeException rejected) {
+                    pending.decrementAndGet();                          // closing: the answer is not recorded
+                }
             }
         };
+    }
+
+    /** One answer dropped (the recorder's queue is full): counted, and a warning at most once a minute. */
+    private void drop() {
+        dropped.incrementAndGet();
+        long since = droppedSinceWarn.incrementAndGet();
+        long now = System.nanoTime();
+        long last = lastDropWarn.get();
+        if (now - last >= DROP_WARN_NANOS && lastDropWarn.compareAndSet(last, now)) {
+            droppedSinceWarn.addAndGet(-since);
+            log.warn("account {} ({}): READ_LIVE recorder queue full ({} waiting): {} answer(s) dropped, not recorded",
+                    account.id(), account.displayName(), MAX_PENDING, since);
+        }
+    }
+
+    /** Answers waiting for the recorder (tests). */
+    int pending() {
+        return pending.get();
+    }
+
+    /** Answers dropped because the recorder's queue was full (tests). */
+    long dropped() {
+        return dropped.get();
+    }
+
+    private boolean recording() {
+        return settings.recorder() != null && settings.recorder().records(account.id());
+    }
+
+    private void record(String call, String body) {
+        try {
+            settings.recorder().record(broker, account.id(), call, body, identifiers());
+        } catch (RuntimeException e) {
+            log.warn("account {} ({}): READ_LIVE answer not recorded: {}", account.id(), account.displayName(),
+                    e.getMessage());
+        }
+    }
+
+    /**
+     * The session's values and the client's own id at the broker (review 16 Nov 2026: a user id or client code in a
+     * request path or a body is taken out as well).
+     */
+    private List<String> identifiers() {
+        List<String> values = new ArrayList<>(secrets.get() == null ? List.of() : secrets.get());
+        String id = clientId();
+        if (!id.isEmpty()) {
+            values.add(id);
+        }
+        return values;
+    }
+
+    private String clientId() {
+        String id = clientId;
+        if (id == null) {
+            id = "";
+            if (dataSource != null) {
+                try {
+                    List<String> ids = new org.springframework.jdbc.core.JdbcTemplate(dataSource).queryForList(
+                            "select external_broker_user_id from acct.broker_account where id = ?", String.class,
+                            account.id());
+                    id = ids.isEmpty() || ids.getFirst() == null ? "" : ids.getFirst().trim();
+                } catch (RuntimeException e) {
+                    log.warn("account {} ({}): client id not read for the READ_LIVE redaction: {}", account.id(),
+                            account.displayName(), e.getMessage());
+                    return "";                                          // read again next time
+                }
+            }
+            clientId = id;
+        }
+        return id;
     }
 
     /**
@@ -302,6 +408,9 @@ public final class ReadLiveProbe implements AutoCloseable {
 
     /** The answers, redacted, one file per distinct body of a call today; the number written. */
     private int save(List<String[]> raw) {
+        if (recording()) {
+            raw.forEach(r -> record(r[0], r[1]));
+        }
         if (settings.dir() == null || raw.isEmpty()) {
             return 0;
         }
@@ -310,9 +419,9 @@ public final class ReadLiveProbe implements AutoCloseable {
             LocalDateTime now = LocalDateTime.now(IST);
             Path day = settings.dir().resolve(broker.toLowerCase(Locale.ROOT)).resolve(Long.toString(account.id()))
                     .resolve(now.toLocalDate().toString());
-            List<String> values = secrets.get();
+            List<String> values = identifiers();
             for (int i = 0; i < raw.size(); i++) {
-                String call = raw.get(i)[0];
+                String call = ReadLiveRecorder.redactCall(raw.get(i)[0], values);
                 String body = redact(raw.get(i)[1], values);
                 String slug = call.replaceAll("\\?.*$", "").replaceAll("[^A-Za-z0-9]+", "-").replaceAll("^-|-$", "");
                 int hash = body.hashCode();
@@ -336,43 +445,12 @@ public final class ReadLiveProbe implements AutoCloseable {
     }
 
     /**
-     * A body without secrets: every field named in {@link #SECRET_FIELDS} (at any depth) replaced, then any of the
-     * session's own {@code values} (token, sid, key) wherever it still appears; a body that is not JSON gets the second
-     * step only.
+     * A body without secrets (16 Nov 2026: the recorder's rules, {@link ReadLiveRedaction}, which also take out the
+     * account holder's name, contact, PAN and bank fields): by field name at any depth, then the session's own
+     * {@code values} (token, sid, key) wherever they still appear; a body that is not JSON gets the second step only.
      */
     static String redact(String body, List<String> values) {
-        String out = body == null ? "" : body;
-        try {
-            JsonNode tree = JSON.readTree(out);
-            if (tree != null && (tree.isObject() || tree.isArray())) {
-                scrub(tree);
-                out = JSON.writeValueAsString(tree);
-            }
-        } catch (RuntimeException e) {
-            // not JSON: the values below only
-        }
-        for (String v : values) {
-            if (v != null && v.length() >= 4) {
-                out = out.replace(v, "<redacted>");
-            }
-        }
-        return out;
-    }
-
-    private static void scrub(JsonNode node) {
-        if (node instanceof ObjectNode o) {
-            List<String> names = new ArrayList<>();
-            o.properties().forEach(e -> names.add(e.getKey()));
-            for (String name : names) {
-                if (SECRET_FIELDS.contains(name.toLowerCase(Locale.ROOT))) {
-                    o.put(name, "<redacted>");
-                } else {
-                    scrub(o.get(name));
-                }
-            }
-        } else if (node instanceof ArrayNode a) {
-            a.forEach(ReadLiveProbe::scrub);
-        }
+        return ReadLiveRedaction.redact(body, values);
     }
 
     /** Stops the thread (a running probe's HTTP call is interrupted). */

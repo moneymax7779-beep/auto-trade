@@ -27,6 +27,7 @@ import com.autotrade.broker.OrderStatus;
 import com.autotrade.broker.OrderType;
 import com.autotrade.broker.OrderUpdate;
 import com.autotrade.broker.Quote;
+import com.autotrade.broker.OrderBudget;
 import com.autotrade.broker.RateLimiter;
 
 import tools.jackson.databind.JsonNode;
@@ -61,6 +62,15 @@ public final class KiteGateway implements BrokerConnection {
     /** Kite's quote API: one call a second per app (API key and base), whichever account or route asks. */
     private static final Map<String, RateLimiter> QUOTE_LIMITS = new ConcurrentHashMap<>();
     private final RateLimiter quotes;
+    /**
+     * Validation 16 Nov 2026: Kite counts orders per user / API key (400 a minute, 5,000 a day; reads 10 a second): our
+     * caps sit below, shared by every gateway on the same app, so a runaway loop stops here, not at Kite's 429s.
+     */
+    static final int ORDERS_PER_MINUTE = 350, ORDERS_PER_DAY = 4_500, READS_PER_SECOND = 8;
+    private static final Map<String, RateLimiter> READ_LIMITS = new ConcurrentHashMap<>();
+    private static final Map<String, RateLimiter> ORDER_LIMITS = new ConcurrentHashMap<>();
+    private final RateLimiter reads;
+    private final OrderBudget budget;
     private final List<Consumer<OrderUpdate>> listeners = new CopyOnWriteArrayList<>();
     private final Map<String, String> brokerIdByTag = new ConcurrentHashMap<>();
     private final Map<String, BrokerOrder> lastSeen = new ConcurrentHashMap<>();
@@ -69,8 +79,38 @@ public final class KiteGateway implements BrokerConnection {
         this.config = config;
         this.http = http;
         this.instruments = instruments;
-        this.limiter = new RateLimiter(config.maxOrdersPerSecond());
         this.quotes = QUOTE_LIMITS.computeIfAbsent(config.apiKey() + "@" + config.apiBase(), k -> new RateLimiter(1));
+        // shared per real app (Kite counts per user / API key); a simulator gets its own, so the static maps hold only
+        // real apps (a test run opens hundreds of simulators on reused ports). Review 16 Nov 2026: the order limiter too,
+        // so a canary's connection and the trading route of one app never exceed Kite's 10 a second together
+        String app = config.apiKey() + "@" + config.apiBase();
+        this.limiter = config.isRealBroker() ? ORDER_LIMITS.computeIfAbsent(app,
+                k -> new RateLimiter(config.maxOrdersPerSecond())) : new RateLimiter(config.maxOrdersPerSecond());
+        this.reads = config.isRealBroker() ? READ_LIMITS.computeIfAbsent(app, k -> new RateLimiter(READS_PER_SECOND))
+                : new RateLimiter(READS_PER_SECOND);
+        this.budget = config.isRealBroker() ? OrderBudget.shared("ZERODHA:" + app, ORDERS_PER_DAY, perMinute())
+                : new OrderBudget(ORDERS_PER_DAY, java.time.Clock.systemUTC(), perMinute());
+    }
+
+    /** A gateway with its own order budget (tests). */
+    KiteGateway(KiteConfig config, KiteHttp http, KiteInstruments instruments, OrderBudget budget) {
+        this.config = config;
+        this.http = http;
+        this.instruments = instruments;
+        this.limiter = new RateLimiter(config.maxOrdersPerSecond());
+        this.quotes = new RateLimiter(1);
+        this.reads = new RateLimiter(READS_PER_SECOND);
+        this.budget = budget;
+    }
+
+    private static OrderBudget.Window perMinute() {
+        return new OrderBudget.Window(java.time.Duration.ofMinutes(1), ORDERS_PER_MINUTE);
+    }
+
+    /** The product our orders carry (the config's), so product-aware checks skip a hand order of another product. */
+    @Override
+    public String product() {
+        return config.product();
     }
 
     @Override
@@ -114,6 +154,7 @@ public final class KiteGateway implements BrokerConnection {
         }
         form.put("validity", "DAY");
         form.put("tag", tag);
+        budget.charge(r.side() == OrderSide.BUY, "place " + tag);
         for (int attempt = 1; ; attempt++) {
             try {
                 limiter.acquire();
@@ -185,6 +226,7 @@ public final class KiteGateway implements BrokerConnection {
             form.put("trigger_price", price(triggerPrice, c.tickSize(), null));
         }
         form.put("order_type", order.type() == OrderType.STOP_LIMIT ? "SL" : "LIMIT");
+        budget.charge(order.side() == OrderSide.BUY, "modify " + clientOrderId);
         limiter.acquire();
         http.put("/orders/regular/" + order.brokerOrderId(), form);
     }
@@ -196,6 +238,7 @@ public final class KiteGateway implements BrokerConnection {
         if (id == null || id.isEmpty()) {
             id = known(clientOrderId).brokerOrderId();
         }
+        budget.count();
         limiter.acquire();
         http.delete("/orders/regular/" + id);
     }
@@ -209,7 +252,7 @@ public final class KiteGateway implements BrokerConnection {
 
     @Override
     public double availableFunds() {
-        JsonNode equity = http.get("/user/margins/equity", null);
+        JsonNode equity = readGet("/user/margins/equity");
         JsonNode live = equity.path("available").path("live_balance");
         return live.isMissingNode() || live.isNull() ? equity.path("net").asDouble(Double.NaN) : live.asDouble();
     }
@@ -248,7 +291,7 @@ public final class KiteGateway implements BrokerConnection {
     @Override
     public List<BrokerOrder> orders() {
         List<BrokerOrder> orders = new ArrayList<>();
-        for (JsonNode o : http.get("/orders", null)) {
+        for (JsonNode o : readGet("/orders")) {
             orders.add(order(o));
         }
         return orders;
@@ -257,7 +300,7 @@ public final class KiteGateway implements BrokerConnection {
     @Override
     public List<BrokerTrade> trades() {
         List<BrokerTrade> trades = new ArrayList<>();
-        for (JsonNode t : http.get("/trades", null)) {
+        for (JsonNode t : readGet("/trades")) {
             trades.add(new BrokerTrade(t.path("trade_id").asString(), t.path("order_id").asString(),
                     KiteInstruments.instrumentKey(t.path("exchange").asString(), exchangeToken(t)),
                     t.path("tradingsymbol").asString(), OrderSide.valueOf(t.path("transaction_type").asString()),
@@ -270,7 +313,7 @@ public final class KiteGateway implements BrokerConnection {
     @Override
     public List<BrokerPosition> positions() {
         List<BrokerPosition> positions = new ArrayList<>();
-        for (JsonNode p : http.get("/portfolio/positions", null).path("net")) {
+        for (JsonNode p : readGet("/portfolio/positions").path("net")) {
             if (!config.product().equals(p.path("product").asString(config.product()))) {
                 continue;
             }
@@ -340,7 +383,8 @@ public final class KiteGateway implements BrokerConnection {
                 type.equals("SL") ? OrderType.STOP_LIMIT : OrderType.LIMIT, o.path("quantity").asLong(0), filled,
                 o.path("average_price").asDouble(0), o.path("price").asDouble(0), o.path("trigger_price").asDouble(0),
                 status(raw, filled), raw, o.path("status_message").asString(null),
-                updated != null ? updated : KiteHttp.time(o.path("order_timestamp").asString("")));
+                updated != null ? updated : KiteHttp.time(o.path("order_timestamp").asString("")),
+                o.path("product").asString(""));
     }
 
     /** Kite's order statuses onto ours; the many transient ones ("VALIDATION PENDING", "MODIFY PENDING", ...) are PENDING. */
@@ -371,4 +415,10 @@ public final class KiteGateway implements BrokerConnection {
             Thread.currentThread().interrupt();
         }
     }
+    /** A read call through the app's read limiter (Kite: 10 a second for these endpoints). */
+    private JsonNode readGet(String path) {
+        reads.acquire();
+        return http.get(path, null);
+    }
+
 }

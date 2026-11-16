@@ -1,0 +1,83 @@
+# Per-broker trading-day rules v1 (multi-broker gap A1, 16 Nov 2026). Until now one global set served every broker: the
+# product MIS hard-coded in the Kite adapter, the last LIVE entry 15:10 (FollowerSimulator.LIVE_LAST_ENTRY) and one
+# square-off cron at 15:20 (ExecutionService, autotrade.execution.square-off-cron). Each broker squares intraday (MIS)
+# positions off at its own cut-off and names its intraday product its own way, so the execution worker now reads them
+# from here, per account broker:
+#   product                 the product code every order of ours carries (as each gateway sends it today; the adapter's
+#                           product must equal it, checked when the worker starts)
+#   last_live_entry         no LIVE entry from this time (IST)
+#   square_off              our end-of-day square-off for the broker's accounts (IST); a minute tick from 15:00 to 15:30
+#                           runs it once the time is reached, so it must lie in 15:00-15:30
+#   broker_auto_square_off  the broker's own intraday F&O auto square-off (it charges Rs 50 + GST an order for it); our
+#                           square_off must be at least 5 minutes before it (checked at load: the worker does not start)
+#   broker_auto_square_off_status
+#                           CONFIRMED: read on the broker's own site on 16 Nov 2026 (source below); UNCONFIRMED: the
+#                           broker's own pages disagree or do not say, and the earliest time they give is used
+#   costs_file              the dated cost model that charges the account's P&L (one file for every broker in v1, see below)
+# PAPER (our own simulated broker) has no product and no broker cut-off: only its square-off and costs.
+#
+# ZERODHA keeps exactly the values the LIVE account has traded under (MIS, 15:10, 15:20, costs v2), so v1 changes nothing
+# for ZERODHA-1. The others' times move earlier where their cut-off requires it.
+#
+# Costs: every broker points to india-index-options-costs.v2 (Rs 30 an order, the Upstox Plus rate, which every replay and
+# P&L of this project has used since 6 Oct 2026). A per-broker brokerage file is a new costs version (and a v2 of this
+# file) once each broker's own tariff page is checked; v1 only moves the choice of file to the account's broker.
+#
+# Times are the broker's equity-derivatives (index options) intraday cut-off on a normal day. Brokers announce changes on
+# their bulletins (Zerodha: zerodha.com/marketintel/bulletin; Upstox: upstox.com/announcements): a change is a new
+# version of this file.
+version: broker-rules-v1
+name: broker-rules
+status: UNCALIBRATED
+
+brokers:
+  ZERODHA:
+    product: MIS
+    last_live_entry: "15:10"
+    square_off: "15:20"
+    broker_auto_square_off: "15:26"
+    broker_auto_square_off_status: CONFIRMED
+    broker_auto_square_off_source: >-
+      support.zerodha.com/category/trading-and-markets/trading-faqs/market-sessions/articles/intraday-auto-square-off-timings
+      (F&O contracts 3:26 PM); zerodha.com/z-connect/updates/changes-to-the-auto-square-off-timings-for-equity-and-fo
+      (F&O 3:25 PM -> 3:26 PM from 26 Dec 2025)
+    costs_file: config/costs/india-index-options-costs.v2.yaml
+
+  UPSTOX:
+    product: I
+    last_live_entry: "15:10"
+    square_off: "15:20"
+    broker_auto_square_off: "15:25"
+    broker_auto_square_off_status: CONFIRMED
+    broker_auto_square_off_source: >-
+      upstox.com/help-center/t-252251 (equity derivatives: auto square-off 3:25 PM, last new intraday order 3:24 PM;
+      undated); a web search lists an Upstox announcement of 4 Sep 2026 moving F&O from 3:20 PM to 3:25 PM (its page
+      did not load on 16 Nov 2026)
+    costs_file: config/costs/india-index-options-costs.v2.yaml
+
+  KOTAK_NEO:
+    product: MIS
+    last_live_entry: "15:05"
+    square_off: "15:15"
+    broker_auto_square_off: "15:20"
+    broker_auto_square_off_status: UNCONFIRMED
+    broker_auto_square_off_source: >-
+      kotakneo.com/bulletins/closing-auction-session-explained (F&O 3:25 PM from 3 Aug 2026) disagrees with
+      kotakneo.com/support/what-are-the-auto-square-off-timings-for-open-intraday-positions (3:20 PM, index options
+      not separated); the earlier 3:20 PM is used until a READ_LIVE session or Kotak support confirms
+    costs_file: config/costs/india-index-options-costs.v2.yaml
+
+  GROWW:
+    product: MIS
+    last_live_entry: "15:05"
+    square_off: "15:15"
+    broker_auto_square_off: "15:20"
+    broker_auto_square_off_status: CONFIRMED
+    broker_auto_square_off_source: >-
+      groww.in/help/stocks,-f&o,-ipo-&-mtf/order/why-was-my-position-auto-sqaured-off--66 ("Your intraday position in F&O
+      will be auto-squared off at 3:20 PM"; undated); groww.in/p/risk-policy (from 10 minutes before the close)
+    costs_file: config/costs/india-index-options-costs.v2.yaml
+
+  PAPER:
+    square_off: "15:20"
+    costs_file: config/costs/india-index-options-costs.v2.yaml

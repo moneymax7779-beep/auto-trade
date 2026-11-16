@@ -33,8 +33,8 @@ import tools.jackson.databind.JsonNode;
  *       noted); the session ends at the next 03:30 IST, Upstox's own expiry.</li>
  * </ol>
  * Never zt-tiger-v2's Upstox app (a new login of that app would end zt's token): a member's account uses its own app.
- * Upstox has a DRY_RUN order adapter only in this build (no LIVE one): the session is read by READ_LIVE
- * ({@link UpstoxSessionSource}); orders go to a simulator.
+ * The session is read by READ_LIVE ({@link UpstoxSessionSource}); Upstox's LIVE connection is not reachable in this build.
+ * Every call here leaves from the account's egress address when it has one (production gaps B1, 16 Nov 2026).
  */
 @Component
 class UpstoxLogin {
@@ -48,7 +48,7 @@ class UpstoxLogin {
     private final SessionActivation sessions;
     private final AccountStore accounts;
     private final BrokerLoginProperties props;
-    private final BrokerHttp http = new BrokerHttp("Upstox");
+    private final BrokerHttp.PerAccount https;
     private final Map<String, Pending> pending = new ConcurrentHashMap<>();
     private final SecureRandom random = new SecureRandom();
     private final UpstoxDenyList denied;
@@ -58,8 +58,15 @@ class UpstoxLogin {
         this(sessions, dataSource, props, UpstoxDenyList.NONE);
     }
 
-    @org.springframework.beans.factory.annotation.Autowired      // two constructors: Spring must be told which
     UpstoxLogin(SessionActivation sessions, DataSource dataSource, BrokerLoginProperties props, UpstoxDenyList denied) {
+        this(sessions, dataSource, props, denied, com.autotrade.execution.AccountEgress.NONE);
+    }
+
+    /** {@code egress}: the account's source address for every call (production gaps B1, 16 Nov 2026). */
+    @org.springframework.beans.factory.annotation.Autowired      // several constructors: Spring must be told which
+    UpstoxLogin(SessionActivation sessions, DataSource dataSource, BrokerLoginProperties props, UpstoxDenyList denied,
+                com.autotrade.execution.AccountEgress egress) {
+        this.https = new BrokerHttp.PerAccount("Upstox", egress);
         this.denied = denied == null ? UpstoxDenyList.NONE : denied;
         this.sessions = sessions;
         this.accounts = new AccountStore(dataSource);
@@ -109,6 +116,7 @@ class UpstoxLogin {
                 sessions.failed(account, app, p.subject(), refusal);
                 return new KiteLogin.Result(false, account.displayName(), refusal + " Nothing was stored.");
             }
+            BrokerHttp http = https.forAccount(account);                // the account's egress (Upstox's registered IP)
             JsonNode token = http.postForm(props.upstoxApi() + "/v2/login/authorization/token", Map.of(), Map.of(
                     "code", code, "client_id", sessions.secrets.read(app.keyRef()),
                     "client_secret", sessions.secrets.read(app.secretRef()), "redirect_uri", app.redirectUri(),

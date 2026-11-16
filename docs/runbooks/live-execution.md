@@ -138,8 +138,10 @@ only until Keycloak.
 
 ## End-of-day square-off and contract checks (code review, 24 Oct 2026)
 
-- **15:20 IST, weekdays:** the worker flattens any follower position still open (`autotrade.execution.square-off-cron`).
-  Every live-set strategy is flat by 15:15, so this only acts when the signal source stopped sending (its failure also
+- **Each broker's square-off time, weekdays** (`config/brokers/broker-rules.v1.yaml`, 16 Nov 2026: ZERODHA and UPSTOX
+  15:20, KOTAK_NEO and GROWW 15:15, PAPER 15:20; a minute tick from 15:00 to 15:30 runs each broker once its time has
+  come, retried until flat): the worker flattens any follower position still open. The rules also hold each broker's
+  last LIVE entry (ZERODHA 15:10) and costs file. Every live-set strategy is flat by 15:15, so this only acts when the signal source stopped sending (its failure also
   raises a CRITICAL Telegram alert from trading-core). No kill switch is engaged; the audit log shows `EOD_SQUARE_OFF`.
 - **An EXIT for another contract** than the one the follower holds (a restarted signal source on a new strike) is
   skipped as `CONTRACT_MISMATCH`; nothing is sold. The held position keeps its broker stop until the square-off or a

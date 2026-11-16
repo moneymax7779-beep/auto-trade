@@ -2,8 +2,7 @@
 -- The bot now takes commands, so it reads its updates with an offset (each update is used up). Every update is kept
 -- here first; the /start <code> chat link reads this table instead of asking Telegram, and a command is processed once
 -- (update_id is Telegram's own, unique per bot).
--- Number: chart orders (feature/chart-orders, uncommitted) also hold V38. Whichever merges second renumbers its file;
--- two V38 files fail the build at once, which is louder than an out-of-order V38 failing on the VM.
+-- Number: written as V38, renumbered V39 when merged after chart orders (V38__chart_orders, main 18e3a69).
 create table exec.telegram_update (
     update_id      bigint      primary key,
     received_at    timestamptz not null default now(),

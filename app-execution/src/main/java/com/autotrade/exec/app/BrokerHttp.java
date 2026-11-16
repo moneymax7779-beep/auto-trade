@@ -1,5 +1,6 @@
 package com.autotrade.exec.app;
 
+import java.net.InetAddress;
 import java.net.URI;
 import java.net.URLEncoder;
 import java.net.http.HttpClient;
@@ -17,6 +18,10 @@ import tools.jackson.databind.json.JsonMapper;
  * The few HTTP calls a broker's daily login makes (Upstox, Kotak Neo, Groww; trader workspaces, 7 Nov 2026): JSON or form
  * bodies, a 15 s timeout, and the broker's own error message on a refusal. A failure's message never carries a request
  * body (a TOTP, MPIN, key or secret), only the broker's reason and the HTTP status.
+ * <p>
+ * Production gaps B1 (16 Nov 2026): a login leaves from the account's own egress address ({@link PerAccount}; Kotak's
+ * session must be created from the IP that sends its orders, error 1037 otherwise), never from the default route when
+ * that address is configured but not on this host; an account without one uses the default client, as before.
  */
 final class BrokerHttp {
 
@@ -33,10 +38,45 @@ final class BrokerHttp {
     }
 
     private final String broker;
-    private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
+    private final HttpClient http;
 
     BrokerHttp(String broker) {
+        this(broker, null);
+    }
+
+    /** @param egress the source address of every call (null: the host's default route) */
+    BrokerHttp(String broker, InetAddress egress) {
         this.broker = broker;
+        this.http = com.autotrade.broker.Egress.client(Duration.ofSeconds(5), egress);
+    }
+
+    /**
+     * One broker's login clients by account: the default client for an account without an egress address, one client per
+     * address otherwise (created once). An address that is configured but not on this host is a {@link Failure} with the
+     * reason (the login is refused, nothing is sent).
+     */
+    static final class PerAccount {
+
+        private final String broker;
+        private final com.autotrade.execution.AccountEgress egress;
+        private final BrokerHttp plain;
+        private final java.util.Map<InetAddress, BrokerHttp> bound = new java.util.concurrent.ConcurrentHashMap<>();
+
+        PerAccount(String broker, com.autotrade.execution.AccountEgress egress) {
+            this.broker = broker;
+            this.egress = egress == null ? com.autotrade.execution.AccountEgress.NONE : egress;
+            this.plain = new BrokerHttp(broker);
+        }
+
+        BrokerHttp forAccount(com.autotrade.account.BrokerAccount account) {
+            InetAddress from;
+            try {
+                from = egress.address(account);
+            } catch (com.autotrade.broker.BrokerException e) {
+                throw new Failure(0, e.getMessage() + "; the login is not sent");
+            }
+            return from == null ? plain : bound.computeIfAbsent(from, f -> new BrokerHttp(broker, f));
+        }
     }
 
     JsonNode getJson(String url, Map<String, String> headers) {

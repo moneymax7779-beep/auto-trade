@@ -41,7 +41,7 @@ reference (`TELEGRAM_COMMAND`, actor `telegram:<login>`).
    (`TELEGRAM_BOT_TOKEN=…`, `TELEGRAM_CHAT_ID=…`), and `AUTOTRADE_TELEGRAM_ALARM_FILE=/app/telegram/alarm.env` in the
    root-only `.env`.
 3. Set `AUTOTRADE_TELEGRAM_COMMANDS=true` in the root-only `.env` and redeploy. Trading-core must run first: the worker
-   now needs schema V38.
+   now needs schema V39.
 4. Check: `curl -s 127.0.0.1:8096/api/execution/status | jq .telegram` shows `"polling": true` and a recent `lastOk`.
    The log shows `Telegram commands on: reading the bot from update N`.
 

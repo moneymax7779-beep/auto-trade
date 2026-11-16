@@ -31,15 +31,19 @@ function Tile({ label, value, sub, title }: { label: string; value: ReactNode; s
 
 /**
  * One row of the day's context above the price chart. Everything here was known at the open except the day's shape,
- * which is labelled as known only at the close.
+ * which is labelled as known only at the close. {@code until}: a replay's clock (15 Nov 2026: the replayed day's
+ * closing VIX, range and shape showed at 09:20, the future in plain sight), so only what was known by then shows.
  */
-export function DayContextCard({ date, underlying, live }: { date: string | undefined; underlying: string; live?: boolean }) {
+export function DayContextCard({ date, underlying, live, until }: { date: string | undefined; underlying: string; live?: boolean;
+  until?: string }) {
   const ctx = useDayContext(date, underlying, live);
   if (ctx.isLoading) return <Loading what="day context" />;
   if (ctx.error) return <ErrorNote error={ctx.error} />;
   const c = ctx.data;
   if (!c) return null;
-  const opening = c.straddle?.find((s) => s[0] >= "09:20");
+  const replaying = until != null && until < "15:30:00";       // a replay past the close knows its whole day
+  const known = (t: string) => !replaying || `${t.slice(0, 5)}:59` < until!;     // a minute is known once it has closed
+  const opening = c.straddle?.find((s) => s[0] >= "09:20" && known(s[0]));
   const fii = c.participants?.find((p) => p.who === "FII");
   const pro = c.participants?.find((p) => p.who === "Pro");
   const client = c.participants?.find((p) => p.who === "Client");
@@ -52,12 +56,12 @@ export function DayContextCard({ date, underlying, live }: { date: string | unde
         sub={c.expiry ? `nearest ${c.expiry.expiry}` : "no option data"} />
       <Tile label="Gap at the open" value={signed(c.index?.gapPct, 2, " %")}
         sub={c.index?.prevClose != null ? `prev close ${points(c.index.prevClose)} → open ${points(c.index.open)}` : "no previous close"} />
-      <Tile label="India VIX" value={c.vixDay.open != null ? `${plain(c.vixDay.open)} → ${plain(c.vixDay.last)}` : "–"}
+      <Tile label="India VIX" value={c.vixDay.open != null ? (replaying ? `${plain(c.vixDay.open)} at the open` : `${plain(c.vixDay.open)} → ${plain(c.vixDay.last)}`) : "–"}
         sub={c.vixDay.percentile1y != null ? `at the open: above ${plain(c.vixDay.percentile1y, 0)} % of the past year's closes`
           : c.vixDay.prevClose != null ? `prev close ${plain(c.vixDay.prevClose)}` : "no VIX for this day"}
-        title={`previous close ${plain(c.vixDay.prevClose)} (${c.vixDay.prevDay ?? "–"}); day ${plain(c.vixDay.low)}–${plain(c.vixDay.high)}; ${c.vixDay.historyDays} days of history`} />
+        title={`previous close ${plain(c.vixDay.prevClose)} (${c.vixDay.prevDay ?? "–"})${replaying ? "" : `; day ${plain(c.vixDay.low)}–${plain(c.vixDay.high)}`}; ${c.vixDay.historyDays} days of history`} />
       <Tile label="Expected move (VIX ÷ √252)" value={c.expectedMoveVix != null ? `±${points(c.expectedMoveVix)} pts` : "–"}
-        sub={range != null ? `day range ${points(range)} pts${shape?.rangeVsExpected != null ? ` = ${plain(shape.rangeVsExpected)}×` : ""}` : undefined}
+        sub={range != null && !replaying ? `day range ${points(range)} pts${shape?.rangeVsExpected != null ? ` = ${plain(shape.rangeVsExpected)}×` : ""}` : undefined}
         title="one standard deviation for a day from VIX at the open" />
       <Tile label="ATM straddle at 09:20" value={opening ? `₹${plain(opening[1])}` : "–"}
         sub={opening ? `${points(opening[2])} strike${opening[3] != null ? ` · ≈ ${plain(opening[3], 1)} % IV` : ""}` : "no option prices"}
@@ -66,8 +70,8 @@ export function DayContextCard({ date, underlying, live }: { date: string | unde
         sub={fii ? `${signed(fii.indexFutLongPctChange, 1, " pts")} · Pro ${plain(pro?.indexFutLongPct, 0)} % · Client ${plain(client?.indexFutLongPct, 0)} %` : "not published"}
         title={fii ? `as published after ${fii.asOf} (NSE participant-wise OI); index calls net ${fii.indexCallNet.toLocaleString("en-IN")}, puts net ${fii.indexPutNet.toLocaleString("en-IN")}` : undefined} />
       <Tile label={shape?.final === false ? "Day so far (hindsight)" : "Day shape (known at the close)"}
-        value={shape ? `${shape.type} ${shape.direction}` : "–"}
-        sub={shape ? `body ${plain(shape.bodyPct, 0)} % of the range` : undefined}
+        value={shape && !replaying ? `${shape.type} ${shape.direction}` : "–"}
+        sub={replaying ? "hidden in a replay until its close" : shape ? `body ${plain(shape.bodyPct, 0)} % of the range` : undefined}
         title="trend: body ≥ 60 % of the range and range ≥ the VIX-expected move; range: body < 30 %. Not knowable during the day." />
     </div>
   );

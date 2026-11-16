@@ -67,7 +67,7 @@ class AccountAdminIT {
                 com.autotrade.account.EquityMode.FIXED, day, "../config/risk/follower-risk.v3.yaml", 100);
         api = new AccountAdminController(new Access(dataSource), dataSource,
                 new TransactionTemplate(new DataSourceTransactionManager(dataSource)),
-                new ExecutionProperties("owner", "LIVE-SET", 0, null, 0, "it", null));
+                new ExecutionProperties("owner", "LIVE-SET", 0, null, 0, "it", null), TestBrokers.live(dataSource));
     }
 
     @AfterAll
@@ -186,13 +186,37 @@ class AccountAdminIT {
         assertThat(status(() -> api.create("local-owner", new AccountAdminController.NewAccount("LIVE-1", "ZERODHA", "LIVE",
                 "AB1236", null, 100_000.0, "FIXED", null, null, List.of(), true, null)))).isEqualTo(400);
         assertThat(status(() -> api.create("local-owner", new AccountAdminController.NewAccount("UP-1", "UPSTOX", "DRY_RUN",
-                null, null, 100_000.0, "FIXED", null, null, List.of(), true, null)))).isEqualTo(400);
+                null, null, 100_000.0, "FIXED", null, null, List.of(), true, null)))).as("no client code").isEqualTo(400);
         api.create("local-owner", new AccountAdminController.NewAccount("PAPER-F", "PAPER", null, null, null, 100_000.0,
                 "COMPOUNDING", null, null, List.of("ma-cross"), true, null));
         assertThat(status(() -> api.create("local-owner", new AccountAdminController.NewAccount("PAPER-F", "PAPER", null, null,
                 null, 100_000.0, "FIXED", null, null, List.of(), true, null)))).as("duplicate name").isEqualTo(400);
         assertThat(status(() -> api.create("kc-trader", zerodha("BY-TRADER", "AB1237", 100_000, null)))).isEqualTo(403);
         assertThat(status(() -> api.create("kc-viewer", zerodha("BY-VIEWER", "AB1238", 100_000, null)))).isEqualTo(403);
+    }
+
+    @Test
+    void anAccountOfAnyBrokerWithAnAdapterIsCreatedDryRunWithItsOwnApp() {
+        // 16 Nov 2026 (A2): it was PAPER or ZERODHA by name; Upstox, Kotak Neo and Groww have order adapters (DRY_RUN)
+        long tenant = new AccountStore(dataSource).ensureTenant("owner");
+        assertThat(status(() -> api.create("local-owner", new AccountAdminController.NewAccount("UP-2", "UPSTOX", "DRY_RUN",
+                "ab12cd", null, 100_000.0, "FIXED", null, null, List.of(), true, null))))
+                .as("no Upstox app in the workspace").isEqualTo(400);
+        jdbc.update("insert into acct.broker_credential_profile (tenant_id, broker_type, scope, name, api_key_ref, "
+                + "api_secret_ref) values (?, 'UPSTOX', 'TENANT_SHARED', 'UPSTOX-1', 'env:UP_KEY', 'env:UP_SECRET')", tenant);
+        assertThat(status(() -> api.create("local-owner", new AccountAdminController.NewAccount("UP-3", "UPSTOX", "LIVE",
+                "AB12CD", null, 100_000.0, "FIXED", null, null, List.of(), true, null)))).as("never created LIVE")
+                .isEqualTo(400);
+        assertThat(status(() -> api.create("local-owner", new AccountAdminController.NewAccount("UP-4", "UPSTOX", "DRY_RUN",
+                "ab-12", null, 100_000.0, "FIXED", null, null, List.of(), true, null)))).as("client code format")
+                .isEqualTo(400);
+        long id = ((Number) api.create("local-owner", new AccountAdminController.NewAccount("UP-5", "UPSTOX", null,
+                "ab12cd", null, 100_000.0, "FIXED", null, null, List.of(), true, null)).get("id")).longValue();
+        assertThat(api.details("local-owner", id)).containsEntry("broker", "UPSTOX").containsEntry("mode", "DRY_RUN")
+                .containsEntry("clientId", "AB12CD").containsEntry("credentialProfile", "UPSTOX-1");
+        assertThat(status(() -> api.create("local-owner", new AccountAdminController.NewAccount("KOTAK-1", "KOTAK_NEO",
+                "DRY_RUN", "KX1234", null, 100_000.0, "FIXED", null, null, List.of(), true, null))))
+                .as("no Kotak app in the workspace").isEqualTo(400);
     }
 
     @Test

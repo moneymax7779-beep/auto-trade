@@ -227,16 +227,30 @@ class GrowwGatewayTest {
     }
 
     @Test
+    void notFoundPastTheLastPageEndsTheListButOnTheFirstPageTheBookIsUnreadable() {
+        // review 16 Nov 2026: GA004 for a page past the end is the end; GA004 on page 0 is never an empty book
+        sim.notFoundWhenEmpty(true);
+        GrowwGateway small = new GrowwGateway(GrowwConfig.simulator(sim.baseUri()).withPageSize(2), http, instruments,
+                sim::book);
+        assertThatThrownBy(small::orders).satisfies(e -> assertThat(kind(e)).isEqualTo(Kind.RETRYABLE))
+                .hasMessageContaining("never taken as empty");
+        for (int i = 1; i <= 3; i++) {
+            small.place(buy("F9" + i + "E1", 65, 90));
+        }
+        assertThat(small.orders()).extracting(BrokerOrder::clientTag).containsExactly("F91E1", "F92E1", "F93E1");
+    }
+
+    @Test
     void theQuoteComesFromTheSuppliedSourceAndWithoutOneNoOrderIsPriced() {
         sim.depth(KEY, List.of(new Quote.Level(99.5, 650), new Quote.Level(99.0, 1300)),
-                List.of(new Quote.Level(100.0, 650), new Quote.Level(100.5, 1300), new Quote.Level(101.0, 6500)), 99.8);
+                List.of(new Quote.Level(100.0, 325), new Quote.Level(100.5, 650), new Quote.Level(101.0, 6500)), 99.8);
         Quote q = gateway.quote(KEY);
-        assertThat(q.asks()).containsExactly(new Quote.Level(100.0, 650), new Quote.Level(100.5, 1300),
+        assertThat(q.asks()).containsExactly(new Quote.Level(100.0, 325), new Quote.Level(100.5, 650),
                 new Quote.Level(101.0, 6500));
-        gateway.place(buy("F91E1", 2600, 100.5));                     // 650 at 100.00 + 1,300 at 100.50; 650 rest open
-        BrokerOrder first = gateway.orderByTag("F91E1").orElseThrow();
-        assertThat(first.filledQuantity()).isEqualTo(1950);
-        assertThat(first.averagePrice()).isCloseTo((650 * 100.0 + 1300 * 100.5) / 1950, within(0.01));
+        gateway.place(buy("F91E1", 1300, 100.5));                     // 325 at 100.00 + 650 at 100.50; 325 rest open
+        BrokerOrder first = gateway.orderByTag("F91E1").orElseThrow();   // (below the 1,800 freeze, 16 Nov 2026)
+        assertThat(first.filledQuantity()).isEqualTo(975);
+        assertThat(first.averagePrice()).isCloseTo((325 * 100.0 + 650 * 100.5) / 975, within(0.01));
         assertThat(first.status()).as("a partial fill: filled_quantity on OPEN").isEqualTo(OrderStatus.PARTIALLY_FILLED);
         assertThat(first.rawStatus()).isEqualTo("OPEN");
         assertThat(gateway.quote(KEY).asks()).containsExactly(new Quote.Level(101.0, 6500));
@@ -760,12 +774,15 @@ class GrowwGatewayTest {
         gateway.place(buy("F52E1", 260, 100.2));                      // 130 of 260 filled, the rest open
         assertThat(gateway.orderByTag("F52E1").orElseThrow().filledQuantity()).isEqualTo(130);
         assertThatThrownBy(() -> gateway.modify("F52E1", 390, 100.2, 0)).satisfies(e -> assertThat(kind(e))
-                .isEqualTo(Kind.TERMINAL)).hasMessageContaining("cancel and re-place");
-        assertThatThrownBy(() -> gateway.modify("F52E1", 130, 100.2, 0)).hasMessageContaining("cancel and re-place");
+                .isEqualTo(Kind.TERMINAL)).hasMessageContaining("cancelled and placed again");
+        assertThatThrownBy(() -> gateway.modify("F52E1", 130, 100.2, 0)).hasMessageContaining("cancelled and placed again");
+        // validation 16 Nov 2026: a price-only change sends the total too, which oversells if Groww reads the rest
+        assertThatThrownBy(() -> gateway.modify("F52E1", 260, 99.0, 0)).satisfies(e -> assertThat(kind(e))
+                .isEqualTo(Kind.TERMINAL));
+        assertThatThrownBy(() -> gateway.modify("F52E1", 0, 99.5, 0)).isInstanceOf(com.autotrade.broker.PartlyFilledModifyRefused.class)
+                .satisfies(e -> assertThat(kind(e))
+                .isEqualTo(Kind.TERMINAL));
         assertThat(sim.requests("modify")).as("nothing sent").isEqualTo(1);
-        gateway.modify("F52E1", 260, 99.0, 0);                        // its own quantity: a price change only
-        gateway.modify("F52E1", 0, 99.5, 0);
-        assertThat(sim.requests("modify")).isEqualTo(3);
     }
 
     @Test
