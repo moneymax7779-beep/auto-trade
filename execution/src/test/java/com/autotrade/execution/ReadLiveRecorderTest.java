@@ -106,6 +106,103 @@ class ReadLiveRecorderTest {
     }
 
     @Test
+    void phoneNumbersGoByFieldNameWordAndByExactValueUnlessTheFieldIsAnOrderTradeOrPrice() {
+        String body = """
+                {"data":{"contact_no":"98765 43210","regMobNo":"9876543210","phNo":"+919876543210","mob":"9876543211",
+                "mobile":9876543212,"contact":{"primary":"9876543213"},"contactNumber":"9876543214",
+                "regNo":"9876543215","alt_no":9876543216,"ref_numbers":[9876543217,"9876543218"],"note_no":"7012345678",
+                "order_id":"9123456789","exchange_order_id":9123456788,"nOrdNo":"9123456787","trade_id":"8123456789",
+                "flId":"8123456788","exchange_timestamp":"9123456786","price":9123456785,"quantity":"9123456784",
+                "instrument_token":9123456783,"seq":"5123456789","guid":"9876543299xyz"}}""";
+        String out = ReadLiveRedaction.redact(body, List.of());
+        for (String phone : List.of("98765 43210", "9876543210", "9876543211", "9876543212", "9876543213", "9876543214",
+                "9876543215", "9876543216", "9876543217", "9876543218", "7012345678")) {
+            assertThat(out).as(phone).doesNotContain("\"" + phone).doesNotContain(":" + phone);
+        }
+        assertThat(out).contains("\"9123456789\"").contains("9123456788").contains("\"9123456787\"")
+                .contains("\"8123456789\"").contains("\"8123456788\"").contains("\"9123456786\"")
+                .contains("9123456785").contains("\"9123456784\"").contains("9123456783")
+                .as("not a mobile (starts with 5)").contains("\"5123456789\"")
+                .as("not exactly ten digits").contains("9876543299xyz");
+        assertThat(ReadLiveRedaction.secretField("regMobNo")).isTrue();
+        assertThat(ReadLiveRedaction.secretField("phNo")).isTrue();
+        assertThat(ReadLiveRedaction.secretField("contact_no")).isTrue();
+        assertThat(ReadLiveRedaction.secretField("phase")).isFalse();
+        assertThat(ReadLiveRedaction.secretField("exchange_order_id")).isFalse();
+    }
+
+    @Test
+    void identifierSegmentsOfARequestPathAreTakenOutOfTheIndexAndTheFileName(@TempDir Path root) throws Exception {
+        assertThat(ReadLiveRedaction.redactPath("/user/AB1234/orders", List.of())).isEqualTo("/user/<redacted>/orders");
+        assertThat(ReadLiveRedaction.redactPath("/v1/clients/xy9z/holdings", List.of("xy9z")))
+                .isEqualTo("/v1/clients/<redacted>/holdings");
+        assertThat(ReadLiveRedaction.redactPath("/v2/portfolio/KT1234X/positions", List.of()))
+                .as("a client code anywhere").isEqualTo("/v2/portfolio/<redacted>/positions");
+        assertThat(ReadLiveRedaction.redactPath("/profile/9876543210", List.of())).isEqualTo("/profile/<redacted>");
+        assertThat(ReadLiveRedaction.redactPath("/quick/user/orders", List.of())).isEqualTo("/quick/user/orders");
+        assertThat(ReadLiveRedaction.redactPath("/orders/151220000000000/trades", List.of()))
+                .as("an order id stays").isEqualTo("/orders/151220000000000/trades");
+        assertThat(ReadLiveRedaction.redactPath("/v1/order/status/reference/F0C261118100000000", List.of()))
+                .as("our own tag stays").isEqualTo("/v1/order/status/reference/F0C261118100000000");
+        assertThat(ReadLiveRedaction.redactPath("/v2/order/retrieve-all", List.of())).isEqualTo("/v2/order/retrieve-all");
+
+        ReadLiveRecorder r = recorder(root, ReadLiveRecorder.Limits.DEFAULT);
+        Optional<Path> saved = r.record("ZERODHA", 21, "GET /user/AB1234/margins?client_id=AB1234&segment=equity",
+                "{\"data\":{\"net\":5}}", List.of("day-token"));
+        Path day = root.resolve("zerodha").resolve(DAY);
+        assertThat(saved).isPresent();
+        assertThat(saved.orElseThrow().getFileName().toString()).doesNotContainIgnoringCase("ab1234");
+        String index = Files.readString(day.resolve(ReadLiveRecorder.INDEX));
+        assertThat(index).doesNotContain("AB1234").contains("\"path\":\"/user/<redacted>/margins\"")
+                .contains("segment=equity");
+        // the client's own id handed in with the session's values: gone from a path where no rule would catch it
+        r.record("KOTAK_NEO", 21, "GET /quick/clients/zq77/limits", "{\"x\":1}", List.of("zq77"));
+        assertThat(Files.readString(root.resolve("kotak_neo").resolve(DAY).resolve(ReadLiveRecorder.INDEX)))
+                .doesNotContain("zq77");
+    }
+
+    @Test
+    void theProbesRecorderQueueIsBoundedAndDropsWhenFull(@TempDir Path root) throws Exception {
+        ReadLiveRecorder r = recorder(root, new ReadLiveRecorder.Limits(1024, 1000, 1000, 10_000_000));
+        ReadLiveProbe probe = new ReadLiveProbe(null, account(21), "GROWW", null, s -> true,
+                new ReadLiveProbe.Settings(null, null, r), List::of);
+        java.util.concurrent.CountDownLatch busy = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        probe.start(() -> {                                    // the route's thread busy (a slow warm-up, a slow disk)
+            busy.countDown();
+            try {
+                release.await(30, java.util.concurrent.TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        try {
+            assertThat(busy.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+            for (int i = 0; i < 100; i++) {
+                probe.tap().accept("GET /v1/order/list", "{\"n\":" + i + "}");
+            }
+            assertThat(probe.pending()).isEqualTo(ReadLiveProbe.MAX_PENDING);
+            assertThat(probe.dropped()).isEqualTo(100 - ReadLiveProbe.MAX_PENDING);
+            release.countDown();
+            Path day = root.resolve("groww").resolve(DAY);
+            for (int i = 0; i < 200 && probe.pending() > 0; i++) {
+                Thread.sleep(20);
+            }
+            assertThat(probe.pending()).isZero();
+            assertThat(files(day)).hasSize(ReadLiveProbe.MAX_PENDING);
+            // room again: the next answer is recorded
+            probe.tap().accept("GET /v1/order/list", "{\"n\":\"next\"}");
+            for (int i = 0; i < 200 && files(day).size() <= ReadLiveProbe.MAX_PENDING; i++) {
+                Thread.sleep(20);
+            }
+            assertThat(files(day)).hasSize(ReadLiveProbe.MAX_PENDING + 1);
+        } finally {
+            release.countDown();
+            probe.close();
+        }
+    }
+
+    @Test
     void savesEachDistinctAnswerOncePerEndpointAndDayOnlyForTheAccountsNamed(@TempDir Path root) throws Exception {
         ReadLiveRecorder r = recorder(root, ReadLiveRecorder.Limits.DEFAULT);
         String empty = "{\"stat\":\"Not_Ok\",\"errMsg\":\"No Data\"}";

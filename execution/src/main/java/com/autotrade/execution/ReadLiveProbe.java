@@ -20,6 +20,8 @@ import java.util.Set;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BiConsumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
@@ -56,6 +58,12 @@ public final class ReadLiveProbe implements AutoCloseable {
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     private static final DateTimeFormatter STAMP = DateTimeFormatter.ofPattern("HHmmss");
     private static final int EXAMPLES = 5;
+    /**
+     * Answers waiting for the recorder on the route's thread at most (review 16 Nov 2026: the queue was unbounded, and a
+     * slow disk with a busy route would hold every answer body in memory); more are dropped, with a warning a minute.
+     */
+    static final int MAX_PENDING = 64;
+    private static final long DROP_WARN_NANOS = TimeUnit.MINUTES.toNanos(1);
     /**
      * How often the probe runs ({@code every} null: never, only the warm-up runs), where it saves the redacted answers
      * ({@code dir} null: nowhere, the audit row only) and the opt-in {@link ReadLiveRecorder} (null: none; 16 Nov 2026,
@@ -115,6 +123,12 @@ public final class ReadLiveProbe implements AutoCloseable {
     private final ThreadLocal<List<String[]>> capture = new ThreadLocal<>();
     private final Map<String, Integer> savedHashes = new HashMap<>();
     private volatile ScheduledExecutorService executor;
+    private final AtomicInteger pending = new AtomicInteger();
+    private final AtomicLong dropped = new AtomicLong();
+    private final AtomicLong droppedSinceWarn = new AtomicLong();
+    private final AtomicLong lastDropWarn = new AtomicLong(System.nanoTime() - DROP_WARN_NANOS);
+    /** The client's own id at the broker (acct.broker_account.external_broker_user_id), read once; "" when none. */
+    private volatile String clientId;
 
     /**
      * @param reads       the route's real-broker side (read-only: only its reads are called)
@@ -149,13 +163,47 @@ public final class ReadLiveProbe implements AutoCloseable {
             }
             ScheduledExecutorService e = executor;
             if (recording() && e != null && !e.isShutdown()) {
+                if (pending.incrementAndGet() > MAX_PENDING) {
+                    pending.decrementAndGet();
+                    drop();
+                    return;
+                }
                 try {
-                    e.execute(() -> record(call, body));
+                    e.execute(() -> {
+                        try {
+                            record(call, body);
+                        } finally {
+                            pending.decrementAndGet();
+                        }
+                    });
                 } catch (RuntimeException rejected) {
-                    // closing: the answer is not recorded
+                    pending.decrementAndGet();                          // closing: the answer is not recorded
                 }
             }
         };
+    }
+
+    /** One answer dropped (the recorder's queue is full): counted, and a warning at most once a minute. */
+    private void drop() {
+        dropped.incrementAndGet();
+        long since = droppedSinceWarn.incrementAndGet();
+        long now = System.nanoTime();
+        long last = lastDropWarn.get();
+        if (now - last >= DROP_WARN_NANOS && lastDropWarn.compareAndSet(last, now)) {
+            droppedSinceWarn.addAndGet(-since);
+            log.warn("account {} ({}): READ_LIVE recorder queue full ({} waiting): {} answer(s) dropped, not recorded",
+                    account.id(), account.displayName(), MAX_PENDING, since);
+        }
+    }
+
+    /** Answers waiting for the recorder (tests). */
+    int pending() {
+        return pending.get();
+    }
+
+    /** Answers dropped because the recorder's queue was full (tests). */
+    long dropped() {
+        return dropped.get();
     }
 
     private boolean recording() {
@@ -164,11 +212,45 @@ public final class ReadLiveProbe implements AutoCloseable {
 
     private void record(String call, String body) {
         try {
-            settings.recorder().record(broker, account.id(), call, body, secrets.get());
+            settings.recorder().record(broker, account.id(), call, body, identifiers());
         } catch (RuntimeException e) {
             log.warn("account {} ({}): READ_LIVE answer not recorded: {}", account.id(), account.displayName(),
                     e.getMessage());
         }
+    }
+
+    /**
+     * The session's values and the client's own id at the broker (review 16 Nov 2026: a user id or client code in a
+     * request path or a body is taken out as well).
+     */
+    private List<String> identifiers() {
+        List<String> values = new ArrayList<>(secrets.get() == null ? List.of() : secrets.get());
+        String id = clientId();
+        if (!id.isEmpty()) {
+            values.add(id);
+        }
+        return values;
+    }
+
+    private String clientId() {
+        String id = clientId;
+        if (id == null) {
+            id = "";
+            if (dataSource != null) {
+                try {
+                    List<String> ids = new org.springframework.jdbc.core.JdbcTemplate(dataSource).queryForList(
+                            "select external_broker_user_id from acct.broker_account where id = ?", String.class,
+                            account.id());
+                    id = ids.isEmpty() || ids.getFirst() == null ? "" : ids.getFirst().trim();
+                } catch (RuntimeException e) {
+                    log.warn("account {} ({}): client id not read for the READ_LIVE redaction: {}", account.id(),
+                            account.displayName(), e.getMessage());
+                    return "";                                          // read again next time
+                }
+            }
+            clientId = id;
+        }
+        return id;
     }
 
     /**
@@ -337,9 +419,9 @@ public final class ReadLiveProbe implements AutoCloseable {
             LocalDateTime now = LocalDateTime.now(IST);
             Path day = settings.dir().resolve(broker.toLowerCase(Locale.ROOT)).resolve(Long.toString(account.id()))
                     .resolve(now.toLocalDate().toString());
-            List<String> values = secrets.get();
+            List<String> values = identifiers();
             for (int i = 0; i < raw.size(); i++) {
-                String call = raw.get(i)[0];
+                String call = ReadLiveRecorder.redactCall(raw.get(i)[0], values);
                 String body = redact(raw.get(i)[1], values);
                 String slug = call.replaceAll("\\?.*$", "").replaceAll("[^A-Za-z0-9]+", "-").replaceAll("^-|-$", "");
                 int hash = body.hashCode();

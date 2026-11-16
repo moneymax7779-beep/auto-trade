@@ -15,11 +15,13 @@ import java.util.function.Consumer;
 import java.util.function.ToIntFunction;
 
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 
 import com.autotrade.broker.BrokerCapabilities;
 import com.autotrade.broker.BrokerConnection;
+import com.autotrade.broker.BrokerException;
 import com.autotrade.broker.BrokerOrder;
 import com.autotrade.broker.BrokerPosition;
 import com.autotrade.broker.BrokerTrade;
@@ -168,6 +170,8 @@ class CanaryTest {
     private static final class Recorded implements Canary.Journal {
         final List<Canary.Step> steps = new ArrayList<>();
         final List<Canary.Report> results = new ArrayList<>();
+        final List<Canary.Report> leftovers = new ArrayList<>();
+        final List<String> calls = new ArrayList<>();
 
         @Override
         public void step(Canary.Step step) {
@@ -177,6 +181,13 @@ class CanaryTest {
         @Override
         public void result(Canary.Report report) {
             results.add(report);
+            calls.add("result");
+        }
+
+        @Override
+        public void leftover(Canary.Report report) {
+            leftovers.add(report);
+            calls.add("leftover");
         }
     }
 
@@ -221,6 +232,8 @@ class CanaryTest {
         assertThat(o.limitPrice()).isEqualTo(44.75);
         assertThat(journal.steps).hasSize(r.steps().size());
         assertThat(journal.results).singleElement().isEqualTo(r);
+        assertThat(journal.leftovers).as("nothing left behind").isEmpty();
+        assertThat(r.leftover()).isFalse();
     }
 
     @ParameterizedTest
@@ -269,11 +282,16 @@ class CanaryTest {
         Venue v = start(b);
         Hooked hooked = new Hooked(v.gateway());
         hooked.afterModify = v.expireSession();
-        Canary.Report r = new Canary(live(hooked), contract(), FAST, null, Clock.systemUTC()).run();
+        Recorded journal = new Recorded();
+        Canary.Report r = new Canary(live(hooked), contract(), FAST, journal, Clock.systemUTC()).run();
 
         assertThat(r.result()).isEqualTo(Canary.Result.FAIL);
         assertThat(r.message()).contains("SESSION").contains("may still be working at the broker: cancel it by hand");
         assertThat(r.leftWorking()).isTrue();
+        // review 16 Nov 2026: a leftover goes to the journal (the account's kill switch, an alert) before the result
+        assertThat(r.leftover()).isTrue();
+        assertThat(journal.leftovers).singleElement().isEqualTo(r);
+        assertThat(journal.calls).containsExactly("leftover", "result");
         assertThat(step(r, "CONFIRM_MODIFY").ok()).isFalse();
         assertThat(v.requests().applyAsInt("cancel")).as("no cancel could be sent").isZero();
     }
@@ -309,8 +327,61 @@ class CanaryTest {
         assertThat(v.requests().applyAsInt("modify")).isZero();
     }
 
+    @ParameterizedTest
+    @EnumSource(Broker.class)
+    void aFillThatCannotBeSoldBackIsALeftover(Broker b) throws Exception {
+        Venue v = start(b);
+        Hooked hooked = new Hooked(v.gateway());
+        hooked.afterPlace = r -> {
+            if (r.side() == OrderSide.BUY) {
+                v.book().quote(KEY, r.limitPrice() - 0.05, 6500, r.limitPrice(), 6500, r.limitPrice());
+            }
+        };
+        hooked.beforePlace = r -> {
+            if (r.side() == OrderSide.SELL) {
+                throw new BrokerException(BrokerException.Kind.TERMINAL, "the broker refused the sell");
+            }
+        };
+        Recorded journal = new Recorded();
+        Canary.Report r = new Canary(live(hooked), contract(), FAST, journal, Clock.systemUTC()).run();
+
+        assertThat(r.result()).isEqualTo(Canary.Result.FAIL);
+        assertThat(r.filledQuantity()).isEqualTo(LOT);
+        assertThat(r.soldBack()).isFalse();
+        assertThat(r.message()).contains("NOT SOLD BACK");
+        assertThat(r.leftover()).isTrue();
+        assertThat(journal.leftovers).singleElement().isEqualTo(r);
+        assertThat(journal.calls).containsExactly("leftover", "result");
+    }
+
+    @Test
+    void refusesWhileTheAccountHasAWorkingOrderOrAHoldingOfOursInAnyContract() throws Exception {
+        Venue v = start(Broker.ZERODHA);
+        Hooked hooked = new Hooked(v.gateway());
+        String other = "NSE_FO|50001";
+        java.time.Instant t = java.time.Instant.now();
+        // a working entry of ours in another contract: the trading LIVE guard counts it, and would count the canary too
+        hooked.extra.add(new BrokerOrder("F12E1", "9001", other, "NIFTY 23200 CE", OrderSide.BUY, OrderType.LIMIT, LOT,
+                0, 0, 80.0, 0, OrderStatus.OPEN, "OPEN", null, t));
+        assertThat(refused(hooked)).contains("orders of ours still working").contains("F12E1");
+        // that entry filled: we hold the other contract
+        hooked.extra.set(0, new BrokerOrder("F12E1", "9001", other, "NIFTY 23200 CE", OrderSide.BUY, OrderType.LIMIT,
+                LOT, LOT, 80.0, 80.0, 0, OrderStatus.FILLED, "COMPLETE", null, t));
+        assertThat(refused(hooked)).contains("holds contracts our orders bought").contains(other);
+        // sold by hand (no tag of ours): flat again, the canary runs
+        hooked.extra.add(new BrokerOrder(null, "9002", other, "NIFTY 23200 CE", OrderSide.SELL, OrderType.LIMIT, LOT,
+                LOT, 81.0, 81.0, 0, OrderStatus.FILLED, "COMPLETE", null, t));
+        Canary.Report r = new Canary(live(hooked), contract(), FAST, null, Clock.systemUTC()).run();
+        assertThat(r.result()).as(r.message()).isEqualTo(Canary.Result.PASS);
+        assertThat(v.requests().applyAsInt("place")).isEqualTo(1);
+    }
+
     private String refused(Venue v) {
-        Canary.Report r = new Canary(live(v.gateway()), contract(), FAST, null, Clock.systemUTC()).run();
+        return refused(v.gateway());
+    }
+
+    private String refused(BrokerConnection gateway) {
+        Canary.Report r = new Canary(live(gateway), contract(), FAST, null, Clock.systemUTC()).run();
         assertThat(r.result()).as(r.message()).isEqualTo(Canary.Result.REFUSED);
         assertThat(r.tag()).as("nothing placed").isNull();
         return r.message();
@@ -320,7 +391,10 @@ class CanaryTest {
     private static final class Hooked implements BrokerConnection {
         final BrokerConnection g;
         Consumer<OrderRequest> afterPlace = r -> { };
+        Consumer<OrderRequest> beforePlace = r -> { };
         Runnable afterModify = () -> { };
+        /** Orders the book shows beside the broker's own (another contract's). */
+        final List<BrokerOrder> extra = new ArrayList<>();
 
         Hooked(BrokerConnection g) {
             this.g = g;
@@ -332,7 +406,13 @@ class CanaryTest {
         @Override public String product() { return g.product(); }
         @Override public double availableFunds() { return g.availableFunds(); }
         @Override public Quote quote(String k) { return g.quote(k); }
-        @Override public List<BrokerOrder> orders() { return g.orders(); }
+        @Override
+        public List<BrokerOrder> orders() {
+            List<BrokerOrder> all = new ArrayList<>(g.orders());
+            all.addAll(extra);
+            return all;
+        }
+
         @Override public java.util.Optional<BrokerOrder> orderByTag(String t) { return g.orderByTag(t); }
         @Override public List<BrokerTrade> trades() { return g.trades(); }
         @Override public List<BrokerPosition> positions() { return g.positions(); }
@@ -341,6 +421,7 @@ class CanaryTest {
 
         @Override
         public void place(OrderRequest r) {
+            beforePlace.accept(r);
             g.place(r);
             afterPlace.accept(r);
         }

@@ -25,7 +25,12 @@ import tools.jackson.databind.json.JsonMapper;
  * Where a {@link Canary} is recorded (16 Nov 2026, D1): one {@code CANARY_STEP} row in exec.audit_log per step (its name,
  * timing, our status and the broker's raw status word), one {@code CANARY_RESULT} row with the outcome, and the whole
  * report as JSON under {@code <dir>/<account id>/<yyyy-MM-dd>/<tag>.json} (IST day). A failed write is logged and never
- * stops the canary (its cleanup matters more than its record); the report file is written atomically.
+ * stops the canary (its cleanup matters more than its record); the report file is written atomically. Every row and the
+ * file carry the run's id ({@code runId}, the admin endpoint's) so a run can be read back after a restart.
+ * <p>
+ * Something left at the broker ({@link Canary.Report#leftover()}: a fill not sold back, an order possibly still working
+ * or of unknown outcome; review 16 Nov 2026) engages the account's kill switch (reason {@code CANARY: ...}) and writes a
+ * {@code CANARY_LEFTOVER} row, which the execution alerts send on Telegram.
  */
 public final class CanaryJournal implements Canary.Journal {
 
@@ -34,31 +39,38 @@ public final class CanaryJournal implements Canary.Journal {
     private static final DateTimeFormatter STAMP = DateTimeFormatter.ofPattern("HHmmss");
     private static final JsonMapper JSON = JsonMapper.builder().enable(SerializationFeature.INDENT_OUTPUT).build();
 
+    /** The audit action of a leftover (sent by the execution alerts). */
+    public static final String LEFTOVER = "CANARY_LEFTOVER";
+    /** Every kill switch the canary engages has a reason starting with this. */
+    public static final String REASON = "CANARY:";
+
     private final KillSwitches audit;
     private final BrokerAccount account;
     private final String actor;
     private final Path dir;
+    private final String runId;
     private volatile Path written;
 
     /** @param dir where report files go (null: audit rows only) */
     public CanaryJournal(DataSource dataSource, BrokerAccount account, String actor, Path dir) {
+        this(dataSource, account, actor, dir, null);
+    }
+
+    /** @param runId the run's id (null: none), in every row and the report file */
+    public CanaryJournal(DataSource dataSource, BrokerAccount account, String actor, Path dir, String runId) {
         this.audit = new KillSwitches(dataSource);
         this.account = account;
         this.actor = actor;
         this.dir = dir;
+        this.runId = runId;
     }
 
     @Override
     public void step(Canary.Step s) {
-        Map<String, Object> d = new LinkedHashMap<>();
-        d.put("n", s.n());
-        d.put("step", s.name());
-        d.put("at", s.at().toString());
-        d.put("millis", s.millis());
-        d.put("ok", s.ok());
-        d.put("status", s.status());
-        d.put("rawStatus", s.rawStatus());
-        d.put("detail", s.detail());
+        Map<String, Object> d = view(s);
+        if (runId != null) {
+            d.put("runId", runId);
+        }
         try {
             audit.audit(account, actor, "CANARY_STEP", d);
         } catch (RuntimeException e) {
@@ -66,10 +78,53 @@ public final class CanaryJournal implements Canary.Journal {
         }
     }
 
+    /**
+     * Something was left at the broker: the account's kill switch first (new entries stop; exits continue), then the
+     * {@code CANARY_LEFTOVER} row the alerts send. Neither failure stops the other.
+     */
+    @Override
+    public void leftover(Canary.Report r) {
+        List<String> what = new java.util.ArrayList<>();
+        if (r.filledQuantity() > 0 && !r.soldBack()) {
+            what.add("filled " + r.filledQuantity() + " of " + r.symbol() + " NOT sold back");
+        }
+        if (r.leftWorking()) {
+            what.add("order " + r.tag() + " may still be working at the broker (or its outcome is unknown)");
+        }
+        String reason = REASON + " " + String.join("; ", what) + " (" + r.instrumentKey() + "): check the broker and clear "
+                + "it by hand, then release the switch";
+        try {
+            audit.engageAccount(account, reason, actor);
+        } catch (RuntimeException e) {
+            log.error("account {}: CANARY LEFTOVER and the kill switch was NOT engaged: {}: {}", account.id(), reason,
+                    e.getMessage());
+        }
+        Map<String, Object> d = new LinkedHashMap<>();
+        if (runId != null) {
+            d.put("runId", runId);
+        }
+        d.put("tag", r.tag());
+        d.put("instrumentKey", r.instrumentKey());
+        d.put("symbol", r.symbol());
+        d.put("filledQuantity", r.filledQuantity());
+        d.put("soldBack", r.soldBack());
+        d.put("leftWorking", r.leftWorking());
+        d.put("reason", reason);
+        d.put("message", r.message());
+        try {
+            audit.audit(account, actor, LEFTOVER, d);
+        } catch (RuntimeException e) {
+            log.error("account {}: canary leftover not audited: {}", account.id(), e.getMessage());
+        }
+    }
+
     @Override
     public void result(Canary.Report r) {
         Path file = writeReport(r);
         Map<String, Object> d = new LinkedHashMap<>();
+        if (runId != null) {
+            d.put("runId", runId);
+        }
         d.put("result", r.result().name());
         d.put("broker", r.broker());
         d.put("instrumentKey", r.instrumentKey());
@@ -109,6 +164,7 @@ public final class CanaryJournal implements Canary.Journal {
             body.put("account", account.id());
             body.put("accountName", account.displayName());
             body.put("actor", actor);
+            body.put("runId", runId);
             body.put("report", view(r));
             Path tmp = Files.createTempFile(day, ".canary-", ".tmp");
             Files.writeString(tmp, JSON.writeValueAsString(body), StandardCharsets.UTF_8);
@@ -142,20 +198,23 @@ public final class CanaryJournal implements Canary.Journal {
         m.put("leftWorking", r.leftWorking());
         m.put("startedAt", r.startedAt().toString());
         m.put("finishedAt", r.finishedAt().toString());
-        List<Map<String, Object>> steps = r.steps().stream().map(s -> {
-            Map<String, Object> x = new LinkedHashMap<>();
-            x.put("n", s.n());
-            x.put("step", s.name());
-            x.put("at", s.at().toString());
-            x.put("millis", s.millis());
-            x.put("ok", s.ok());
-            x.put("status", s.status());
-            x.put("rawStatus", s.rawStatus());
-            x.put("detail", s.detail());
-            return x;
-        }).toList();
-        m.put("steps", steps);
+        m.put("leftover", r.leftover());
+        m.put("steps", r.steps().stream().map(CanaryJournal::view).toList());
         return m;
+    }
+
+    /** One step as plain values (a mutable map). */
+    public static Map<String, Object> view(Canary.Step s) {
+        Map<String, Object> x = new LinkedHashMap<>();
+        x.put("n", s.n());
+        x.put("step", s.name());
+        x.put("at", s.at().toString());
+        x.put("millis", s.millis());
+        x.put("ok", s.ok());
+        x.put("status", s.status());
+        x.put("rawStatus", s.rawStatus());
+        x.put("detail", s.detail());
+        return x;
     }
 
     private static Double finite(double v) {

@@ -36,7 +36,9 @@ import tools.jackson.databind.json.JsonMapper;
  * Opt-in by account ({@code autotrade.execution.read-live-record.accounts}, default none): each distinct answer body of a
  * broker endpoint on an IST day is saved once, redacted ({@link ReadLiveRedaction}), as
  * {@code <root>/<broker>/<yyyy-MM-dd>/<endpoint>-<seq>.json}, with a line in that folder's {@code index.jsonl} saying
- * which call it answered (method, path, query, account, time, bytes, digest) so {@link ReadLiveFixture} can turn it into
+ * which call it answered (method, path, query, account, time, bytes, digest; the path and query redacted too, review 16
+ * Nov 2026: {@link ReadLiveRedaction#redactPath}, so a client code or user id in a URL never reaches the index or a file
+ * name) so {@link ReadLiveFixture} can turn it into
  * a contract-test fixture. Distinct means a different redacted body: the same empty book every five minutes is kept
  * once. Capped per broker and day: a body over {@code maxBytes} is skipped, at most {@code maxFilesPerEndpoint} files
  * per endpoint, {@code maxFiles} files and {@code maxBytesPerDay} bytes in all. Files and folders are owner-only where
@@ -99,12 +101,14 @@ public final class ReadLiveRecorder {
      * file written (empty: not recorded, a repeat, over a cap, or a failure).
      *
      * @param call    {@code "<METHOD> <path>?<query>"} as the adapter's HTTP client reports it
-     * @param secrets the session's own values (token, sid, keys) to take out as well
+     * @param secrets the session's own values (token, sid, keys, the client's own id) to take out as well, from the
+     *                body, the path and the query
      */
     public Optional<Path> record(String broker, long accountId, String call, String body, List<String> secrets) {
         if (!records(accountId) || broker == null || call == null || body == null) {
             return Optional.empty();
         }
+        call = redactCall(call, secrets);
         try {
             if (body.length() > limits.maxBytes()) {
                 log.info("READ_LIVE recorder: {} {} answer of {} chars over the {} cap, not saved", broker, endpoint(call),
@@ -146,7 +150,7 @@ public final class ReadLiveRecorder {
                 line.put("file", file.getFileName().toString());
                 line.put("endpoint", endpoint);
                 line.put("method", space < 0 ? "GET" : call.substring(0, space));
-                line.put("path", q < 0 ? target : target.substring(0, q));
+                line.put("path", q < 0 ? target : target.substring(0, q));       // redacted by redactCall
                 line.put("query", q < 0 ? null : ReadLiveRedaction.redactQuery(target.substring(q + 1), secrets));
                 line.put("account", accountId);
                 line.put("at", clock.instant().toString());
@@ -166,6 +170,18 @@ public final class ReadLiveRecorder {
             log.warn("READ_LIVE recorder: {} answer not saved: {}", broker, e.toString());
             return Optional.empty();
         }
+    }
+
+    /**
+     * The call with its path redacted ({@link ReadLiveRedaction#redactPath}); the query is left for
+     * {@link ReadLiveRedaction#redactQuery} (by parameter name).
+     */
+    static String redactCall(String call, List<String> secrets) {
+        int space = call.indexOf(' ');
+        String target = space < 0 ? call : call.substring(space + 1);
+        int q = target.indexOf('?');
+        String path = ReadLiveRedaction.redactPath(q < 0 ? target : target.substring(0, q), secrets);
+        return (space < 0 ? "" : call.substring(0, space + 1)) + path + (q < 0 ? "" : target.substring(q));
     }
 
     /**

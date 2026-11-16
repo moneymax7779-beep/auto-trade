@@ -35,7 +35,8 @@ class ExecutionAlerts {
             "LATE_FILL", "SELLS_CUT",             // review 8 Nov 2026: a fill adopted late, our sells cut to the broker's holding
             "DAILY_LOSS_STOP",                    // v11: the daily loss with open positions reached: everything sold
             "NET_SHORT",                          // 16 Nov 2026: a contract net short across products (hand NRML sell)
-            "EGRESS_REFUSED");                    // 16 Nov 2026: a LIVE account with positions has no route (its address)
+            "EGRESS_REFUSED",                     // 16 Nov 2026: a LIVE account with positions has no route (its address)
+            "CANARY_LEFTOVER");                   // 16 Nov 2026: a canary left a fill or an order at the broker
 
     /** One message, and the member workspace it is also for (null: the admin's only). */
     record Alert(String text, Long memberTenant) {
@@ -84,7 +85,8 @@ class ExecutionAlerts {
                 + "a.trade_mode, case when t.trading_control = 'DAILY_SWITCH' then t.id end member_tenant "
                 + "from exec.audit_log l join acct.broker_account a on a.id = l.broker_account_id "
                 + "join acct.tenant t on t.id = a.tenant_id "
-                + "where l.id > ? and l.action = any(?) and a.trade_mode in ('LIVE', 'DRY_RUN') order by l.id", lastAudit,
+                + "where l.id > ? and l.action = any(?) and (a.trade_mode in ('LIVE', 'DRY_RUN') "
+                + "or l.action = 'CANARY_LEFTOVER') order by l.id", lastAudit,     // a canary's real order, in any mode
                 ACTIONS.toArray(new String[0]))) {
             lastAudit = Math.max(lastAudit, ((Number) r.get("id")).longValue());
             String action = (String) r.get("action");

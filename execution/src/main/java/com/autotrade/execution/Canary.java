@@ -33,7 +33,10 @@ import com.autotrade.broker.Quote;
  * order that can never trade, and records every step:
  * <ol>
  *   <li>FUNDS: the funds read;</li>
- *   <li>BOOK_CHECK: the broker holds none of the contract and has no working order of ours in it (else REFUSED);</li>
+ *   <li>BOOK_CHECK: the broker holds none of the contract, and the account has no working order of ours and holds nothing
+ *       bought by our orders in ANY contract (else REFUSED; review 16 Nov 2026: the trading LIVE guard counts the
+ *       canary's working buy as a contract held, so a canary beside a real position could refuse a real entry at
+ *       {@code maxOpenPositions});</li>
  *   <li>QUOTE: a two-sided quote, fresh; the buy price is {@code max(tick, bid x 0.5)} rounded down to the tick and the
  *       modify price one step lower (or one tick higher at the floor); both must stay below the ask and at or below the
  *       bid, else REFUSED (never marketable);</li>
@@ -48,6 +51,8 @@ import com.autotrade.broker.Quote;
  * place leaves nothing behind if it can: the order is looked up by tag, cancelled when working, and a fill (it should
  * never happen) is sold back at once through the same connection with a marketable limit, then the result is FAIL with
  * the fill in its message. A lost session that keeps the order from being cancelled is reported as left working.
+ * Anything left behind (a fill not sold back, an order possibly still working or of unknown outcome:
+ * {@link Report#leftover()}) goes to {@link Journal#leftover} before the result (the account's kill switch and an alert).
  * <p>
  * It is never run by a scheduler (16 Nov 2026): only by the user's explicit request (the admin endpoint with its typed
  * confirmation), and {@link #run()} refuses on Spring's scheduler threads as a last stop.
@@ -107,6 +112,14 @@ public final class Canary {
                          double bid, double ask, double buyPrice, double modifiedPrice, double funds,
                          long filledQuantity, boolean soldBack, boolean leftWorking, String message, Instant startedAt,
                          Instant finishedAt, List<Step> steps) {
+
+        /**
+         * Whether the canary left something at the broker that a person must deal with: a fill not (all) sold back, or
+         * the order possibly still working (a cancel that could not be confirmed, a place of unknown outcome).
+         */
+        public boolean leftover() {
+            return leftWorking || (filledQuantity > 0 && !soldBack);
+        }
     }
 
     /** Where steps and the result are recorded (the audit log and a report file; a test's list). */
@@ -115,6 +128,13 @@ public final class Canary {
         void step(Step step);
 
         void result(Report report);
+
+        /**
+         * Something was left at the broker ({@link Report#leftover()}): called before {@link #result}, so the account is
+         * stopped (its kill switch) and someone told before anything else is recorded.
+         */
+        default void leftover(Report report) {
+        }
 
         Journal NONE = new Journal() {
             @Override
@@ -168,6 +188,11 @@ public final class Canary {
         this.clock = clock == null ? Clock.systemUTC() : clock;
     }
 
+    /** Whether this thread is one of Spring's scheduler threads (a canary is never run from one). */
+    public static boolean onSchedulerThread() {
+        return Thread.currentThread().getName().startsWith(SCHEDULER_THREAD);
+    }
+
     /** Runs the canary once (a Canary is used once). */
     public synchronized Report run() {
         if (!steps.isEmpty()) {
@@ -177,7 +202,7 @@ public final class Canary {
         Result result;
         String message;
         try {
-            if (Thread.currentThread().getName().startsWith(SCHEDULER_THREAD)) {
+            if (onSchedulerThread()) {
                 throw new Stop(Result.REFUSED, "a canary is never run by a scheduler: only by the user's own request");
             }
             sequence();
@@ -214,6 +239,14 @@ public final class Canary {
         Report report = new Report(result, broker.name(), contract.instrumentKey(), contract.symbol(), contract.lotSize(),
                 tag, bid, ask, buyPrice, modifiedPrice, funds, filled, soldBack, leftWorking, message, started,
                 clock.instant(), List.copyOf(steps));
+        if (report.leftover()) {
+            try {
+                journal.leftover(report);
+            } catch (RuntimeException e) {
+                log.error("canary {} on {}: LEFT AT THE BROKER and the leftover was not recorded: {}", tag, broker.name(),
+                        e.toString());
+            }
+        }
         if (result == Result.PASS) {
             log.info("canary {} on {}: {}", tag, broker.name(), message);
         } else {
@@ -235,20 +268,36 @@ public final class Canary {
             List<BrokerPosition> positions = broker.positions();
             List<BrokerOrder> orders = broker.orders();
             netBefore = net(positions);
-            List<String> working = orders.stream().filter(o -> contract.instrumentKey().equals(o.instrumentKey())
-                    && o.clientTag() != null && OUR_TAG.matcher(o.clientTag()).matches() && !o.status().isTerminal())
-                    .map(o -> o.clientTag() + " " + o.side() + " " + o.status()).toList();
             if (netBefore != 0) {
                 throw new Stop(Result.REFUSED, "REFUSED: the broker holds " + netBefore + " of " + contract.symbol()
                         + ": the canary runs only on a contract with no position");
             }
+            // any contract (review 16 Nov 2026): a working order of ours, or a contract our orders bought and hold
+            List<String> working = orders.stream().filter(o -> ours(o) && !o.status().isTerminal())
+                    .map(o -> o.clientTag() + " " + o.side() + " " + o.symbol() + " " + o.status()).toList();
             if (!working.isEmpty()) {
-                throw new Stop(Result.REFUSED, "REFUSED: orders of ours still working in " + contract.symbol() + ": "
-                        + working);
+                throw new Stop(Result.REFUSED, "REFUSED: orders of ours still working (the canary runs only when none "
+                        + "is, in any contract): " + working);
+            }
+            // what is held of every contract our orders traded today, from the whole book (a hand exit counts), as the
+            // LIVE guard reads it
+            java.util.Set<String> traded = new java.util.HashSet<>();
+            orders.stream().filter(o -> ours(o) && o.instrumentKey() != null).forEach(o -> traded.add(o.instrumentKey()));
+            java.util.Map<String, Long> held = new java.util.TreeMap<>();
+            for (BrokerOrder o : orders) {
+                if (o.instrumentKey() != null && traded.contains(o.instrumentKey()) && o.filledQuantity() > 0) {
+                    held.merge(o.instrumentKey(), o.side() == OrderSide.SELL ? -o.filledQuantity() : o.filledQuantity(),
+                            Long::sum);
+                }
+            }
+            held.values().removeIf(q -> q == 0);
+            if (!held.isEmpty()) {
+                throw new Stop(Result.REFUSED, "REFUSED: the account holds contracts our orders bought " + held
+                        + ": the canary runs only when we hold nothing");
             }
             return orders.size();
-        }, n -> new Seen(true, null, null, "no position and no working order of ours in " + contract.symbol() + " ("
-                + n + " orders in today's book)"));
+        }, n -> new Seen(true, null, null, "no position in " + contract.symbol() + ", no working order of ours and "
+                + "nothing held by our orders in any contract (" + n + " orders in today's book)"));
         Quote q = step("QUOTE", () -> broker.quote(contract.instrumentKey()), x -> new Seen(true, null, null,
                 x == null ? "no quote" : "bid " + x.bid() + " x " + x.bidQuantity() + ", ask " + x.ask() + " x "
                         + x.askQuantity() + ", last " + x.last() + ", at " + x.time()));
@@ -524,6 +573,10 @@ public final class Canary {
 
     private String lastStep() {
         return steps.isEmpty() ? "start" : steps.getLast().name();
+    }
+
+    private static boolean ours(BrokerOrder o) {
+        return o.clientTag() != null && OUR_TAG.matcher(o.clientTag()).matches();
     }
 
     private long net(List<BrokerPosition> positions) {
