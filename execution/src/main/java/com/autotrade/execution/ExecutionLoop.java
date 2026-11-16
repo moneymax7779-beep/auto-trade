@@ -170,6 +170,12 @@ public final class ExecutionLoop implements AutoCloseable {
      * The idle accounts that keep a READ_LIVE probe (user 8 Nov 2026: a member's Kotak account on PAPER days). Reads only:
      * the probe connection is never a route, so it sends nothing, real or simulated.
      */
+    /** The brokers configured LIVE: a LIVE route opens only for those (review 16 Nov 2026). */
+    public ExecutionLoop liveBrokers(LiveBrokers live) {
+        connections.liveBrokers(live::live);
+        return this;
+    }
+
     public ExecutionLoop probeOnly(java.util.Set<Long> accountIds) {
         this.probeOnly = java.util.Set.copyOf(accountIds);
         return this;

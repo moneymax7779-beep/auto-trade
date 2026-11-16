@@ -373,4 +373,23 @@ class MultiBrokerLiveIT {
             assertThat(kotak.requests() + upstox.requests() + groww.requests()).as("nothing reached a broker").isZero();
         }
     }
+
+    @Test
+    void aLiveAccountOfABrokerTakenOutOfTheLiveSettingGetsNoRoute() throws Exception {
+        // review 16 Nov 2026: the routes checked only the adapter; removing ZERODHA from autotrade.execution.live-brokers
+        // and restarting left a LIVE account trading while the pages said it could not
+        BrokerAccount kite = liveAccount(BrokerType.ZERODHA, "AB1234");
+        List<BrokerAdapter> adapters = List.of(new ZerodhaDryRunAdapter(dataSource, 1e9));
+        FollowerRisk v7 = FollowerRisk.load(Path.of(V7));
+        try (BrokerConnections registry = new BrokerConnections(dataSource, 1e9, adapters)) {
+            registry.liveBrokers(LiveBrokers.of("", adapters)::live);
+            BrokerConnections.Route route = registry.route(kite, v7);
+            assertThat(route.venue()).isNull();
+            assertThat(route.description()).isEqualTo("LIVE refused: ZERODHA is not configured LIVE on this worker");
+        }
+        try (BrokerConnections registry = new BrokerConnections(dataSource, 1e9, adapters)) {
+            registry.liveBrokers(LiveBrokers.of(LiveBrokers.DEFAULT, adapters)::live);
+            assertThat(registry.route(kite, v7).venue()).as("configured: the Kite LIVE route opens").isNotNull();
+        }
+    }
 }

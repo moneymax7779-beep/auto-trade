@@ -48,6 +48,11 @@ class ExecutionService implements DisposableBean {
     private final BrokerRules rules;
     /** The worker's adapters, one per broker: the loop's, and what {@link BrokerSetup}'s LiveBrokers is built from. */
     private final List<BrokerAdapter> brokerAdapters;
+    /**
+     * The brokers configured LIVE ({@code autotrade.execution.live-brokers}) with an adapter that offers LIVE: one instance
+     * for the loop's routes and the pages (review 16 Nov 2026: the routes ignored the setting).
+     */
+    private final com.autotrade.execution.LiveBrokers liveBrokers;
     private final com.autotrade.execution.AccountEgress egress;
     private final UpstoxDenyList upstoxDenied;
     private final String recordAccounts;
@@ -57,7 +62,7 @@ class ExecutionService implements DisposableBean {
 
     /** Tests: no real broker sessions and no broker rules (the loop is not started). */
     ExecutionService(DataSource dataSource, ExecutionProperties properties) {
-        this(dataSource, properties, null, null, null, null, null, null, null, null, null, null, null, null, null);
+        this(dataSource, properties, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -73,7 +78,9 @@ class ExecutionService implements DisposableBean {
                      @org.springframework.beans.factory.annotation.Value("${autotrade.execution.read-live-record.accounts:}")
                      String recordAccounts,
                      BrokerLoginProperties brokers, com.autotrade.execution.AccountEgress egress,
-                     UpstoxDenyList upstoxDenied, BrokerRules rules) {
+                     UpstoxDenyList upstoxDenied, BrokerRules rules,
+                     @org.springframework.beans.factory.annotation.Value("${autotrade.execution.live-brokers:"
+                             + com.autotrade.execution.LiveBrokers.DEFAULT + "}") String liveBrokerNames) {
         this.dataSource = dataSource;
         this.properties = properties;
         this.kiteSessions = kiteSessions;
@@ -92,6 +99,13 @@ class ExecutionService implements DisposableBean {
         this.brokerAdapters = adapters(dataSource, properties.brokerFunds(), kiteSessions, kotakSessions, upstoxSessions,
                 growwSessions, kite == null ? com.autotrade.zerodha.KiteConfig.REAL_API : java.net.URI.create(kite.apiBase()),
                 null, null, probeSettings(), this.egress, this.upstoxDenied, null, null, rules);
+        this.liveBrokers = com.autotrade.execution.LiveBrokers.of(liveBrokerNames == null
+                ? com.autotrade.execution.LiveBrokers.DEFAULT : liveBrokerNames, brokerAdapters);
+    }
+
+    /** The brokers an account may trade LIVE on this worker (the setting, and an adapter that offers LIVE). */
+    com.autotrade.execution.LiveBrokers liveBrokers() {
+        return liveBrokers;
     }
 
     /** The worker's broker adapters (one per broker). */
@@ -246,7 +260,8 @@ class ExecutionService implements DisposableBean {
         rules.requireProducts(brokerAdapters);
         rules.describe().forEach(line -> log.info("broker rules {}: {}", rules.version(), line));
         loop = new ExecutionLoop(dataSource, properties.tenant(), properties.copyGroup(), properties.workerId(), rules,
-                new StoredQuotes(dataSource, null), properties.brokerFunds(), brokerAdapters).probeOnly(probeAccounts());
+                new StoredQuotes(dataSource, null), properties.brokerFunds(), brokerAdapters).liveBrokers(liveBrokers)
+                .probeOnly(probeAccounts());
         if (!probeAccounts().isEmpty()) {
             log.warn("READ_LIVE probe (reads only, no order path) for idle accounts {}", probeAccounts());
         }
@@ -289,8 +304,15 @@ class ExecutionService implements DisposableBean {
         if (current == null) {
             return;
         }
+        if (lastTick == null) {
+            // review 16 Nov 2026: a worker started in the window has no account leases before its first tick; a broker
+            // marked done now would never be squared off. The next minute's call (to 15:30) catches up.
+            log.warn("end-of-day square-off: the loop has not ticked yet; tried again next minute");
+            return;
+        }
         LocalDate day = day();
-        java.time.LocalTime now = java.time.LocalTime.now(IST);
+        // the scheduled minute, not the clock (a cron that fires a few ms early must not move 15:20 to 15:21)
+        java.time.LocalTime now = java.time.LocalTime.now(IST).plusSeconds(2).truncatedTo(java.time.temporal.ChronoUnit.MINUTES);
         Thread.ofVirtual().name("exec-square-off-due").start(() -> {
             try {
                 current.squareOffDue(day, now).forEach(line -> log.warn("end-of-day square-off: {}", line));

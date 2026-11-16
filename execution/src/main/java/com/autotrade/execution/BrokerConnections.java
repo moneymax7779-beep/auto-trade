@@ -55,6 +55,12 @@ public final class BrokerConnections implements AutoCloseable {
      * HTTP clients of their own; Kite's has nothing to close).
      */
     private final Map<Long, BrokerConnection> liveOpened = new ConcurrentHashMap<>();
+    /**
+     * The brokers configured LIVE ({@link LiveBrokers}; review 16 Nov 2026: a LIVE route opens only for a broker that is
+     * both configured LIVE and whose adapter offers LIVE, so taking a broker out of the setting and restarting stops its
+     * LIVE accounts, not only the switch pages). Every broker until the worker sets it (tests).
+     */
+    private volatile java.util.function.Predicate<BrokerType> liveBrokers = b -> true;
 
     /** The registry with this build's adapters (Zerodha). */
     public BrokerConnections(DataSource dataSource, double simulatedBrokerFunds) {
@@ -66,6 +72,33 @@ public final class BrokerConnections implements AutoCloseable {
         this.simulatedBrokerFunds = simulatedBrokerFunds;
         this.freeze = new FreezeQuantities(dataSource);
         adapters.forEach(a -> this.adapters.put(a.broker(), a));
+    }
+
+    /**
+     * Review 16 Nov 2026: a LIVE account refused its route by the egress check (its address was added while it held
+     * positions, or the address left this host) has no venue, so neither our exits nor Flatten can reach the broker: its
+     * kill switch is engaged (no new entry when the address comes back before anyone looks) and EGRESS_REFUSED is
+     * audited, which the worker sends on Telegram. Its resting stops at the broker still protect it. Once per account
+     * and reason while the worker runs.
+     */
+    private void stranded(BrokerAccount account, String why) {
+        Integer open = new org.springframework.jdbc.core.JdbcTemplate(dataSource).queryForObject("select count(*) from "
+                + "exec.position where broker_account_id = ? and status <> 'CLOSED' and quantity_open > 0", Integer.class,
+                account.id());
+        if (open == null || open == 0 || !strandedSaid.add(account.id() + ":" + why)) {
+            return;
+        }
+        KillSwitches kills = new KillSwitches(dataSource);
+        kills.engageAccount(account, "EGRESS: " + why, "broker-registry");
+        kills.audit(account, "broker-registry", "EGRESS_REFUSED", Map.of("open_positions", open, "reason", why,
+                "rule", "no LIVE route from an address this host lacks: exits wait, resting broker stops still protect"));
+    }
+
+    private final java.util.Set<String> strandedSaid = ConcurrentHashMap.newKeySet();
+
+    /** The brokers configured LIVE (the worker's {@link LiveBrokers}); routes already open are not re-checked. */
+    public void liveBrokers(java.util.function.Predicate<BrokerType> configuredLive) {
+        this.liveBrokers = java.util.Objects.requireNonNull(configuredLive);
     }
 
     public Route route(BrokerAccount account, FollowerRisk risk) {
@@ -114,9 +147,15 @@ public final class BrokerConnections implements AutoCloseable {
             // user's go-ahead, and its broker is configured LIVE (LiveBrokers, checked by the LIVE switch)
             return new Route(null, null, "LIVE refused: " + account.brokerType() + " is not a LIVE broker yet");
         }
+        if (!liveBrokers.test(account.brokerType())) {
+            log.error("account {} ({}) is LIVE but {} is not configured LIVE (autotrade.execution.live-brokers): no route",
+                    account.id(), account.displayName(), account.brokerType());
+            return new Route(null, null, "LIVE refused: " + account.brokerType() + " is not configured LIVE on this worker");
+        }
         String egress = adapter == null ? null : adapter.egressRefusal(account);
         if (egress != null) {
             log.error("account {} ({}): LIVE route refused: {}", account.id(), account.displayName(), egress);
+            stranded(account, egress);
             return new Route(null, null, "LIVE refused: " + egress);
         }
         BrokerAdapter.Live live = adapter == null ? null : adapter.live(account, risk.live());

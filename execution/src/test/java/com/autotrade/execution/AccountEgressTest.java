@@ -34,9 +34,10 @@ class AccountEgressTest {
         assertThat(e.configured(1)).isEmpty();
         assertThat(e.requiredBrokers()).containsExactlyInAnyOrder(BrokerType.KOTAK_NEO, BrokerType.UPSTOX,
                 BrokerType.GROWW);
-        assertThat(AccountEgress.parse("", "").requiredBrokers()).as("blank: no broker needs one").isEmpty();
-        assertThat(AccountEgress.parse(null, "zerodha, KOTAK_NEO").requiredBrokers())
-                .containsExactlyInAnyOrder(BrokerType.ZERODHA, BrokerType.KOTAK_NEO);
+        assertThat(AccountEgress.parse("", "").requiredBrokers()).as("blank never switches the gate off (review 16 Nov)")
+                .containsExactlyInAnyOrder(BrokerType.KOTAK_NEO, BrokerType.UPSTOX, BrokerType.GROWW);
+        assertThat(AccountEgress.parse(null, "zerodha, KOTAK_NEO").requiredBrokers()).as("the setting only adds")
+                .containsExactlyInAnyOrder(BrokerType.ZERODHA, BrokerType.KOTAK_NEO, BrokerType.UPSTOX, BrokerType.GROWW);
         for (String bad : new String[] {"21", "21=", "=10.0.0.1", "21=10.0.0.1=2", "x=10.0.0.1", "0=10.0.0.1",
                 "-1=10.0.0.1", "21=egress.example.com", "21=10.0.0.1,", "21=10.0.0.1,,15=10.0.0.2", "21=10.0.0.1,21=10.0.0.2",
                 "21=10.0.0.1,15=10.0.0.1", "21=0.0.0.0", "021=10.0.0.1"}) {

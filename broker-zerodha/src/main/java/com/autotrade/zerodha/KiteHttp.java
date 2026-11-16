@@ -47,6 +47,14 @@ public final class KiteHttp {
         this.client = com.autotrade.broker.Egress.client(config.timeout(), config.egress());
     }
 
+    /**
+     * Lets the client go (review 16 Nov 2026: each canary opened a Kite connection that was never closed): calls in flight
+     * finish, new ones are refused. For a connection that is no longer used.
+     */
+    public void close() {
+        client.shutdown();
+    }
+
     /** The day's access token (from {@link KiteAuth#exchange}); never logged. */
     public void accessToken(String token) {
         this.accessToken = token;

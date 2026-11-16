@@ -4,7 +4,6 @@ import java.nio.file.Path;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -28,9 +27,8 @@ class BrokerSetup {
     }
 
     @Bean
-    LiveBrokers liveBrokers(@Value("${autotrade.execution.live-brokers:" + LiveBrokers.DEFAULT + "}") String brokers,
-                            ExecutionService service) {
-        LiveBrokers live = LiveBrokers.of(brokers, service.brokerAdapters());
+    LiveBrokers liveBrokers(ExecutionService service) {
+        LiveBrokers live = service.liveBrokers();              // the same instance the loop's routes check
         log.info("LIVE brokers: {}", live.live());
         if (!live.configuredWithoutLiveAdapter().isEmpty()) {
             log.warn("configured LIVE but their adapter offers no LIVE connection (they stay DRY_RUN): {}",

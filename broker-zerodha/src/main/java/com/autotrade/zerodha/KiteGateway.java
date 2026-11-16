@@ -68,6 +68,7 @@ public final class KiteGateway implements BrokerConnection {
      */
     static final int ORDERS_PER_MINUTE = 350, ORDERS_PER_DAY = 4_500, READS_PER_SECOND = 8;
     private static final Map<String, RateLimiter> READ_LIMITS = new ConcurrentHashMap<>();
+    private static final Map<String, RateLimiter> ORDER_LIMITS = new ConcurrentHashMap<>();
     private final RateLimiter reads;
     private final OrderBudget budget;
     private final List<Consumer<OrderUpdate>> listeners = new CopyOnWriteArrayList<>();
@@ -78,11 +79,13 @@ public final class KiteGateway implements BrokerConnection {
         this.config = config;
         this.http = http;
         this.instruments = instruments;
-        this.limiter = new RateLimiter(config.maxOrdersPerSecond());
         this.quotes = QUOTE_LIMITS.computeIfAbsent(config.apiKey() + "@" + config.apiBase(), k -> new RateLimiter(1));
         // shared per real app (Kite counts per user / API key); a simulator gets its own, so the static maps hold only
-        // real apps (a test run opens hundreds of simulators on reused ports)
+        // real apps (a test run opens hundreds of simulators on reused ports). Review 16 Nov 2026: the order limiter too,
+        // so a canary's connection and the trading route of one app never exceed Kite's 10 a second together
         String app = config.apiKey() + "@" + config.apiBase();
+        this.limiter = config.isRealBroker() ? ORDER_LIMITS.computeIfAbsent(app,
+                k -> new RateLimiter(config.maxOrdersPerSecond())) : new RateLimiter(config.maxOrdersPerSecond());
         this.reads = config.isRealBroker() ? READ_LIMITS.computeIfAbsent(app, k -> new RateLimiter(READS_PER_SECOND))
                 : new RateLimiter(READS_PER_SECOND);
         this.budget = config.isRealBroker() ? OrderBudget.shared("ZERODHA:" + app, ORDERS_PER_DAY, perMinute())

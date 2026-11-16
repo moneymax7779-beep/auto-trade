@@ -320,6 +320,9 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
             if (gateway == null || !access.apiKey().equals(apiKey)) {
                 KiteConfig config = new KiteConfig(access.apiKey(), kiteApiBase, KiteConfig.REAL_LOGIN, product,
                         Duration.ofSeconds(5), 8, null, from);
+                if (http != null) {
+                    http.close();                                   // the previous app's client (review 16 Nov 2026)
+                }
                 http = new KiteHttp(config);
                 if (!orders) {                                          // READ_LIVE only: a LIVE client has no tap
                     http.tap((call, body) -> {
@@ -375,6 +378,14 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
         @Override
         public String name() {
             return "ZERODHA";
+        }
+
+        /** Lets this connection's HTTP client go (a canary's, a dropped route's); calls in flight finish. */
+        @Override
+        public synchronized void close() {
+            if (http != null) {
+                http.close();
+            }
         }
 
         /** Every order of ours is MIS (the config below); a hand NRML trade in the account is not counted as held. */

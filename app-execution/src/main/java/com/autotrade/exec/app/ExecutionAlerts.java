@@ -34,7 +34,8 @@ class ExecutionAlerts {
             "INSTRUMENT_MAPPING_MISMATCH", "EOD_SQUARE_OFF", "FLATTEN", "END_OF_DAY", "EXIT_RETRY", "MODE_PAPER_SESSION_LOST",
             "LATE_FILL", "SELLS_CUT",             // review 8 Nov 2026: a fill adopted late, our sells cut to the broker's holding
             "DAILY_LOSS_STOP",                    // v11: the daily loss with open positions reached: everything sold
-            "NET_SHORT");                         // 16 Nov 2026: a contract net short across products (hand NRML sell)
+            "NET_SHORT",                          // 16 Nov 2026: a contract net short across products (hand NRML sell)
+            "EGRESS_REFUSED");                    // 16 Nov 2026: a LIVE account with positions has no route (its address)
 
     /** One message, and the member workspace it is also for (null: the admin's only). */
     record Alert(String text, Long memberTenant) {

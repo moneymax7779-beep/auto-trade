@@ -66,7 +66,7 @@ public final class AccountEgress {
      * and addresses, which are not secrets).
      *
      * @param accounts        {@code id=address} pairs, comma-separated; blank = none
-     * @param requiredBrokers broker names, comma-separated; null = {@link #DEFAULT_REQUIRED}; blank = none
+     * @param requiredBrokers broker names added to {@link #DEFAULT_REQUIRED}, comma-separated (null or blank: the default)
      */
     public static AccountEgress parse(String accounts, String requiredBrokers) {
         return new AccountEgress(parseAccounts(accounts), parseBrokers(requiredBrokers), Egress::assigned);
@@ -134,6 +134,9 @@ public final class AccountEgress {
             }
             out.add(b);
         }
+        // review 16 Nov 2026: the setting adds brokers (ZERODHA, once its pilot leaves the shared NAT), never removes the
+        // ones that take orders only from a registered IP: a blank or shortened value no longer switches the gate off
+        out.addAll(DEFAULT_REQUIRED);
         return out;
     }
 
