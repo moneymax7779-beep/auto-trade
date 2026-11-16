@@ -27,7 +27,7 @@ class DailyCarryTest {
         DailyCarry early = new DailyCarry("TEST", at("08:55"));
         early.get(() -> { reads.incrementAndGet(); return CARRY; });
         early.get(() -> { reads.incrementAndGet(); return CARRY; });
-        assertThat(reads).as("before 09:00 IST: not kept").hasValue(2);
+        assertThat(reads).as("before 09:15 IST: not kept").hasValue(2);
 
         DailyCarry day = new DailyCarry("TEST", at("09:20"));
         assertThat(day.get(() -> { reads.incrementAndGet(); return CARRY; })).isEqualTo(CARRY);
@@ -36,15 +36,31 @@ class DailyCarryTest {
     }
 
     @Test
-    void aFailedReadIsNoneForNowAndNotKeptButALostSessionIsThrown() {
-        DailyCarry day = new DailyCarry("TEST", at("10:00"));
-        assertThat(day.get(() -> {
+    void aFailedReadIsUnknownNeverNothingAndIsNotReadAgainForAWhile() {
+        // second review 16 Nov 2026: "nothing carried" on a failed read made the reconciler cut our stop
+        java.util.concurrent.atomic.AtomicReference<java.time.Instant> now = new java.util.concurrent.atomic.AtomicReference<>(
+                at("10:00").instant());
+        Clock moving = new Clock() {
+            public java.time.ZoneId getZone() { return ZoneOffset.UTC; }
+            public Clock withZone(java.time.ZoneId zone) { return this; }
+            public java.time.Instant instant() { return now.get(); }
+        };
+        AtomicInteger reads = new AtomicInteger();
+        DailyCarry day = new DailyCarry("TEST", moving);
+        assertThatThrownBy(() -> day.get(() -> {
+            reads.incrementAndGet();
             throw new BrokerException(BrokerException.Kind.RETRYABLE, "timeout");
-        })).isEmpty();
-        assertThat(day.get(() -> CARRY)).as("read again, then kept").isEqualTo(CARRY);
+        })).isInstanceOf(BrokerException.class).hasMessageContaining("not known")
+                .satisfies(e -> assertThat(((BrokerException) e).kind()).isEqualTo(BrokerException.Kind.RETRYABLE));
+        assertThatThrownBy(() -> day.get(() -> { reads.incrementAndGet(); return CARRY; }))
+                .as("not read again within the pause").hasMessageContaining("not known");
+        assertThat(reads).hasValue(1);
+        now.set(now.get().plus(DailyCarry.RETRY));
+        assertThat(day.get(() -> { reads.incrementAndGet(); return CARRY; })).isEqualTo(CARRY);
         DailyCarry other = new DailyCarry("TEST", at("10:00"));
         assertThatThrownBy(() -> other.get(() -> {
             throw new BrokerException(BrokerException.Kind.SESSION, "logged out");
-        })).isInstanceOf(BrokerException.class);
+        })).isInstanceOf(BrokerException.class)
+                .satisfies(e -> assertThat(((BrokerException) e).kind()).isEqualTo(BrokerException.Kind.SESSION));
     }
 }

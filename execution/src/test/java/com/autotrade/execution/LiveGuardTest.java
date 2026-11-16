@@ -135,7 +135,9 @@ class LiveGuardTest {
         // the rule stays "never below zero across products": a carried NRML short against our MIS long is the account
         // already flat; our sell would make it short again
         carried.put(CE, -(long) LOT);
-        book.add(order("F7", CE, OrderSide.BUY, OrderStatus.FILLED, LOT, LOT, "MIS"));
+        assertThatThrownBy(() -> guard.place(buy("F7", CE, LOT))).as("second review: no buy that could not be exited")
+                .isInstanceOf(LiveGuard.Refusal.class).hasMessageContaining("short " + LOT);
+        book.add(order("F7", CE, OrderSide.BUY, OrderStatus.FILLED, LOT, LOT, "MIS"));      // bought by hand meanwhile
         assertThatThrownBy(() -> guard.place(sell("F7S1", CE, LOT))).hasMessageContaining("across products");
         assertThat(sent).isEmpty();
     }

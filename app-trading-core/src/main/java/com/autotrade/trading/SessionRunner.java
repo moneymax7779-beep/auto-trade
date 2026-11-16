@@ -685,6 +685,7 @@ class SessionRunner implements ApplicationRunner {
         // review 16 Nov 2026 (D9): the engine was started before the steps below; one that threw (the signal source, the
         // snapshot run) left its sync thread running, and the retry started a second engine beside it
         boolean workerStarted = false;
+        ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor();
         try {
             if (signalSource) {
                 com.autotrade.account.AccountStore accounts = new com.autotrade.account.AccountStore(target);
@@ -705,7 +706,6 @@ class SessionRunner implements ApplicationRunner {
             }
             current = trading;
 
-            ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor();
             if (!replay) {
                 timer.scheduleAtFixedRate(safe(trading::heartbeat), 1, 1, TimeUnit.SECONDS);
                 timer.scheduleAtFixedRate(safe(() -> {
@@ -756,7 +756,15 @@ class SessionRunner implements ApplicationRunner {
             SnapshotWriter snapshotWriter = snapshots;
             Long snapshotRunId = snapshotRun;
             Thread worker = Thread.ofPlatform().name("trading-session-" + session).start(() -> {
-                Map<String, Object> summary = trading.run();
+                Map<String, Object> summary;
+                try {
+                    summary = trading.run();
+                } catch (RuntimeException e) {
+                    // second review 16 Nov 2026: a session ending in an exception skipped every close below, so its chart
+                    // engine kept syncing (its heartbeat said "running") beside the next session's; closed the same now
+                    log.error("session {} ended by an error; closing its parts", session, e);
+                    summary = Map.of("error", e.toString());
+                }
                 context.getBeanProvider(LiveTicks.class).ifAvailable(LiveTicks::clear);   // its prices are history now
                 if (chartOrders != null) {
                     chartOrders.close();
@@ -786,8 +794,11 @@ class SessionRunner implements ApplicationRunner {
             workerStarted = true;
             return started;
         } finally {
-            if (!workerStarted && chartOrders != null) {
-                chartOrders.close();
+            if (!workerStarted) {
+                if (chartOrders != null) {
+                    chartOrders.close();
+                }
+                timer.shutdownNow();                             // its heartbeat and snapshot flush, too
             }
         }
     }

@@ -357,7 +357,7 @@ public final class BrokerReconciler {
      * then booked by {@link #bookHandSale} at the next check (no stop live), or stays a reconciliation difference.
      */
     private void cutOurSells(BrokerAccount account, BrokerConnection broker, BrokerBooks books, String key) {
-        long held = Math.max(0, LiveGuard.holds(books.orders(), key, broker.product(), books.carried()));
+        long held = Math.max(0, LiveGuard.holds(books.orders(), key, broker.product(), books.carriedOrNone()));
         List<BrokerOrder> working = books.orders().stream().filter(o -> key.equals(o.instrumentKey())
                 && o.ofProduct(broker.product())
                 && o.side() == OrderSide.SELL && !o.status().isTerminal() && o.clientTag() != null
@@ -421,8 +421,21 @@ public final class BrokerReconciler {
             return orders == null ? (orders = broker.orders()) : orders;
         }
 
+        /** The carry; thrown (RETRYABLE) while it is not known: a check that needs it skips (second review). */
         Map<String, Long> carried() {
             return carried == null ? (carried = broker.carriedIn()) : carried;
+        }
+
+        /** The carry, or none while it is not known (the cut to what is held goes by today's book, as before). */
+        Map<String, Long> carriedOrNone() {
+            try {
+                return carried();
+            } catch (com.autotrade.broker.BrokerException e) {
+                if (e.kind() == com.autotrade.broker.BrokerException.Kind.SESSION) {
+                    throw e;
+                }
+                return Map.of();
+            }
         }
 
         List<BrokerTrade> trades() {

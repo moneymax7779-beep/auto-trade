@@ -710,6 +710,9 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
     const held = drawnLineAt(p.x, p.y);
     if (held) {                                         // a chart order's line: drag it up or down
       drag.current = { kind: "line", key: held.key, x: p.x, y: p.y, view, yr: { lo: y0, hi: y1 }, manualY: manualY != null, moved: false, id: e.pointerId };
+      // review 16 Nov 2026: the price axis holds still while a line is dragged (a live rescale moved the price under a
+      // still pointer); given back on release
+      if (manualY == null) setManualY({ lo: y0, hi: y1 });
       svgRef.current?.setPointerCapture(e.pointerId);
       return;
     }
@@ -770,9 +773,10 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
     const d = drag.current;
     drag.current = null;
     if (d && d.kind === "line") {
-      // the price where the pointer was let go (the last render's may lag a move behind)
+      // the price where the pointer was let go (the last render's may lag a move behind), on the held axis
       if (d.moved && d.key && drawing) drawing.onDrag(d.key, linePrice(priceAtY(toSvg(e).y)));
       setLineDrag(null);
+      if (!d.manualY) setManualY(null);
       return;
     }
     // placing a chart order: a click on the price pane is its entry
@@ -796,8 +800,10 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
   const onPointerCancel = (e: PointerEvent<SVGSVGElement>) => {
     pointers.current.delete(e.pointerId);
     if (pointers.current.size < 2) pinch.current = null;
+    const d = drag.current;
     drag.current = null;
     setLineDrag(null);
+    if (d?.kind === "line" && !d.manualY) setManualY(null);
   };
 
   const tip = hover == null ? null : (() => {
@@ -1025,6 +1031,15 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
                   <text x={W - R - 22} y={y - 4} textAnchor="end" fontSize="10" fill={l.color} className="num font-semibold" {...HALO}>{l.label} {nf(v, 1)}</text>
                   {l.draggable && <rect x={W - R - 16} y={y - 4} width={12} height={8} rx={2} fill={l.color} opacity={0.9} />}
                 </g>
+              );
+            })}
+            {/* review 16 Nov 2026: a touch on a draggable line is the chart's, not a page scroll (pan-y on the chart took a
+                vertical finger drag as a scroll and cancelled it): a strip with touch-action none along each such line */}
+            {(drawing?.lines ?? []).filter((l) => l.draggable).map((l) => {
+              const y = Y(shownPrice(l));
+              return (
+                <rect key={`touch-${l.key}`} x={L} y={y - 7} width={W - R - L} height={14} fill="transparent"
+                  pointerEvents="all" style={{ touchAction: "none", cursor: "ns-resize" }} />
               );
             })}
             <polyline fill="none" stroke="var(--color-accent)" strokeWidth={candles.length ? 1 : 1.6} opacity={candles.length ? 0.4 : 1}

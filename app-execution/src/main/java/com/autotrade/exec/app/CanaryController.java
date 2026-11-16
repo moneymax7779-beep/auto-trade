@@ -150,7 +150,7 @@ class CanaryController {
     private final Clock clock;
     private final Canary.Settings settings;
     /** The account switch's reason while a canary runs (review 16 Nov 2026, D3): entries held, exits go on. */
-    static final String FENCE = "CANARY: new entries held while the canary runs";
+    static final String FENCE = KillSwitches.HOLD + "new entries held while the canary runs";
     private final Set<Long> running = ConcurrentHashMap.newKeySet();
     private final Map<String, Run> runs = Collections.synchronizedMap(new LinkedHashMap<>() {
         @Override
@@ -387,13 +387,9 @@ class CanaryController {
         } finally {
             if (fence != null) {
                 try {
-                    if (report != null && report.leftover()) {
-                        // kept: the leftover's own switch (its engage found this one engaged and added nothing)
-                        jdbc.update("update exec.kill_switch set reason = ? where id = ? and released_at is null",
-                                CanaryJournal.leftoverReason(report), fence);
-                    } else {
-                        kills.release(fence, a.tenantId(), run.actor);
-                    }
+                    // released always (second review 16 Nov 2026): a leftover's kill, and any other engaged meanwhile,
+                    // has its own row (a hold is never taken for one); only an unexpected end keeps it
+                    kills.release(fence, a.tenantId(), run.actor);
                 } catch (RuntimeException e) {
                     log.error("canary {} on account {}: its entry hold #{} was not settled: {}", run.id, a.id(), fence,
                             e.toString());

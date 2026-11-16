@@ -159,8 +159,11 @@ public final class ChartLines {
             throw new IllegalArgumentException("the stop is " + pts(e - s) + " from the entry: at least " + pts(2 * l.buffer())
                     + " (twice the buffer), or every tick of noise stops it");
         }
-        if (t - e < l.buffer()) {
-            throw new IllegalArgumentException("the target is " + pts(t - e) + " from the entry: at least " + pts(l.buffer()));
+        if (t - e <= l.buffer()) {
+            // second review: one buffer exactly was accepted, and every entry tick (at the buffer past the line) was
+            // already at the target, so the order could only be voided
+            throw new IllegalArgumentException("the target is " + pts(t - e) + " from the entry: more than "
+                    + pts(l.buffer()));
         }
     }
 

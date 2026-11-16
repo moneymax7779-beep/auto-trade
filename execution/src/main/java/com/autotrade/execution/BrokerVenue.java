@@ -499,7 +499,7 @@ public final class BrokerVenue implements FollowerVenue {
                 // review 8 Nov 2026: what the broker's book holds and is not already being sold by others, plus what our
                 // own stops cover (they are re-sized or replaced). Less than the position (a hand sale in Kite): our guard
                 // would refuse the stop, so no row is written and nothing sent (no refused order every turn, no alert)
-                long free = LiveGuard.free(book, key, "", broker.product(), broker.carriedIn()) + covered;  // "": no tag
+                long free = LiveGuard.free(book, key, "", broker.product(), LiveGuard.carriedOrNone(broker)) + covered;
                 if (free < open) {
                     return Protection.later(Protection.Later.BROKER_HOLDS_LESS, "the broker holds " + free + " free of "
                             + pos.get("symbol") + ", our position " + open);
@@ -891,7 +891,7 @@ public final class BrokerVenue implements FollowerVenue {
             return null;
         }
         try {
-            return LiveGuard.holds(broker.orders(), instrumentKey, broker.product(), broker.carriedIn());
+            return LiveGuard.holds(broker.orders(), instrumentKey, broker.product(), LiveGuard.carriedOrNone(broker));
         } catch (BrokerException e) {
             if (e.kind() == Kind.SESSION) {
                 throw e;

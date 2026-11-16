@@ -559,8 +559,11 @@ public final class ExecutionLoop implements AutoCloseable {
         // EOD_SQUARE_OFF alert, once a day) and its broker stays pending, so a route that comes back is squared off
         for (BrokerAccount stranded : unleasedLive(brokers)) {
             int held = openPositions(stranded.id());
-            String line = "NOT squared off: no worker trades this account now (its LIVE route is refused); " + held
-                    + " position(s) open: close them in the broker's app";
+            if (held == 0) {
+                continue;
+            }
+            String line = "NOT squared off: no worker trades this account now (its LIVE route refused, or no worker serves "
+                    + "it); " + held + " position(s) open: close them in the broker's app";
             lines.add(stranded.displayName() + ": " + line);
             open.add(stranded.brokerType());
             if (strandedSaid.add(day + ":" + stranded.id())) {
@@ -599,7 +602,7 @@ public final class ExecutionLoop implements AutoCloseable {
     private List<BrokerAccount> unleasedLive(java.util.Set<com.autotrade.account.BrokerType> brokers) {
         List<BrokerAccount> out = new ArrayList<>();
         for (Long id : jdbc.queryForList("select a.id from acct.broker_account a where a.trade_mode = 'LIVE' and exists "
-                + "(select 1 from exec.position p where p.broker_account_id = a.id and p.status <> 'CLOSED' and "
+                + "(select 1 from exec.position p where p.broker_account_id = a.id and p.status = 'OPEN' and "
                 + "p.quantity_open > 0) and not exists (select 1 from exec.account_lease l where l.broker_account_id = a.id "
                 + "and l.heartbeat_at > now() - make_interval(secs => ?)) order by a.id", Long.class,
                 (double) LEASE_SILENT.toSeconds())) {

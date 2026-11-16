@@ -102,7 +102,9 @@ public final class BrokerConnections implements AutoCloseable {
         Integer open = new org.springframework.jdbc.core.JdbcTemplate(dataSource).queryForObject("select count(*) from "
                 + "exec.position where broker_account_id = ? and status <> 'CLOSED' and quantity_open > 0", Integer.class,
                 account.id());
-        if (open == null || open == 0 || !strandedSaid.add(account.id() + ":" + why)) {
+        // second review: once a day (the worker runs for days: a refusal after the user released yesterday's kill)
+        if (open == null || open == 0 || !strandedSaid.add(java.time.LocalDate.now(java.time.ZoneId.of("Asia/Kolkata"))
+                + ":" + account.id() + ":" + why)) {
             return;
         }
         KillSwitches kills = new KillSwitches(dataSource);

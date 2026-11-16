@@ -184,7 +184,11 @@ function ManualAccountView({ accountId, index }: { accountId: number; index: str
       </div>
       {quote.error && <p className="text-sm text-down">No contract to buy: {(quote.error as Error).message}</p>}
 
-      {confirm?.kind === "BUY" && (
+      {confirm?.kind === "BUY" && confirm.mode !== a.mode && (
+        // review 16 Nov 2026: the card keeps the mode it opened with; one changed since is never shown as this card
+        <p className="text-sm text-down">{a.name} changed from {confirm.mode} to {a.mode} since the card opened: click BUY again.</p>
+      )}
+      {confirm?.kind === "BUY" && confirm.mode === a.mode && (
         <div className={`space-y-2 rounded-md border px-3 py-2 text-sm ${live ? "border-down/60 bg-down/10" : "border-line bg-panel-2"}`}>
           <div>
             {live && <b className="text-down">REAL ORDER at {a.broker}. </b>}
@@ -235,7 +239,7 @@ function ManualAccountView({ accountId, index }: { accountId: number; index: str
           {exit.error && <p className="text-down">Not exited: {(exit.error as Error).message}</p>}
         </div>
       )}
-      {note && <p className="text-sm text-muted">{note}</p>}
+      {note && <p className={`text-sm ${note.startsWith("Not bought") ? "text-down" : "text-muted"}`}>{note}</p>}
 
       {a.orders.length > 0 && (
         <div className="overflow-x-auto">

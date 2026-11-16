@@ -293,7 +293,9 @@ class CanaryTest {
         assertThat(r.result()).isEqualTo(Canary.Result.FAIL);
         assertThat(r.message()).contains("without a fill of " + r.tag()).contains("not sold back by the canary");
         assertThat(r.filledQuantity()).isZero();
-        assertThat(r.leftover()).isFalse();
+        // second review: never sold back, but a leftover (kill switch, alert): it may be the canary's own fill unseen
+        assertThat(r.positionMoved()).isEqualTo(LOT);
+        assertThat(r.leftover()).isTrue();
         assertThat(names(r)).doesNotContain("SELL_BACK");
         assertThat(net(v)).as("the other order's position is left alone").isEqualTo(LOT);
     }

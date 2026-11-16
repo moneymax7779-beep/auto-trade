@@ -373,11 +373,19 @@ class TelegramCommandsIT {
                     .isEqualTo("START");
             assertThat(gateway.pollOnce(0)).isTrue();
             assertThat(pollQueries.get(1)).as("then from the new id").contains("offset=8&");
+            // second review: a restart took max(update_id) + 1 (the old high id) and ate every update below it
+            gateway.prepare();
+            assertThat(gateway.pollOnce(0)).isTrue();
+            assertThat(pollQueries.get(2)).as("a restart goes on from the reader's own offset").contains("offset=8&");
 
             Files.writeString(botFile, "TELEGRAM_BOT_TOKEN=5353:BBB\nTELEGRAM_CHAT_ID=42\n");
             assertThat(gateway.pollOnce(0)).isTrue();
-            assertThat(pollQueries.get(2)).as("another bot: its own first update").doesNotContain("offset=");
+            assertThat(pollQueries.get(3)).as("another bot: its own first update").doesNotContain("offset=");
             assertThat(jdbc.queryForObject("select bot_id from exec.telegram_poller", Long.class)).isEqualTo(5353L);
+            Files.writeString(botFile, "TELEGRAM_BOT_TOKEN=6464:CCC\nTELEGRAM_CHAT_ID=42\n");
+            gateway.prepare();                                            // a restart on a third bot
+            assertThat(gateway.pollOnce(0)).isTrue();
+            assertThat(pollQueries.get(4)).doesNotContain("offset=");
         } finally {
             Files.copy(saved, botFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             jdbc.update("update exec.telegram_update set received_at = now() where received_at < now() - interval '1 day'");

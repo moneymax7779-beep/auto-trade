@@ -55,10 +55,12 @@ public final class KillSwitches {
      * same difference every 30 s wrote 1,076 audit rows).
      */
     public void engageAccount(BrokerAccount account, String reason, String actor) {
+        // review 16 Nov 2026: a HOLD (a canary run's entry hold) is not a kill: a real one engaged meanwhile gets its own
+        // row, or the hold's release at the run's end lifted it in silence
         int engaged = jdbc.update("insert into exec.kill_switch (tenant_id, scope, broker_account_id, reason, engaged_by) "
                 + "select ?, 'ACCOUNT', ?, ?, ? where not exists (select 1 from exec.kill_switch where scope = 'ACCOUNT' "
-                + "and broker_account_id = ? and released_at is null)", account.tenantId(), account.id(), reason, actor,
-                account.id());
+                + "and broker_account_id = ? and released_at is null and reason not like '" + HOLD + "%')",
+                account.tenantId(), account.id(), reason, actor, account.id());
         if (engaged == 0 && jdbc.queryForObject("select exists (select 1 from exec.audit_log l join exec.kill_switch k on "
                 + "k.broker_account_id = l.broker_account_id and k.scope = 'ACCOUNT' and k.released_at is null where "
                 + "l.broker_account_id = ? and l.action in ('KILL_ACCOUNT', 'KILL_ACCOUNT_ALREADY_ENGAGED') "
@@ -68,6 +70,12 @@ public final class KillSwitches {
         audit(account, actor, engaged > 0 ? "KILL_ACCOUNT" : "KILL_ACCOUNT_ALREADY_ENGAGED", Map.of("reason", reason));
         log.error("ACCOUNT KILL {} ({}): {}", account.id(), account.displayName(), reason);
     }
+
+    /**
+     * The reason prefix of a hold: an ACCOUNT switch that stops new entries for a while (a canary's run) and is released
+     * by whoever set it. {@link #engageAccount} never takes one for a kill already engaged.
+     */
+    public static final String HOLD = "HOLD: ";
 
     /** True when a TENANT switch of the workspace is engaged (the LIVE switch is refused meanwhile). */
     public boolean tenantEngaged(long tenantId) {

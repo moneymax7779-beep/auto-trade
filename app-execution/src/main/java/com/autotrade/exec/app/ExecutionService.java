@@ -32,7 +32,7 @@ class ExecutionService implements DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(ExecutionService.class);
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
-    static final int REQUIRED_SCHEMA = 41;          // V41: Telegram poller's bot (V40: chart engine heartbeat)
+    static final int REQUIRED_SCHEMA = 42;          // V42: Telegram reader's offset (V41: its bot, V40: chart heartbeat)
 
     private final DataSource dataSource;
     private final ExecutionProperties properties;

@@ -113,25 +113,36 @@ class TelegramGateway implements DisposableBean {
             log.warn("Telegram: {} update(s) stored but not handled before the restart: skipped", skipped);
         }
         commands.recover();
-        Long max = jdbc.queryForObject("select max(update_id) from exec.telegram_update", Long.class);
-        offset = max == null ? 0 : max + 1;
         java.sql.Timestamp newest = jdbc.queryForObject("select max(received_at) from exec.telegram_update",
                 java.sql.Timestamp.class);
         lastUpdateAt = newest == null ? null : newest.toInstant();
-        List<Long> stored = jdbc.queryForList("select bot_id from exec.telegram_poller where id = 1", Long.class);
-        Long known = stored.isEmpty() ? null : stored.getFirst();
+        List<Map<String, Object>> stored = jdbc.queryForList("select bot_id, next_offset from exec.telegram_poller where "
+                + "id = 1");
+        Long known = stored.isEmpty() || stored.getFirst().get("bot_id") == null ? null
+                : ((Number) stored.getFirst().get("bot_id")).longValue();
+        Long next = stored.isEmpty() || stored.getFirst().get("next_offset") == null ? null
+                : ((Number) stored.getFirst().get("next_offset")).longValue();
         botId = commands.bot().botId();
         if (known != null && botId != null && !known.equals(botId)) {
             log.warn("Telegram: the command bot changed ({} -> {}): reading it from its first unconfirmed update", known,
                     botId);
             offset = 0;
+        } else if (next != null) {
+            // review 16 Nov 2026 (second pass on D8): the reader's own next offset, never max(update_id) + 1 of every
+            // update ever kept, which after ids restarted lower confirmed every new update unread
+            offset = next;
+        } else {
+            Long max = jdbc.queryForObject("select max(update_id) from exec.telegram_update", Long.class);
+            offset = max == null ? 0 : max + 1;                    // before V42: the old rule, once
         }
         saveBot();
     }
 
+    /** The bot and the offset the reader goes on from, together (a crash between them must not pair them wrongly). */
     private void saveBot() {
-        jdbc.update("insert into exec.telegram_poller (id, worker_id, bot_id) values (1, ?, ?) on conflict (id) do update "
-                + "set bot_id = excluded.bot_id", workerId, botId);
+        jdbc.update("insert into exec.telegram_poller (id, worker_id, bot_id, next_offset) values (1, ?, ?, ?) on conflict "
+                + "(id) do update set bot_id = excluded.bot_id, next_offset = excluded.next_offset", workerId, botId,
+                offset);
     }
 
     private void loop() {
@@ -197,8 +208,9 @@ class TelegramGateway implements DisposableBean {
                         outcome.length() > 200 ? outcome.substring(0, 200) : outcome, id);
             }
         }
-        jdbc.update("insert into exec.telegram_poller (id, worker_id, last_ok_at) values (1, ?, now()) on conflict (id) "
-                + "do update set worker_id = excluded.worker_id, last_ok_at = excluded.last_ok_at", workerId);
+        jdbc.update("insert into exec.telegram_poller (id, worker_id, last_ok_at, bot_id, next_offset) values (1, ?, now(), "
+                + "?, ?) on conflict (id) do update set worker_id = excluded.worker_id, last_ok_at = excluded.last_ok_at, "
+                + "bot_id = excluded.bot_id, next_offset = excluded.next_offset", workerId, botId, offset);
         return true;
     }
 
@@ -243,8 +255,11 @@ class TelegramGateway implements DisposableBean {
         boolean market = tradingDays.isTradingDay(now.toLocalDate()) && !t.isBefore(LocalTime.of(9, 0))
                 && t.isBefore(LocalTime.of(15, 35));
         if (!running) {
-            if (props.commands() && !commands.bot().configured() && market) {
-                alarm("NO_TOKEN", NO_TOKEN);
+            // review 16 Nov 2026: also when a token was put in bot.env after the start (nothing reads it until a restart)
+            if (props.commands() && market) {
+                alarm("NO_TOKEN", commands.bot().configured() ? "Telegram commands are ON on this worker, but its reader "
+                        + "is not running (a token added to bot.env after the start is read only at a restart): nothing "
+                        + "reads your commands. Use the web or the broker app; restart the worker." : NO_TOKEN);
             }
             return;
         }
