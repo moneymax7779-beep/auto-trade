@@ -58,6 +58,7 @@ class ManualOrdersIT {
     private static final String V3 = "../config/risk/follower-risk.v3.yaml";
     private static final String V7 = "../config/risk/follower-risk.v7.yaml";
     private static final String V8 = "../config/risk/follower-risk.v8.yaml";
+    private static final String V13 = "../config/risk/follower-risk.v13.yaml";
     private static final BrokerRules RULES = BrokerRules.load(Path.of("..", "config", "brokers", "broker-rules.v1.yaml"));
     private static final int LOT = 65;
     private static final double[] STRIKES = {23050, 23100, 23150, 23200, 23250};
@@ -466,6 +467,20 @@ class ManualOrdersIT {
             assertThat(p.get("status")).isEqualTo("CLOSED");
             assertThat(p.get("exit_reason")).isEqualTo("TRADER_EXIT");
         });
+    }
+
+    @Test
+    void aLiveBuyOnV13WithNoStrategiesChosenIsSentLikeOnV8() {
+        // review 16 Nov 2026 (D4): v13 = v11 + manual; manual must be in the defaults too, or an account that has not
+        // chosen its LIVE strategies refuses every manual buy (REJECTED_LIVE_STRATEGY)
+        Setup s = setup(BrokerType.ZERODHA, TradeMode.LIVE, V13);
+        ManualOrders.Placed placed = manual().buy(s.account(), s.group(), "NIFTY", "CE", best("CE"), "kc-trader", DAY);
+        assertThat(placed.mode()).isEqualTo("LIVE");
+        try (BrokerConnections registry = registry()) {
+            follower(registry, s.account()).run(s.account(), s.group(), DAY);
+        }
+        assertThat(intentState(placed.intentId())).isEqualTo("EXECUTED");
+        assertThat(kite.requests("place")).as("the entry and its resting stop reached Kite").isEqualTo(2);
     }
 
     @Test

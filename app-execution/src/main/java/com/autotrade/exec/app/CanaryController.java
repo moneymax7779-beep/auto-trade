@@ -149,6 +149,8 @@ class CanaryController {
     private final Path dir;
     private final Clock clock;
     private final Canary.Settings settings;
+    /** The account switch's reason while a canary runs (review 16 Nov 2026, D3): entries held, exits go on. */
+    static final String FENCE = "CANARY: new entries held while the canary runs";
     private final Set<Long> running = ConcurrentHashMap.newKeySet();
     private final Map<String, Run> runs = Collections.synchronizedMap(new LinkedHashMap<>() {
         @Override
@@ -325,6 +327,8 @@ class CanaryController {
             }
         };
         Canary.Report report = null;
+        KillSwitches kills = new KillSwitches(dataSource);
+        Long fence = null;
         try {
             FollowerRisk.LiveLimits limits = new FollowerRisk.LiveLimits(1, risk.live().maxOpenPositions(),
                     risk.live().strategies(), risk.live().defaults());
@@ -348,6 +352,19 @@ class CanaryController {
             }
             run.connection = live.description();
             try {
+                // review 16 Nov 2026 (D3): no strategy entry on the account while the canary runs (its buy would be one
+                // more contract held, and a real fill of the contract would have been taken for the canary's). The
+                // account's switch stops new entries; it is released when the run ends, kept when it left something
+                fence = kills.engage(a.tenantId(), "ACCOUNT", a.id(), null, null, FENCE + " (run " + run.id + ")",
+                        run.actor);
+            } catch (RuntimeException e) {
+                report = notRun(a, contract, Canary.Result.FAIL, "FAIL: new entries could not be held for the run "
+                        + "(nothing was sent): " + e.getMessage());
+                tracked.result(report);
+                live.connection().close();
+                return;
+            }
+            try {
                 report = new Canary(live.connection(), contract, settings, tracked, clock).run();
             } catch (Throwable t) {
                 // the canary handles every RuntimeException itself; anything else may have left its order working
@@ -368,6 +385,20 @@ class CanaryController {
                 report = notRun(a, contract, Canary.Result.FAIL, "FAIL: " + t);
             }
         } finally {
+            if (fence != null) {
+                try {
+                    if (report != null && report.leftover()) {
+                        // kept: the leftover's own switch (its engage found this one engaged and added nothing)
+                        jdbc.update("update exec.kill_switch set reason = ? where id = ? and released_at is null",
+                                CanaryJournal.leftoverReason(report), fence);
+                    } else {
+                        kills.release(fence, a.tenantId(), run.actor);
+                    }
+                } catch (RuntimeException e) {
+                    log.error("canary {} on account {}: its entry hold #{} was not settled: {}", run.id, a.id(), fence,
+                            e.toString());
+                }
+            }
             run.reportFile = journal.reportFile() == null ? null : journal.reportFile().toString();
             run.result = CanaryJournal.view(report);
             running.remove(a.id());
