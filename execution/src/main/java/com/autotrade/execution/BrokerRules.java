@@ -61,6 +61,10 @@ public record BrokerRules(String version, String contentHash, Map<BrokerType, Ru
         }
     }
 
+    /** Each broker's intraday product code: our orders never carry another (a carry product has no auto square-off). */
+    static final Map<BrokerType, String> INTRADAY = Map.of(BrokerType.ZERODHA, "MIS", BrokerType.UPSTOX, "I",
+            BrokerType.KOTAK_NEO, "MIS", BrokerType.GROWW, "MIS");
+
     private static void check(String version, Rule r) {
         String at = version + " " + r.broker() + ": ";
         if (r.squareOff().isBefore(SQUARE_OFF_FROM) || r.squareOff().isAfter(SQUARE_OFF_TO)) {
@@ -75,6 +79,13 @@ public record BrokerRules(String version, String contentHash, Map<BrokerType, Ru
         }
         if (r.product() == null || r.product().isBlank()) {
             throw new IllegalArgumentException(at + "no product");
+        }
+        String intraday = INTRADAY.get(r.broker());
+        if (intraday != null && !intraday.equals(r.product())) {
+            // review 16 Nov 2026: the Kite adapter takes its product from these rules, so requireProducts compared the
+            // value with itself; an NRML here would send every LIVE order NRML (no broker auto square-off backstop)
+            throw new IllegalArgumentException(at + "product " + r.product() + " is not " + r.broker() + "'s intraday "
+                    + "product " + intraday);
         }
         if (r.lastLiveEntry() == null || !r.lastLiveEntry().isBefore(r.squareOff())) {
             throw new IllegalArgumentException(at + "last_live_entry " + r.lastLiveEntry() + " must be before square_off "

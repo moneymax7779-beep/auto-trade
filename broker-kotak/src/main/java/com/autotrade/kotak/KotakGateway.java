@@ -109,6 +109,9 @@ public final class KotakGateway implements BrokerConnection {
     private final List<Consumer<OrderUpdate>> listeners = new CopyOnWriteArrayList<>();
     private final Map<String, String> brokerIdByTag = new ConcurrentHashMap<>();
     private final Map<String, BrokerOrder> lastSeen = new ConcurrentHashMap<>();
+    /** One poll at a time (review 16 Nov 2026): two polls interleaving their put and restore of {@link #lastSeen} could
+     *  report the same fill twice, with its fill quantity. */
+    private final Object pollLock = new Object();
 
     /**
      * @param quotes the executable book by our instrument key ({@code null}: no quote source; {@link #quote} refuses)
@@ -484,6 +487,12 @@ public final class KotakGateway implements BrokerConnection {
 
     @Override
     public int poll() {
+        synchronized (pollLock) {
+            return pollOnce();
+        }
+    }
+
+    private int pollOnce() {
         int emitted = 0;
         for (BrokerOrder now : orders()) {
             BrokerOrder before = lastSeen.put(now.brokerOrderId(), now);

@@ -281,9 +281,14 @@ function statusTone(s: string) {
 
 function OrderList({ desk, fold = false }: { desk: ChartDesk; fold?: boolean }) {
   const { mine, base } = desk;
+  // review 16 Nov 2026: the exit's own result is shown ("not exited: …", "queued behind …"); it was dropped, so an exit
+  // that sold nothing looked done
+  const [outcome, setOutcome] = useState<{ id: number; lines: string[] } | null>(null);
   const act = useMutation({
     mutationFn: (a: { id: number; what: "cancel" | "exit" }) =>
-      postJson(`${base}/chart-orders/${a.id}/${a.what}`, a.what === "exit" ? { confirm: "EXIT" } : {}),
+      postJson<{ result?: string[] }>(`${base}/chart-orders/${a.id}/${a.what}`, a.what === "exit" ? { confirm: "EXIT" } : {}),
+    onMutate: () => setOutcome(null),
+    onSuccess: (r, a) => setOutcome(r?.result?.length ? { id: a.id, lines: r.result } : null),
     onSettled: desk.refresh,
   });
   if (mine.length === 0) return <p className="text-xs text-muted">No chart orders on {desk.underlying} {desk.replay ? "in this replay" : "today"}.</p>;
@@ -329,6 +334,10 @@ function OrderList({ desk, fold = false }: { desk: ChartDesk; fold?: boolean }) 
   return (
     <div className="space-y-2">
       {act.error && <p className="text-sm text-down">Not done: {reason(act.error)}</p>}
+      {outcome && (
+        <p className={`text-sm ${outcome.lines.some((l) => /^not |no manual|queued/i.test(l)) ? "text-down" : "text-muted"}`}>
+          #{outcome.id}: {outcome.lines.join(" · ")}</p>
+      )}
       {fold ? <>
         {rows(working)}
         {finished.length > 0 && (

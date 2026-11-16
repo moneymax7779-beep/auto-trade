@@ -82,6 +82,21 @@ public final class BrokerConnections implements AutoCloseable {
      * and reason while the worker runs.
      */
     private void stranded(BrokerAccount account, String why) {
+        stranded(account, why, "EGRESS: ", "EGRESS_REFUSED",
+                "no LIVE route from an address this host lacks: exits wait, resting broker stops still protect");
+    }
+
+    /**
+     * Review 16 Nov 2026: the same for every other LIVE refusal (the broker taken out of the LIVE setting, its adapter
+     * not offering LIVE, the switch off, the risk file without live limits): it was only logged, so a LIVE account with
+     * positions sat with no exits, no kill switch and no alert until a restart.
+     */
+    private void strandedLive(BrokerAccount account, String why) {
+        stranded(account, why, "LIVE ROUTE: ", "LIVE_ROUTE_REFUSED",
+                "a LIVE account with open positions has no route: exits and Flatten wait; resting broker stops still protect");
+    }
+
+    private void stranded(BrokerAccount account, String why, String prefix, String action, String rule) {
         Integer open = new org.springframework.jdbc.core.JdbcTemplate(dataSource).queryForObject("select count(*) from "
                 + "exec.position where broker_account_id = ? and status <> 'CLOSED' and quantity_open > 0", Integer.class,
                 account.id());
@@ -89,9 +104,8 @@ public final class BrokerConnections implements AutoCloseable {
             return;
         }
         KillSwitches kills = new KillSwitches(dataSource);
-        kills.engageAccount(account, "EGRESS: " + why, "broker-registry");
-        kills.audit(account, "broker-registry", "EGRESS_REFUSED", Map.of("open_positions", open, "reason", why,
-                "rule", "no LIVE route from an address this host lacks: exits wait, resting broker stops still protect"));
+        kills.engageAccount(account, prefix + why, "broker-registry");
+        kills.audit(account, "broker-registry", action, Map.of("open_positions", open, "reason", why, "rule", rule));
     }
 
     private final java.util.Set<String> strandedSaid = ConcurrentHashMap.newKeySet();
@@ -107,7 +121,11 @@ public final class BrokerConnections implements AutoCloseable {
 
     private Route open(BrokerAccount account, FollowerRisk risk) {
         if (account.tradeMode() == TradeMode.LIVE) {
-            return live(account, risk);
+            Route live = live(account, risk);
+            if (live.venue() == null) {               // an egress refusal was said already (the same account and reason)
+                strandedLive(account, live.description().replaceFirst("^LIVE refused: ", ""));
+            }
+            return live;
         }
         if (account.tradeMode() == TradeMode.PAPER || risk.orders() == null) {
             return new Route(new SimulatedVenue(dataSource, simulatedBrokerFunds), null, "simulated fills");

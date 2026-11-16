@@ -234,7 +234,7 @@ final class ReplayChartOrders {
         switch (event) {
             case VOID_STOP_FIRST -> end(o, "VOID", "the index reached the stop line before the entry", price);
             case VOID_CHASE -> end(o, "VOID", "the first tick past the entry was more than " + fmt(o.noChase)
-                    + " pts beyond it (not chased)", price);
+                    + " pts beyond it, or at the target (not chased)", price);
             case ENTER -> {
                 Bought bought = desk.buy(o.underlying, o.side, o.lots, o.lines());
                 if (bought.position() == null) {

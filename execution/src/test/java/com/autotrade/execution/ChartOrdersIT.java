@@ -517,6 +517,39 @@ class ChartOrdersIT {
     }
 
     @Test
+    void aStopWhoseWriteFailedFiresAgainAfterAPause() {
+        // review 16 Nov 2026: the engine marked the order acted on before the exit ran; a failed write (OPEN -> EXITING)
+        // left it marked at that version, so its chart stop never fired again that day
+        Setup s = setup(TradeMode.PAPER);
+        try (ExecutionLoop loop = loop("worker-chart-12")) {
+            ChartOrders.Order o = orders().arm(s.account(), loop.manualGroup(s.account().id()),
+                    arm("CE", 23_170, 23_120, 23_260), "kc", DAY);
+            ChartOrderEngine engine = engine();
+            tick(engine, 23_173);
+            loop.tick(DAY, 20_000);
+            engine.sync();
+            assertThat(status(o.id())).isEqualTo("OPEN");
+
+            jdbc.execute("create or replace function exec.it_fail_exiting() returns trigger language plpgsql as $$ begin "
+                    + "if old.status = 'OPEN' and new.status = 'EXITING' then raise exception 'it: database hiccup'; end if; "
+                    + "return new; end $$");
+            jdbc.execute("create trigger it_fail_exiting before update on exec.chart_order for each row "
+                    + "execute function exec.it_fail_exiting()");
+            try {
+                tick(engine, 23_117);
+                assertThat(status(o.id())).as("the write failed").startsWith("OPEN");
+            } finally {
+                jdbc.execute("drop trigger it_fail_exiting on exec.chart_order");
+                jdbc.execute("drop function exec.it_fail_exiting()");
+            }
+            tick(engine, 23_116);
+            assertThat(status(o.id())).as("not again on the next tick").startsWith("OPEN");
+            engine.onIndexTick("NIFTY", 23_116, MORNING.instant().plus(ChartOrderEngine.EXIT_RETRY));
+            assertThat(status(o.id())).isEqualTo("EXITING");
+        }
+    }
+
+    @Test
     void aPaperExitWithNoBidIsNotWrittenAndFiresAgainOnlyAfterAPause() {
         Setup s = setup(TradeMode.PAPER);
         try (ExecutionLoop loop = loop("worker-chart-11")) {
