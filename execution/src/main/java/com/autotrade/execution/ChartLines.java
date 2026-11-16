@@ -73,6 +73,32 @@ public final class ChartLines {
      * for the trader) when it cannot be armed: lines in the wrong order, a stop or target too close, or the entry line so
      * near the index that it would fire at once.
      */
+    /**
+     * Review 16 Nov 2026 (D7): the trader confirmed the kind the ticket showed, worked out from a quote up to seconds
+     * old; the server works it out again from the index now, and an index that moved through the entry meanwhile turns
+     * a breakout into a pullback (or back): a different trade from the one confirmed. Refused when {@code expected}
+     * (the ticket's; null or blank: not given, as before) is not {@code kind}.
+     */
+    public static void requireKind(Kind kind, String expected, double spot) {
+        if (expected == null || expected.isBlank()) {
+            return;
+        }
+        Kind shown;
+        try {
+            shown = Kind.valueOf(expected.trim().toUpperCase(java.util.Locale.ROOT));
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException("unknown entry kind " + expected);
+        }
+        if (shown != kind) {
+            throw new IllegalArgumentException("the index is at " + price(spot) + " now: these lines arm as a "
+                    + name(kind) + ", not the " + name(shown) + " the ticket showed: nothing armed; check the ticket again");
+        }
+    }
+
+    private static String name(Kind k) {
+        return k.name().toLowerCase(java.util.Locale.ROOT).replace('_', ' ');
+    }
+
     public static Kind validate(Lines l, double spot) {
         shape(l, spot);
         double d = l.dir(), e = d * l.entry(), x = d * spot;

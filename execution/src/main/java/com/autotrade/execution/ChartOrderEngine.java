@@ -351,6 +351,10 @@ public final class ChartOrderEngine implements AutoCloseable {
 
     /** Follows the account turns' outcomes, expires waiting orders, and reloads the watched orders. */
     public synchronized void sync() {
+        // review 16 Nov 2026 (D6): the heartbeat arm and move check (the database's clock, as theirs); first, so a sync
+        // that fails further on still says the engine runs, and one that cannot write this says nothing
+        jdbc.update("insert into exec.chart_engine_beat (session_date, beat_at) values (?, now()) on conflict (session_date) "
+                + "do update set beat_at = now()", java.sql.Date.valueOf(day));
         Instant now = clock.instant();
         LocalTime time = LocalTime.ofInstant(now, IST);
         List<ChartOrders.Order> working = new ArrayList<>(orders.workingBefore(day));

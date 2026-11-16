@@ -61,9 +61,17 @@ public final class ChartOrders {
         }
     }
 
-    /** What the trader arms; {@code validUntil}, {@code buffer} and {@code noChase} null = the defaults. */
+    /**
+     * What the trader arms; {@code validUntil}, {@code buffer} and {@code noChase} null = the defaults; {@code expectKind}
+     * the entry kind the ticket showed (null: not checked), refused when the lines arm as another now (D7).
+     */
     public record Arm(String underlying, String side, double entry, double stop, double target, int lots,
-                      LocalTime validUntil, Double buffer, Double noChase) {
+                      LocalTime validUntil, Double buffer, Double noChase, String expectKind) {
+
+        public Arm(String underlying, String side, double entry, double stop, double target, int lots,
+                   LocalTime validUntil, Double buffer, Double noChase) {
+            this(underlying, side, entry, stop, target, lots, validUntil, buffer, noChase, null);
+        }
     }
 
     private final JdbcTemplate jdbc;
@@ -126,6 +134,7 @@ public final class ChartOrders {
         if (killed != null) {
             throw new IllegalArgumentException("kill switch engaged (" + killed + "): nothing armed");
         }
+        requireEngine(day, "nothing armed");
         List<String> held = jdbc.queryForList("select symbol from exec.position where broker_account_id = ? and strategy_id = ? "
                 + "and underlying = ? and status <> 'CLOSED'", String.class, account.id(), ManualOrders.STRATEGY, u);
         if (!held.isEmpty()) {
@@ -137,6 +146,7 @@ public final class ChartOrders {
         ChartLines.Lines lines = new ChartLines.Lines(side, a.entry(), a.stop(), a.target(), buffer, noChase);
         double spot = spot(u, day);
         ChartLines.Kind kind = ChartLines.validate(lines, spot);
+        ChartLines.requireKind(kind, a.expectKind(), spot);
         long id;
         try {
             id = jdbc.queryForObject("insert into exec.chart_order (tenant_id, broker_account_id, copy_group_id, "
@@ -174,6 +184,7 @@ public final class ChartOrders {
             throw new IllegalArgumentException("chart order #" + id + " changed meanwhile (now " + o.status()
                     + "): look again and move it from there");
         }
+        requireEngine(day, "the line was not moved");
         double e = entry == null ? o.entry() : entry, s = stop == null ? o.stop() : stop, t = target == null ? o.target() : target;
         ChartLines.Lines lines = new ChartLines.Lines(o.side(), e, s, t, o.buffer(), o.noChase());
         double spot = spot(o.underlying(), day);
@@ -400,6 +411,34 @@ public final class ChartOrders {
                 Timestamp.from(now.minus(SPOT_MAX_AGE)), Timestamp.from(now.plusSeconds(5))).stream().findFirst()
                 .orElseThrow(() -> new IllegalArgumentException("no " + underlying + " index price in the last "
                         + SPOT_MAX_AGE.toSeconds() + " s: the market feed is not running"));
+    }
+
+    /** How old the engine's heartbeat may be for arm and move (it beats about once a second). */
+    static final java.time.Duration ENGINE_STALE = java.time.Duration.ofSeconds(10);
+
+    /**
+     * When the chart-order engine last synced for {@code day} (the database's clock), and whether that is recent enough
+     * to arm or move against; never: null. Review 16 Nov 2026 (D6).
+     */
+    public record Engine(boolean running, Instant lastSeen) {
+    }
+
+    public Engine engine(LocalDate day) {
+        Map<String, Object> row = jdbc.queryForMap("select (select beat_at from exec.chart_engine_beat where session_date = ?) "
+                + "as beat, (select beat_at > now() - make_interval(secs => ?) from exec.chart_engine_beat where session_date "
+                + "= ?) as fresh", Date.valueOf(day), (double) ENGINE_STALE.toSeconds(), Date.valueOf(day));
+        Timestamp beat = (Timestamp) row.get("beat");
+        return new Engine(Boolean.TRUE.equals(row.get("fresh")), beat == null ? null : beat.toInstant());
+    }
+
+    /** Refuses when no engine is watching the day's chart orders: an armed or moved line would never fire. */
+    private void requireEngine(LocalDate day, String outcome) {
+        Engine e = engine(day);
+        if (!e.running()) {
+            throw new IllegalArgumentException("the chart-order engine is not running ("
+                    + (e.lastSeen() == null ? "not seen today" : "last seen " + LocalTime.ofInstant(e.lastSeen(), IST)
+                            .withNano(0) + " IST") + "; it runs inside the trading session): " + outcome);
+        }
     }
 
     private Order owned(BrokerAccount account, long id) {

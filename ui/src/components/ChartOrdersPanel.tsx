@@ -36,7 +36,9 @@ export interface ChartOrder {
   position?: { open: number; entry: number; status: string; exit_reason: string | null; gross: number | null; charges: number | null };
 }
 
-interface ChartOrdersView { account: string; mode: string; canArm: boolean; canExit: boolean; unavailable?: string | null; orders: ChartOrder[] }
+/** engine (live only, review 16 Nov 2026): whether the chart-order engine watches today's orders; arm and move are refused if not */
+interface ChartOrdersView { account: string; mode: string; canArm: boolean; canExit: boolean; unavailable?: string | null; orders: ChartOrder[];
+  engine?: { running: boolean; lastSeen: string | null } }
 
 interface Quote { symbol: string; lotSize: number; ask: number; bid: number; spot: number }
 
@@ -157,7 +159,8 @@ export function useChartDesk(underlying: string, enabled: boolean, replay = fals
     },
   };
   return { underlying, accounts, paper, accountId, setAccountId: setPicked, tool, setTool, draft, setDraft, orders, mine,
-    move, refresh, drawing, canArm, canExit, base, replay, unavailable: orders.data?.unavailable ?? null };
+    move, refresh, drawing, canArm, canExit, base, replay, unavailable: orders.data?.unavailable ?? null,
+    engineDown: orders.data?.engine != null && !orders.data.engine.running ? orders.data.engine : null };
 }
 
 export type ChartDesk = ReturnType<typeof useChartDesk>;
@@ -195,6 +198,11 @@ export function ChartOrdersPanel({ desk, embedded = false }: { desk: ChartDesk; 
       </header>
       <div className={`space-y-2 text-sm ${embedded ? "px-3 py-2" : "p-4"}`}>
         {desk.unavailable && <p className="text-xs text-muted">Lines cannot be drawn now: {desk.unavailable}.</p>}
+        {desk.engineDown && (
+          <p className="text-xs font-semibold text-down">The chart-order engine is not running
+            {desk.engineDown.lastSeen ? ` (last seen ${new Date(desk.engineDown.lastSeen).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour12: false })} IST)` : " today"}:
+            nothing can be armed or moved, and armed lines are not watched. It runs inside the trading session.</p>
+        )}
         {desk.replay && desk.canArm && !tool && !draft && (
           <p className="text-xs text-muted">Pause the replay to draw at leisure; a line counts from the next replayed tick. The
             strike is the ATM of the replay's latest minute when the entry fires.</p>
@@ -214,9 +222,12 @@ function Ticket({ desk, draft }: { desk: ChartDesk; draft: Draft }) {
   const quote = useQuery({ queryKey: ["chart-quote", base, underlying, draft.side], retry: false,
     queryFn: () => get<Quote>(`${base}/manual/quote?underlying=${underlying}&side=${draft.side}`),
     refetchInterval: desk.replay ? 3000 : 10_000 });
+  // review 16 Nov 2026 (D7): the kind the ticket shows goes with the order; the server refuses it when the index has
+  // moved through the entry since this quote (a breakout would arm as a pullback), and the quote is read again
   const arm = useMutation({
-    mutationFn: () => postJson<ChartOrder>(`${base}/chart-orders`, { underlying, ...draft }),
+    mutationFn: (expectKind: string | undefined) => postJson<ChartOrder>(`${base}/chart-orders`, { underlying, ...draft, expectKind }),
     onSuccess: () => { desk.setDraft(null); desk.refresh(); },
+    onError: () => { quote.refetch(); },
   });
   const set = (k: keyof Draft) => (e: { target: { value: string } }) =>
     desk.setDraft({ ...draft, [k]: k === "validUntil" ? e.target.value : Number(e.target.value) });
@@ -265,7 +276,7 @@ function Ticket({ desk, draft }: { desk: ChartDesk; draft: Draft }) {
         past its line; the target at its line. Strike: the best ATM when it fires.
       </p>
       <div className="mt-2 flex gap-2">
-        <button type="button" disabled={arm.isPending || !!check.problem} onClick={() => arm.mutate()}
+        <button type="button" disabled={arm.isPending || !!check.problem || !!desk.engineDown} onClick={() => arm.mutate(check.kind)}
           className="rounded bg-accent px-4 py-1.5 text-sm font-semibold text-white disabled:opacity-50">Arm</button>
         <button type="button" onClick={() => desk.setDraft(null)} className="rounded border border-line px-3 py-1.5 text-sm">Discard</button>
       </div>

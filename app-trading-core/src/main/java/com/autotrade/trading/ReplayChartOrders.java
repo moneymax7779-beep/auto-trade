@@ -110,6 +110,12 @@ final class ReplayChartOrders {
 
     /** Arms an order; IllegalArgumentException (the reason) when its lines or fields are wrong. */
     Order arm(String underlying, String side, Double entry, Double stop, Double target, Integer lots, String validUntil) {
+        return arm(underlying, side, entry, stop, target, lots, validUntil, null);
+    }
+
+    /** As {@link #arm}, refused when the lines arm as another kind than {@code expectKind} (the ticket's; D7). */
+    Order arm(String underlying, String side, Double entry, Double stop, Double target, Integer lots, String validUntil,
+              String expectKind) {
         if (underlying == null || !tradable.contains(underlying)) {
             throw new IllegalArgumentException("chart orders trade " + String.join(" and ", tradable.stream().sorted().toList())
                     + " in this replay");
@@ -133,6 +139,7 @@ final class ReplayChartOrders {
         Lines lines = new Lines(side, entry, stop, target, ChartLines.defaultBuffer(underlying),
                 ChartLines.defaultNoChase(underlying));
         Kind kind = ChartLines.validate(lines, spot);
+        ChartLines.requireKind(kind, expectKind, spot);
         Order o = new Order(nextId++, underlying, side, kind, entry, stop, target, lines.buffer(), lines.noChase(), lots, until);
         note(o, "ARMED", spot, kind.name().toLowerCase(java.util.Locale.ROOT) + ", " + lots + " lot(s), until " + until);
         orders.add(o);

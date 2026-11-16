@@ -842,9 +842,10 @@ public final class TradingSession {
     }
 
     public Map<String, Object> chartArm(String underlying, String side, Double entry, Double stop, Double target,
-                                        Integer lots, String validUntil) {
+                                        Integer lots, String validUntil, String expectKind) {
         synchronized (lock) {
-            return ReplayChartOrders.view(chartBook().arm(underlying, side, entry, stop, target, lots, validUntil));
+            return ReplayChartOrders.view(chartBook().arm(underlying, side, entry, stop, target, lots, validUntil,
+                    expectKind));
         }
     }
 
