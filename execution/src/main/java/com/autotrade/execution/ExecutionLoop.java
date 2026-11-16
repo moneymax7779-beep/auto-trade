@@ -542,6 +542,12 @@ public final class ExecutionLoop implements AutoCloseable {
         return manual().buy(account, manualGroup(account), underlying, side, expectedSymbol, actor, day);
     }
 
+    /** {@link #manualGroup(BrokerAccount)} by account id (a chart order is armed in it). */
+    public long manualGroup(long accountId) {
+        return manualGroup(accounts.byId(accountId).orElseThrow(() -> new IllegalArgumentException("no account "
+                + accountId)));
+    }
+
     /**
      * A served copy group the account follows (its turn runs only those groups' intents): its own tenant's first (review
      * 9 Nov 2026: never a group shared to it by another tenant when its own will do).

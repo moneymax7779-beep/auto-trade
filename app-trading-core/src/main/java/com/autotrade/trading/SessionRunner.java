@@ -124,6 +124,76 @@ class SessionRunner implements ApplicationRunner {
         return current;
     }
 
+    /**
+     * A replay stopped before its day ended (Ctrl-C on bin/replay-desk, 15 Nov 2026) would stay RUNNING in trade.session,
+     * and a RUNNING replay row has blocked a day's shadow run before: it is closed as STOPPED. Live sessions are left to
+     * {@link #closeOrphanedLiveSessions} as before.
+     */
+    @jakarta.annotation.PreDestroy
+    void stopUnfinishedReplay() {
+        TradingSession session = current;
+        if (session == null || !session.chartOrdersOn() || session.sessionId() <= 0
+                || !"RUNNING".equals(session.runState())) {
+            return;
+        }
+        try {
+            new TradeStore(target).endSession(session.sessionId(), "STOPPED", Map.of(),
+                    "stopped before the replay's end (the service shut down)");
+            log.info("replay session {} stopped before its end: marked STOPPED", session.sessionId());
+        } catch (RuntimeException e) {
+            log.warn("replay session {} could not be marked STOPPED: {}", session.sessionId(), e.getMessage());
+        }
+    }
+
+    /** The day of this process's replay (--mode=replay), for the replay bar's Restart. */
+    private volatile LocalDate replayDay;
+    /** A Restart in progress ("RESTARTING"), its failure ("FAILED: …"), or null. */
+    private volatile String replayRestart;
+
+    /**
+     * The replay bar's Restart (user, 15 Nov 2026: "add a restart button in the replay bar"): ends this process's replay
+     * (STOPPED, "restarted from the replay bar") if it still runs, and starts the same day again with the same settings
+     * (speed, pause-at, strategies on/off), in the background: loading the day takes about a minute. Only a replay
+     * started to stay up after its end (bin/replay-desk, replay-keep-serving), never a live or scheduled process.
+     */
+    synchronized String restartReplay() {
+        if (!"replay".equals(mode) || replayDay == null
+                || !context.getEnvironment().getProperty("autotrade.trading.replay-keep-serving", Boolean.class, false)) {
+            throw new IllegalStateException("only a replay started with bin/replay-desk can be restarted here");
+        }
+        if ("RESTARTING".equals(replayRestart)) {
+            throw new IllegalStateException("the replay is already restarting");
+        }
+        Running old = running;
+        LocalDate day = replayDay;
+        replayRestart = "RESTARTING";
+        Thread.ofPlatform().name("replay-restart-" + day).start(() -> {
+            try {
+                if (old != null && old.worker().isAlive()) {
+                    old.session().abandon("restarted from the replay bar");
+                    if (!old.worker().join(Duration.ofMinutes(2))) {
+                        throw new IllegalStateException("the running replay did not stop within 2 minutes");
+                    }
+                }
+                Thread signalThread = signalWorker;
+                if (signalThread != null && !signalThread.join(Duration.ofMinutes(2))) {
+                    throw new IllegalStateException("the replay's signal source did not stop within 2 minutes");
+                }
+                log.info("replay {}: restarted from the replay bar", day);
+                Running next = start(day, true);
+                replayRestart = next == null ? "FAILED: the replay could not start (see the service log)" : null;
+            } catch (Exception e) {
+                log.warn("replay {} restart failed", day, e);
+                replayRestart = "FAILED: " + e.getMessage();
+            }
+        });
+        return replayRestart;
+    }
+
+    String replayRestart() {
+        return replayRestart;
+    }
+
     com.autotrade.md.live.ReplayControl replayControl() {
         return replayControl;
     }
@@ -239,6 +309,7 @@ class SessionRunner implements ApplicationRunner {
             }
             case "replay" -> {
                 LocalDate session = LocalDate.parse(first(args, "session", LocalDate.now(MarketTime.IST).toString()));
+                replayDay = session;
                 Running replay = start(session, true);
                 if (replay == null) {
                     exit(0);
@@ -248,6 +319,12 @@ class SessionRunner implements ApplicationRunner {
                 Thread signalThread = signalWorker;                // live execution L1: let the signal source drain
                 if (signalThread != null) {
                     signalThread.join();
+                }
+                // a replay traded by hand (bin/replay-desk) stays up after the day ends, so its trades can be looked at
+                if (context.getEnvironment().getProperty("autotrade.trading.replay-keep-serving", Boolean.class, false)) {
+                    log.info("replay {} {}; still serving the UI (replay-keep-serving), stop it with Ctrl-C", session,
+                            replay.session().status().get("status"));
+                    return;
                 }
                 exit("DONE".equals(replay.session().status().get("status")) ? 0 : 1);
             }
@@ -571,12 +648,40 @@ class SessionRunner implements ApplicationRunner {
         }
         if (replay && t.replaySpeed() > 0) {
             trading.replayControl(replayControl);
+            // chart orders in a replay (15 Nov 2026): replay-pause-at HH:mm runs to that time and pauses, so lines can be
+            // drawn before the moment of interest (e.g. 09:16, once the first minute's option chain is there)
+            String pauseAt = context.getEnvironment().getProperty("autotrade.trading.replay-pause-at");
+            if (pauseAt != null && !pauseAt.isBlank()) {
+                replayControl.pauseAt(session.atTime(java.time.LocalTime.parse(pauseAt.length() == 5 ? pauseAt + ":00" : pauseAt))
+                        .atZone(MarketTime.IST).toInstant());
+            }
         }
+        // replay-strategies: off (replays only): the strategies still decide, none of their orders is placed, so the
+        // trader's chart orders trade the replay's paper account alone
+        if (replay && "off".equalsIgnoreCase(context.getEnvironment().getProperty("autotrade.trading.replay-strategies", "on"))) {
+            trading.strategiesOff(true);
+            log.info("replay-strategies off: only chart orders trade in this replay");
+        }
+        List<java.util.function.Consumer<com.autotrade.core.event.IndexTick>> taps = new ArrayList<>();
         // the charts' live push: a live session's index ticks, and a paced replay's (an unpaced one runs ahead of any page)
         if (!replay || t.replaySpeed() > 0) {
             String mode = replay ? "PAPER_REPLAY" : "PAPER_LIVE";
-            context.getBeanProvider(LiveTicks.class).ifAvailable(ticks -> trading.indexTap(tick -> ticks.accept(tick, session, mode)));
+            context.getBeanProvider(LiveTicks.class).ifAvailable(ticks -> taps.add(tick -> ticks.accept(tick, session, mode)));
         }
+        // chart orders (14 Nov 2026, plan 2026-11-14-chart-line-trading-plan.md): the trader's entry, stop and target lines,
+        // checked on every live index tick in memory; autotrade.chart-orders.enabled=false turns them off
+        com.autotrade.execution.ChartOrderEngine chartEngine = null;
+        if (!replay && context.getEnvironment().getProperty("autotrade.chart-orders.enabled", Boolean.class, true)) {
+            com.autotrade.execution.ChartOrderEngine engine = new com.autotrade.execution.ChartOrderEngine(target, session)
+                    .start();
+            taps.add(tick -> engine.onIndexTick(tick.underlying(), tick.price(), tick.receivedAt()));
+            chartEngine = engine;
+        }
+        if (!taps.isEmpty()) {
+            List<java.util.function.Consumer<com.autotrade.core.event.IndexTick>> all = List.copyOf(taps);
+            trading.indexTap(tick -> all.forEach(tap -> tap.accept(tick)));
+        }
+        com.autotrade.execution.ChartOrderEngine chartOrders = chartEngine;
         if (signalSource) {
             com.autotrade.account.AccountStore accounts = new com.autotrade.account.AccountStore(target);
             long tenant = accounts.ensureTenant(signal.tenantName());
@@ -649,6 +754,9 @@ class SessionRunner implements ApplicationRunner {
         Thread worker = Thread.ofPlatform().name("trading-session-" + session).start(() -> {
             Map<String, Object> summary = trading.run();
             context.getBeanProvider(LiveTicks.class).ifAvailable(LiveTicks::clear);   // its prices are history now
+            if (chartOrders != null) {
+                chartOrders.close();
+            }
             if (recorder != null) {
                 recorder.close();
             }

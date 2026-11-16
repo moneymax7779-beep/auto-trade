@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Trade a recorded day by hand (user, 15 Nov 2026: "in the replay i should be able to draw and run the replay"): a
+# paced replay of auto-trade's own capture whose NIFTY / SENSEX charts take entry, stop and target lines (the chart-order
+# panel), traded on the replay's own paper account at the replayed option prices. Examples:
+#   bin/replay-desk 2026-11-13                 # 60x, pauses at 09:20 (the first five minutes on the chart), strategies off, http://127.0.0.1:8098/index/NIFTY
+#   bin/replay-desk 2026-11-13 30 10:30 on     # 30x, pauses at 10:30, the configured strategies trade alongside
+# Arguments: day, speed (market seconds per second), pause-at HH:MM, strategies on|off, port.
+# It keeps serving after the day ends so the trades can be looked at (Ctrl-C stops it). It never runs migrations: the
+# database is used as it is (the replay's trades are stored as a PAPER_REPLAY session, strategy "chart").
+set -euo pipefail
+DAY=${1:?usage: bin/replay-desk YYYY-MM-DD [speed=60] [pause-at=09:20] [strategies=off] [port=8098]}
+SPEED=${2:-60}
+PAUSE=${3:-09:20}
+STRATEGIES=${4:-off}
+PORT=${5:-8098}
+# zt-tiger-v2 is only read for earlier days' history; on this Mac the replays read the restored archive in
+# autotrade-postgres (zt_archive) as the replay batches do, unless ZT_SOURCE_URL says otherwise
+export ZT_SOURCE_URL=${ZT_SOURCE_URL:-jdbc:postgresql://127.0.0.1:5500/zt_archive}
+export ZT_SOURCE_USER=${ZT_SOURCE_USER:-autotrade} ZT_SOURCE_PASSWORD=${ZT_SOURCE_PASSWORD:-autotrade}
+export ZT_SOURCE_PASSWORD_FILE=${ZT_SOURCE_PASSWORD_FILE:-/nonexistent}
+echo "replay-desk: $DAY at ${SPEED}x, pausing at $PAUSE, strategies $STRATEGIES: open http://127.0.0.1:$PORT/index/NIFTY"
+exec "$(dirname "$0")/trading-core" --mode=replay --session="$DAY" --server.port="$PORT" \
+  --autotrade.trading.replay-source=own --autotrade.trading.replay-speed="$SPEED" \
+  --autotrade.trading.replay-pause-at="$PAUSE" --autotrade.trading.replay-strategies="$STRATEGIES" \
+  --autotrade.trading.replay-keep-serving=true --spring.flyway.enabled=false

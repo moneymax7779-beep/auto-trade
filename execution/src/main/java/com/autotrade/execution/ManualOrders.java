@@ -46,6 +46,8 @@ public final class ManualOrders {
     /** The strategy id of manual orders (P&amp;L, reconciliation and the LIVE risk file's strategy list read it). */
     public static final String STRATEGY = "manual";
     public static final int LOTS = 1;
+    /** A chart order's largest size (the account's own lot, capital and loss checks still apply on top). */
+    public static final int MAX_LOTS = 10;
     public static final double STOP_PCT = 25;
     public static final List<String> UNDERLYINGS = List.of("NIFTY", "SENSEX");
     static final LocalTime FIRST_BUY = LocalTime.of(9, 15);
@@ -239,6 +241,25 @@ public final class ManualOrders {
     /** {@code lots}: tests only (a partial fill needs more than one lot); the UI's buy is {@link #LOTS}. */
     Placed buy(BrokerAccount account, long copyGroupId, String underlying, String side, String expectedSymbol, String actor,
                LocalDate day, int lots) {
+        String s = side == null ? "" : side.trim().toUpperCase(java.util.Locale.ROOT);
+        return buy(account, copyGroupId, underlying, side, expectedSymbol, actor, day, lots, STOP_PCT,
+                "manual BUY " + s + " by " + actor, "MANUAL:" + account.id() + ":" + UUID.randomUUID());
+    }
+
+    /**
+     * The buy, as the panel's buy and a chart order's entry ({@link ChartOrderEngine}, 14 Nov 2026) write it: {@code lots}
+     * lots ({@link #MAX_LOTS} at most), the broker stop {@code stopPct} % below the price paid, {@code reason} on the
+     * decision (the position's entry note), {@code idempotencyKey} the decision's key (a chart order's entry is written
+     * once: a second write of the same key fails and writes nothing).
+     */
+    public Placed buy(BrokerAccount account, long copyGroupId, String underlying, String side, String expectedSymbol,
+                      String actor, LocalDate day, int lots, double stopPct, String reason, String idempotencyKey) {
+        if (lots < 1 || lots > MAX_LOTS) {
+            throw new IllegalArgumentException("lots: 1 to " + MAX_LOTS);
+        }
+        if (!(stopPct > 0) || stopPct >= 100) {
+            throw new IllegalArgumentException("the broker stop must be between 0 and 100 % below the price paid");
+        }
         String u = checkUnderlying(underlying);
         String s = checkSide(side);
         if (account.role() != AccountRole.FOLLOWER_TRADE) {
@@ -279,13 +300,13 @@ public final class ManualOrders {
             throw new IllegalArgumentException("kill switch engaged (" + killed + "): nothing sent");
         }
         long quantity = (long) lots * c.lotSize();
-        String idempotency = "MANUAL:" + account.id() + ":" + UUID.randomUUID();
+        String idempotency = idempotencyKey;
         Instant now = clock.instant();
         Map<String, Double> context = new LinkedHashMap<>();
         context.put("fixed_lots", (double) lots);
         context.put("strategy_lots", (double) lots);
         context.put("intended_lots", (double) lots);
-        context.put("stop_pct", STOP_PCT);
+        context.put("stop_pct", stopPct);
         long[] ids = transactions.execute(tx -> {
             // review 9 Nov 2026: two clicks (two tabs) both passed the checks above and wrote two buys; one account's buys
             // are written one at a time and checked again under the lock
@@ -294,7 +315,7 @@ public final class ManualOrders {
             refuseIfBusy(account, u, day);
             // the decision's notification is delivered at commit, with its batch and intent already there
             new SignalDecisionStore(dataSource).insert(new SignalDecision(copyGroupId, 0, day, now, STRATEGY, 0, u,
-                    SignalDecision.Action.ENTER, s, null, "MANUAL", "manual BUY " + s + " by " + actor, c.token(), key,
+                    SignalDecision.Action.ENTER, s, null, "MANUAL", reason, c.token(), key,
                     c.symbol(), c.lotSize(), c.ask(), quantity * c.ask(), Double.NaN, lots, idempotency, context));
             long decision = jdbc.queryForObject("select id from exec.signal_decision where idempotency_key = ?", Long.class,
                     idempotency);
@@ -399,6 +420,73 @@ public final class ManualOrders {
         return jdbc.queryForList("select id from exec.position where broker_account_id = ? and strategy_id = ? "
                 + "and status <> 'CLOSED' and quantity_open > 0 and (? or underlying = ?) order by opened_at, id", Long.class,
                 accountId, STRATEGY, underlying == null, underlying == null ? "" : underlying);
+    }
+
+    /**
+     * A chart order's exit (14 Nov 2026): one EXIT decision of {@link #STRATEGY} and one EXIT intent for this account only,
+     * for its open manual position of {@code underlying}, written in one transaction and announced like any decision. The
+     * account's turn sells it as it sells any strategy's exit: the broker stop released first (what it sold is booked,
+     * never sold twice), then a limit at the bid, chased and retried. {@code reason} becomes the position's exit reason.
+     * The decision's price is the contract's latest bid in our capture (a PAPER account fills at it); IllegalArgumentException
+     * when the account holds no manual position of the index. Returns the intent id.
+     */
+    public long exit(BrokerAccount account, long copyGroupId, String underlying, String actor, LocalDate day, String reason,
+                     String idempotencyKey) {
+        String u = checkUnderlying(underlying);
+        List<Map<String, Object>> held = jdbc.queryForList("select p.id, p.option_side, p.instrument_token, p.instrument_key, "
+                + "p.symbol, p.quantity_open, d.lot_size from exec.position p join exec.trade_intent i on i.id = "
+                + "p.entry_trade_intent_id join exec.trade_batch b on b.id = i.trade_batch_id join exec.signal_decision d on "
+                + "d.id = b.signal_decision_id where p.broker_account_id = ? and p.strategy_id = ? and p.underlying = ? "
+                + "and p.status <> 'CLOSED' and p.quantity_open > 0 order by p.opened_at, p.id limit 1", account.id(),
+                STRATEGY, u);
+        if (held.isEmpty()) {
+            throw new IllegalArgumentException(account.displayName() + " holds no manual " + u + " position");
+        }
+        Map<String, Object> p = held.getFirst();
+        long token = ((Number) p.get("instrument_token")).longValue();
+        String key = InstrumentKeys.normalize((String) p.get("instrument_key"), token);
+        String symbol = (String) p.get("symbol");
+        String side = (String) p.get("option_side");
+        long quantity = ((Number) p.get("quantity_open")).longValue();
+        int lotSize = p.get("lot_size") == null ? lotSizeOf(token) : ((Number) p.get("lot_size")).intValue();
+        Instant now = clock.instant();
+        double bid = jdbc.queryForList("select bid_px[1] from md.option_tick where instrument_token = ? and session_date = ? "
+                + "and recv_ts > ? and recv_ts <= ? order by recv_ts desc limit 1", Double.class, token, Date.valueOf(day),
+                Timestamp.from(now.minus(QUOTE_MAX_AGE)), Timestamp.from(now.plusSeconds(5))).stream()
+                .filter(java.util.Objects::nonNull).findFirst().orElse(Double.NaN);
+        if (Double.isNaN(bid) && account.tradeMode() == TradeMode.PAPER) {
+            // code review 15 Nov 2026: a PAPER account fills at the decision's price; without one the turn rejects the exit
+            // (NO_EXIT_PRICE), so nothing is written and the caller tries again
+            throw new IllegalArgumentException("no bid for " + symbol + " in the last " + QUOTE_MAX_AGE.toSeconds()
+                    + " s: a PAPER exit needs one");
+        }
+        int lots = lotSize > 0 ? (int) Math.max(1, quantity / lotSize) : 1;
+        Map<String, Double> context = new LinkedHashMap<>();
+        context.put("quantity", (double) quantity);
+        long intent = transactions.execute(tx -> {
+            new SignalDecisionStore(dataSource).insert(new SignalDecision(copyGroupId, 0, day, now, STRATEGY, 0, u,
+                    SignalDecision.Action.EXIT, side, null, "MANUAL", reason, token, key, symbol, lotSize, bid,
+                    Double.NaN, Double.NaN, lots, idempotencyKey, context));
+            long decision = jdbc.queryForObject("select id from exec.signal_decision where idempotency_key = ?", Long.class,
+                    idempotencyKey);
+            long batch = jdbc.queryForObject("insert into exec.trade_batch (tenant_id, copy_group_id, signal_decision_id, "
+                    + "source, idempotency_key, status) values (?, ?, ?, 'MANUAL', ?, 'FANNED_OUT') returning id", Long.class,
+                    account.tenantId(), copyGroupId, decision, idempotencyKey);
+            return jdbc.queryForObject("insert into exec.trade_intent (tenant_id, trade_batch_id, broker_account_id, "
+                    + "broker_type, execution_mode, strategy_id, priority, underlying, action, option_side, instrument_token, "
+                    + "symbol, quantity, state, idempotency_key) values (?, ?, ?, ?, ?, ?, 0, ?, 'EXIT', ?, ?, ?, ?, "
+                    + "'CREATED', ?) returning id", Long.class, account.tenantId(), batch, account.id(),
+                    account.brokerType().name(), account.tradeMode().name(), STRATEGY, u, side, token, symbol, quantity,
+                    idempotencyKey + ":" + account.id());
+        });
+        Map<String, Object> audit = new LinkedHashMap<>();
+        audit.put("intent", intent);
+        audit.put("symbol", symbol);
+        audit.put("quantity", quantity);
+        audit.put("bid", Double.isNaN(bid) ? null : bid);
+        audit.put("reason", reason);
+        kills.audit(account, actor, "MANUAL_EXIT", audit);
+        return intent;
     }
 
     // ------------------------------------------------------------------------------------------------- the panel

@@ -13,6 +13,7 @@ import { PcrPanel } from "../components/PcrPanel";
 import { OiTapePanel, type TapeTrade } from "../components/OiTapePanel";
 import { ErrorNote, Loading, Panel, Pnl } from "../components/ui";
 import { ReplayControls } from "../components/TradeInspector";
+import { ChartOrdersPanel, useChartDesk } from "../components/ChartOrdersPanel";
 
 export const INDICES = ["NIFTY", "SENSEX", "BANKNIFTY"] as const;
 /** Indices recorded for context only (charts, volume, PCR); no strategy trades them. */
@@ -109,7 +110,11 @@ function LiveDay({ underlying, s, nav, inspect }: { underlying: string; s: Statu
   const pnl = [...open, ...closed].reduce((sum, p) => sum + p.net, 0);   // net of costs, as the day P&L
   // a replay runs on its own clock: its day's charts are cut at its last event, so they move as it runs
   // "HH:mm:ss" (a whole minute comes from the server as "HH:mm")
-  const until = s.mode === "PAPER_REPLAY" && s.lastEvent ? s.lastEvent.slice(0, 8).padEnd(8, ":00").slice(0, 8) : undefined;
+  const until = replayClock(s);
+  // chart orders (14 Nov 2026): lines drawn on this chart for a PAPER account, live days of NIFTY and SENSEX only;
+  // in a paced replay (15 Nov 2026) on the replay's own paper account, at the replay's clock and prices
+  const tradable = !CONTEXT_ONLY.has(underlying);
+  const desk = useChartDesk(underlying, tradable, s.mode === "PAPER_REPLAY");
   return (
     <>
       {inspect && <ReplayControls s={s} />}
@@ -118,8 +123,9 @@ function LiveDay({ underlying, s, nav, inspect }: { underlying: string; s: Statu
         <MarketCard title={underlying} spot={market.spot} time={market.time} state={market.state}
           volatility={market.volatility} cas={market.cas} />
       )}
-      {s.date && <DayContextCard date={s.date} underlying={underlying} live />}
+      {s.date && <DayContextCard date={s.date} underlying={underlying} live until={until} />}
       <SurgePanel live date={s.date} underlying={underlying} nav={nav} until={until} sessionId={inspect ? s.session : undefined}
+        drawing={tradable ? desk.drawing : undefined} desk={tradable ? <ChartOrdersPanel desk={desk} embedded /> : undefined}
         trades={chartTrades([...open, ...closed].filter((p) => p.opened).map((p) => liveAsStored(p, s.date!)), underlying, null, strategyShort, noSpot)} />
       {s.date && <OiTapePanel underlying={underlying} date={s.date} live until={until}
         trades={[...open, ...closed].filter((p) => p.opened).map((p): TapeTrade => ({ label: `${p.strategy ?? ""} ${p.side}`, opened: p.opened!, closed: p.closed, net: p.net }))} />}
@@ -182,7 +188,7 @@ function PastDay({ underlying, day, sessionId, nav, inspect }: { underlying: str
 function PlainLiveDay({ underlying, s, nav }: { underlying: string; s: Status; nav: DayNav }) {
   const mine = <T extends { underlying: string }>(rows: T[] | undefined) => (rows ?? []).filter((r) => r.underlying === underlying);
   const open = mine(s.openPositions), closed = mine(s.closedPositions);
-  const until = s.mode === "PAPER_REPLAY" && s.lastEvent ? s.lastEvent.slice(0, 8).padEnd(8, ":00").slice(0, 8) : undefined;
+  const until = replayClock(s);
   return (
     <>
       <SurgePanel plain live date={s.date} underlying={underlying} nav={nav} until={until}
@@ -225,4 +231,14 @@ function liveAsStored(p: PositionRow, date: string): TradePositionRow {
     realised: p.realised ?? 0, costs: p.costs ?? 0, net: p.net, quantity: p.quantity, lot_size: p.lotSize ?? null,
     average_cost: p.averageCost, average_exit: p.exitPrice ?? null, direction: p.direction ?? null,
   };
+}
+
+/**
+ * A replay's clock "HH:mm:ss" (its charts are cut there, so they move as it runs; a whole minute comes from the server as
+ * "HH:mm"); before its first event 09:00 (15 Nov 2026: with no event yet the chart showed the whole replayed day,
+ * the future included). Undefined for a live session.
+ */
+function replayClock(s: Status): string | undefined {
+  if (s.mode !== "PAPER_REPLAY") return undefined;
+  return s.lastEvent ? s.lastEvent.slice(0, 8).padEnd(8, ":00").slice(0, 8) : "09:00:00";
 }

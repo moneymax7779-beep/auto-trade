@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useId, useMemo, useRef, useState, type PointerEvent } from "react";
+import { Fragment, useEffect, useId, useMemo, useRef, useState, type PointerEvent, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { get, type SessionStructure } from "../api";
 import { ErrorNote, Loading, Panel } from "./ui";
@@ -159,7 +159,11 @@ function cutStructure(s: SessionStructure | undefined, until: string): SessionSt
     trades: s.trades.filter((tr) => known(tr.at)).map((tr) => (tr.exit && !known(tr.exit) ? { ...tr, exit: null } : tr)) };
 }
 
-export function SurgePanel({ live, date, underlying, nav, trades = NO_TRADES, until, sessionId, plain = false }: { live?: boolean; date?: string; underlying?: string; nav?: DayNav;
+export function SurgePanel({ live, date, underlying, nav, trades = NO_TRADES, until, sessionId, plain = false, drawing, desk }: { live?: boolean; date?: string; underlying?: string; nav?: DayNav;
+  /** chart orders' lines on this index's price pane (its live day only) */
+  drawing?: ChartDrawing;
+  /** the chart-order desk (draw buttons, ticket, orders), shown right above this index's chart so it sits by the lines */
+  desk?: ReactNode;
   /** the day's trades on this index, drawn on the price chart (entry arrow, exit square, the index from entry to exit) */
   trades?: ChartTrade[];
   /** a running replay's clock: the chart shows the day up to it */
@@ -190,15 +194,16 @@ export function SurgePanel({ live, date, underlying, nav, trades = NO_TRADES, un
       {r.underlyings.filter((u) => !underlying || u.underlying === underlying).map((u) => (
         <UnderlyingSurgesPanel key={u.underlying} date={r.date!} data={until ? cutDay(u, until) : u} live={live} until={until} sessionId={sessionId}
           filters={filters} onFilters={update} nav={nav} plain={plain}
-          trades={u.underlying === underlying ? trades : NO_TRADES} />
+          trades={u.underlying === underlying ? trades : NO_TRADES} drawing={u.underlying === underlying ? drawing : undefined}
+          desk={u.underlying === underlying ? desk : undefined} />
       ))}
     </div>
   );
 }
 
-function UnderlyingSurgesPanel({ date, data: polled, live, until, sessionId, filters, onFilters, nav, trades, plain }:
+function UnderlyingSurgesPanel({ date, data: polled, live, until, sessionId, filters, onFilters, nav, trades, plain, drawing, desk }:
   { date: string; data: UnderlyingSurges; live?: boolean; until?: string; sessionId?: number; filters: Filters; onFilters: (f: Filters) => void;
-    nav?: DayNav; trades: ChartTrade[]; plain: boolean }) {
+    nav?: DayNav; trades: ChartTrade[]; plain: boolean; drawing?: ChartDrawing; desk?: ReactNode }) {
   // the pushed price (live and paced replays): the last minute moves as the index does, between the 30-second refreshes
   const pushed = useLiveBars(polled.underlying, date, !!live);
   const data = useMemo(() => (pushed.bars ? { ...polled, index: withLiveCloses(polled.index, pushed.bars, until) } : polled),
@@ -256,7 +261,7 @@ function UnderlyingSurgesPanel({ date, data: polled, live, until, sessionId, fil
             : "updates every 30 s; a surge shows once the next minute closes"}</span>}</>}
       right={<span className="text-xs text-muted num">{data.surges.length} surges · {count("bullish")} bullish · {count("bearish")} bearish · {count("mixed")} mixed</span>}
     >
-      {!data.historyAvailable && <p className="mb-2 text-xs text-warn">Volume history from zt-tiger-v2 is unavailable, so surges cannot be ranked.</p>}
+      {!data.historyAvailable && <p className="mb-2 text-xs text-warn">No futures volume history for the previous sessions (zt-tiger-v2 or own capture), so surges cannot be ranked.</p>}
       <Toolbar filters={filters} onFilters={onFilters} data={data} />
       <div className="mb-2 flex flex-wrap items-center gap-3">
         <LevelTogglesBar toggles={toggles} onChange={setToggles} />
@@ -266,9 +271,10 @@ function UnderlyingSurgesPanel({ date, data: polled, live, until, sessionId, fil
       {data.underlying === "SENSEX" && (
         <p className="mb-2 text-xs text-warn">SENSEX futures trade thinly (hundreds to a few thousand contracts a minute), so its surges rest on small volumes.</p>
       )}
+      {desk}
       <SurgeChart date={date} live={live} until={until} nav={nav} data={data} shown={shown} groups={groups} selected={selected}
         onSelect={setSelected} levels={levels.data} toggles={toggles} trades={trades} onPickTrade={sessionId != null ? setPicked : undefined}
-        structure={structure} structureToggles={structureToggles} />
+        structure={structure} structureToggles={structureToggles} drawing={drawing} />
       {picked && sessionId != null && (
         <div className="mt-3">
           {pickedContext
@@ -370,7 +376,28 @@ const EXPANDED = new Set<string>();
 const PRESETS: { label: string; span: number | null }[] = [{ label: "day", span: null }, { label: "2h", span: 120 }, { label: "1h", span: 60 }, { label: "30m", span: 30 }];
 
 interface YRange { lo: number; hi: number }           // a stretched price axis; null = fit the visible minutes
-interface Drag { kind: "pan" | "yscale" | "xscale"; x: number; y: number; view: View; yr: YRange; manualY: boolean; moved: boolean; id: number }
+interface Drag { kind: "pan" | "yscale" | "xscale" | "line"; x: number; y: number; view: View; yr: YRange; manualY: boolean; moved: boolean; id: number;
+  /** kind "line": the drawn line held */
+  key?: string }
+
+/** One horizontal line drawn on the price pane by the trader (a chart order's entry, stop or target). */
+export interface DrawnLine { key: string; price: number; color: string; label: string; dashed?: boolean; draggable?: boolean }
+/**
+ * Chart orders on the price pane (14 Nov 2026): the lines to draw; {@code placing} (a side) while a click on the price
+ * pane places a new order's entry ({@code onPlace} gets the price there); {@code onDrag} gets a draggable line's new
+ * price when it is let go.
+ */
+export interface ChartDrawing { lines: DrawnLine[]; placing: string | null; onPlace: (price: number) => void;
+  onDrag: (key: string, price: number) => void;
+  /** finished chart orders (15 Nov 2026): their lines from arming to the end, the target and stop zones shaded */
+  boxes?: DrawnBox[] }
+/** A finished chart order as a trade box: entry, stop and target from {@code from} to {@code to} ("HH:mm:ss"). */
+export interface DrawnBox { key: string; from: string; to: string; entry: number; stop: number; target: number; label: string;
+  colors: { entry: string; stop: string; target: string } }
+/** "HH:mm[:ss]" in minutes of the day, to the second */
+const minutesAt = (t: string) => { const [h, m, sec] = t.split(":").map(Number); return h * 60 + m + (sec || 0) / 60; };
+/** A drawn price: to half a point (the index's own tick is 0.05; lines are levels, not ticks). */
+const linePrice = (v: number) => Math.round(v * 2) / 2;
 interface Pinch { dist: number; mid: number; view: View }
 interface Premium { strike: number; expiry: string; CE: [string, number, number][]; PE: [string, number, number][] }
 const PREMIUM_KEY = "surge-chart-premium";
@@ -403,7 +430,7 @@ function loadSize(): Size {
 }
 
 function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onSelect, levels, toggles, trades, onPickTrade,
-  structure, structureToggles, plain = false }:
+  structure, structureToggles, plain = false, drawing }:
   { date: string; live?: boolean; until?: string; nav?: DayNav; data: UnderlyingSurges; shown: Surge[]; groups: Burst[]; selected: string | null;
     onSelect: (t: string | null) => void; levels?: LevelsData; toggles: LevelToggles; trades: ChartTrade[];
     /** a click on a trade's entry arrow or exit square (its data opens under the chart) */
@@ -411,8 +438,12 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
     /** ma-cross's 3-minute candles, EMA9 / EMA20 and its trades' stops and targets, each drawn when toggled on */
     structure?: SessionStructure; structureToggles: StructureToggles;
     /** a member's chart: no premium pane */
-    plain?: boolean }) {
+    plain?: boolean;
+    /** chart orders' lines: drawn on the price pane, placed by a click and moved by dragging */
+    drawing?: ChartDrawing }) {
   const svgRef = useRef<SVGSVGElement>(null);
+  // a drawn line being dragged: its key and the price under the pointer (sent on release)
+  const [lineDrag, setLineDrag] = useState<{ key: string; price: number } | null>(null);
   const clipId = `plot-${useId().replace(/:/g, "")}`;
   const [hover, setHover] = useState<{ m: number; y: number } | null>(null);
   const [view, setView] = useChartView(date, data.underlying, FULL);
@@ -609,7 +640,10 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
     ...lv.filter((l) => inBand(l.price)).map((l) => l.price),
     ...(mpNow != null && inBand(mpNow) ? [mpNow] : []),
     ...zs.filter((z) => inBand(z.lo) || inBand(z.hi)).flatMap((z) => [z.lo, z.hi]),
-    ...candles.flatMap((c) => [c[2], c[3]]), ...stopLines.filter((s) => inBand(s.v)).map((s) => s.v)];
+    ...candles.flatMap((c) => [c[2], c[3]]), ...stopLines.filter((s) => inBand(s.v)).map((s) => s.v),
+    // chart orders' lines are always in view (the trader acts on them), a finished order's box while its time is
+    ...(drawing?.lines ?? []).map((l) => l.price),
+    ...(drawing?.boxes ?? []).filter((bx) => minutesAt(bx.to) >= a && minutesAt(bx.from) <= b).flatMap((bx) => [bx.stop, bx.target])];
   const fLo = Math.min(...fitted), fHi = Math.max(...fitted), pad = Math.max((fHi - fLo) * 0.06, 1);
   const y0 = manualY?.lo ?? fLo - pad, y1 = manualY?.hi ?? fHi + pad;
   geo.current = { view, y0, y1, priceH: PRICE_H, W, L, PW };
@@ -652,6 +686,16 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
     const box = svgRef.current!.getBoundingClientRect();
     return { x: ((e.clientX - box.left) / box.width) * W, y: ((e.clientY - box.top) / box.height) * H };
   };
+  /** The index price at a height of the price pane. */
+  const priceAtY = (y: number) => y1 - ((y - T) / PRICE_H) * (y1 - y0);
+  /** The shown price of a drawn line (the pointer's while it is dragged). */
+  const shownPrice = (l: DrawnLine) => (lineDrag?.key === l.key ? lineDrag.price : l.price);
+  /** The draggable drawn line within 7 units of a point of the plot, the nearest. */
+  const drawnLineAt = (x: number, y: number) => {
+    if (!drawing || x < L || x > W - R || y < T || y > T + PRICE_H) return undefined;
+    return drawing.lines.filter((l) => l.draggable && Math.abs(Y(shownPrice(l)) - y) <= 7)
+      .sort((p, q) => Math.abs(Y(shownPrice(p)) - y) - Math.abs(Y(shownPrice(q)) - y))[0];
+  };
   const onPointerDown = (e: PointerEvent<SVGSVGElement>) => {
     if (e.button !== 0) return;
     const p = toSvg(e);
@@ -660,6 +704,12 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
       const [x1, x2] = [...pointers.current.values()];
       pinch.current = { dist: Math.max(10, Math.abs(x2 - x1)), mid: a + (((x1 + x2) / 2 - L) / PW) * span, view };
       drag.current = null;
+      return;
+    }
+    const held = drawnLineAt(p.x, p.y);
+    if (held) {                                         // a chart order's line: drag it up or down
+      drag.current = { kind: "line", key: held.key, x: p.x, y: p.y, view, yr: { lo: y0, hi: y1 }, manualY: manualY != null, moved: false, id: e.pointerId };
+      svgRef.current?.setPointerCapture(e.pointerId);
       return;
     }
     const kind = p.x < L && p.y <= T + PRICE_H ? "yscale" : p.y > VY0 + VOL_H ? "xscale" : "pan";
@@ -677,6 +727,12 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
       return;
     }
     const d = drag.current;
+    if (d && d.kind === "line" && d.key) {
+      if (Math.abs(p.y - d.y) > 2) d.moved = true;
+      if (d.moved) setLineDrag({ key: d.key, price: linePrice(priceAtY(p.y)) });
+      setHover(null);
+      return;
+    }
     if (d) {
       const dx = p.x - d.x, dy = p.y - d.y;
       if (!d.moved && Math.abs(dx) + Math.abs(dy) > 3) {
@@ -711,6 +767,17 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
     if (pointers.current.size < 2) pinch.current = null;
     const d = drag.current;
     drag.current = null;
+    if (d && d.kind === "line") {
+      if (d.moved && d.key && lineDrag && drawing) drawing.onDrag(d.key, lineDrag.price);
+      setLineDrag(null);
+      return;
+    }
+    // placing a chart order: a click on the price pane is its entry
+    if (d && !d.moved && d.kind === "pan" && drawing?.placing) {
+      const p = toSvg(e);
+      if (p.x >= L && p.x <= W - R && p.y >= T && p.y <= T + PRICE_H) drawing.onPlace(linePrice(priceAtY(p.y)));
+      return;
+    }
     // a click (no drag) on the plot, not on a surge marker (they select their surge): pin that minute, or unpin it
     if (d && !d.moved && d.kind === "pan" && !(e.target instanceof SVGCircleElement)) {
       const p = toSvg(e);
@@ -819,7 +886,8 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
             title={`${shortDay(nav.next)}: its open, at this zoom`}>{shortDay(nav.next)} ›</button>
         )}
         <svg ref={svgRef} viewBox={`0 0 ${W} ${H}`} className="block w-full select-none" role="img"
-          style={{ touchAction: "pan-y", cursor: drag.current?.moved ? "grabbing" : "crosshair" }}
+          style={{ touchAction: "pan-y", cursor: lineDrag || (hover && drawnLineAt(X(hover.m), hover.y)) ? "ns-resize"
+            : drag.current?.moved ? "grabbing" : drawing?.placing ? "copy" : "crosshair" }}
           aria-label={`${data.underlying} index and futures volume by minute with surges`}
           onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={onPointerUp} onPointerCancel={onPointerUp}
           onPointerLeave={() => { if (!drag.current?.moved) setHover(null); }} onDoubleClick={reset}>
@@ -918,6 +986,33 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
                 <title>ma-cross {s.name} {nf(s.v, 2)}</title>
               </line>
             ))}
+            {/* finished chart orders: a trade box from arming to the end (target zone green, stop zone red), display only */}
+            {(drawing?.boxes ?? []).filter((bx) => minutesAt(bx.to) >= a && minutesAt(bx.from) <= b).map((bx) => {
+              const x0 = X(minutesAt(bx.from)), x1 = Math.max(X(minutesAt(bx.to)), x0 + 3);
+              const ye = Y(bx.entry), ys = Y(bx.stop), yt = Y(bx.target);
+              return (
+                <g key={`box-${bx.key}`} pointerEvents="none">
+                  <rect x={x0} width={x1 - x0} y={Math.min(ye, yt)} height={Math.abs(yt - ye)} fill={bx.colors.target} opacity={0.1} />
+                  <rect x={x0} width={x1 - x0} y={Math.min(ye, ys)} height={Math.abs(ys - ye)} fill={bx.colors.stop} opacity={0.1} />
+                  <line x1={x0} x2={x1} y1={yt} y2={yt} stroke={bx.colors.target} strokeWidth={1.2} />
+                  <line x1={x0} x2={x1} y1={ye} y2={ye} stroke={bx.colors.entry} strokeWidth={1.4} />
+                  <line x1={x0} x2={x1} y1={ys} y2={ys} stroke={bx.colors.stop} strokeWidth={1.2} />
+                  {bx.label && <text x={x0 + 3} y={Math.max(ye, ys, yt) + 11} fontSize="10" fill="var(--color-muted)" className="num" {...HALO}>{bx.label}</text>}
+                </g>
+              );
+            })}
+            {/* chart orders: entry, stop and target across the pane; a draggable one has a handle at its right end */}
+            {(drawing?.lines ?? []).map((l) => {
+              const v = shownPrice(l), y = Y(v);
+              return (
+                <g key={`draw-${l.key}`} pointerEvents="none">
+                  <line x1={L} x2={W - R} y1={y} y2={y} stroke={l.color} strokeWidth={lineDrag?.key === l.key ? 2.5 : 1.8}
+                    strokeDasharray={l.dashed ? "7 4" : undefined} />
+                  <text x={W - R - 22} y={y - 4} textAnchor="end" fontSize="10" fill={l.color} className="num font-semibold" {...HALO}>{l.label} {nf(v, 1)}</text>
+                  {l.draggable && <rect x={W - R - 16} y={y - 4} width={12} height={8} rx={2} fill={l.color} opacity={0.9} />}
+                </g>
+              );
+            })}
             <polyline fill="none" stroke="var(--color-accent)" strokeWidth={candles.length ? 1 : 1.6} opacity={candles.length ? 0.4 : 1}
               points={pts.map((p) => `${X(minutes(p[0])).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(" ")} />
             {shown.filter((s) => s.spot != null && minutes(s.t) >= a - 1 && minutes(s.t) <= b + 1).map((s) => {
@@ -1000,6 +1095,8 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
                   full: `the auction's indicative close at ${i[0]}`, color: LEVEL_COLORS.auction, fill: false }] : []),
               ];
             })(),
+            ...(drawing?.lines ?? []).filter((l) => inY(shownPrice(l))).map((l) => ({ key: `draw-${l.key}`, y: Y(shownPrice(l)),
+              text: nf(shownPrice(l), 1), full: `${l.label} ${nf(shownPrice(l), 2)}`, color: l.color, fill: true })),
             { key: "last", y: Y(lastShown[1]), text: nf(lastShown[1], 1), full: `${data.underlying} at ${lastShown[0]}`, color: "var(--color-accent)", fill: true },
           ]).map((t) => (
             <g key={t.key}>

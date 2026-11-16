@@ -249,6 +249,11 @@ class ExecutionService implements DisposableBean {
         return new com.autotrade.execution.ManualOrders(dataSource).today(accountId, day());
     }
 
+    /** The copy group a manual or chart order of the account is written in (one this worker serves). */
+    long manualGroup(long accountId) {
+        return started().manualGroup(accountId);
+    }
+
     private ExecutionLoop started() {
         ExecutionLoop current = loop;
         if (current == null) {

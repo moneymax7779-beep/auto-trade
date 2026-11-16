@@ -28,7 +28,17 @@ export async function get<T>(path: string): Promise<T> {
 
 export async function post<T>(path: string): Promise<T> {
   const response = await fetch(path, { method: "POST" });
-  if (!response.ok) throw new Error(`${response.status} ${response.statusText} for ${path}`);
+  if (!response.ok) {
+    // the server's reason, as get and postJson give it (15 Nov 2026: a refused replay pause read "409 for /api/…")
+    let reason = "";
+    try {
+      const body = (await response.json()) as Json;
+      reason = (body?.message as string) || (body?.error as string) || "";
+    } catch {
+      reason = "";
+    }
+    throw new Error(`${response.status}: ${reason || response.statusText || path}`);
+  }
   return (await response.json()) as T;
 }
 
@@ -90,6 +100,8 @@ export interface Status {
   feed?: string;
   events?: number;
   lastEvent?: string | null;
+  /** a paced replay's Restart from the replay bar: "RESTARTING" while the day loads, "FAILED: …" if it failed */
+  replayRestart?: string | null;
   feedLagSeconds?: number | null;
   dayPnl?: number;
   /** risk v8/v9: the session's capital (equity at its start), the starting capital, sizing and the daily loss limit */

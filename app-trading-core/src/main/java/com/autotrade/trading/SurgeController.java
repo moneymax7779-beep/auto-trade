@@ -20,7 +20,10 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+import com.autotrade.core.history.CombinedSessionHistory;
 import com.autotrade.core.time.MarketTime;
+import com.autotrade.md.store.OwnSessionHistory;
+import com.autotrade.md.store.ReferenceStore;
 import com.autotrade.md.zt.ZtReadOnlyDataSource;
 import com.autotrade.md.zt.ZtSessionHistory;
 import com.zaxxer.hikari.HikariDataSource;
@@ -28,7 +31,7 @@ import com.zaxxer.hikari.HikariDataSource;
 /**
  * Futures-volume surges with the open-interest flow around each, for the Live page (display only;
  * no strategy reads it). A surge is a minute whose futures volume is at least 5 × the median of the
- * same minute over the previous 10 sessions (zt-tiger-v2's volume history, read-only). Prices, OI and
+ * same minute over the previous 10 sessions (zt-tiger-v2's volume history, read-only, or the own capture's when newer or zt-tiger-v2 is unreachable). Prices, OI and
  * quotes come from this service's own capture (md.*), last tick of each minute; each flow compares
  * minute t − 1 with minute t + 1, so a surge is shown once minute t + 1 has closed.
  */
@@ -119,19 +122,27 @@ class SurgeController {
         boolean today = day.equals(LocalDate.now(MarketTime.IST));
         Cached hit = cache.get(key);
         long now = System.currentTimeMillis();
-        if (hit != null && (!today || now - hit.at() < 20_000)) {
+        if (hit != null && ((!today && ranked(hit.value())) || now - hit.at() < 20_000)) {
             return hit.value();
         }
         boolean finished = ChartDb.finished(day);
         Map<String, Object> value = finished ? db.loadJson(KIND, day, underlying) : null;
-        if (value == null) {
+        if (value == null || !ranked(value)) {
             value = compute(day, underlying, today);
-            if (finished) {
+            if (finished && ranked(value)) {
                 db.saveJson(KIND, day, underlying, value);
             }
         }
         cache.put(key, new Cached(now, value));
         return value;
+    }
+
+    /**
+     * A day computed with its volume history (15 Nov 2026): one computed without it (zt-tiger-v2 unreachable, no own
+     * history yet) is not kept for good, so the day is ranked once the history can be read.
+     */
+    private static boolean ranked(Map<String, Object> value) {
+        return !Boolean.FALSE.equals(value.get("historyAvailable"));
     }
 
     private Map<String, Object> compute(LocalDate day, String underlying, boolean today) {
@@ -380,8 +391,7 @@ class SurgeController {
 
     private Map<LocalTime, Double> computeMedian(LocalDate day, String underlying) {
             try {
-                List<Map<LocalTime, Long>> history = new ZtSessionHistory(zt()).futuresMinuteVolumes(underlying, day,
-                        HISTORY_SESSIONS);
+                List<Map<LocalTime, Long>> history = volumeHistory(day, underlying);
                 Map<LocalTime, List<Long>> byMinute = new TreeMap<>();
                 for (Map<LocalTime, Long> session : history) {
                     session.forEach((t, v) -> {
@@ -403,6 +413,23 @@ class SurgeController {
                 log.warn("futures volume history unavailable for {} {}: {}", underlying, day, e.getMessage());
                 return new TreeMap<>();
             }
+    }
+
+    /**
+     * The previous sessions' futures minute volumes as the engine reads them (SessionRunner): zt-tiger-v2's and
+     * auto-trade's own capture, the more recent source winning (CombinedSessionHistory). Own capture alone when
+     * zt-tiger-v2 cannot be read (15 Nov 2026: the Mac's replays have no zt-tiger-v2, so the surge pane stayed empty).
+     */
+    private List<Map<LocalTime, Long>> volumeHistory(LocalDate day, String underlying) {
+        OwnSessionHistory own = new OwnSessionHistory(db.dataSource());
+        try {
+            return new CombinedSessionHistory(new ZtSessionHistory(zt()), own, new ReferenceStore(db.dataSource()))
+                    .futuresMinuteVolumes(underlying, day, HISTORY_SESSIONS);
+        } catch (Exception e) {
+            log.info("zt-tiger-v2 volume history unavailable for {} {} ({}): own capture only", underlying, day,
+                    e.getMessage());
+            return own.futuresMinuteVolumes(underlying, day, HISTORY_SESSIONS);
+        }
     }
 
     private HikariDataSource zt() throws java.sql.SQLException {
