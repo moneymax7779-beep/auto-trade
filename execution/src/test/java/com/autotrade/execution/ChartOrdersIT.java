@@ -155,8 +155,17 @@ class ChartOrdersIT {
         return new Setup(tenant, group, accounts.byId(id).orElseThrow());
     }
 
+    /** The trader's side, with the day's engine running (its heartbeat fresh, as the engine's sync writes it). */
     private static ChartOrders orders() {
+        beat(0);
         return new ChartOrders(dataSource).withClock(MORNING);
+    }
+
+    /** The engine's heartbeat for the day, {@code secondsAgo} old. */
+    private static void beat(int secondsAgo) {
+        jdbc.update("insert into exec.chart_engine_beat (session_date, beat_at) values (?, now() - make_interval(secs => ?)) "
+                + "on conflict (session_date) do update set beat_at = excluded.beat_at", java.sql.Date.valueOf(DAY),
+                (double) secondsAgo);
     }
 
     private static ChartOrderEngine engine() {
@@ -546,6 +555,52 @@ class ChartOrdersIT {
             assertThat(status(o.id())).as("not again on the next tick").startsWith("OPEN");
             engine.onIndexTick("NIFTY", 23_116, MORNING.instant().plus(ChartOrderEngine.EXIT_RETRY));
             assertThat(status(o.id())).isEqualTo("EXITING");
+        }
+    }
+
+    @Test
+    void nothingIsArmedOrMovedWhileNoEngineWatchesTheDaysOrders() {
+        // review 16 Nov 2026 (D6): with the engine off, or its session failed or restarting, an order was armed (or an
+        // open position's stop moved) that nothing would ever fire
+        Setup s = setup(TradeMode.PAPER);
+        try (ExecutionLoop loop = loop("worker-chart-13")) {
+            long group = loop.manualGroup(s.account().id());
+            ChartOrders.Order o = orders().arm(s.account(), group, arm("CE", 23_170, 23_120, 23_260), "kc", DAY);
+            beat(30);                                                     // the engine's last sync, 30 s ago
+            ChartOrders stale = new ChartOrders(dataSource).withClock(MORNING);
+            assertThat(stale.engine(DAY).running()).isFalse();
+            assertThatThrownBy(() -> stale.move(s.account(), o.id(), o.version(), 23_175.0, null, null, "kc", DAY))
+                    .hasMessageContaining("the chart-order engine is not running").hasMessageContaining("not moved");
+            stale.cancel(s.account(), o.id(), "kc");                     // a cancel needs no engine
+            assertThatThrownBy(() -> stale.arm(s.account(), group, arm("CE", 23_170, 23_120, 23_260), "kc", DAY))
+                    .hasMessageContaining("the chart-order engine is not running").hasMessageContaining("nothing armed");
+            jdbc.update("delete from exec.chart_engine_beat where session_date = ?", java.sql.Date.valueOf(DAY));
+            assertThat(stale.engine(DAY).lastSeen()).isNull();
+            assertThatThrownBy(() -> stale.arm(s.account(), group, arm("CE", 23_170, 23_120, 23_260), "kc", DAY))
+                    .hasMessageContaining("not seen today");
+            engine();                                                     // its first sync beats
+            assertThat(stale.engine(DAY).running()).isTrue();
+            ChartOrders.Order armed = stale.arm(s.account(), group, arm("CE", 23_170, 23_120, 23_260), "kc", DAY);
+            assertThat(armed.status()).isEqualTo("ARMED");
+            stale.cancel(s.account(), armed.id(), "kc");                 // the other tests' engines watch every order
+        }
+    }
+
+    @Test
+    void anOrderIsNotArmedAsAnotherKindThanTheTicketShowed() {
+        // review 16 Nov 2026 (D7): the ticket said breakout from a quote seconds old; the index had run through the entry,
+        // so the server armed a pullback (buy on the way back down): another trade than the one confirmed
+        Setup s = setup(TradeMode.PAPER);
+        try (ExecutionLoop loop = loop("worker-chart-14")) {
+            long group = loop.manualGroup(s.account().id());
+            ChartOrders.Arm pullbackNow = new ChartOrders.Arm("NIFTY", "CE", 23_100, 23_050, 23_200, 2, null, null, null,
+                    "BREAKOUT");                                          // the index is above 23,100: a pullback now
+            assertThatThrownBy(() -> orders().arm(s.account(), group, pullbackNow, "kc", DAY))
+                    .hasMessageContaining("these lines arm as a pullback, not the breakout the ticket showed");
+            ChartOrders.Order o = orders().arm(s.account(), group, new ChartOrders.Arm("NIFTY", "CE", 23_100, 23_050, 23_200,
+                    2, null, null, null, "PULLBACK"), "kc", DAY);
+            assertThat(o.kind()).isEqualTo(ChartLines.Kind.PULLBACK);
+            orders().cancel(s.account(), o.id(), "kc");                  // the other tests' engines watch every order
         }
     }
 

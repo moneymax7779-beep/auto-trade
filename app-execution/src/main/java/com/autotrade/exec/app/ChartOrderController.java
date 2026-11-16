@@ -63,10 +63,17 @@ class ChartOrderController {
         out.put("canArm", user.mayAct(a.tenantId()));
         out.put("canExit", user.emergency(a.tenantId()));
         out.put("orders", orders.today(a.id(), service.day()));
+        // review 16 Nov 2026 (D6): whether an engine watches the day's chart orders (arm and move are refused if not)
+        ChartOrders.Engine engine = orders.engine(service.day());
+        Map<String, Object> e = new LinkedHashMap<>();
+        e.put("running", engine.running());
+        e.put("lastSeen", engine.lastSeen() == null ? null : engine.lastSeen().toString());
+        out.put("engine", e);
         return out;
     }
 
-    record Arm(String underlying, String side, Double entry, Double stop, Double target, Integer lots, String validUntil) {
+    record Arm(String underlying, String side, Double entry, Double stop, Double target, Integer lots, String validUntil,
+               String expectKind) {
     }
 
     @PostMapping("/api/execution/accounts/{id}/chart-orders")
@@ -80,7 +87,8 @@ class ChartOrderController {
             }
             LocalTime until = b.validUntil() == null || b.validUntil().isBlank() ? null : LocalTime.parse(b.validUntil());
             ChartOrders.Order o = orders.arm(a, service.manualGroup(a.id()), new ChartOrders.Arm(b.underlying(), b.side(),
-                    b.entry(), b.stop(), b.target(), b.lots() == null ? 1 : b.lots(), until, null, null), user.subject(),
+                    b.entry(), b.stop(), b.target(), b.lots() == null ? 1 : b.lots(), until, null, null, b.expectKind()),
+                    user.subject(),
                     service.day());
             return ChartOrders.view(o);
         });

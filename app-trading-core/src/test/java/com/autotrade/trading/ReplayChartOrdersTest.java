@@ -87,6 +87,17 @@ class ReplayChartOrdersTest {
     }
 
     @Test
+    void aReplayOrderIsNotArmedAsAnotherKindThanTheTicketShowed() {
+        // review 16 Nov 2026 (D7): at 300x the ticket's quote can be minutes of replay old
+        index("10:00:00", 23_080);
+        quote("10:00:00", 99.5, 100, 100);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> book.arm("NIFTY", "CE", 23_100.0, 23_070.0, 23_160.0, 1,
+                "14:45", "PULLBACK")).hasMessageContaining("these lines arm as a breakout, not the pullback");
+        assertThat(book.arm("NIFTY", "CE", 23_100.0, 23_070.0, 23_160.0, 1, "14:45", "BREAKOUT").kind)
+                .isEqualTo(ChartLines.Kind.BREAKOUT);
+    }
+
+    @Test
     void aBreakoutBuysAtTheBufferPastTheEntryAndSellsAtTheTarget() {
         index("10:00:00", 23_080);
         quote("10:00:00", 99.5, 100, 100);

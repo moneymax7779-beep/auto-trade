@@ -71,6 +71,18 @@ class ChartLinesTest {
     }
 
     @Test
+    void theKindTheTicketShowedMustBeTheKindTheLinesArmAs() {
+        // review 16 Nov 2026 (D7)
+        ChartLines.requireKind(Kind.BREAKOUT, "BREAKOUT", 24_230);
+        ChartLines.requireKind(Kind.BREAKOUT, null, 24_230);                           // not given: not checked
+        ChartLines.requireKind(Kind.FAR_BREAKOUT, "far_breakout", 24_150);
+        assertThatThrownBy(() -> ChartLines.requireKind(Kind.PULLBACK, "BREAKOUT", 24_280))
+                .hasMessage("the index is at 24280 now: these lines arm as a pullback, not the breakout the ticket showed: "
+                        + "nothing armed; check the ticket again");
+        assertThatThrownBy(() -> ChartLines.requireKind(Kind.PULLBACK, "SIDEWAYS", 24_280)).hasMessageContaining("unknown");
+    }
+
+    @Test
     void aBreakoutWhoseEntryTickIsAlreadyAtTheTargetIsNotBought() {
         // review 16 Nov 2026: target 5 past the entry, inside the no-chase band of 8: the entering tick could pass it
         Lines close = new Lines("CE", 24_250, 24_200, 24_255, 2, 8);

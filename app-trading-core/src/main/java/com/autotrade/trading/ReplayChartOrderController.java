@@ -45,12 +45,14 @@ class ReplayChartOrderController {
         return ResponseEntity.ok(view);
     }
 
-    record Arm(String underlying, String side, Double entry, Double stop, Double target, Integer lots, String validUntil) {
+    record Arm(String underlying, String side, Double entry, Double stop, Double target, Integer lots, String validUntil,
+               String expectKind) {
     }
 
     @PostMapping("/chart-orders")
     ResponseEntity<?> arm(@RequestBody Arm a) {
-        return call(s -> s.chartArm(a.underlying(), a.side(), a.entry(), a.stop(), a.target(), a.lots(), a.validUntil()));
+        return call(s -> s.chartArm(a.underlying(), a.side(), a.entry(), a.stop(), a.target(), a.lots(), a.validUntil(),
+                a.expectKind()));
     }
 
     record Move(Integer version, Double entry, Double stop, Double target) {
