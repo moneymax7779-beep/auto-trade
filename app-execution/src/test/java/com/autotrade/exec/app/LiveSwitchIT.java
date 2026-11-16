@@ -69,7 +69,7 @@ class LiveSwitchIT {
         profile = jdbc.queryForObject("insert into acct.broker_credential_profile (tenant_id, broker_type, scope, name, "
                 + "api_key_ref, api_secret_ref) values (?, 'ZERODHA', 'TENANT_SHARED', 'KITE-1', 'env:KITE_API_KEY', "
                 + "'env:KITE_API_SECRET') returning id", Long.class, tenant);
-        api = new LiveSwitchController(new Access(dataSource), dataSource);
+        api = new LiveSwitchController(new Access(dataSource), dataSource, TestBrokers.live(dataSource));
     }
 
     @AfterAll

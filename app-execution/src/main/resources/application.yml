@@ -42,7 +42,12 @@ autotrade:
     copy-group: LIVE-SET
     poll-ms: 1000
     wake-on-signal: true            # a stored signal decision runs the tick at once (Postgres LISTEN); the poll is the fallback
-    costs-file: config/costs/india-index-options-costs.v2.yaml
+    # Each broker's product, last LIVE entry, end-of-day square-off (at least 5 min before the broker's own) and costs
+    # file (16 Nov 2026, A1/A3; replaced costs-file and square-off-cron). A change is a new version of the file.
+    broker-rules-file: config/brokers/broker-rules.v1.yaml
+    # The brokers an account may be switched LIVE on (A2), comma-separated; a broker is LIVE only when its adapter also
+    # offers a LIVE connection. Adding one needs its READ_LIVE sessions, canary and the user's go-ahead first.
+    live-brokers: ${AUTOTRADE_LIVE_BROKERS:ZERODHA}
     # Holidays for the 08:30 login links and the 09:10 login board. Keep equal to trading-core's
     # autotrade.trading.exchange-file: a new exchange file version is changed in both places.
     exchange-file: config/exchange/nse-bse-sessions.v3.yaml

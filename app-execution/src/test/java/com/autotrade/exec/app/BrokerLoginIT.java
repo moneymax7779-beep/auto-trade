@@ -102,8 +102,9 @@ class BrokerLoginIT {
         TelegramNotifier telegram = new TelegramNotifier(kite, db.ds());
         members = new MembersController(access, db.ds(), tx, new KeycloakAdmin(new KeycloakAdminProperties(null, null, null,
                 null)), telegram);
-        admin = new AccountAdminController(access, db.ds(), tx, new ExecutionProperties(null, "*", 1000, null, 0, "it", null));
-        apps = new BrokerAppController(access, db.ds(), tx, kite, props);
+        admin = new AccountAdminController(access, db.ds(), tx, new ExecutionProperties(null, "*", 1000, null, 0, "it", null),
+                TestBrokers.live(db.ds()));
+        apps = new BrokerAppController(access, db.ds(), tx, kite, props, TestBrokers.live(db.ds()));
         SessionActivation sessions = new SessionActivation(db.ds(), tx, kite, props);
         upstox = new UpstoxLogin(sessions, db.ds(), props);
         kiteProps = kite;
@@ -112,7 +113,7 @@ class BrokerLoginIT {
         transactions = tx;
         logins = new BrokerLoginController(access, db.ds(), upstox, new KotakNeoLogin(sessions, props),
                 new GrowwLogin(sessions, props), sessions);
-        workspaces = new WorkspaceController(access, db.ds(), tx, telegram);
+        workspaces = new WorkspaceController(access, db.ds(), tx, telegram, TestBrokers.live(db.ds()));
     }
 
     @AfterAll
@@ -406,7 +407,7 @@ class BrokerLoginIT {
     void ztTigersUpstoxAppAndUserAreNeverSavedOrLoggedIn() {
         UpstoxDenyList deny = new UpstoxDenyList(List.of("zt-app-key-1"), List.of("BM6462", "7AB12C"));
         BrokerAppController denying = new BrokerAppController(new Access(db.ds()), db.ds(), transactions, kiteProps,
-                brokerProps, deny);
+                brokerProps, deny, TestBrokers.live(db.ds()));
         UpstoxLogin denyingLogin = new UpstoxLogin(activation, db.ds(), brokerProps, deny);
         long t = member("zara");
         long id = app("zara", t, "UPSTOX", "Zt app");

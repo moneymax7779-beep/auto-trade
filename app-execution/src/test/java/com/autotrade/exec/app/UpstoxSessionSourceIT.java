@@ -178,6 +178,6 @@ class UpstoxSessionSourceIT {
         assertThat(adapters).extracting(BrokerAdapter::broker).containsExactly(BrokerType.ZERODHA, BrokerType.KOTAK_NEO,
                 BrokerType.UPSTOX, BrokerType.GROWW);
         assertThat(adapters.get(2).live(upstox, null)).isNull();
-        assertThat(LiveBrokers.LIVE).containsExactly(BrokerType.ZERODHA);
+        assertThat(LiveBrokers.of(LiveBrokers.DEFAULT, adapters).live()).containsExactly(BrokerType.ZERODHA);
     }
 }

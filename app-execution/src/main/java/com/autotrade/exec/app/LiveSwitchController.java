@@ -55,8 +55,11 @@ class LiveSwitchController {
     private final JdbcTemplate jdbc;
     private final KillSwitches audit;
     private final org.springframework.transaction.support.TransactionTemplate tx;
+    /** The brokers an account may be switched LIVE on (16 Nov 2026, A2: configuration and adapter, no longer a constant). */
+    private final com.autotrade.execution.LiveBrokers liveBrokers;
 
-    LiveSwitchController(Access access, DataSource dataSource) {
+    LiveSwitchController(Access access, DataSource dataSource, com.autotrade.execution.LiveBrokers liveBrokers) {
+        this.liveBrokers = liveBrokers;
         this.tx = new org.springframework.transaction.support.TransactionTemplate(
                 new org.springframework.jdbc.datasource.DataSourceTransactionManager(dataSource));
         this.access = access;
@@ -84,7 +87,7 @@ class LiveSwitchController {
         if (body.on()) {
             require(a.displayName().equals(body.confirm()), "type the account's name (" + a.displayName() + ") to confirm");
             require(a.enabled() && a.role().name().equals("FOLLOWER_TRADE"), a.displayName() + " is not an enabled follower");
-            require(com.autotrade.execution.LiveBrokers.live(a.brokerType()), a.brokerType() + " has no LIVE order adapter yet");
+            require(liveBrokers.live(a.brokerType()), a.brokerType() + " has no LIVE order adapter yet");
             require(a.tradeMode() == TradeMode.DRY_RUN, a.displayName() + " is " + a.tradeMode() + ", not DRY_RUN");
             FollowerRisk risk;
             try {

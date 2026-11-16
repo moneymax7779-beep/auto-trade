@@ -51,7 +51,7 @@ import com.autotrade.groww.GrowwSimulator;
  *       refuses any order call to Groww's host.</li>
  * </ul>
  * There is no LIVE Groww connection: {@link #live} returns null, so an account switched LIVE gets no route (and Groww is
- * not in {@link LiveBrokers#LIVE}). LIVE needs the READ_LIVE sessions, the static IP and the canary of the plan first.
+ * not LIVE in {@link LiveBrokers}). LIVE needs the READ_LIVE sessions, the static IP and the canary of the plan first.
  */
 public final class GrowwDryRunAdapter implements BrokerAdapter {
 
@@ -104,6 +104,15 @@ public final class GrowwDryRunAdapter implements BrokerAdapter {
     @Override
     public BrokerType broker() {
         return BrokerType.GROWW;
+    }
+
+    /**
+     * The product of our Groww orders: its config's ({@link GrowwConfig#INTRADAY}, MIS, for the reads and the simulator);
+     * checked against the broker rules at the worker's start (16 Nov 2026, A1).
+     */
+    @Override
+    public String product() {
+        return groww.product();
     }
 
     @Override

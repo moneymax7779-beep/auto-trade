@@ -55,6 +55,20 @@ public interface BrokerAdapter {
     BrokerType broker();
 
     /**
+     * The product code every order of ours through this adapter carries (Kite MIS, Kotak MIS, Upstox I, Groww MIS);
+     * the worker checks it against its broker's rules at start ({@link BrokerRules#requireProducts}).
+     */
+    String product();
+
+    /**
+     * Whether {@link #live} can return a connection (16 Nov 2026: what {@link LiveBrokers} requires besides the
+     * configuration). An adapter that implements {@code live} says so here as well.
+     */
+    default boolean offersLive() {
+        return false;
+    }
+
+    /**
      * Opens the DRY_RUN connection of an account: orders always go to the adapter's simulator, never to a real broker;
      * {@code rules} say where its book comes from ({@link OrderRules#brokerMarket()}: the broker's own read API).
      */

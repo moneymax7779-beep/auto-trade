@@ -51,7 +51,7 @@ import com.autotrade.kotak.KotakSimulator;
  *       and positions at the route's open and every few minutes.</li>
  * </ul>
  * There is no LIVE Kotak connection: {@link #live} returns null, so an account switched LIVE gets no route (and Kotak is
- * not in {@link LiveBrokers#LIVE}). LIVE needs the READ_LIVE sessions, the static IP and the canary of the plan first.
+ * not LIVE in {@link LiveBrokers}). LIVE needs the READ_LIVE sessions, the static IP and the canary of the plan first.
  */
 public final class KotakDryRunAdapter implements BrokerAdapter {
 
@@ -97,6 +97,15 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
     @Override
     public BrokerType broker() {
         return BrokerType.KOTAK_NEO;
+    }
+
+    /**
+     * The product of our Kotak orders: what its gateway configs carry ({@link KotakConfig#session} and
+     * {@link KotakConfig#simulator}: MIS); checked against the broker rules at the worker's start (16 Nov 2026, A1).
+     */
+    @Override
+    public String product() {
+        return KotakConfig.simulator(java.net.URI.create("http://127.0.0.1")).product();
     }
 
     @Override

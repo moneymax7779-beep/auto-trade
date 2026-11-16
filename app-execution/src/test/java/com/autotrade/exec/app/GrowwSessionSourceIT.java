@@ -155,6 +155,6 @@ class GrowwSessionSourceIT {
         assertThat(adapters).extracting(BrokerAdapter::broker).containsExactly(BrokerType.ZERODHA, BrokerType.KOTAK_NEO,
                 BrokerType.UPSTOX, BrokerType.GROWW);
         assertThat(adapters.get(3).live(groww, null)).isNull();
-        assertThat(LiveBrokers.LIVE).containsExactly(BrokerType.ZERODHA);
+        assertThat(LiveBrokers.of(LiveBrokers.DEFAULT, adapters).live()).containsExactly(BrokerType.ZERODHA);
     }
 }

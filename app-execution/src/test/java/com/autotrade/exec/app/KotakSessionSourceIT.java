@@ -140,6 +140,8 @@ class KotakSessionSourceIT {
         assertThat(adapters).extracting(BrokerAdapter::broker).containsExactly(BrokerType.ZERODHA, BrokerType.KOTAK_NEO,
                 BrokerType.UPSTOX, BrokerType.GROWW);
         assertThat(adapters.get(1).live(kotak, null)).isNull();
-        assertThat(LiveBrokers.LIVE).containsExactly(BrokerType.ZERODHA);
+        assertThat(LiveBrokers.of(LiveBrokers.DEFAULT, adapters).live()).containsExactly(BrokerType.ZERODHA);
+        assertThat(LiveBrokers.of("ZERODHA,KOTAK_NEO", adapters).live(BrokerType.KOTAK_NEO))
+                .as("configured LIVE, but its adapter offers no LIVE connection").isFalse();
     }
 }

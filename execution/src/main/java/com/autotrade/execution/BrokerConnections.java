@@ -15,7 +15,6 @@ import com.autotrade.account.BrokerAccount;
 import com.autotrade.account.BrokerType;
 import com.autotrade.account.TradeMode;
 import com.autotrade.broker.BrokerConnection;
-import com.autotrade.zerodha.KiteSimulator;
 
 /**
  * The broker registry (live plan section 2a): which venue each follower account trades through.
@@ -153,10 +152,20 @@ public final class BrokerConnections implements AutoCloseable {
         }
     }
 
-    /** The Kite simulator of a ZERODHA DRY_RUN account (tests, fault drills); null when it has none. */
-    public KiteSimulator simulator(long accountId) {
+    /**
+     * The local simulator of a DRY_RUN account (tests, fault drills), whatever its broker (16 Nov 2026, A4: it was cast
+     * to the Kite simulator): {@code KiteSimulator}, {@code KotakSimulator}, {@code UpstoxSimulator} or
+     * {@code GrowwSimulator}; null when the account has none or its simulator is of another type.
+     */
+    public <T extends AutoCloseable> T simulator(long accountId, Class<T> type) {
+        AutoCloseable sim = simulator(accountId);
+        return type.isInstance(sim) ? type.cast(sim) : null;
+    }
+
+    /** The local simulator of a DRY_RUN account, of its broker's own type; null when it has none. */
+    public AutoCloseable simulator(long accountId) {
         BrokerAdapter.DryRun d = opened.get(accountId);
-        return d != null && d.resource() instanceof KiteSimulator sim ? sim : null;
+        return d == null ? null : d.resource();
     }
 
     /** Forgets an account's route (its lease was lost, its configuration changed): a new turn opens a fresh one. */

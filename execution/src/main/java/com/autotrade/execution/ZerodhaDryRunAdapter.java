@@ -45,14 +45,12 @@ import com.autotrade.zerodha.KiteSimulator;
  *       moment. Orders still go only to the simulator: the real connection is read-only ({@link ReadLiveConnection}).</li>
  * </ul>
  * And LIVE ({@link #live}, the Kite pilot from 4 Nov 2026, switched by the user): the same session reads, and orders go
- * to the real Kite (product MIS), behind a {@link LiveGuard} with the risk file's {@code live} limits.
+ * to the real Kite (product MIS, from the broker rules), behind a {@link LiveGuard} with the risk file's {@code live} limits.
  */
 public final class ZerodhaDryRunAdapter implements BrokerAdapter {
 
     private static final Logger log = LoggerFactory.getLogger(ZerodhaDryRunAdapter.class);
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
-    /** The product every LIVE Kite order of ours carries (intraday). */
-    static final String PRODUCT = "MIS";
     /** The simulator never refuses for funds when the broker's real funds decide (CapitalPolicy reads them). */
     private static final double UNLIMITED_FUNDS = 1e12;
     /** A failed instrument load is tried again after this long, not on every read. */
@@ -64,6 +62,11 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
     private final double simulatedBrokerFunds;
     private final BrokerSessions sessions;
     private final URI kiteApiBase;
+    /**
+     * The product every Kite order of ours carries (intraday): the broker rules' (16 Nov 2026, A1; MIS), else
+     * {@link KiteConfig}'s own default (MIS).
+     */
+    private final String product;
 
     public ZerodhaDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds) {
         this(dataSource, simulatedBrokerFunds, BrokerSessions.NONE, KiteConfig.REAL_API);
@@ -75,15 +78,33 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
      */
     public ZerodhaDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
                                 URI kiteApiBase) {
+        this(dataSource, simulatedBrokerFunds, sessions, kiteApiBase, null);
+    }
+
+    /** @param product the product of our Kite orders ({@link BrokerRules}); null: {@link KiteConfig}'s default */
+    public ZerodhaDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
+                                URI kiteApiBase, String product) {
         this.dataSource = dataSource;
         this.simulatedBrokerFunds = simulatedBrokerFunds;
         this.sessions = sessions;
         this.kiteApiBase = kiteApiBase;
+        this.product = product != null ? product : KiteConfig.simulator(KiteConfig.REAL_API).product();
     }
 
     @Override
     public BrokerType broker() {
         return BrokerType.ZERODHA;
+    }
+
+    @Override
+    public String product() {
+        return product;
+    }
+
+    /** The Kite LIVE pilot (from 4 Nov 2026, switched by the user). */
+    @Override
+    public boolean offersLive() {
+        return true;
     }
 
     @Override
@@ -131,7 +152,7 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
     public Live live(BrokerAccount account, FollowerRisk.LiveLimits limits) {
         KiteReads kite = new KiteReads(account, true);
         return new Live(new LiveGuard(kite, limits, kite::lotSize), "LIVE: Kite " + kiteApiBase.getHost()
-                + ", product MIS, at most " + limits.maxLotsPerOrder() + " lot(s) a buy and "
+                + ", product " + product + ", at most " + limits.maxLotsPerOrder() + " lot(s) a buy and "
                 + limits.maxOpenPositions() + " contracts, LIVE strategies as chosen on the Accounts page");
     }
 
@@ -234,7 +255,7 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
             BrokerSessions.Access access = sessions.access(account).orElseThrow(() -> new BrokerException(Kind.SESSION,
                     "no Kite session for " + account.displayName() + " today: log in"));
             if (gateway == null || !access.apiKey().equals(apiKey)) {
-                KiteConfig config = new KiteConfig(access.apiKey(), kiteApiBase, KiteConfig.REAL_LOGIN, PRODUCT,
+                KiteConfig config = new KiteConfig(access.apiKey(), kiteApiBase, KiteConfig.REAL_LOGIN, product,
                         Duration.ofSeconds(5), 8, null);
                 http = new KiteHttp(config);
                 gateway = new KiteGateway(config, http, instruments);
@@ -288,7 +309,7 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
         /** Every order of ours is MIS (the config below); a hand NRML trade in the account is not counted as held. */
         @Override
         public String product() {
-            return PRODUCT;
+            return product;
         }
 
         @Override

@@ -70,16 +70,20 @@ class BrokerAppController {
     private final KiteLoginProperties kite;
     private final BrokerLoginProperties brokers;
     private final UpstoxDenyList upstoxDenied;
+    /** Which brokers an app's accounts can trade LIVE (16 Nov 2026, A2: from configuration and the adapters). */
+    private final com.autotrade.execution.LiveBrokers liveBrokers;
 
     /** Tests: no Upstox key or user denied. */
     BrokerAppController(Access access, DataSource dataSource, TransactionTemplate tx, KiteLoginProperties kite,
-                        BrokerLoginProperties brokers) {
-        this(access, dataSource, tx, kite, brokers, UpstoxDenyList.NONE);
+                        BrokerLoginProperties brokers, com.autotrade.execution.LiveBrokers liveBrokers) {
+        this(access, dataSource, tx, kite, brokers, UpstoxDenyList.NONE, liveBrokers);
     }
 
     @org.springframework.beans.factory.annotation.Autowired      // two constructors: Spring must be told which
     BrokerAppController(Access access, DataSource dataSource, TransactionTemplate tx, KiteLoginProperties kite,
-                        BrokerLoginProperties brokers, UpstoxDenyList upstoxDenied) {
+                        BrokerLoginProperties brokers, UpstoxDenyList upstoxDenied,
+                        com.autotrade.execution.LiveBrokers liveBrokers) {
+        this.liveBrokers = liveBrokers;
         this.upstoxDenied = upstoxDenied == null ? UpstoxDenyList.NONE : upstoxDenied;
         this.access = access;
         this.accounts = new AccountStore(dataSource);
@@ -125,7 +129,7 @@ class BrokerAppController {
             Map<String, Object> r = new LinkedHashMap<>();
             r.put("redirectUrl", redirect(b));
             r.put("staticIps", ips());
-            r.put("liveCapable", WorkspaceController.LIVE_BROKERS.contains(b));
+            r.put("liveCapable", liveBrokers.live(b));
             register.put(b.name(), r);
         }
         out.put("register", register);

@@ -329,7 +329,9 @@ class UpstoxReadLiveIT {
 
     @Test
     void anUpstoxAccountSwitchedLiveGetsNoLiveRouteAndNothingIsSent() {
-        assertThat(LiveBrokers.live(BrokerType.UPSTOX)).as("Upstox is not in the LIVE set").isFalse();
+        assertThat(LiveBrokers.of("ZERODHA,UPSTOX", java.util.List.of(new ZerodhaDryRunAdapter(dataSource, 1e9),
+                new UpstoxDryRunAdapter(dataSource, 1e9))).live(BrokerType.UPSTOX))
+                .as("Upstox is configured LIVE here, but its adapter offers no LIVE connection").isFalse();
         AccountStore accounts = new AccountStore(dataSource);
         long tenant = accounts.ensureTenant("owner");
         long owner = accounts.ensureUser("uc-owner", "owner");

@@ -330,7 +330,9 @@ class GrowwReadLiveIT {
 
     @Test
     void aGrowwAccountSwitchedLiveGetsNoLiveRouteAndNothingIsSent() {
-        assertThat(LiveBrokers.live(BrokerType.GROWW)).as("Groww is not in the LIVE set").isFalse();
+        assertThat(LiveBrokers.of("ZERODHA,GROWW", java.util.List.of(new ZerodhaDryRunAdapter(dataSource, 1e9),
+                new GrowwDryRunAdapter(dataSource, 1e9))).live(BrokerType.GROWW))
+                .as("Groww is configured LIVE here, but its adapter offers no LIVE connection").isFalse();
         AccountStore accounts = new AccountStore(dataSource);
         long tenant = accounts.ensureTenant("owner");
         long owner = accounts.ensureUser("uc-owner", "owner");

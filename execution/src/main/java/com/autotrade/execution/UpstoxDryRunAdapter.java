@@ -49,7 +49,7 @@ import com.autotrade.upstox.orders.UpstoxSimulator;
  *       refuses any order call to Upstox's host.</li>
  * </ul>
  * There is no LIVE Upstox connection: {@link #live} returns null, so an account switched LIVE gets no route (and Upstox is
- * not in {@link LiveBrokers#LIVE}). LIVE needs the READ_LIVE sessions, the static IP and the canary of the plan first.
+ * not LIVE in {@link LiveBrokers}). LIVE needs the READ_LIVE sessions, the static IP and the canary of the plan first.
  */
 public final class UpstoxDryRunAdapter implements BrokerAdapter {
 
@@ -102,6 +102,15 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
     @Override
     public BrokerType broker() {
         return BrokerType.UPSTOX;
+    }
+
+    /**
+     * The product of our Upstox orders: its config's ({@link UpstoxConfig#INTRADAY}, I, for the reads and the simulator);
+     * checked against the broker rules at the worker's start (16 Nov 2026, A1).
+     */
+    @Override
+    public String product() {
+        return upstox.product();
     }
 
     @Override

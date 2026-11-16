@@ -74,9 +74,11 @@ public final class FollowerSimulator {
     /** A broker exit is sent this many times at most, this far apart (code review 3 Nov 2026). */
     static final int EXIT_ATTEMPTS = 5;
     static final java.time.Duration EXIT_RETRY_AFTER = java.time.Duration.ofSeconds(10);
-    /** A LIVE entry older than this, or from this time of day, is refused (code review 3 Nov 2026). */
+    /**
+     * A LIVE entry older than this is refused (code review 3 Nov 2026); so is one from its broker's last LIVE entry
+     * ({@link BrokerRules}; 16 Nov 2026, A1: it was one 15:10 for every broker).
+     */
     static final java.time.Duration LIVE_ENTRY_MAX_AGE = java.time.Duration.ofSeconds(60);
-    static final java.time.LocalTime LIVE_LAST_ENTRY = java.time.LocalTime.of(15, 10);
     /**
      * Review 8 Nov 2026: a position whose broker stop is not confirmed armed this many times in a row (it is tried again
      * every turn) stops the account's entries (an alert); a stop the broker refused is tried again after
@@ -90,6 +92,8 @@ public final class FollowerSimulator {
 
     /** The wall clock of the LIVE entry checks (tests set their own). */
     private java.time.Clock clock = java.time.Clock.systemUTC();
+    /** Each broker's last LIVE entry ({@link #withBrokerRules}); none: every LIVE entry is refused. */
+    private BrokerRules brokerRules;
 
     private final JdbcTemplate jdbc;
     private final AccountStore accounts;
@@ -145,6 +149,15 @@ public final class FollowerSimulator {
     FollowerSimulator withProtectBackOff(java.time.Duration backOff) {
         this.protectBackOff = backOff;
         protectRetryAt.clear();
+        return this;
+    }
+
+    /**
+     * The broker rules whose last LIVE entry the account's broker is held to (the execution worker's; 16 Nov 2026, A1).
+     * Without them no LIVE entry is taken.
+     */
+    public FollowerSimulator withBrokerRules(BrokerRules rules) {
+        this.brokerRules = rules;
         return this;
     }
 
@@ -691,8 +704,15 @@ public final class FollowerSimulator {
         if (venue.live()) {
             // code review 3 Nov 2026: a LIVE entry follows its signal at once or not at all (a worker that was down, a lease
             // taken over late: the decision's moment has passed), and none is opened just before the square-off
-            if (!java.time.LocalTime.now(clock.withZone(java.time.ZoneId.of("Asia/Kolkata"))).isBefore(LIVE_LAST_ENTRY)) {
-                return reject(p, "LATE_ENTRY", "no LIVE entry from " + LIVE_LAST_ENTRY + " IST (square-off 15:20)");
+            java.time.LocalTime last = brokerRules == null ? null : brokerRules.lastLiveEntry(day.account.brokerType());
+            if (last == null) {
+                return reject(p, "NO_BROKER_RULES", "no LIVE entry: no trading-day rules for "
+                        + day.account.brokerType());
+            }
+            if (!java.time.LocalTime.now(clock.withZone(java.time.ZoneId.of("Asia/Kolkata"))).isBefore(last)) {
+                return reject(p, "LATE_ENTRY", "no LIVE entry from " + last + " IST (" + day.account.brokerType()
+                        + " square-off " + brokerRules.squareOff(day.account.brokerType()) + ", " + brokerRules.version()
+                        + ")");
             }
             java.time.Duration age = java.time.Duration.between(p.at(), clock.instant());
             if (age.compareTo(LIVE_ENTRY_MAX_AGE) > 0) {

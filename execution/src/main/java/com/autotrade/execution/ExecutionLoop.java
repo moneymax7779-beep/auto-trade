@@ -73,10 +73,18 @@ public final class ExecutionLoop implements AutoCloseable {
     private final String tenant;
     private final String copyGroups;
     private final String workerId;
+    /** Every account's cost model when there are no broker rules (tests); null with them. */
     private final CostModel costs;
+    /**
+     * Each broker's trading-day rules (16 Nov 2026, A1): its accounts' costs (A3), last LIVE entry and square-off time.
+     * Null (the constructors without them, tests): one cost model for every account, no LIVE entry, and only the
+     * all-broker {@link #squareOff(LocalDate)}.
+     */
+    private final BrokerRules brokerRules;
     private final QuoteSource quotes;
     private final BrokerConnections connections;
-    private final BrokerReconciler reconciler;
+    /** One per broker: each charges with its broker's costs (an account's state lives in its broker's reconciler). */
+    private final Map<com.autotrade.account.BrokerType, BrokerReconciler> reconcilers = new ConcurrentHashMap<>();
     private final TradingDay tradingDay;
     private final Map<Long, ExecutorService> lanes = new ConcurrentHashMap<>();
     private final Map<Long, Future<?>> busy = new ConcurrentHashMap<>();
@@ -91,9 +99,16 @@ public final class ExecutionLoop implements AutoCloseable {
     /** When a probe that failed to open may be tried again (a broker down must not be retried every second). */
     private final Map<Long, Instant> probeRetry = new ConcurrentHashMap<>();
     static final java.time.Duration PROBE_RETRY = java.time.Duration.ofMinutes(1);
-    private volatile LocalDate squareOffDay;                 // the day whose square-off has not left everything flat
-    private volatile Instant squareOffStarted;
-    private volatile Instant squareOffLast;
+    /**
+     * The square-off's day and, per broker, its first attempt that day while it has not left the broker's accounts flat
+     * (16 Nov 2026, A1: each broker squares off at its own time, so each is retried, and given up, on its own clock).
+     */
+    private final Object squareOffState = new Object();
+    private volatile LocalDate squareOffDay;
+    private final Map<com.autotrade.account.BrokerType, Instant> squareOffPending = new ConcurrentHashMap<>();
+    /** The brokers whose square-off time was reached on {@link #squareOffDay} ({@link #squareOffDue}: once each). */
+    private final java.util.Set<com.autotrade.account.BrokerType> squareOffDueRun = ConcurrentHashMap.newKeySet();
+    private volatile Instant squareOffLast = Instant.MIN;
     private java.time.Duration squareOffRetry = SQUARE_OFF_RETRY;
     /** Review 8 Nov 2026: square-off retries run here, one at a time, never on the tick (a flatten can take minutes). */
     private final ExecutorService squareOffs = Executors.newSingleThreadExecutor(
@@ -120,6 +135,21 @@ public final class ExecutionLoop implements AutoCloseable {
     /** @param adapters one order adapter per broker (8 Nov 2026: Kite, then Kotak, Upstox, Groww as each is built) */
     public ExecutionLoop(DataSource dataSource, String tenant, String copyGroups, String workerId, CostModel costs,
                          QuoteSource quotes, double brokerFunds, List<BrokerAdapter> adapters) {
+        this(dataSource, tenant, copyGroups, workerId, costs, null, quotes, brokerFunds, adapters);
+    }
+
+    /**
+     * The execution worker's loop (16 Nov 2026, A1/A3): each account is charged with its broker's costs file, held to its
+     * broker's last LIVE entry and squared off at its broker's time ({@link #squareOffDue}).
+     */
+    public ExecutionLoop(DataSource dataSource, String tenant, String copyGroups, String workerId, BrokerRules rules,
+                         QuoteSource quotes, double brokerFunds, List<BrokerAdapter> adapters) {
+        this(dataSource, tenant, copyGroups, workerId, null, java.util.Objects.requireNonNull(rules, "broker rules"),
+                quotes, brokerFunds, adapters);
+    }
+
+    private ExecutionLoop(DataSource dataSource, String tenant, String copyGroups, String workerId, CostModel costs,
+                          BrokerRules rules, QuoteSource quotes, double brokerFunds, List<BrokerAdapter> adapters) {
         this.dataSource = dataSource;
         this.jdbc = new JdbcTemplate(dataSource);
         this.transactions = new TransactionTemplate(new org.springframework.jdbc.datasource.DataSourceTransactionManager(
@@ -130,9 +160,9 @@ public final class ExecutionLoop implements AutoCloseable {
         this.copyGroups = copyGroups;
         this.workerId = workerId;
         this.costs = costs;
+        this.brokerRules = rules;
         this.quotes = quotes;
         this.connections = new BrokerConnections(dataSource, brokerFunds, adapters);
-        this.reconciler = new BrokerReconciler(dataSource, costs);
         this.tradingDay = new TradingDay(dataSource);
     }
 
@@ -206,7 +236,8 @@ public final class ExecutionLoop implements AutoCloseable {
 
     /** The square-off tried again when the last one did not leave everything flat (see {@link #SQUARE_OFF_RETRY}). */
     private void squareOffAgain(LocalDate day) {
-        if (!day.equals(squareOffDay) || squareOffLast.plus(squareOffRetry).isAfter(Instant.now())
+        if (!day.equals(squareOffDay) || squareOffPending.isEmpty()
+                || squareOffLast.plus(squareOffRetry).isAfter(Instant.now())
                 || !squareOffRunning.compareAndSet(false, true)) {
             return;
         }
@@ -226,28 +257,44 @@ public final class ExecutionLoop implements AutoCloseable {
     }
 
     private void retrySquareOff(LocalDate day) {
-        if (Instant.now().isAfter(squareOffStarted.plus(SQUARE_OFF_RETRY_FOR))) {
-            squareOffDay = null;
-            for (long accountId : List.copyOf(leases.keySet())) {
-                BrokerAccount account = accounts.byId(accountId).orElse(null);
-                int open = account == null ? 0 : openPositions(accountId);
-                if (open > 0) {
-                    new KillSwitches(dataSource).audit(account, workerId, "EOD_SQUARE_OFF", Map.of("positions",
-                            List.of(open + " position(s) STILL OPEN after " + SQUARE_OFF_RETRY_FOR.toMinutes()
-                                    + " min of square-off attempts: close them in the broker's app")));
-                    log.error("account {} ({}): {} position(s) still open after the square-off attempts", accountId,
-                            account.displayName(), open);
-                }
+        java.util.Set<com.autotrade.account.BrokerType> again = java.util.EnumSet.noneOf(
+                com.autotrade.account.BrokerType.class);
+        java.util.Set<com.autotrade.account.BrokerType> expired = java.util.EnumSet.noneOf(
+                com.autotrade.account.BrokerType.class);
+        synchronized (squareOffState) {
+            if (!day.equals(squareOffDay)) {
+                return;
             }
-            return;
+            squareOffPending.forEach((broker, started) -> (Instant.now().isAfter(started.plus(SQUARE_OFF_RETRY_FOR))
+                    ? expired : again).add(broker));
+            expired.forEach(squareOffPending::remove);
         }
-        squareOff(day).forEach(line -> log.warn("end-of-day square-off (again): {}", line));
+        for (long accountId : List.copyOf(leases.keySet())) {
+            BrokerAccount account = accounts.byId(accountId).orElse(null);
+            int open = account == null || !expired.contains(account.brokerType()) ? 0 : openPositions(accountId);
+            if (open > 0) {
+                new KillSwitches(dataSource).audit(account, workerId, "EOD_SQUARE_OFF", Map.of("positions",
+                        List.of(open + " position(s) STILL OPEN after " + SQUARE_OFF_RETRY_FOR.toMinutes()
+                                + " min of square-off attempts: close them in the broker's app")));
+                log.error("account {} ({}): {} position(s) still open after the square-off attempts", accountId,
+                        account.displayName(), open);
+            }
+        }
+        if (!again.isEmpty()) {
+            squareOff(day, again).forEach(line -> log.warn("end-of-day square-off (again): {}", line));
+        }
     }
 
     /** Tests: the square-off retry interval. */
     ExecutionLoop squareOffRetry(java.time.Duration every) {
         this.squareOffRetry = every;
         return this;
+    }
+
+    /** Tests: runs {@code work} on the account's own lane (a lane kept busy stands for a slow or stuck broker). */
+    Future<?> onLane(long accountId, Runnable work) {
+        return lanes.computeIfAbsent(accountId, id -> Executors.newSingleThreadExecutor(
+                Thread.ofPlatform().name("exec-account-" + id).daemon(true).factory())).submit(work);
     }
 
     /** Tests: the account is reconciled at its next turn. */
@@ -357,7 +404,7 @@ public final class ExecutionLoop implements AutoCloseable {
                 Instant last = reconciled.get(account.id());
                 if (last == null || last.plus(RECONCILE_EVERY).isBefore(Instant.now())) {
                     try {
-                        BrokerReconciler.Check c = reconciler.check(account, route.connection());
+                        BrokerReconciler.Check c = reconciler(account).check(account, route.connection());
                         check = c.matched() ? "" : ", RECONCILIATION " + c.differences();
                     } catch (BrokerException e) {
                         if (e.kind() == BrokerException.Kind.SESSION) {
@@ -377,8 +424,8 @@ public final class ExecutionLoop implements AutoCloseable {
                     reconciled.put(account.id(), Instant.now());
                 }
             }
-            FollowerSimulator simulator = simulators.computeIfAbsent(account.id(), id -> new FollowerSimulator(dataSource,
-                    costs, risk, route.venue(), quotes).asWorker(workerId, epoch));
+            FollowerSimulator simulator = simulators.computeIfAbsent(account.id(), id -> follower(account, risk, route,
+                    epoch));
             int executed = 0, skipped = 0, rejected = 0;
             double net = 0;
             Map<String, Integer> reasons = new LinkedHashMap<>();
@@ -415,20 +462,60 @@ public final class ExecutionLoop implements AutoCloseable {
     }
 
     /**
-     * End-of-day square-off (code review 24 Oct 2026): a follower closes only on its signal source's EXIT decisions, so
-     * when the signal source stopped mid-day its positions would stay open overnight (and block the next day's entries
-     * for that strategy). At the square-off time every account this worker holds that still has an open position is
-     * flattened like the Flatten button, but without a kill switch (the next day trades normally); audited
-     * EOD_SQUARE_OFF. Every strategy of the live set is flat by 15:15, so this is a safety net. Review 8 Nov 2026: tried
-     * again from each tick until flat ({@link #SQUARE_OFF_RETRY}).
+     * The square-off of every broker whose time ({@link BrokerRules#squareOff}) has come at {@code now} (IST) and that was
+     * not yet run today (16 Nov 2026, A1: the worker calls this every minute from 15:00 to 15:30 instead of one 15:20
+     * square-off for every broker). A broker whose accounts are not left flat is retried like {@link #squareOff}.
+     */
+    public List<String> squareOffDue(LocalDate day, java.time.LocalTime now) {
+        if (brokerRules == null) {
+            throw new IllegalStateException("no broker rules: the brokers' square-off times are not known");
+        }
+        java.util.Set<com.autotrade.account.BrokerType> due;
+        synchronized (squareOffState) {
+            newSquareOffDay(day);
+            due = brokerRules.squareOffDue(now);
+            due.removeAll(squareOffDueRun);
+            squareOffDueRun.addAll(due);
+        }
+        if (due.isEmpty()) {
+            return List.of();
+        }
+        log.warn("end-of-day square-off of {} accounts ({} IST, {})", due, now.withNano(0), brokerRules.version());
+        return squareOff(day, due);
+    }
+
+    private void newSquareOffDay(LocalDate day) {
+        if (!day.equals(squareOffDay)) {
+            squareOffPending.clear();
+            squareOffDueRun.clear();
+            squareOffDay = day;
+        }
+    }
+
+    /**
+     * End-of-day square-off of every broker's accounts now (drills, tests); the worker runs each broker's at its own time
+     * ({@link #squareOffDue}).
      */
     public List<String> squareOff(LocalDate day) {
-        // the times first, then the day: a tick reading the day always finds its times set
-        if (!day.equals(squareOffDay)) {
-            squareOffStarted = Instant.now();
+        return squareOff(day, java.util.EnumSet.allOf(com.autotrade.account.BrokerType.class));
+    }
+
+    /**
+     * End-of-day square-off (code review 24 Oct 2026) of the accounts of {@code brokers}: a follower closes only on its
+     * signal source's EXIT decisions, so when the signal source stopped mid-day its positions would stay open overnight
+     * (and block the next day's entries for that strategy). At the square-off time every account this worker holds that
+     * still has an open position is flattened like the Flatten button, but without a kill switch (the next day trades
+     * normally); audited EOD_SQUARE_OFF. Every strategy of the live set is flat by 15:15, so this is a safety net. Review
+     * 8 Nov 2026: tried again from each tick until flat ({@link #SQUARE_OFF_RETRY}), per broker since 16 Nov 2026.
+     */
+    public List<String> squareOff(LocalDate day, java.util.Set<com.autotrade.account.BrokerType> brokers) {
+        synchronized (squareOffState) {
+            // the pending brokers and the time first, then a tick reading them finds them set for this day
+            newSquareOffDay(day);
+            Instant now = Instant.now();
+            brokers.forEach(b -> squareOffPending.putIfAbsent(b, now));
+            squareOffLast = now;
         }
-        squareOffLast = Instant.now();
-        squareOffDay = day;
         List<String> lines = new ArrayList<>();
         // validation 16 Nov 2026: every account at once, each on its own lane (one slow or stuck broker account no longer
         // holds the others back toward the broker's own MIS cut-off); the results are gathered in account order
@@ -436,7 +523,7 @@ public final class ExecutionLoop implements AutoCloseable {
         try (ExecutorService all = Executors.newVirtualThreadPerTaskExecutor()) {
             for (long accountId : List.copyOf(leases.keySet())) {
                 BrokerAccount account = accounts.byId(accountId).orElse(null);
-                if (account == null || openPositions(accountId) == 0) {
+                if (account == null || !brokers.contains(account.brokerType()) || openPositions(accountId) == 0) {
                     continue;
                 }
                 runs.put(accountId, all.submit(() -> {
@@ -456,7 +543,8 @@ public final class ExecutionLoop implements AutoCloseable {
                 }));
             }
         }                                                           // close() waits for every account
-        boolean flat = true;
+        java.util.Set<com.autotrade.account.BrokerType> open = java.util.EnumSet.noneOf(
+                com.autotrade.account.BrokerType.class);
         for (Map.Entry<Long, java.util.concurrent.Future<List<String>>> run : runs.entrySet()) {
             try {
                 lines.addAll(run.getValue().get());
@@ -464,10 +552,18 @@ public final class ExecutionLoop implements AutoCloseable {
                 lines.add(accounts.byId(run.getKey()).map(BrokerAccount::displayName).orElse("account " + run.getKey())
                         + ": square-off failed (" + e.getMessage() + ")");
             }
-            flat &= openPositions(run.getKey()) == 0;
+            if (openPositions(run.getKey()) > 0) {
+                accounts.byId(run.getKey()).ifPresent(a -> open.add(a.brokerType()));
+            }
         }
-        if (flat) {
-            squareOffDay = null;                                    // done: no more attempts today
+        synchronized (squareOffState) {
+            if (day.equals(squareOffDay)) {
+                for (com.autotrade.account.BrokerType b : brokers) {
+                    if (!open.contains(b)) {
+                        squareOffPending.remove(b);                 // flat: no more attempts today
+                    }
+                }
+            }
         }
         return lines;
     }
@@ -515,7 +611,8 @@ public final class ExecutionLoop implements AutoCloseable {
                     holding = new ManualExit.BrokerHolding(null, String.valueOf(e.getMessage()));
                 }
             }
-            return new ManualExit(dataSource, costs).book(account, positionId, price, at, actor, holding, unchecked);
+            return new ManualExit(dataSource, costsOf(account)).book(account, positionId, price, at, actor, holding,
+                    unchecked);
         });
     }
 
@@ -531,10 +628,8 @@ public final class ExecutionLoop implements AutoCloseable {
         }
         try {
             return onLane(account, (epoch, borrowed) -> {
-                FollowerSimulator simulator = borrowed
-                        ? new FollowerSimulator(dataSource, costs, risk, route.venue(), quotes).asWorker(workerId, epoch)
-                        : simulators.computeIfAbsent(account.id(), id -> new FollowerSimulator(dataSource, costs, risk,
-                                route.venue(), quotes).asWorker(workerId, epoch));
+                FollowerSimulator simulator = borrowed ? follower(account, risk, route, epoch)
+                        : simulators.computeIfAbsent(account.id(), id -> follower(account, risk, route, epoch));
                 return simulator.flatten(account, day, this::flattenPrice, reason, positionId);
             });
         } catch (IllegalStateException e) {
@@ -602,7 +697,7 @@ public final class ExecutionLoop implements AutoCloseable {
                 BrokerConnections.Route route = account == null ? null
                         : connections.route(account, FollowerRisk.load(Path.of(account.riskFile())));
                 if (route != null && route.connection() != null) {
-                    days.add(reconciler.endOfDay(account, route.connection(), day));
+                    days.add(reconciler(account).endOfDay(account, route.connection(), day));
                 }
             } catch (RuntimeException e) {
                 // review 8 Nov 2026: one account's failure (a lost session, a failed read) stopped the loop, so the
@@ -619,6 +714,22 @@ public final class ExecutionLoop implements AutoCloseable {
             }
         }
         return days;
+    }
+
+    /** The cost model that charges the account: its broker's costs file (A3), else the loop's one model. */
+    private CostModel costsOf(BrokerAccount account) {
+        return brokerRules == null ? costs : brokerRules.costs(account.brokerType());
+    }
+
+    private BrokerReconciler reconciler(BrokerAccount account) {
+        return reconcilers.computeIfAbsent(account.brokerType(), b -> new BrokerReconciler(dataSource, costsOf(account)));
+    }
+
+    /** The account's simulator on this worker: its broker's costs and, with the broker rules, its last LIVE entry. */
+    private FollowerSimulator follower(BrokerAccount account, FollowerRisk risk, BrokerConnections.Route route,
+                                       long epoch) {
+        return new FollowerSimulator(dataSource, costsOf(account), risk, route.venue(), quotes)
+                .withBrokerRules(brokerRules).asWorker(workerId, epoch);
     }
 
     /** The account's route (for drills and tests): its venue and broker connection. */

@@ -72,11 +72,11 @@ class WorkspaceIT {
                 "/nonexistent/bot.env"), dataSource);
         members = new MembersController(access, dataSource, tx, new KeycloakAdmin(new KeycloakAdminProperties(null, null,
                 null, null)), telegram);
-        admin = new AccountAdminController(access, dataSource, tx, properties);
+        admin = new AccountAdminController(access, dataSource, tx, properties, TestBrokers.live(dataSource));
         api = new AccountsController(access, dataSource, new ExecutionService(dataSource, properties));
-        workspaces = new WorkspaceController(access, dataSource, tx, telegram);
+        workspaces = new WorkspaceController(access, dataSource, tx, telegram, TestBrokers.live(dataSource));
         support = new SupportController(access, dataSource, telegram);
-        liveSwitch = new LiveSwitchController(access, dataSource);
+        liveSwitch = new LiveSwitchController(access, dataSource, TestBrokers.live(dataSource));
     }
 
     @AfterAll
@@ -397,7 +397,7 @@ class WorkspaceIT {
         TransactionTemplate tx = new TransactionTemplate(new DataSourceTransactionManager(dataSource));
         BrokerAppController apps = new BrokerAppController(new Access(dataSource), dataSource, tx,
                 new KiteLoginProperties(null, null, null, null, null, "/nonexistent/bot.env"),
-                new BrokerLoginProperties(null, null, null, null, null));
+                new BrokerLoginProperties(null, null, null, null, null), TestBrokers.live(dataSource));
         apps.link("ira", account, new BrokerAppController.Link(other));
         assertThat(accounts.byId(account).orElseThrow().liveTradingEnabled()).isFalse();
         assertThat(jdbc.queryForList("select detail->>'reason' from exec.audit_log where broker_account_id = ? and action = "
