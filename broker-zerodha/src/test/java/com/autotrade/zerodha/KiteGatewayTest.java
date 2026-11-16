@@ -7,6 +7,7 @@ import static org.assertj.core.api.Assertions.within;
 import java.io.StringReader;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -98,6 +99,20 @@ class KiteGatewayTest {
                 .isEqualTo(Kind.SESSION));
         http.accessToken(session.accessToken());
         assertThat(gateway.availableFunds()).isEqualTo(1e9);
+    }
+
+    @Test
+    void whatWasCarriedIntoTodayIsReadAcrossProductsAndTodaysTradesAreNotCarry() throws Exception {
+        // review 16 Nov 2026 (D1): an NRML lot carried overnight is not in today's order book; the guard needs it
+        assertThat(gateway.carriedIn()).isEmpty();
+        sim.carried(KEY, 65);
+        sim.carried(SENSEX, -20);
+        // a new gateway (the first one kept its empty read: the carry is fixed for the day once read after 09:00 IST)
+        KiteGateway fresh = new KiteGateway(KiteConfig.simulator(sim.baseUri()), http, KiteInstruments.load(http));
+        gateway.place(buy("F1E1", 130, 100.20));                                  // today's MIS buy: not carried
+        assertThat(fresh.carriedIn()).containsExactlyInAnyOrderEntriesOf(Map.of(KEY, 65L, SENSEX, -20L));
+        assertThat(fresh.positions()).as("our product's positions only").singleElement()
+                .satisfies(p -> assertThat(p.netQuantity()).isEqualTo(130));
     }
 
     @Test

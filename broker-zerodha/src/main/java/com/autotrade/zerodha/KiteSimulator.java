@@ -226,6 +226,19 @@ public final class KiteSimulator implements AutoCloseable {
                 price, clock.get()));
     }
 
+    /**
+     * A position the account carried into today in NRML (an overnight lot; negative: a carried short): a row of Kite's
+     * net positions with product NRML, {@code quantity} and {@code overnight_quantity} the carry and no trade today.
+     */
+    public synchronized void carried(String instrumentKey, long quantity) {
+        if (byKey(instrumentKey) == null) {
+            throw new IllegalArgumentException("not listed: " + instrumentKey);
+        }
+        carriedNrml.merge(instrumentKey, quantity, Long::sum);
+    }
+
+    private final Map<String, Long> carriedNrml = new LinkedHashMap<>();
+
     public synchronized void failNext(String operation, Fault fault) {
         faults.computeIfAbsent(operation, k -> new ArrayDeque<>()).add(fault);
     }
@@ -759,9 +772,19 @@ public final class KiteSimulator implements AutoCloseable {
                     .put("day_sell_quantity", q[1]).put("day_buy_value", v[0]).put("day_sell_value", v[1])
                     .put("realised", quantity == 0 ? v[1] - v[0] : 0));
         }
+        ArrayNode day = net.deepCopy();
+        for (Map.Entry<String, Long> e : carriedNrml.entrySet()) {
+            Listing l = byKey(e.getKey());
+            net.add(json.createObjectNode().put("tradingsymbol", l.tradingSymbol()).put("exchange", l.exchange())
+                    .put("instrument_token", l.instrumentToken()).put("exchange_token", l.exchangeToken())
+                    .put("product", "NRML").put("quantity", e.getValue()).put("overnight_quantity", e.getValue())
+                    .put("average_price", 100).put("buy_quantity", Math.max(0, e.getValue()))
+                    .put("sell_quantity", Math.max(0, -e.getValue())).put("day_buy_quantity", 0).put("day_sell_quantity", 0)
+                    .put("day_buy_value", 0).put("day_sell_value", 0));
+        }
         ObjectNode data = json.createObjectNode();
         data.set("net", net);
-        data.set("day", net.deepCopy());
+        data.set("day", day);
         return data;
     }
 

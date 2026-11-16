@@ -65,6 +65,8 @@ public final class BrokerReconciler {
     private final Map<Long, Map<String, Instant>> lastDifferences = new java.util.concurrent.ConcurrentHashMap<>();
     /** Review 8 Nov 2026: the last SELLS_CUT audited per account and contract (the same one is not audited again). */
     private final Map<String, String> lastCut = new java.util.concurrent.ConcurrentHashMap<>();
+    /** The last SPLIT_PRODUCT audited per account and contract (the same quantities once a day). */
+    private final Map<String, String> lastSplit = new java.util.concurrent.ConcurrentHashMap<>();
     /** The last NET_SHORT audited per account and contract (the same one is audited once a day). */
     private final Map<String, String> lastNetShort = new java.util.concurrent.ConcurrentHashMap<>();
     /** The last RECONCILIATION_ACCEPTED audited per account (the same one is audited once a day). */
@@ -149,8 +151,54 @@ public final class BrokerReconciler {
                         .filter(released.negate()).toList()), "reconciler");
             }
         }
+        splitProducts(account, broker, books, ours.keySet());
         netShorts(account, books);
         return new Check(differences.isEmpty(), differences);
+    }
+
+    /**
+     * Review 16 Nov 2026 (D2): a contract we hold whose holding across all products (carried in plus today's book) is
+     * below what our product holds: something in another product sold against it (ZERODHA-1's hand NRML sell of our MIS
+     * long). The positions we compare are our product's only and the net is not below zero, so nothing else sees it, and
+     * our resting stop (or the broker's own square-off of our product) would leave the other product short overnight.
+     * Our working sells are cut to what the account holds across products, and SPLIT_PRODUCT is audited (alerted) once a
+     * day per contract and quantities. A connection that does not know its product cannot tell, and an unreadable book is
+     * looked at again at the next check.
+     */
+    private void splitProducts(BrokerAccount account, BrokerConnection broker, BrokerBooks books, java.util.Set<String> keys) {
+        String product = broker.product();
+        if (product == null || keys.isEmpty()) {
+            return;
+        }
+        List<BrokerOrder> book;
+        Map<String, Long> carried;
+        try {
+            book = books.orders();
+            carried = books.carried();
+        } catch (com.autotrade.broker.BrokerException e) {
+            if (e.kind() == com.autotrade.broker.BrokerException.Kind.SESSION) {
+                throw e;
+            }
+            return;
+        }
+        for (String key : keys) {
+            long mine = LiveGuard.held(book, key, product), all = LiveGuard.heldAll(book, key, carried);
+            if (mine <= 0 || all >= mine) {
+                continue;
+            }
+            cutOurSells(account, broker, books, key);
+            String said = java.time.LocalDate.now(IST) + " " + mine + " " + all;
+            if (!said.equals(lastSplit.put(account.id() + ":" + key, said))) {
+                String symbol = book.stream().filter(o -> key.equals(o.instrumentKey())).map(BrokerOrder::symbol)
+                        .findFirst().orElse(key);
+                kills.audit(account, "reconciler", "SPLIT_PRODUCT", Map.of("contract", key, "symbol", symbol,
+                        "our_product", product, "our_product_quantity", mine, "all_products_quantity", all,
+                        "rule", "another product is " + (mine - all) + " short against our " + product + " holding of "
+                                + symbol + " (a sell by hand in another product?): our sells there were cut so none sells "
+                                + "it short; the broker squares off the " + product + " side at its cut-off and leaves "
+                                + "the other product short: buy it back or convert it"));
+            }
+        }
     }
 
     /**
@@ -161,8 +209,10 @@ public final class BrokerReconciler {
      */
     private void netShorts(BrokerAccount account, BrokerBooks books) {
         List<BrokerOrder> book;
+        Map<String, Long> carried;
         try {
             book = books.orders();
+            carried = books.carried();
         } catch (com.autotrade.broker.BrokerException e) {
             if (e.kind() == com.autotrade.broker.BrokerException.Kind.SESSION) {
                 throw e;
@@ -177,7 +227,7 @@ public final class BrokerReconciler {
             }
         }
         for (String key : keys) {
-            long net = LiveGuard.held(book, key, null);
+            long net = LiveGuard.heldAll(book, key, carried);         // with what was carried into today
             if (net >= 0) {
                 continue;
             }
@@ -186,7 +236,7 @@ public final class BrokerReconciler {
                 String symbol = book.stream().filter(o -> key.equals(o.instrumentKey())).map(BrokerOrder::symbol)
                         .findFirst().orElse(key);
                 kills.audit(account, "reconciler", "NET_SHORT", Map.of("contract", key, "symbol", symbol,
-                        "net_quantity", net, "rule", "today's filled buys less sells across all products are below zero: "
+                        "net_quantity", net, "rule", "what was carried into today plus today's filled buys less sells, across all products, is below zero: "
                                 + "an option short (check NRML / hand orders at the broker)"));
             }
         }
@@ -307,7 +357,7 @@ public final class BrokerReconciler {
      * then booked by {@link #bookHandSale} at the next check (no stop live), or stays a reconciliation difference.
      */
     private void cutOurSells(BrokerAccount account, BrokerConnection broker, BrokerBooks books, String key) {
-        long held = Math.max(0, LiveGuard.holds(books.orders(), key, broker.product()));
+        long held = Math.max(0, LiveGuard.holds(books.orders(), key, broker.product(), books.carried()));
         List<BrokerOrder> working = books.orders().stream().filter(o -> key.equals(o.instrumentKey())
                 && o.ofProduct(broker.product())
                 && o.side() == OrderSide.SELL && !o.status().isTerminal() && o.clientTag() != null
@@ -361,6 +411,7 @@ public final class BrokerReconciler {
         private final BrokerConnection broker;
         private List<BrokerOrder> orders;
         private List<BrokerTrade> trades;
+        private Map<String, Long> carried;
 
         BrokerBooks(BrokerConnection broker) {
             this.broker = broker;
@@ -368,6 +419,10 @@ public final class BrokerReconciler {
 
         List<BrokerOrder> orders() {
             return orders == null ? (orders = broker.orders()) : orders;
+        }
+
+        Map<String, Long> carried() {
+            return carried == null ? (carried = broker.carriedIn()) : carried;
         }
 
         List<BrokerTrade> trades() {
