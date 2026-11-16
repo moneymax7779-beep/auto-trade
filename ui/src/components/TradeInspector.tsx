@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { get, post, type Status } from "../api";
 import { useMoment } from "./chartView";
 import { strategyShort } from "./strategies";
-import { Panel } from "./ui";
+import { ConfirmButton, Panel } from "./ui";
 
 /**
  * Looking inside a session for tuning (user, 5 Nov 2026: "stop at some point for analyzing what data it holds at that
@@ -71,9 +71,9 @@ export function useTradeContext(sessionId: number | undefined, live: boolean, wa
 export function useReplayState(replaying: boolean) {
   return useQuery({ queryKey: ["replay-control"], queryFn: () => get<ReplayState>("/api/replay-control"),
     enabled: replaying, retry: false,
-    // an unpaced replay answers 409 (nothing to control): stop asking; after any other error (a deploy, a blip) ask again
-    // more slowly
-    refetchInterval: (q) => (!replaying ? false : !q.state.error ? 1_000 : String(q.state.error).includes("409") ? false : 5_000) });
+    // a 409 (an unpaced or finished replay: nothing to control) or another error (a deploy, a blip): ask again slowly, so
+    // the controls come back after a Restart (15 Nov 2026)
+    refetchInterval: (q) => (!replaying ? false : !q.state.error ? 1_000 : 5_000) });
 }
 
 /** Pause, resume, speed, run to the next entry / exit / a position's exit / a time: shown only while a replay runs. */
@@ -84,8 +84,47 @@ export function ReplayControls({ s }: { s: Status }) {
     mutationFn: (q: string) => post<ReplayState>(`/api/replay-control?${q}`),
     onSuccess: (data) => client.setQueryData(["replay-control"], data),
   });
+  // Restart (15 Nov 2026): the same day from the start with the same speed, pause time and strategies; this run is
+  // ended as STOPPED and stays on the Sessions page
+  // the session the Restart was asked from: "restarting" shows until a new session replaces it (the old one is
+  // still RUNNING for a moment while it stops)
+  const [restartedFrom, setRestartedFrom] = useState<number | null>(null);
+  const restart = useMutation({
+    mutationFn: () => post<{ restart: string }>("/api/replay-control?action=restart"),
+    onSuccess: () => { setRestartedFrom(s.session ?? null); client.removeQueries({ queryKey: ["replay-control"] }); client.invalidateQueries(); },
+  });
   const [until, setUntil] = useState("");
-  if (s.mode !== "PAPER_REPLAY" || !state.data) return null;
+  if (s.mode !== "PAPER_REPLAY") return null;
+  const why = (e: unknown) => (e instanceof Error ? e.message : String(e)).replace(/^(Error:\s*)?\d{3}:?\s*/, "");
+  const restartButton = (
+    <ConfirmButton tone="neutral" label="↺ Restart" confirmLabel="Start this day over?" disabled={restart.isPending}
+      onConfirm={() => restart.mutate()} />
+  );
+  const restartNote = restart.error ? <span className="text-down">Not restarted: {why(restart.error)}</span> : null;
+  const failed = s.replayRestart?.startsWith("FAILED") ?? false;
+  if (s.replayRestart === "RESTARTING" || restart.isPending || (restartedFrom != null && restartedFrom === s.session && !failed)) {
+    return (
+      <div className="flex flex-wrap items-center gap-2 rounded border border-accent/40 bg-accent/5 px-3 py-2 text-xs">
+        <span className="font-semibold">Replay {s.date}</span>
+        <span className="rounded bg-accent/15 px-1.5 py-0.5 font-semibold text-accent">restarting</span>
+        <span className="text-muted">loading the day again (about a minute); it starts paused at the same time as before</span>
+      </div>
+    );
+  }
+  // a finished replay (15 Nov 2026: its last polled state stayed on screen, "running 300×" with a Pause that answered 409)
+  if (s.status !== "RUNNING") {
+    return (
+      <div className="flex flex-wrap items-center gap-2 rounded border border-line bg-panel-2 px-3 py-2 text-xs">
+        <span className="font-semibold">Replay {s.date}</span>
+        <span className="num">{s.lastEvent?.slice(0, 8) ?? "–"}</span>
+        <span className="rounded bg-panel px-1.5 py-0.5 font-semibold text-muted">finished · {s.status}</span>
+        {restartButton}
+        {failed && <span className="text-down">Restart {s.replayRestart?.toLowerCase()}</span>}
+        {restartNote}
+      </div>
+    );
+  }
+  if (!state.data || state.error) return null;
   const r = state.data;
   const btn = "rounded border border-line px-2 py-1 hover:bg-panel-2 disabled:opacity-40";
   const open = (s.openPositions ?? []).filter((p) => p.quantity > 0);
@@ -114,7 +153,9 @@ export function ReplayControls({ s }: { s: Status }) {
           value={until} onChange={(e) => setUntil(e.target.value)} />
         <button type="submit" className={btn} disabled={!/^\d{2}:\d{2}(:\d{2})?$/.test(until)}>run until</button>
       </form>
-      {act.error && <span className="text-down">{String(act.error)}</span>}
+      <span className="ml-auto">{restartButton}</span>
+      {act.error && <span className="text-down">Not done: {why(act.error)}</span>}
+      {restartNote}
     </div>
   );
 }

@@ -139,6 +139,10 @@ public final class TradingSession {
     private volatile Supplier<Set<String>> switchedOff = Set::of;
     /** strategy|underlying|intent|minute already recorded as refused for OFF (one row a minute, not one per snapshot). */
     private final Set<String> offNoted = new HashSet<>();
+    /** A replay's chart orders (user, 15 Nov 2026): the trader's lines on the replayed day; null when live. */
+    private final ReplayChartOrders chart;
+    /** A replay with the strategies' entries off (replay-strategies: off): only the trader's chart orders trade. */
+    private volatile boolean strategiesOff;
 
     public TradingSession(Settings settings, LiveFeed feed, TradeStore store) {
         this.settings = settings;
@@ -157,6 +161,8 @@ public final class TradingSession {
         });
         this.risk = new RiskEngine(settings.risk(), killSwitch);
         this.contracts = new ContractResolver(settings.session(), settings.instruments());
+        this.chart = settings.mode() == Mode.PAPER_REPLAY
+                ? new ReplayChartOrders(new ChartDesk(), Set.copyOf(settings.tradeUnderlyings())) : null;
         for (String underlying : settings.underlyings()) {
             List<Slot> slots = new ArrayList<>();
             if (settings.tradeUnderlyings().contains(underlying)) {
@@ -209,10 +215,14 @@ public final class TradingSession {
                 engines.values().forEach(FeatureEngine::finish);
                 settleExpired();
                 if (!oms.livePositions().isEmpty()) {
-                    oms.exitAll("SESSION_END");
+                    oms.exitAll(abandoned != null ? "SESSION_STOPPED" : "SESSION_END");
+                }
+                if (chart != null) {
+                    chart.refresh(true);
                 }
             }
-            status = "DONE";
+            status = abandoned != null ? "STOPPED" : "DONE";
+            error = abandoned;
         } catch (Exception e) {
             error = String.valueOf(e.getMessage());
             status = "FAILED";
@@ -225,6 +235,18 @@ public final class TradingSession {
     }
 
     public void stop() {
+        feed.stop();
+    }
+
+    /** Set by {@link #abandon}: why the session was ended before its feed did. */
+    private volatile String abandoned;
+
+    /**
+     * Ends the session before its day did and marks it STOPPED with {@code reason}, not DONE (the replay bar's Restart,
+     * 15 Nov 2026): open positions are sold as SESSION_STOPPED, waiting chart orders expire.
+     */
+    public void abandon(String reason) {
+        abandoned = reason;
         feed.stop();
     }
 
@@ -319,6 +341,9 @@ public final class TradingSession {
                 }
             }
             broker.accept(event);
+            if (chart != null && event instanceof com.autotrade.core.event.IndexTick index) {
+                chart.onIndexTick(index.underlying(), index.price());
+            }
             reconcileIfDue();
         }
     }
@@ -372,7 +397,7 @@ public final class TradingSession {
             Decision decision = slot.strategy().decide(snapshot, oms.view(strategyId, underlying));
             lastDecisions.put(decisionKey(underlying, strategyId), decision);
             store.decision(sessionId, strategyId, decision, snapshot.spot());
-            if (squareOff) {
+            if (squareOff || strategiesOff) {
                 continue;
             }
             for (OrderIntent intent : decision.orders()) {
@@ -786,6 +811,139 @@ public final class TradingSession {
             if (oms != null) {
                 oms.exitAll(reason);
             }
+        }
+    }
+
+    /**
+     * A replay with every strategy's orders off (user, 15 Nov 2026, chart orders in a replay): the strategies still
+     * decide (their states show), nothing of theirs is entered; only the trader's chart orders trade.
+     */
+    public void strategiesOff(boolean off) {
+        this.strategiesOff = off;
+    }
+
+    /** STARTING, RUNNING, DONE or FAILED. */
+    public String runState() {
+        return status;
+    }
+
+    /** True for a replay: its chart orders can be drawn. */
+    public boolean chartOrdersOn() {
+        return chart != null;
+    }
+
+    /** The replay's chart orders, oldest first, as the panel reads them. */
+    public List<Map<String, Object>> chartOrders() {
+        synchronized (lock) {
+            ReplayChartOrders book = chartBook();
+            book.refresh(false);
+            return book.orders().stream().map(ReplayChartOrders::view).toList();
+        }
+    }
+
+    public Map<String, Object> chartArm(String underlying, String side, Double entry, Double stop, Double target,
+                                        Integer lots, String validUntil) {
+        synchronized (lock) {
+            return ReplayChartOrders.view(chartBook().arm(underlying, side, entry, stop, target, lots, validUntil));
+        }
+    }
+
+    public Map<String, Object> chartMove(long id, Integer version, Double entry, Double stop, Double target) {
+        synchronized (lock) {
+            return ReplayChartOrders.view(chartBook().move(id, version, entry, stop, target));
+        }
+    }
+
+    public Map<String, Object> chartCancel(long id) {
+        synchronized (lock) {
+            return ReplayChartOrders.view(chartBook().cancel(id));
+        }
+    }
+
+    public Map<String, Object> chartExit(long id) {
+        synchronized (lock) {
+            return ReplayChartOrders.view(chartBook().exitNow(id));
+        }
+    }
+
+    /** The ATM option a chart order on {@code underlying} would buy now, for the ticket's risk estimate. */
+    public Map<String, Object> chartQuote(String underlying, String side) {
+        synchronized (lock) {
+            chartBook();
+            FeatureSnapshot snapshot = lastSnapshots.get(underlying);
+            if (snapshot == null || oms == null) {
+                throw new IllegalArgumentException("no " + underlying + " option chain in the replay yet");
+            }
+            OptionSide optionSide = OptionSide.valueOf(side);
+            Contract contract = contracts.find(underlying, snapshot.options().atmStrike(), optionSide)
+                    .orElseThrow(() -> new IllegalArgumentException("no quotes for the ATM " + side + " yet"));
+            Map<String, Object> quote = new LinkedHashMap<>();
+            quote.put("symbol", contract.symbol());
+            quote.put("lotSize", contract.lotSize());
+            double ask = oms.ask(contract);
+            quote.put("ask", Double.isFinite(ask) ? ask : null);
+            quote.put("bid", null);
+            double spot = lastIndexPrice.getOrDefault(underlying, Double.NaN);
+            quote.put("spot", Double.isFinite(spot) ? spot : null);
+            return quote;
+        }
+    }
+
+    private ReplayChartOrders chartBook() {
+        if (chart == null) {
+            throw new IllegalStateException("chart orders in this service are the live engine's; this one is for replays");
+        }
+        if (oms == null) {
+            throw new IllegalStateException("the replay has not started yet");
+        }
+        return chart;
+    }
+
+    /** The replay's clock, prices and paper account, lent to its chart orders (called under {@link #lock}). */
+    private final class ChartDesk implements ReplayChartOrders.Desk {
+
+        @Override
+        public Instant now() {
+            return clock.get();
+        }
+
+        @Override
+        public double spot(String underlying) {
+            return lastIndexPrice.getOrDefault(underlying, Double.NaN);
+        }
+
+        @Override
+        public ReplayChartOrders.Bought buy(String underlying, String side, int lots,
+                                            com.autotrade.execution.ChartLines.Lines lines) {
+            FeatureSnapshot snapshot = lastSnapshots.get(underlying);
+            if (snapshot == null || !(snapshot.options().atmStrike() > 0)) {
+                return new ReplayChartOrders.Bought(null, "no " + underlying + " option chain in the replay yet");
+            }
+            OptionSide optionSide = OptionSide.valueOf(side);
+            var contract = contracts.find(underlying, snapshot.options().atmStrike(), optionSide);
+            if (contract.isEmpty()) {
+                return new ReplayChartOrders.Bought(null, "no quotes for the ATM " + side + " yet");
+            }
+            double ask = oms.ask(contract.get());
+            // the premium stop resting under the index stop (plan 2.3), as live
+            double stopPct = com.autotrade.execution.ChartLines.safetyStopPct(lines, ask);
+            LocalTime time = clock.get().atZone(MarketTime.IST).toLocalTime();
+            RiskDecision result = oms.enter(ReplayChartOrders.STRATEGY, underlying, optionSide, contract.get(), lots,
+                    "CHART", new MarketContext(time, snapshot.secondsSinceSpot(), snapshot.secondsSinceOption()), stopPct);
+            log.info("{} {} chart BUY {} {} lot(s) {} (safety stop {} %)", time.withNano(0), underlying,
+                    contract.get().symbol(), lots, result.approved() ? "APPROVED" : "REJECTED: " + result.reason(), stopPct);
+            if (!result.approved()) {
+                return new ReplayChartOrders.Bought(null, result.reason());
+            }
+            ManagedPosition position = oms.livePositions().stream()
+                    .filter(p -> ReplayChartOrders.STRATEGY.equals(p.strategy()) && underlying.equals(p.underlying()))
+                    .findFirst().orElse(null);
+            return new ReplayChartOrders.Bought(position, position == null ? "the buy was not placed" : null);
+        }
+
+        @Override
+        public void exit(String underlying, String reason) {
+            oms.exit(ReplayChartOrders.STRATEGY, underlying, reason);
         }
     }
 

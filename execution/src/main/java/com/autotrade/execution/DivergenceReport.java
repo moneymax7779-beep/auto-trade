@@ -131,8 +131,10 @@ public final class DivergenceReport {
 
     /** The day's report for a copy group; {@code paper1SessionId} null = chosen as the class comment says. */
     public Report build(long copyGroupId, LocalDate day, Long paper1SessionId) {
+        // a trader's manual orders (signal session 0) are no signal of the group (review 9 Nov 2026)
         Long signalSession = jdbc.queryForObject("select max(signal_session_id) from exec.signal_decision "
-                + "where copy_group_id = ? and session_date = ?", Long.class, copyGroupId, day);
+                + "where copy_group_id = ? and session_date = ? and strategy_id <> '" + ManualOrders.STRATEGY + "'",
+                Long.class, copyGroupId, day);
         if (signalSession == null) {
             return new Report(day, copyGroupId, null, null, List.of(), List.of());
         }

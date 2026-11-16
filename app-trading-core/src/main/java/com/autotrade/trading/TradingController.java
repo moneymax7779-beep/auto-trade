@@ -45,6 +45,9 @@ class TradingController {
         } else {
             status.putAll(session.status());
         }
+        if (runner.replayRestart() != null) {
+            status.put("replayRestart", runner.replayRestart());       // the replay bar's Restart, while it loads or failed
+        }
         status.put("schedule", runner.schedule());
         if (auth.member(principal)) {
             status.keySet().retainAll(MEMBER_STATUS);
@@ -108,6 +111,9 @@ class TradingController {
         if (session == null || !"PAPER_REPLAY".equals(String.valueOf(session.status().get("mode")))) {
             return ResponseEntity.status(409).body(Map.of("error", "no replay running"));
         }
+        if (!"RUNNING".equals(session.runState())) {    // 15 Nov 2026: a finished replay answered "runs unpaced"
+            return ResponseEntity.status(409).body(Map.of("error", "the replay has finished (" + session.runState() + ")"));
+        }
         if (!runner.replayControl().attached()) {       // an unpaced replay has no clock to pause or re-pace
             return ResponseEntity.status(409).body(Map.of("error", "this replay runs unpaced (speed 0): start it with a speed to control it"));
         }
@@ -124,9 +130,19 @@ class TradingController {
     ResponseEntity<Map<String, Object>> replayControl(@RequestParam String action, @RequestParam(required = false) Double value,
                                                       @RequestParam(required = false) String time,
                                                       @RequestParam(required = false) String symbol) {
+        if ("restart".equals(action)) {                  // 15 Nov 2026: works on a finished replay too
+            try {
+                return ResponseEntity.accepted().body(Map.of("restart", runner.restartReplay()));
+            } catch (IllegalStateException e) {
+                return ResponseEntity.status(409).body(Map.of("error", String.valueOf(e.getMessage())));
+            }
+        }
         TradingSession session = runner.current();
         if (session == null || !"PAPER_REPLAY".equals(String.valueOf(session.status().get("mode")))) {
             return ResponseEntity.status(409).body(Map.of("error", "no replay running"));
+        }
+        if (!"RUNNING".equals(session.runState())) {    // 15 Nov 2026: a finished replay answered "runs unpaced"
+            return ResponseEntity.status(409).body(Map.of("error", "the replay has finished (" + session.runState() + ")"));
         }
         if (!runner.replayControl().attached()) {       // an unpaced replay has no clock to pause or re-pace
             return ResponseEntity.status(409).body(Map.of("error", "this replay runs unpaced (speed 0): start it with a speed to control it"));

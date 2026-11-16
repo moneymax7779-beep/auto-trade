@@ -235,7 +235,8 @@ class AccountAdminController {
         for (long tenant : user.tenants()) {
             Long[] groups = accounts.followableCopyGroups(tenant).toArray(new Long[0]);
             ids.addAll(jdbc.queryForList("select distinct strategy_id from exec.signal_decision where copy_group_id = any(?) "
-                    + "and session_date > current_date - 60", String.class, (Object) groups));
+                    + "and session_date > current_date - 60 and strategy_id <> '"
+                    + com.autotrade.execution.ManualOrders.STRATEGY + "'", String.class, (Object) groups));
             ids.addAll(jdbc.queryForList("select distinct s.strategy_id from acct.strategy_subscription s join "
                     + "acct.broker_account a on a.id = s.broker_account_id where a.tenant_id = ?", String.class, tenant));
         }
@@ -470,6 +471,9 @@ class AccountAdminController {
                 for (String held : jdbc.queryForList("select distinct strategy_id from exec.position where "
                         + "broker_account_id = any(?) and status <> 'CLOSED'", String.class,
                         (Object) (twin == null ? new Long[] {id} : new Long[] {id, twin}))) {
+                    if (held.equals(com.autotrade.execution.ManualOrders.STRATEGY)) {
+                        continue;                  // a manual position is no subscription: its EXIT is the trader's
+                    }
                     // an unsubscribed strategy's EXIT is no longer fanned out to this account (code review 3 Nov 2026)
                     require(wanted.contains(held) || off.contains(held), a.displayName() + " holds an open " + held + " position: keep the "
                             + "strategy until it is closed");

@@ -360,6 +360,36 @@ class ExecutionService implements DisposableBean {
         return current.bookManualExit(accountId, positionId, price, at, actor, unchecked);
     }
 
+    com.autotrade.execution.ManualOrders.Pick manualQuote(long accountId, String underlying, String side) {
+        return started().manualQuote(accountId, underlying, side, day());
+    }
+
+    com.autotrade.execution.ManualOrders.Placed manualBuy(long accountId, String underlying, String side, String symbol,
+                                                          String actor) {
+        return started().manualBuy(accountId, underlying, side, symbol, actor, day());
+    }
+
+    List<String> manualExit(long accountId, String underlying, String actor) throws Exception {
+        return started().manualExit(accountId, underlying, actor, day());
+    }
+
+    List<java.util.Map<String, Object>> manualToday(long accountId) {
+        return new com.autotrade.execution.ManualOrders(dataSource).today(accountId, day());
+    }
+
+    /** The copy group a manual or chart order of the account is written in (one this worker serves). */
+    long manualGroup(long accountId) {
+        return started().manualGroup(accountId);
+    }
+
+    private ExecutionLoop started() {
+        ExecutionLoop current = loop;
+        if (current == null) {
+            throw new IllegalArgumentException("the worker has not started");
+        }
+        return current;
+    }
+
     /** When the loop last finished a tick (null before the first): the watchdog's heartbeat. */
     java.time.Instant lastTick() {
         return lastTick;

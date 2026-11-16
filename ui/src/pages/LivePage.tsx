@@ -10,6 +10,7 @@ import { MarketCard } from "../components/MarketCard";
 import { splitDecisionKey, storedScores, StrategyMatrix, type MatrixCell } from "../components/strategies";
 import { AlertBanner } from "../components/AlertBanner";
 import { LiveBooks, PaperPositions } from "../components/LiveBookPanel";
+import { ManualTradePanel } from "../components/ManualTradePanel";
 import { CuesPanel } from "../components/CuesPanel";
 import { MarketRead } from "../components/MarketRead";
 import { ReplayControls } from "../components/TradeInspector";
@@ -32,6 +33,7 @@ export function LivePage({ canAct = true }: { canAct?: boolean }) {
       <div className="space-y-4">
       <AlertBanner />
       <LiveBooks />
+      <ManualTradePanel />
       <EquityPanel />
       <CuesPanel />
       <Panel title={s.schedule?.mode === "auto" ? "Waiting for the next trading session" : "No trading session running"}>
@@ -109,6 +111,7 @@ export function LivePage({ canAct = true }: { canAct?: boolean }) {
       {beforeOpen && <CuesPanel />}
 
       <LiveBooks />
+      <ManualTradePanel />
       <PaperPositions account={s.account ?? "PAPER-1"} date={s.date ?? ""} openRows={s.openPositions ?? []}
         closedRows={s.closedPositions ?? []} />
 
