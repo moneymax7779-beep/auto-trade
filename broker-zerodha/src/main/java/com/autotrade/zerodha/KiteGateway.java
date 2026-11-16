@@ -339,40 +339,22 @@ public final class KiteGateway implements BrokerConnection {
      */
     @Override
     public Map<String, Long> carriedIn() {
-        java.time.ZonedDateTime now = java.time.ZonedDateTime.now(java.time.ZoneId.of("Asia/Kolkata"));
-        Carried c = carried;
-        if (c != null && c.day().equals(now.toLocalDate())) {
-            return c.byKey();
-        }
-        Map<String, Long> byKey = new LinkedHashMap<>();
-        try {
+        return carry.get(() -> {
+            Map<String, Long> byKey = new LinkedHashMap<>();
             for (JsonNode p : readGet("/portfolio/positions").path("net")) {
-                long carry = p.has("day_buy_quantity") || p.has("day_sell_quantity")
+                long carried = p.has("day_buy_quantity") || p.has("day_sell_quantity")
                         ? p.path("quantity").asLong() - p.path("day_buy_quantity").asLong() + p.path("day_sell_quantity").asLong()
                         : p.path("overnight_quantity").asLong();
-                if (carry != 0) {
-                    byKey.merge(KiteInstruments.instrumentKey(p.path("exchange").asString(), exchangeToken(p)), carry,
+                if (carried != 0) {
+                    byKey.merge(KiteInstruments.instrumentKey(p.path("exchange").asString(), exchangeToken(p)), carried,
                             Long::sum);
                 }
             }
-        } catch (BrokerException e) {
-            if (e.kind() == Kind.SESSION) {
-                throw e;
-            }
-            log.warn("Kite positions not read for what was carried into today ({}): none counted for now", e.getMessage());
-            return Map.of();
-        }
-        Map<String, Long> out = Map.copyOf(byKey);
-        if (!now.toLocalTime().isBefore(java.time.LocalTime.of(9, 0))) {
-            carried = new Carried(now.toLocalDate(), out);
-        }
-        return out;
+            return byKey;
+        });
     }
 
-    private record Carried(java.time.LocalDate day, Map<String, Long> byKey) {
-    }
-
-    private volatile Carried carried;
+    private final com.autotrade.broker.DailyCarry carry = new com.autotrade.broker.DailyCarry("Kite");
 
     /** Kite reports its own instrument token; the exchange token is its low 8 bits shifted out (token >> 8). */
     private long exchangeToken(JsonNode n) {

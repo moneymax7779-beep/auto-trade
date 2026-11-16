@@ -516,6 +516,12 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
         }
 
         @Override
+        public Map<String, Long> carriedIn() {
+            loadToday(session());                         // a row without a token is mapped through today's list
+            return gateway().carriedIn();
+        }
+
+        @Override
         public int poll() {
             return orderGateway("poll").poll();
         }

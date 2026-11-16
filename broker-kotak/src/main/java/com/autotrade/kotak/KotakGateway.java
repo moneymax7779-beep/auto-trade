@@ -20,6 +20,7 @@ import org.slf4j.LoggerFactory;
 
 import com.autotrade.broker.BrokerCapabilities;
 import com.autotrade.broker.BrokerConnection;
+import com.autotrade.broker.DailyCarry;
 import com.autotrade.broker.BrokerException;
 import com.autotrade.broker.BrokerException.Kind;
 import com.autotrade.broker.BrokerOrder;
@@ -462,6 +463,33 @@ public final class KotakGateway implements BrokerConnection {
         }
         return positions;
     }
+
+    /**
+     * What each contract carried into today across every product (review 16 Nov 2026, D1b): {@code cfBuyQty} less
+     * {@code cfSellQty} of each row of the positions book, unfiltered by product. Kept for the day ({@link DailyCarry}).
+     */
+    @Override
+    public Map<String, Long> carriedIn() {
+        return carry.get(() -> {
+            Map<String, Long> byKey = new LinkedHashMap<>();
+            for (JsonNode p : rows(KotakHttp.POSITIONS)) {
+                long carried = KotakHttp.whole(p.path("cfBuyQty")) - KotakHttp.whole(p.path("cfSellQty"));
+                String key = key(p);
+                if (carried != 0 && key == null) {
+                    // review 16 Nov 2026: the day's instrument list not loaded yet (the route's warm-up): not kept as
+                    // "nothing carried" for the day; read again at the next call
+                    throw new BrokerException(Kind.RETRYABLE, "a carried position (" + carried + ") is not mapped to a "
+                            + "contract yet");
+                }
+                if (carried != 0 && key != null) {
+                    byKey.merge(key, carried, Long::sum);
+                }
+            }
+            return byKey;
+        });
+    }
+
+    private final DailyCarry carry = new DailyCarry("Kotak");
 
     /**
      * A book's rows ({@code data}). Only Kotak's exact {@code Not_Ok} "No Data" is an empty book; an Ok answer without a

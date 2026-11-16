@@ -511,6 +511,11 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
         }
 
         @Override
+        public Map<String, Long> carriedIn() {
+            return gateway().carriedIn();
+        }
+
+        @Override
         public int poll() {
             return orderGateway("poll").poll();
         }

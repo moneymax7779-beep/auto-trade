@@ -2,6 +2,8 @@ package com.autotrade.execution;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -115,8 +117,41 @@ public final class BrokerConnections implements AutoCloseable {
         this.liveBrokers = java.util.Objects.requireNonNull(configuredLive);
     }
 
+    /**
+     * The account's route, opened on first use and kept. Review 16 Nov 2026 (D5): a refused route (no venue) was kept
+     * until a restart, so a LIVE account whose egress address came up seconds after the worker started had no exits and
+     * no square-off all day. A refused route is opened again {@link #REFUSED_RETRY} after it was refused (the refusal's
+     * kill switch and alert are said once per account and reason, not at every retry).
+     */
     public Route route(BrokerAccount account, FollowerRisk risk) {
-        return routes.computeIfAbsent(account.id(), id -> open(account, risk));
+        Route r = routes.computeIfAbsent(account.id(), id -> openNoted(account, risk));
+        Instant refused = refusedAt.get(account.id());
+        if (r.venue() == null && (refused == null || !Instant.now().isBefore(refused.plus(refusedRetry)))) {
+            routes.remove(account.id(), r);
+            r = routes.computeIfAbsent(account.id(), id -> openNoted(account, risk));
+        }
+        return r;
+    }
+
+    /** {@link #open}, noting when a route was refused. */
+    private Route openNoted(BrokerAccount account, FollowerRisk risk) {
+        Route opened = open(account, risk);
+        if (opened.venue() == null) {
+            refusedAt.put(account.id(), Instant.now());
+        } else {
+            refusedAt.remove(account.id());
+        }
+        return opened;
+    }
+
+    /** How long a refused route is kept before it is opened again. */
+    static final Duration REFUSED_RETRY = Duration.ofSeconds(30);
+    private final Map<Long, Instant> refusedAt = new ConcurrentHashMap<>();
+    private volatile Duration refusedRetry = REFUSED_RETRY;
+
+    /** Tests: how long a refused route is kept. */
+    void retryRefusedAfter(Duration retry) {
+        this.refusedRetry = retry;
     }
 
     private Route open(BrokerAccount account, FollowerRisk risk) {
@@ -262,6 +297,7 @@ public final class BrokerConnections implements AutoCloseable {
     /** Forgets an account's route (its lease was lost, its configuration changed): a new turn opens a fresh one. */
     public void drop(long accountId) {
         routes.remove(accountId);
+        refusedAt.remove(accountId);
         close(opened.remove(accountId));
         closeLive(liveOpened.remove(accountId));
         closeProbe(accountId);

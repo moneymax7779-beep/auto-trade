@@ -4,6 +4,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -20,6 +21,7 @@ import org.slf4j.LoggerFactory;
 
 import com.autotrade.broker.BrokerCapabilities;
 import com.autotrade.broker.BrokerConnection;
+import com.autotrade.broker.DailyCarry;
 import com.autotrade.broker.BrokerException;
 import com.autotrade.broker.BrokerException.Kind;
 import com.autotrade.broker.BrokerOrder;
@@ -473,6 +475,31 @@ public final class UpstoxGateway implements BrokerConnection {
         }
         return positions;
     }
+
+    /**
+     * What each contract carried into today across every product (review 16 Nov 2026, D1b): each row's net
+     * {@code quantity} less today's buys plus today's sells (one snapshot), else its {@code overnight_quantity}, unfiltered
+     * by product. Kept for the day ({@link DailyCarry}).
+     */
+    @Override
+    public Map<String, Long> carriedIn() {
+        return carry.get(() -> {
+            Map<String, Long> byKey = new LinkedHashMap<>();
+            for (JsonNode p : rows(UpstoxHttp.POSITIONS)) {
+                long carried = p.has("day_buy_quantity") || p.has("day_sell_quantity")
+                        ? UpstoxHttp.whole(p.path("quantity")) - UpstoxHttp.whole(p.path("day_buy_quantity"))
+                                + UpstoxHttp.whole(p.path("day_sell_quantity"))
+                        : UpstoxHttp.whole(p.path("overnight_quantity"));
+                String key = key(p);
+                if (carried != 0 && key != null) {
+                    byKey.merge(key, carried, Long::sum);
+                }
+            }
+            return byKey;
+        });
+    }
+
+    private final DailyCarry carry = new DailyCarry("Upstox");
 
     /**
      * A position's average entry: a long is entered by its buys (the day's buy value / quantity), a short by its sells
