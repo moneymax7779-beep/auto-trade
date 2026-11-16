@@ -44,12 +44,16 @@ class ExecutionService implements DisposableBean {
     private final String probeEvery;
     private final String probeDir;
     private final String probeAccounts;
+    private final String recordAccounts;
+    private final BrokerLoginProperties brokers;
     private volatile ExecutionLoop loop;
+    /** The adapters the loop was given (16 Nov 2026: the canary opens an account's LIVE connection through the same). */
+    private volatile List<com.autotrade.execution.BrokerAdapter> adapters = List.of();
     private volatile java.time.Instant lastTick;
 
     /** Tests: no real broker sessions. */
     ExecutionService(DataSource dataSource, ExecutionProperties properties) {
-        this(dataSource, properties, null, null, null, null, null, null, null, null);
+        this(dataSource, properties, null, null, null, null, null, null, null, null, null, null);
     }
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -61,7 +65,10 @@ class ExecutionService implements DisposableBean {
                      @org.springframework.beans.factory.annotation.Value("${autotrade.execution.read-live-probe.dir:}")
                      String probeDir,
                      @org.springframework.beans.factory.annotation.Value("${autotrade.execution.read-live-probe.accounts:}")
-                     String probeAccounts) {
+                     String probeAccounts,
+                     @org.springframework.beans.factory.annotation.Value("${autotrade.execution.read-live-record.accounts:}")
+                     String recordAccounts,
+                     BrokerLoginProperties brokers) {
         this.dataSource = dataSource;
         this.properties = properties;
         this.kiteSessions = kiteSessions;
@@ -72,6 +79,8 @@ class ExecutionService implements DisposableBean {
         this.probeEvery = probeEvery;
         this.probeDir = probeDir;
         this.probeAccounts = probeAccounts;
+        this.recordAccounts = recordAccounts;
+        this.brokers = brokers;
     }
 
     /**
@@ -106,7 +115,7 @@ class ExecutionService implements DisposableBean {
         com.autotrade.execution.BrokerSessions sessions = new BrokerSessionRouter(byBroker);
         com.autotrade.execution.CapturedQuotes captured = new com.autotrade.execution.CapturedQuotes(dataSource);
         return java.util.List.of(
-                new com.autotrade.execution.ZerodhaDryRunAdapter(dataSource, brokerFunds, sessions, kiteApiBase),
+                new com.autotrade.execution.ZerodhaDryRunAdapter(dataSource, brokerFunds, sessions, kiteApiBase, probe),
                 new com.autotrade.execution.KotakDryRunAdapter(dataSource, brokerFunds, sessions, captured, probe),
                 new com.autotrade.execution.UpstoxDryRunAdapter(dataSource, brokerFunds, sessions,
                         upstox == null ? com.autotrade.upstox.orders.UpstoxConfig.real() : upstox, captured, probe),
@@ -123,7 +132,19 @@ class ExecutionService implements DisposableBean {
      * comma-separated; blank = none). Reads only: see ExecutionLoop#probeOnly.
      */
     java.util.Set<Long> probeAccounts() {
-        String ids = probeAccounts == null ? "" : probeAccounts.trim();
+        return ids(probeAccounts);
+    }
+
+    /**
+     * The accounts whose real broker answers are recorded ({@code autotrade.execution.read-live-record.accounts}: ids,
+     * comma-separated; blank = none, the default; 16 Nov 2026, D2), redacted, under {@code <storeDir>/read-live}.
+     */
+    java.util.Set<Long> recordAccounts() {
+        return ids(recordAccounts);
+    }
+
+    private static java.util.Set<Long> ids(String list) {
+        String ids = list == null ? "" : list.trim();
         if (ids.isEmpty()) {
             return java.util.Set.of();
         }
@@ -139,8 +160,27 @@ class ExecutionService implements DisposableBean {
     ReadLiveProbe.Settings probeSettings() {
         String every = probeEvery == null ? "" : probeEvery.trim();
         String dir = probeDir == null ? "" : probeDir.trim();
+        java.util.Set<Long> recorded = recordAccounts();
+        com.autotrade.execution.ReadLiveRecorder recorder = recorded.isEmpty() || brokers == null ? null
+                : new com.autotrade.execution.ReadLiveRecorder(Path.of(brokers.storeDir()).resolve("read-live"), recorded,
+                com.autotrade.execution.ReadLiveRecorder.Limits.DEFAULT, java.time.Clock.systemUTC());
         return new ReadLiveProbe.Settings(every.isEmpty() ? null : java.time.Duration.parse(every),
-                dir.isEmpty() ? null : Path.of(dir));
+                dir.isEmpty() ? null : Path.of(dir), recorder);
+    }
+
+    /**
+     * An account's LIVE connection from this worker's adapter for its broker, behind its LIVE guard with {@code limits}
+     * (null: the adapter offers none, or the worker has not started). The caller closes it. Used only by the canary
+     * (16 Nov 2026, D1), on the user's explicit request; the trading route opens its own through the broker registry.
+     */
+    com.autotrade.execution.BrokerAdapter.Live openLive(com.autotrade.account.BrokerAccount account,
+                                                        com.autotrade.execution.FollowerRisk.LiveLimits limits) {
+        for (com.autotrade.execution.BrokerAdapter a : adapters) {
+            if (a.broker() == account.brokerType()) {
+                return a.live(account, limits);
+            }
+        }
+        return null;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -152,13 +192,17 @@ class ExecutionService implements DisposableBean {
                     + ": start trading-core with this code first (it owns the migrations)");
         }
         CostModel costs = CostModel.from(ThresholdConfig.load(Path.of(properties.costsFile())));
+        adapters = adapters(dataSource, properties.brokerFunds(), kiteSessions, kotakSessions, upstoxSessions,
+                growwSessions, kite == null ? com.autotrade.zerodha.KiteConfig.REAL_API : java.net.URI.create(kite.apiBase()),
+                null, null, probeSettings());
         loop = new ExecutionLoop(dataSource, properties.tenant(), properties.copyGroup(), properties.workerId(), costs,
-                new StoredQuotes(dataSource, null), properties.brokerFunds(), adapters(dataSource,
-                properties.brokerFunds(), kiteSessions, kotakSessions, upstoxSessions, growwSessions,
-                kite == null ? com.autotrade.zerodha.KiteConfig.REAL_API : java.net.URI.create(kite.apiBase()), null,
-                null, probeSettings())).probeOnly(probeAccounts());
+                new StoredQuotes(dataSource, null), properties.brokerFunds(), adapters).probeOnly(probeAccounts());
         if (!probeAccounts().isEmpty()) {
             log.warn("READ_LIVE probe (reads only, no order path) for idle accounts {}", probeAccounts());
+        }
+        if (!recordAccounts().isEmpty()) {
+            log.warn("READ_LIVE recorder: real broker answers of accounts {} saved redacted under {}", recordAccounts(),
+                    brokers == null ? "(no store dir)" : Path.of(brokers.storeDir()).resolve("read-live"));
         }
         log.info("execution worker {} serving copy group {} (tenant {}), every {} ms", properties.workerId(),
                 properties.copyGroup(), properties.tenant(), properties.pollMs());

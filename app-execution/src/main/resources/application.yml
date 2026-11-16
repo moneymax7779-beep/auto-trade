@@ -47,7 +47,7 @@ autotrade:
     # autotrade.trading.exchange-file: a new exchange file version is changed in both places.
     exchange-file: config/exchange/nse-bse-sessions.v3.yaml
     broker-funds: 1000000000         # DRY_RUN in L1: simulated broker funds (L2 reads the broker)
-    # READ_LIVE probe (code review 8 Nov 2026): a Kotak / Upstox / Groww DRY_RUN route on dry_run_market BROKER reads the
+    # READ_LIVE probe (code review 8 Nov 2026; Zerodha too from 16 Nov 2026): a broker's DRY_RUN route on dry_run_market BROKER reads the
     # real session's orders, trades and positions at its open and every `every` (ISO-8601; blank = off), audits a
     # READ_LIVE_PROBE row per account, and saves the answers redacted (no token, sid or keys) under `dir` (blank = none)
     # as material for contract tests. Reads only; a failure never affects trading.
@@ -57,6 +57,17 @@ autotrade:
       # Idle accounts (a DAILY_SWITCH member's real account on a PAPER day) that keep a READ_LIVE probe while they have
       # today's login: account ids, comma-separated; blank = none. Reads only, never an order (user 8 Nov 2026).
       accounts: ${AUTOTRADE_READ_LIVE_PROBE_ACCOUNTS:}
+    # READ_LIVE recorder (16 Nov 2026, D2): for these account ids (comma-separated; blank = none), each distinct answer of
+    # the account's READ_LIVE route (its real session's reads: book, trades, positions, funds) is saved once per endpoint
+    # and IST day, redacted (credentials, the holder's identity, contact, PAN and bank fields), under
+    # <brokers.store-dir>/read-live/<broker>/<yyyy-MM-dd>/<endpoint>-<seq>.json with an index.jsonl, capped per day
+    # (2 MB a body, 40 files an endpoint, 400 files and 100 MB in all). The account needs a READ_LIVE route or probe.
+    read-live-record:
+      accounts: ${AUTOTRADE_READ_LIVE_RECORD_ACCOUNTS:}
+    # The morning canary (16 Nov 2026, D1): POST /api/execution/accounts/{id}/canary, platform admin only, never scheduled.
+    # Its JSON reports go here (blank = <brokers.store-dir>/canary).
+    canary:
+      dir: ${AUTOTRADE_CANARY_DIR:}
     # The daily Kite login (live L3, user go-ahead 24 Oct 2026): the app's key and secret as files in secrets-dir (read
     # only; the credential profile names them file:<name>), the day's access token per account in sessions-dir (owner
     # only), the 08:30 IST login link by Telegram to public-base-url/api/execution/accounts/{id}/kite/login.

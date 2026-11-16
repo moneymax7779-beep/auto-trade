@@ -38,6 +38,8 @@ public final class KiteHttp {
     private final HttpClient client;
     private final JsonMapper json = JsonMapper.builder().build();
     private volatile String accessToken;
+    /** READ_LIVE recorder hook (16 Nov 2026): sees each JSON answer's body, never a header or the token; null = none. */
+    private volatile java.util.function.BiConsumer<String, String> tap;
 
     public KiteHttp(KiteConfig config) {
         this.config = config;
@@ -47,6 +49,15 @@ public final class KiteHttp {
     /** The day's access token (from {@link KiteAuth#exchange}); never logged. */
     public void accessToken(String token) {
         this.accessToken = token;
+    }
+
+    /**
+     * Hears every JSON answer ({@code "GET /orders"} with its query, and the body) after it arrives and before it is
+     * judged: the READ_LIVE recorder's raw record. A tap that fails changes nothing for the call; null = none. The
+     * instrument CSV is not tapped.
+     */
+    public void tap(java.util.function.BiConsumer<String, String> tap) {
+        this.tap = tap;
     }
 
     JsonNode get(String path, Map<String, String> query) {
@@ -119,6 +130,15 @@ public final class KiteHttp {
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new KiteException(Kind.UNKNOWN, "interrupted", 0, "", true, e);
+        }
+        java.util.function.BiConsumer<String, String> t = tap;
+        if (t != null) {
+            try {
+                String q = request.uri().getRawQuery();
+                t.accept(request.method() + " " + request.uri().getRawPath() + (q == null ? "" : "?" + q), response.body());
+            } catch (RuntimeException e) {
+                // the recorder never affects a call
+            }
         }
         JsonNode body;
         try {
