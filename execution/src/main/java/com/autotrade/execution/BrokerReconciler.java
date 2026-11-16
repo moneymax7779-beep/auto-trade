@@ -34,7 +34,8 @@ import com.autotrade.sim.Side;
  *       continue) and is audited with both sides. One check alone is not enough (code review 3 Nov 2026): a stop that
  *       filled since the last turn is booked only after the check, and Kite's positions can lag its order book, so a
  *       normal stop-out or fill would otherwise stop the account's entries for the day. Nothing is flattened
- *       automatically. One difference is booked instead (6 Nov 2026, the second hand exit in two days on ZERODHA-1):
+ *       automatically. A difference a user released today is not engaged again while it stays the same
+ *       ({@link #acceptedToday}, 16 Nov 2026). One difference is booked instead (6 Nov 2026, the second hand exit in two days on ZERODHA-1):
  *       a position of ours the broker no longer holds at all, with none of its stops live at the broker, sold by
  *       sells that are not ours ({@link #bookHandSale}). It closes as a MANUAL exit and the account is not stopped.</li>
  *   <li>{@link #endOfDay}: after the close. The broker's trade book against our fills, contract by contract (bought and
@@ -64,6 +65,9 @@ public final class BrokerReconciler {
     private final Map<Long, Map<String, Instant>> lastDifferences = new java.util.concurrent.ConcurrentHashMap<>();
     /** Review 8 Nov 2026: the last SELLS_CUT audited per account and contract (the same one is not audited again). */
     private final Map<String, String> lastCut = new java.util.concurrent.ConcurrentHashMap<>();
+    /** The last RECONCILIATION_ACCEPTED audited per account (the same one is audited once a day). */
+    private final Map<Long, String> lastAccepted = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final String MANUAL_NOTE = " (not ours: a manual trade?)";
     /** Each account's last check. */
     private final Map<Long, Instant> lastCheck = new java.util.concurrent.ConcurrentHashMap<>();
     /** Our order tags: F, the trade intent, the role letter (FollowerSimulator / BrokerVenue). */
@@ -110,7 +114,7 @@ public final class BrokerReconciler {
                 continue;
             }
             differing.put(key, since);
-            String difference = key + ": ours " + o + ", broker " + t + (o == 0 ? " (not ours: a manual trade?)" : "");
+            String difference = key + ": ours " + o + ", broker " + t + (o == 0 ? MANUAL_NOTE : "");
             differences.add(difference);
             if (again) {
                 repeated.add(difference);
@@ -122,9 +126,45 @@ public final class BrokerReconciler {
             lastDifferences.put(account.id(), differing);
         }
         if (!repeated.isEmpty()) {                                   // a contract that differed last time too
-            kills.engageAccount(account, "RECONCILIATION: " + String.join("; ", differences), "reconciler");
+            java.util.Set<String> accepted = acceptedToday(account);
+            if (repeated.stream().allMatch(d -> accepted.contains(core(d)))) {
+                // 16 Nov 2026: a manual MIS trade in Kite re-engaged the switch seconds after each Release (three times)
+                String said = java.time.LocalDate.now(IST) + " " + repeated;
+                if (!said.equals(lastAccepted.put(account.id(), said))) {
+                    kills.audit(account, "reconciler", "RECONCILIATION_ACCEPTED", Map.of("differences", repeated,
+                            "rule", "released by a user today with this exact difference"));
+                }
+            } else {
+                lastAccepted.remove(account.id());
+                kills.engageAccount(account, "RECONCILIATION: " + String.join("; ", differences.stream()
+                        .filter(d -> !accepted.contains(core(d))).toList()), "reconciler");
+            }
         }
         return new Check(differences.isEmpty(), differences);
+    }
+
+    /**
+     * The differences a user accepted today: those listed by a RECONCILIATION switch of the account that a user (not the
+     * reconciler) released since the start of the IST day. Releasing says "I know: it is my manual trade"; the switch is
+     * not engaged again for the same contract with the same two quantities. A changed quantity on either side, another
+     * contract, or the next day engages it again. Kept in the database, so a restart does not forget a release.
+     */
+    private java.util.Set<String> acceptedToday(BrokerAccount account) {
+        java.util.Set<String> accepted = new java.util.HashSet<>();
+        for (String reason : jdbc.queryForList("select reason from exec.kill_switch where scope = 'ACCOUNT' and "
+                + "broker_account_id = ? and released_at is not null and coalesce(released_by, 'reconciler') <> 'reconciler' "
+                + "and released_at >= (now() at time zone 'Asia/Kolkata')::date::timestamp at time zone 'Asia/Kolkata' "
+                + "and reason like 'RECONCILIATION: %'", String.class, account.id())) {
+            for (String d : reason.substring("RECONCILIATION: ".length()).split("; ")) {
+                accepted.add(core(d));
+            }
+        }
+        return accepted;
+    }
+
+    /** A difference without its "not ours" note: contract and both quantities. */
+    private static String core(String difference) {
+        return difference.replace(MANUAL_NOTE, "").trim();
     }
 
     /**
