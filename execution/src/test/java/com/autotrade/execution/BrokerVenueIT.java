@@ -787,6 +787,41 @@ class BrokerVenueIT {
     }
 
     @Test
+    void aHandNrmlSellOfOurMisHoldingCutsOurStopsAndIsAlertedOnce() throws Exception {
+        // review 16 Nov 2026 (D2): our MIS long sold by hand as NRML. Our product's positions still match (ours 2600,
+        // broker MIS 2600) and the account is not net short, so nothing saw it; our resting stop (or Kite's MIS square-off)
+        // would then leave an NRML short of 2600 overnight
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        brokerFollower().run(s.broker(), s.group(), DAY);              // 2,600 MIS with its stops resting
+        com.autotrade.broker.BrokerOrder handNrml = new com.autotrade.broker.BrokerOrder(null, "HANDNRML1", KEY, SYMBOL,
+                com.autotrade.broker.OrderSide.SELL, com.autotrade.broker.OrderType.LIMIT, 2600, 2600, 90, 90, 0,
+                com.autotrade.broker.OrderStatus.FILLED, "COMPLETE", null, Instant.now(), "NRML");
+        com.autotrade.broker.BrokerConnection split = (com.autotrade.broker.BrokerConnection) java.lang.reflect.Proxy
+                .newProxyInstance(getClass().getClassLoader(), new Class<?>[] {com.autotrade.broker.BrokerConnection.class},
+                        (proxy, m, args) -> {
+                            if (m.getName().equals("orders")) {
+                                List<com.autotrade.broker.BrokerOrder> book = new java.util.ArrayList<>(gateway.orders());
+                                book.add(handNrml);
+                                return book;
+                            }
+                            try {
+                                return m.invoke(gateway, args);
+                            } catch (java.lang.reflect.InvocationTargetException e) {
+                                throw e.getCause();
+                            }
+                        });
+        BrokerReconciler reconciler = new BrokerReconciler(dataSource, costs);
+        assertThat(reconciler.check(s.broker(), split).matched()).as("our product's positions still match").isTrue();
+        assertThat(gateway.orders()).filteredOn(o -> o.clientTag() != null && o.clientTag().matches("F\\d+S.*"))
+                .hasSize(2).allSatisfy(o -> assertThat(o.status()).isEqualTo(com.autotrade.broker.OrderStatus.CANCELLED));
+        reconciler.check(s.broker(), split);
+        assertThat(jdbc.queryForList("select detail::text from exec.audit_log where broker_account_id = ? "
+                + "and action = 'SPLIT_PRODUCT'", String.class, s.broker().id())).as("alerted once").singleElement()
+                .asString().contains("2600 short against our MIS holding");
+    }
+
+    @Test
     void positionsThatLagAFillNeverCutAStop() throws Exception {
         // Kite's positions can lag its order book: a fresh entry not yet in them is no reason to cut its stop
         Setup s = setup(false);

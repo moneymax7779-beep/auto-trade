@@ -31,7 +31,9 @@ import com.autotrade.broker.Quote;
  *       anything else); a modify that would raise a quantity past these is refused the same way.</li>
  * </ul>
  * What is held is read from the broker's own order book (the truth the venue also polls), not from its positions, which
- * can lag a fill by a moment. An order whose tag is already in that book is not sent again. Reads, cancels, polls and
+ * can lag a fill by a moment; across all products it also counts what the account carried into today
+ * ({@link BrokerConnection#carriedIn}, review 16 Nov 2026: an NRML lot carried overnight and sold by hand today netted
+ * out our MIS buy of the same contract, and our exit and stop were refused with nothing said). An order whose tag is already in that book is not sent again. Reads, cancels, polls and
  * updates pass through unchanged: cancelling only ever reduces risk.
  */
 public final class LiveGuard implements BrokerConnection {
@@ -73,7 +75,7 @@ public final class LiveGuard implements BrokerConnection {
                 throw refused("max " + limits.maxOpenPositions() + " contracts held or being bought: " + held);
             }
         } else {
-            long free = free(book, r.instrumentKey(), r.clientOrderId(), product);
+            long free = free(book, r.instrumentKey(), r.clientOrderId(), product, carried());
             if (r.quantity() > free) {
                 throw refused("sell " + r.quantity() + " of " + r.symbol() + " but only " + Math.max(0, free)
                         + " is held and not already being sold (in our product and across products): never short");
@@ -91,7 +93,7 @@ public final class LiveGuard implements BrokerConnection {
             if (o.side() == OrderSide.BUY) {
                 checkBuyQuantity(o.instrumentKey(), quantity);
             } else {
-                long free = free(book, o.instrumentKey(), clientOrderId, product) + o.filledQuantity();
+                long free = free(book, o.instrumentKey(), clientOrderId, product, carried()) + o.filledQuantity();
                 if (quantity > free) {
                     throw refused("modify " + clientOrderId + " to sell " + quantity + " but only " + Math.max(0, free)
                             + " is held: never short");
@@ -128,6 +130,18 @@ public final class LiveGuard implements BrokerConnection {
         }
     }
 
+    /** What the account carried into today (none when it cannot be read now: today's book alone, as before). */
+    private java.util.Map<String, Long> carried() {
+        try {
+            return broker.carriedIn();
+        } catch (BrokerException e) {
+            if (e.kind() == BrokerException.Kind.SESSION) {
+                throw e;
+            }
+            return java.util.Map.of();
+        }
+    }
+
     /**
      * Filled buys less filled sells of a contract in today's book, counting only orders of {@code product} (null: all).
      * 16 Nov 2026: the broker keeps MIS and NRML as separate positions, so an NRML buy by hand does not make an MIS sell
@@ -149,15 +163,24 @@ public final class LiveGuard implements BrokerConnection {
      * sell of our MIS position leaves the account net flat; our MIS stop then selling too would leave an NRML short
      * nobody manages), whichever is less.
      */
-    static long free(List<BrokerOrder> book, String instrumentKey, String except, String product) {
+    static long free(List<BrokerOrder> book, String instrumentKey, String except, String product,
+                     java.util.Map<String, Long> carried) {
         long ours = held(book, instrumentKey, product) - workingSells(book, instrumentKey, except, product);
-        long all = held(book, instrumentKey, null) - workingSells(book, instrumentKey, except, null);
+        long all = heldAll(book, instrumentKey, carried) - workingSells(book, instrumentKey, except, null);
         return Math.min(ours, all);
     }
 
     /** What is held of a contract in our product and across all products, whichever is less. */
-    static long holds(List<BrokerOrder> book, String instrumentKey, String product) {
-        return Math.min(held(book, instrumentKey, product), held(book, instrumentKey, null));
+    static long holds(List<BrokerOrder> book, String instrumentKey, String product, java.util.Map<String, Long> carried) {
+        return Math.min(held(book, instrumentKey, product), heldAll(book, instrumentKey, carried));
+    }
+
+    /**
+     * What the account holds of a contract across all products: what it carried into today plus today's filled buys less
+     * filled sells of every product (a carried short is negative).
+     */
+    static long heldAll(List<BrokerOrder> book, String instrumentKey, java.util.Map<String, Long> carried) {
+        return held(book, instrumentKey, null) + carried.getOrDefault(instrumentKey, 0L);
     }
 
     /** What working sells of a contract (other than {@code except}, of {@code product}; null: all) could still sell. */
@@ -235,6 +258,11 @@ public final class LiveGuard implements BrokerConnection {
     @Override
     public List<BrokerPosition> positions() {
         return broker.positions();
+    }
+
+    @Override
+    public java.util.Map<String, Long> carriedIn() {
+        return broker.carriedIn();
     }
 
     @Override

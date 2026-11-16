@@ -425,6 +425,11 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
         }
 
         @Override
+        public Map<String, Long> carriedIn() {
+            return gateway().carriedIn();
+        }
+
+        @Override
         public int poll() {
             return orderGateway("poll").poll();
         }

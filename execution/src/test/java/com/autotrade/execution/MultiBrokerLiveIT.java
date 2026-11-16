@@ -348,6 +348,22 @@ class MultiBrokerLiveIT {
         }
     }
 
+    /** Review 16 Nov 2026 (D1): what the account carried in reaches the LIVE guard through every layer of the Kite route. */
+    @Test
+    void kiteLiveConnectionPassesWhatWasCarriedIntoTodayToTheGuard() throws Exception {
+        BrokerAccount account = liveAccount(BrokerType.ZERODHA, "AB4322");
+        try (KiteSimulator kite = new KiteSimulator(0, "real-key", "real-secret", 1_500)) {
+            kite.list(new KiteSimulator.Listing(47168, "NFO", "NIFTY26X0323100PE", "NIFTY", DAY.plusDays(2).toString(),
+                    23100, "PE", LOT, 0.05));
+            kite.carried(KEY, LOT);
+            BrokerAdapter.Live live = new ZerodhaDryRunAdapter(dataSource, 1e9,
+                    a -> Optional.of(new BrokerSessions.Access("real-key", "day-token")), kite.baseUri(),
+                    loopbackFor(account)).live(account, ONE_LOT);
+            assertThat(live.connection()).isInstanceOf(LiveGuard.class);
+            assertThat(live.connection().carriedIn()).containsExactlyEntriesOf(Map.of(KEY, (long) LOT));
+        }
+    }
+
     // ------------------------------------------------------------------ Upstox
 
     @Test

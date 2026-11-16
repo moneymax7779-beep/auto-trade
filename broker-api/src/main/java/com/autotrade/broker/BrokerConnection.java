@@ -33,6 +33,16 @@ public interface BrokerConnection extends BrokerGateway, AutoCloseable {
         return null;
     }
 
+    /**
+     * Per contract (our instrument key): the net quantity the account carried into today across every product (overnight
+     * positions; a long is positive, a short negative). Today's order book shows only today's orders, so a holding
+     * "across all products" read from it alone misses a carried NRML position (review 16 Nov 2026). Empty when nothing
+     * is carried or this connection cannot tell; a connection that wraps another must pass it through.
+     */
+    default java.util.Map<String, Long> carriedIn() {
+        return java.util.Map.of();
+    }
+
     /** Our order with this tag in today's book, if the broker has it. */
     default java.util.Optional<BrokerOrder> orderByTag(String clientTag) {
         return orders().stream().filter(o -> clientTag.equals(o.clientTag())).findFirst();

@@ -33,6 +33,7 @@ class LiveGuardTest {
     private final List<BrokerOrder> book = new ArrayList<>();
     private final List<OrderRequest> sent = new ArrayList<>();
     private BrokerException nextRead;                          // the next order-book read fails with this
+    private final java.util.Map<String, Long> carried = new java.util.HashMap<>();   // overnight positions, all products
     private final LiveGuard guard = new LiveGuard(new Book(), new FollowerRisk.LiveLimits(1, 2, Set.of("ma-cross")),
             key -> LOT);
 
@@ -112,7 +113,30 @@ class LiveGuardTest {
         book.add(order(null, CE, OrderSide.SELL, OrderStatus.FILLED, LOT, LOT, "NRML"));
         assertThatThrownBy(() -> guard.place(sell("F5S1", CE, LOT))).isInstanceOf(LiveGuard.Refusal.class)
                 .hasMessageContaining("across products");
-        assertThat(LiveGuard.holds(book, CE, "MIS")).isZero();
+        assertThat(LiveGuard.holds(book, CE, "MIS", java.util.Map.of())).isZero();
+        assertThat(sent).isEmpty();
+    }
+
+    @Test
+    void anNrmlLotCarriedOvernightAndSoldByHandTodayDoesNotBlockOurExit() {
+        // review 16 Nov 2026 (D1): today's book alone showed only the NRML sell, which netted out our MIS buy: our stop
+        // and exit were refused and the position was left to the broker's square-off
+        carried.put(CE, (long) LOT);                                                     // 75 NRML carried in
+        book.add(order(null, CE, OrderSide.SELL, OrderStatus.FILLED, LOT, LOT, "NRML"));  // sold by hand today
+        book.add(order("F6", CE, OrderSide.BUY, OrderStatus.FILLED, LOT, LOT, "MIS"));   // our entry
+        guard.place(sell("F6S1", CE, LOT));
+        assertThat(sent).hasSize(1);
+        assertThat(LiveGuard.holds(book, CE, "MIS", carried)).isEqualTo(LOT);
+        assertThat(LiveGuard.holds(book, CE, "MIS", java.util.Map.of())).as("without the carry: blocked").isZero();
+    }
+
+    @Test
+    void aShortCarriedOvernightStillNeverLetsOurSellsAddToIt() {
+        // the rule stays "never below zero across products": a carried NRML short against our MIS long is the account
+        // already flat; our sell would make it short again
+        carried.put(CE, -(long) LOT);
+        book.add(order("F7", CE, OrderSide.BUY, OrderStatus.FILLED, LOT, LOT, "MIS"));
+        assertThatThrownBy(() -> guard.place(sell("F7S1", CE, LOT))).hasMessageContaining("across products");
         assertThat(sent).isEmpty();
     }
 
@@ -193,6 +217,11 @@ class LiveGuardTest {
         @Override
         public List<BrokerPosition> positions() {
             return List.of();
+        }
+
+        @Override
+        public java.util.Map<String, Long> carriedIn() {
+            return java.util.Map.copyOf(carried);
         }
 
         @Override
