@@ -16,11 +16,11 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
-import com.autotrade.config.ThresholdConfig;
+import com.autotrade.execution.BrokerAdapter;
+import com.autotrade.execution.BrokerRules;
 import com.autotrade.execution.ExecutionLoop;
 import com.autotrade.execution.ReadLiveProbe;
 import com.autotrade.execution.StoredQuotes;
-import com.autotrade.sim.CostModel;
 
 /**
  * Runs the {@link ExecutionLoop} every poll interval and whenever {@link SignalWakeup} hears a new signal decision.
@@ -44,12 +44,25 @@ class ExecutionService implements DisposableBean {
     private final String probeEvery;
     private final String probeDir;
     private final String probeAccounts;
+    /** The broker rules (16 Nov 2026, A1/A3); null only in tests that never start the loop. */
+    private final BrokerRules rules;
+    /** The worker's adapters, one per broker: the loop's, and what {@link BrokerSetup}'s LiveBrokers is built from. */
+    private final List<BrokerAdapter> brokerAdapters;
+    /**
+     * The brokers configured LIVE ({@code autotrade.execution.live-brokers}) with an adapter that offers LIVE: one instance
+     * for the loop's routes and the pages (review 16 Nov 2026: the routes ignored the setting).
+     */
+    private final com.autotrade.execution.LiveBrokers liveBrokers;
+    private final com.autotrade.execution.AccountEgress egress;
+    private final UpstoxDenyList upstoxDenied;
+    private final String recordAccounts;
+    private final BrokerLoginProperties brokers;
     private volatile ExecutionLoop loop;
     private volatile java.time.Instant lastTick;
 
-    /** Tests: no real broker sessions. */
+    /** Tests: no real broker sessions and no broker rules (the loop is not started). */
     ExecutionService(DataSource dataSource, ExecutionProperties properties) {
-        this(dataSource, properties, null, null, null, null, null, null, null, null);
+        this(dataSource, properties, null, null, null, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -61,7 +74,13 @@ class ExecutionService implements DisposableBean {
                      @org.springframework.beans.factory.annotation.Value("${autotrade.execution.read-live-probe.dir:}")
                      String probeDir,
                      @org.springframework.beans.factory.annotation.Value("${autotrade.execution.read-live-probe.accounts:}")
-                     String probeAccounts) {
+                     String probeAccounts,
+                     @org.springframework.beans.factory.annotation.Value("${autotrade.execution.read-live-record.accounts:}")
+                     String recordAccounts,
+                     BrokerLoginProperties brokers, com.autotrade.execution.AccountEgress egress,
+                     UpstoxDenyList upstoxDenied, BrokerRules rules,
+                     @org.springframework.beans.factory.annotation.Value("${autotrade.execution.live-brokers:"
+                             + com.autotrade.execution.LiveBrokers.DEFAULT + "}") String liveBrokerNames) {
         this.dataSource = dataSource;
         this.properties = properties;
         this.kiteSessions = kiteSessions;
@@ -72,11 +91,32 @@ class ExecutionService implements DisposableBean {
         this.probeEvery = probeEvery;
         this.probeDir = probeDir;
         this.probeAccounts = probeAccounts;
+        this.recordAccounts = recordAccounts;
+        this.brokers = brokers;
+        this.egress = egress == null ? com.autotrade.execution.AccountEgress.NONE : egress;
+        this.upstoxDenied = upstoxDenied == null ? UpstoxDenyList.NONE : upstoxDenied;
+        this.rules = rules;
+        this.brokerAdapters = adapters(dataSource, properties.brokerFunds(), kiteSessions, kotakSessions, upstoxSessions,
+                growwSessions, kite == null ? com.autotrade.zerodha.KiteConfig.REAL_API : java.net.URI.create(kite.apiBase()),
+                null, null, probeSettings(), this.egress, this.upstoxDenied, null, null, rules);
+        this.liveBrokers = com.autotrade.execution.LiveBrokers.of(liveBrokerNames == null
+                ? com.autotrade.execution.LiveBrokers.DEFAULT : liveBrokerNames, brokerAdapters);
+    }
+
+    /** The brokers an account may trade LIVE on this worker (the setting, and an adapter that offers LIVE). */
+    com.autotrade.execution.LiveBrokers liveBrokers() {
+        return liveBrokers;
+    }
+
+    /** The worker's broker adapters (one per broker). */
+    List<BrokerAdapter> brokerAdapters() {
+        return brokerAdapters;
     }
 
     /**
      * The worker's adapters, one per broker (8 Nov 2026): Zerodha (DRY_RUN and the LIVE pilot, unchanged), and Kotak Neo,
-     * Upstox and Groww (DRY_RUN only: their {@code live()} is null and they are not in LiveBrokers). Each reads its own
+     * Upstox and Groww (DRY_RUN; their LIVE connections exist since 16 Nov 2026 but they are not in LiveBrokers, and
+     * without an egress address the static-IP gate refuses them). Each reads its own
      * accounts' sessions; Upstox's and Groww's READ_LIVE reads go to {@code upstox} / {@code groww} (their own hosts when
      * null), with the member's own session, never zt-tiger-v2's; a READ_LIVE route's probe runs as {@code probe} says.
      */
@@ -89,6 +129,33 @@ class ExecutionService implements DisposableBean {
                                                                          com.autotrade.upstox.orders.UpstoxConfig upstox,
                                                                          com.autotrade.groww.GrowwConfig groww,
                                                                          ReadLiveProbe.Settings probe) {
+        return adapters(dataSource, brokerFunds, kiteSessions, kotakSessions, upstoxSessions, growwSessions, kiteApiBase,
+                upstox, groww, probe, com.autotrade.execution.AccountEgress.NONE, UpstoxDenyList.NONE, null, null, null);
+    }
+
+    /**
+     * As above, with each account's egress address and the static-IP LIVE gate ({@code egress}, production gaps B1/B2,
+     * 16 Nov 2026: every adapter's real-broker clients of an account leave from its address), the Upstox users never
+     * switched LIVE ({@code upstoxDenied}: zt-tiger-v2's always), the LIVE configs of Upstox and Groww (their own hosts
+     * when null; a simulator in tests), and the Kite product from the broker rules (A1; null rules: the Kite config's
+     * default, MIS; the other adapters' products are checked against the rules at start, {@link BrokerRules#requireProducts}).
+     * Kotak, Upstox and Groww have LIVE connections, reachable only once their adapter offers LIVE and their broker is
+     * configured in LiveBrokers (neither in this build).
+     */
+    static java.util.List<com.autotrade.execution.BrokerAdapter> adapters(DataSource dataSource, double brokerFunds,
+                                                                         KiteSessionSource kiteSessions,
+                                                                         KotakSessionSource kotakSessions,
+                                                                         UpstoxSessionSource upstoxSessions,
+                                                                         GrowwSessionSource growwSessions,
+                                                                         java.net.URI kiteApiBase,
+                                                                         com.autotrade.upstox.orders.UpstoxConfig upstox,
+                                                                         com.autotrade.groww.GrowwConfig groww,
+                                                                         ReadLiveProbe.Settings probe,
+                                                                         com.autotrade.execution.AccountEgress egress,
+                                                                         UpstoxDenyList upstoxDenied,
+                                                                         com.autotrade.upstox.orders.UpstoxConfig upstoxLive,
+                                                                         com.autotrade.groww.GrowwConfig growwLive,
+                                                                         BrokerRules rules) {
         java.util.Map<com.autotrade.account.BrokerType, com.autotrade.execution.BrokerSessions> byBroker =
                 new java.util.EnumMap<>(com.autotrade.account.BrokerType.class);
         if (kiteSessions != null) {
@@ -106,12 +173,17 @@ class ExecutionService implements DisposableBean {
         com.autotrade.execution.BrokerSessions sessions = new BrokerSessionRouter(byBroker);
         com.autotrade.execution.CapturedQuotes captured = new com.autotrade.execution.CapturedQuotes(dataSource);
         return java.util.List.of(
-                new com.autotrade.execution.ZerodhaDryRunAdapter(dataSource, brokerFunds, sessions, kiteApiBase),
-                new com.autotrade.execution.KotakDryRunAdapter(dataSource, brokerFunds, sessions, captured, probe),
+                new com.autotrade.execution.ZerodhaDryRunAdapter(dataSource, brokerFunds, sessions, kiteApiBase,
+                        rules == null ? null : rules.rule(com.autotrade.account.BrokerType.ZERODHA).product(), egress,
+                        probe),
+                new com.autotrade.execution.KotakDryRunAdapter(dataSource, brokerFunds, sessions, captured, probe, egress),
                 new com.autotrade.execution.UpstoxDryRunAdapter(dataSource, brokerFunds, sessions,
-                        upstox == null ? com.autotrade.upstox.orders.UpstoxConfig.real() : upstox, captured, probe),
+                        upstox == null ? com.autotrade.upstox.orders.UpstoxConfig.real() : upstox, captured, probe,
+                        upstoxLive == null ? com.autotrade.upstox.orders.UpstoxConfig.live() : upstoxLive, egress,
+                        upstoxDenied.deniedUserIds()),
                 new com.autotrade.execution.GrowwDryRunAdapter(dataSource, brokerFunds, sessions,
-                        groww == null ? com.autotrade.groww.GrowwConfig.real() : groww, captured, probe));
+                        groww == null ? com.autotrade.groww.GrowwConfig.real() : groww, captured, probe,
+                        growwLive == null ? com.autotrade.groww.GrowwConfig.live() : growwLive, egress));
     }
 
     /**
@@ -123,7 +195,19 @@ class ExecutionService implements DisposableBean {
      * comma-separated; blank = none). Reads only: see ExecutionLoop#probeOnly.
      */
     java.util.Set<Long> probeAccounts() {
-        String ids = probeAccounts == null ? "" : probeAccounts.trim();
+        return ids(probeAccounts);
+    }
+
+    /**
+     * The accounts whose real broker answers are recorded ({@code autotrade.execution.read-live-record.accounts}: ids,
+     * comma-separated; blank = none, the default; 16 Nov 2026, D2), redacted, under {@code <storeDir>/read-live}.
+     */
+    java.util.Set<Long> recordAccounts() {
+        return ids(recordAccounts);
+    }
+
+    private static java.util.Set<Long> ids(String list) {
+        String ids = list == null ? "" : list.trim();
         if (ids.isEmpty()) {
             return java.util.Set.of();
         }
@@ -139,8 +223,27 @@ class ExecutionService implements DisposableBean {
     ReadLiveProbe.Settings probeSettings() {
         String every = probeEvery == null ? "" : probeEvery.trim();
         String dir = probeDir == null ? "" : probeDir.trim();
+        java.util.Set<Long> recorded = recordAccounts();
+        com.autotrade.execution.ReadLiveRecorder recorder = recorded.isEmpty() || brokers == null ? null
+                : new com.autotrade.execution.ReadLiveRecorder(Path.of(brokers.storeDir()).resolve("read-live"), recorded,
+                com.autotrade.execution.ReadLiveRecorder.Limits.DEFAULT, java.time.Clock.systemUTC());
         return new ReadLiveProbe.Settings(every.isEmpty() ? null : java.time.Duration.parse(every),
-                dir.isEmpty() ? null : Path.of(dir));
+                dir.isEmpty() ? null : Path.of(dir), recorder);
+    }
+
+    /**
+     * An account's LIVE connection from this worker's adapter for its broker, behind its LIVE guard with {@code limits}
+     * (null: the adapter offers none, or the worker has not started). The caller closes it. Used only by the canary
+     * (16 Nov 2026, D1), on the user's explicit request; the trading route opens its own through the broker registry.
+     */
+    com.autotrade.execution.BrokerAdapter.Live openLive(com.autotrade.account.BrokerAccount account,
+                                                        com.autotrade.execution.FollowerRisk.LiveLimits limits) {
+        for (com.autotrade.execution.BrokerAdapter a : brokerAdapters) {   // the canary opens LIVE through the loop's adapters
+            if (a.broker() == account.brokerType()) {
+                return a.live(account, limits);
+            }
+        }
+        return null;
     }
 
     @EventListener(ApplicationReadyEvent.class)
@@ -151,14 +254,20 @@ class ExecutionService implements DisposableBean {
             throw new IllegalStateException("schema version " + version + " < " + REQUIRED_SCHEMA
                     + ": start trading-core with this code first (it owns the migrations)");
         }
-        CostModel costs = CostModel.from(ThresholdConfig.load(Path.of(properties.costsFile())));
-        loop = new ExecutionLoop(dataSource, properties.tenant(), properties.copyGroup(), properties.workerId(), costs,
-                new StoredQuotes(dataSource, null), properties.brokerFunds(), adapters(dataSource,
-                properties.brokerFunds(), kiteSessions, kotakSessions, upstoxSessions, growwSessions,
-                kite == null ? com.autotrade.zerodha.KiteConfig.REAL_API : java.net.URI.create(kite.apiBase()), null,
-                null, probeSettings())).probeOnly(probeAccounts());
+        if (rules == null) {
+            throw new IllegalStateException("no broker rules (autotrade.execution.broker-rules-file)");
+        }
+        rules.requireProducts(brokerAdapters);
+        rules.describe().forEach(line -> log.info("broker rules {}: {}", rules.version(), line));
+        loop = new ExecutionLoop(dataSource, properties.tenant(), properties.copyGroup(), properties.workerId(), rules,
+                new StoredQuotes(dataSource, null), properties.brokerFunds(), brokerAdapters).liveBrokers(liveBrokers)
+                .probeOnly(probeAccounts());
         if (!probeAccounts().isEmpty()) {
             log.warn("READ_LIVE probe (reads only, no order path) for idle accounts {}", probeAccounts());
+        }
+        if (!recordAccounts().isEmpty()) {
+            log.warn("READ_LIVE recorder: real broker answers of accounts {} saved redacted under {}", recordAccounts(),
+                    brokers == null ? "(no store dir)" : Path.of(brokers.storeDir()).resolve("read-live"));
         }
         log.info("execution worker {} serving copy group {} (tenant {}), every {} ms", properties.workerId(),
                 properties.copyGroup(), properties.tenant(), properties.pollMs());
@@ -183,15 +292,34 @@ class ExecutionService implements DisposableBean {
     }
 
     /**
-     * 15:20 IST, weekdays (the live set is flat by 15:15; Zerodha squares MIS off from about 15:20): any follower position
-     * still open is flattened without a kill switch (code review 24 Oct 2026: a stopped signal source sends no EXIT).
+     * Every minute from 15:00 to 15:30 IST, weekdays: each broker's follower positions still open are flattened without a
+     * kill switch once its square-off time in the broker rules has come (code review 24 Oct 2026: a stopped signal source
+     * sends no EXIT). 16 Nov 2026 (A1): this was one 15:20 cron ({@code autotrade.execution.square-off-cron}, removed)
+     * for every broker; ZERODHA's time stays 15:20. Each minute's square-off runs on its own thread, so a slow one does
+     * not hold back the next broker's time; a worker started late squares every broker already due at its first minute.
      */
-    @Scheduled(cron = "${autotrade.execution.square-off-cron:0 20 15 * * MON-FRI}", zone = "Asia/Kolkata")
+    @Scheduled(cron = "0 0-30 15 * * MON-FRI", zone = "Asia/Kolkata")
     void squareOff() {
         ExecutionLoop current = loop;
-        if (current != null) {
-            current.squareOff(day()).forEach(line -> log.warn("end-of-day square-off: {}", line));
+        if (current == null) {
+            return;
         }
+        if (lastTick == null) {
+            // review 16 Nov 2026: a worker started in the window has no account leases before its first tick; a broker
+            // marked done now would never be squared off. The next minute's call (to 15:30) catches up.
+            log.warn("end-of-day square-off: the loop has not ticked yet; tried again next minute");
+            return;
+        }
+        LocalDate day = day();
+        // the scheduled minute, not the clock (a cron that fires a few ms early must not move 15:20 to 15:21)
+        java.time.LocalTime now = java.time.LocalTime.now(IST).plusSeconds(2).truncatedTo(java.time.temporal.ChronoUnit.MINUTES);
+        Thread.ofVirtual().name("exec-square-off-due").start(() -> {
+            try {
+                current.squareOffDue(day, now).forEach(line -> log.warn("end-of-day square-off: {}", line));
+            } catch (RuntimeException e) {
+                log.error("end-of-day square-off failed", e);
+            }
+        });
     }
 
     /** After the close (15:45 IST, weekdays): every broker-routed account this worker holds is reconciled. */

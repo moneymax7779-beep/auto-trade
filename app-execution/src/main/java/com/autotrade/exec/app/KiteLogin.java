@@ -84,6 +84,7 @@ class KiteLogin {
     private final SecureRandom random = new SecureRandom();
     private final TelegramNotifier telegram;
     private final TradingDays tradingDays;
+    private final com.autotrade.execution.AccountEgress egress;
     private final com.autotrade.execution.TradingDay tradingDay;
 
     KiteLogin(DataSource dataSource, TransactionTemplate tx, KiteLoginProperties props, TelegramNotifier telegram,
@@ -92,9 +93,19 @@ class KiteLogin {
     }
 
     /** {@code brokers}: the store a member's Kite app keys typed on the Brokers page live in ({@code store:}). */
-    @org.springframework.beans.factory.annotation.Autowired
     KiteLogin(DataSource dataSource, TransactionTemplate tx, KiteLoginProperties props, BrokerLoginProperties brokers,
               TelegramNotifier telegram, TradingDays tradingDays) {
+        this(dataSource, tx, props, brokers, telegram, tradingDays, com.autotrade.execution.AccountEgress.NONE);
+    }
+
+    /**
+     * {@code egress}: the account's source address for the token exchange and the funds check (production gaps B1, 16 Nov
+     * 2026); an account without one (ZERODHA-1) logs in from the default route exactly as before.
+     */
+    @org.springframework.beans.factory.annotation.Autowired
+    KiteLogin(DataSource dataSource, TransactionTemplate tx, KiteLoginProperties props, BrokerLoginProperties brokers,
+              TelegramNotifier telegram, TradingDays tradingDays, com.autotrade.execution.AccountEgress egress) {
+        this.egress = egress == null ? com.autotrade.execution.AccountEgress.NONE : egress;
         this.telegram = telegram;
         this.tradingDays = tradingDays;
         this.tradingDay = new com.autotrade.execution.TradingDay(dataSource);
@@ -153,7 +164,8 @@ class KiteLogin {
                     return new Result(false, account.displayName(), "No Zerodha client id is pinned for this account; "
                             + "nothing was stored.");
                 }
-                KiteConfig config = config(secrets.read(profile.apiKeyRef()));
+                // the account's egress address (null without one: the same config as before 16 Nov 2026)
+                KiteConfig config = config(secrets.read(profile.apiKeyRef())).withEgress(egress.address(account));
                 session = new KiteAuth(config, new KiteHttp(config)).exchange(requestToken, secrets.read(profile.apiSecretRef()));
                 if (!profile.externalUserId().equalsIgnoreCase(session.userId())) {
                     safeAudit(account, p.subject(), "SESSION_LOGIN_WRONG_USER",

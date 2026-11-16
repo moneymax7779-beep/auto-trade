@@ -620,11 +620,14 @@ class KotakGatewayTest {
         gateway.place(buy("F42E1", 260, 100.2));                        // 130 filled, 130 open
         int modifies = sim.requests("modify");
         assertThatThrownBy(() -> gateway.modify("F42E1", 390, 100.2, 0)).satisfies(e -> assertThat(kind(e))
-                .isEqualTo(Kind.TERMINAL)).hasMessageContaining("cancel and re-place");
+                .isEqualTo(Kind.TERMINAL)).hasMessageContaining("cancelled and placed again");
+        // validation 16 Nov 2026: a price-only change sends qt (the total) too, which oversells if Kotak reads the rest
+        assertThatThrownBy(() -> gateway.modify("F42E1", 0, 99.0, 0)).isInstanceOf(com.autotrade.broker.PartlyFilledModifyRefused.class)
+                .satisfies(e -> assertThat(kind(e))
+                .isEqualTo(Kind.TERMINAL));
+        assertThatThrownBy(() -> gateway.modify("F42E1", 260, 98.5, 0)).satisfies(e -> assertThat(kind(e))
+                .isEqualTo(Kind.TERMINAL));
         assertThat(sim.requests("modify")).as("nothing sent").isEqualTo(modifies);
-        gateway.modify("F42E1", 0, 99.0, 0);                            // a price change keeps the quantity: allowed
-        gateway.modify("F42E1", 260, 98.5, 0);                          // the same quantity: allowed
-        assertThat(sim.requests("modify")).isEqualTo(modifies + 2);
     }
 
     @Test

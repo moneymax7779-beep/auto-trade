@@ -26,6 +26,7 @@ import com.autotrade.account.EquityMode;
 import com.autotrade.account.TradeMode;
 import com.autotrade.config.ThresholdConfig;
 import com.autotrade.sim.CostModel;
+import com.autotrade.zerodha.KiteSimulator;
 import com.zaxxer.hikari.HikariConfig;
 import com.zaxxer.hikari.HikariDataSource;
 
@@ -186,7 +187,8 @@ class ExecutionLoopIT {
             assertThat(jdbc.queryForList("select role || ':' || status from exec.order_execution where broker_account_id = ? "
                     + "order by id", String.class, followers[1]))
                     .containsExactly("ENTRY:FILLED", "STOP:CANCELLED", "EMERGENCY_EXIT:FILLED");
-            assertThat(loop.connections().simulator(followers[1]).netQuantities()).containsValue(0L);
+            assertThat(loop.connections().simulator(followers[1], KiteSimulator.class).netQuantities())
+                    .containsValue(0L);
             assertThat(new KillSwitches(dataSource).engaged(accounts.byId(followers[1]).orElseThrow(), "opening-drive",
                     "NSE_FO|47168")).startsWith("ACCOUNT: FLATTEN by kc-bob");
 
@@ -414,7 +416,7 @@ class ExecutionLoopIT {
         try (ExecutionLoop loop = new ExecutionLoop(dataSource, "t-hal", "SET-hal", "worker-H", k.costs(), none, 1e9)) {
             loop.tick(today, 20_000);
             assertThat(loop.status()).extracting(ExecutionLoop.AccountStatus::accountId).contains(k.follower(), other);
-            loop.connections().simulator(k.follower()).expireToken();      // its end-of-day trades read fails (SESSION)
+            loop.connections().simulator(k.follower(), KiteSimulator.class).expireToken();  // its EOD trades read fails
             List<BrokerReconciler.EndOfDay> eod = loop.endOfDay(today);
             assertThat(eod).singleElement().satisfies(d -> assertThat(d.ledger().brokerAccountId()).isEqualTo(other));
             assertThat(jdbc.queryForObject("select count(*) from acct.ledger_day where broker_account_id = ? "
@@ -441,7 +443,8 @@ class ExecutionLoopIT {
                     "EXIT", "TARGET", 3000047168L, "NSE_FO|47168", "NIFTY 23100 PE", 65, 120, 0, 500_000, 20, "erin:exit",
                     Map.of()));
             loop.reconcileNextTurn(k.follower());
-            loop.connections().simulator(k.follower()).failNext("positions", com.autotrade.zerodha.KiteSimulator.Fault.HTTP_500);
+            loop.connections().simulator(k.follower(), KiteSimulator.class).failNext("positions",
+                    KiteSimulator.Fault.HTTP_500);
             loop.tick(today, 20_000);
             assertThat(positionState(k.follower())).isEqualTo("CLOSED:TARGET");
             assertThat(loop.status()).filteredOn(st -> st.accountId() == k.follower()).singleElement()
@@ -461,7 +464,8 @@ class ExecutionLoopIT {
         try (ExecutionLoop loop = new ExecutionLoop(dataSource, "t-fay", "SET-fay", "worker-F", k.costs(), none, 1e9)) {
             loop.tick(today, 20_000);
             assertThat(positionState(k.follower())).isEqualTo("OPEN");
-            loop.connections().simulator(k.follower()).failNext("cancel", com.autotrade.zerodha.KiteSimulator.Fault.HTTP_500);
+            loop.connections().simulator(k.follower(), KiteSimulator.class).failNext("cancel",
+                    KiteSimulator.Fault.HTTP_500);
             assertThat(loop.squareOff(today)).singleElement().asString().contains("NOT flattened");
             assertThat(positionState(k.follower())).isEqualTo("OPEN");
             loop.squareOffRetry(java.time.Duration.ZERO);
@@ -473,6 +477,138 @@ class ExecutionLoopIT {
             Thread.sleep(500);
             assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? "
                     + "and action = 'EOD_SQUARE_OFF'", Integer.class, k.follower())).isEqualTo(2);
+        } finally {
+            jdbc.update("update acct.copy_group set enabled = false where id = ?", k.group());
+        }
+    }
+
+    /** A second ZERODHA DRY_RUN follower of {@code k}'s tenant and group, entered with it at its next tick. */
+    private long secondKiteFollower(Kite k, String name, LocalDate today) {
+        AccountStore accounts = new AccountStore(dataSource);
+        long other = accounts.ensureFollowerAccount(accounts.ensureTenant("t-" + name), accounts.ensureUser("kc-" + name,
+                name), name.toUpperCase() + "2-KITE", BrokerType.ZERODHA, TradeMode.DRY_RUN, 500_000, EquityMode.FIXED,
+                today, "../config/risk/follower-risk.v3.yaml", 100);
+        new FanOut(dataSource).subscribe(k.group(), other, List.of("opening-drive"), 1.0);
+        jdbc.update("update acct.strategy_subscription set enabled_at = now() - interval '1 hour' where copy_group_id = ?",
+                k.group());
+        return other;
+    }
+
+    private static int eodAudits(long follower) {
+        return jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? "
+                + "and action = 'EOD_SQUARE_OFF'", Integer.class, follower);
+    }
+
+    @Test
+    void aSlowAccountDoesNotHoldBackTheOthersSquareOffAndIsRetriedUntilFlat() throws Exception {
+        // validation 16 Nov 2026 (A5): the square-off runs every account at once on its own lane; one stuck broker account
+        // must not keep another from being flattened before the broker's own MIS cut-off
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
+        Kite k = enteredKiteFollower("ivy", today);
+        long slow = secondKiteFollower(k, "ivy", today);
+        QuoteSource none = (d, u, t, at) -> Double.NaN;
+        try (ExecutionLoop loop = new ExecutionLoop(dataSource, "t-ivy", "SET-ivy", "worker-I", k.costs(), none, 1e9)) {
+            loop.tick(today, 20_000);
+            assertThat(positionState(k.follower())).isEqualTo("OPEN");
+            assertThat(positionState(slow)).isEqualTo("OPEN");
+            java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+            loop.onLane(slow, () -> {                                       // its lane is stuck (a broker call hanging)
+                try {
+                    release.await(60, java.util.concurrent.TimeUnit.SECONDS);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            loop.connections().simulator(slow, KiteSimulator.class).failNext("cancel", KiteSimulator.Fault.HTTP_500);
+            java.util.concurrent.CompletableFuture<List<String>> run = java.util.concurrent.CompletableFuture.supplyAsync(
+                    () -> loop.squareOff(today));
+            try {
+                awaitState(k.follower(), "CLOSED:EOD_SQUARE_OFF");
+                assertThat(eodAudits(k.follower())).isEqualTo(1);
+                assertThat(positionState(slow)).as("still waiting for its lane").isEqualTo("OPEN");
+                assertThat(run).as("the square-off waits for the slow account; the fast one did not").isNotDone();
+            } finally {
+                release.countDown();
+            }
+            List<String> lines = run.get(60, java.util.concurrent.TimeUnit.SECONDS);
+            assertThat(lines).anySatisfy(l -> assertThat(l).startsWith("IVY-KITE: ").contains("sold"));
+            assertThat(lines).anySatisfy(l -> assertThat(l).startsWith("IVY2-KITE: ").contains("NOT flattened"));
+            assertThat(positionState(slow)).isEqualTo("OPEN");
+            assertThat(eodAudits(slow)).isEqualTo(1);
+
+            loop.squareOffRetry(java.time.Duration.ZERO);
+            loop.tick(today, 20_000);
+            awaitState(slow, "CLOSED:EOD_SQUARE_OFF");                     // retried off the tick until flat
+            assertThat(eodAudits(slow)).isEqualTo(2);
+            assertThat(eodAudits(k.follower())).as("flat: not squared off again").isEqualTo(1);
+        } finally {
+            jdbc.update("update acct.copy_group set enabled = false where id = ?", k.group());
+        }
+    }
+
+    /**
+     * Broker rules for the test: v1, with PAPER squared off at 15:10 and charged with costs v1 (Rs 20 an order) while
+     * ZERODHA keeps 15:20 and costs v2 (Rs 30).
+     */
+    private static BrokerRules paperEarlyRules() throws java.io.IOException {
+        Path dir = java.nio.file.Files.createTempDirectory("broker-rules");
+        Path file = java.nio.file.Files.createDirectories(dir.resolve("config").resolve("brokers"))
+                .resolve("broker-rules.v1.yaml");
+        String v1 = java.nio.file.Files.readString(Path.of("..", "config", "brokers", "broker-rules.v1.yaml"));
+        String paper = """
+                  PAPER:
+                    square_off: "15:20"
+                    costs_file: config/costs/india-index-options-costs.v2.yaml
+                """;
+        assertThat(v1).contains(paper);
+        String costs = Path.of("..", "config", "costs").toAbsolutePath().normalize() + "/";
+        java.nio.file.Files.writeString(file, v1.replace(paper, paper.replace("15:20", "15:10")
+                .replace("costs.v2", "costs.v1")).replace("config/costs/", costs));
+        return BrokerRules.load(file);
+    }
+
+    @Test
+    void eachBrokersAccountsAreSquaredOffAtItsOwnTimeAndChargedWithItsOwnCosts() throws Exception {
+        // 16 Nov 2026 (A1, A3): one 15:20 square-off and one costs file served every broker
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
+        Kite k = enteredKiteFollower("jo", today);
+        AccountStore accounts = new AccountStore(dataSource);
+        long paper = accounts.ensureFollowerAccount(accounts.ensureTenant("t-jo"), accounts.ensureUser("kc-jo", "jo"),
+                "JO-PAPER", BrokerType.PAPER, TradeMode.PAPER, 500_000, EquityMode.FIXED, today,
+                "../config/risk/follower-risk.v3.yaml", 100);
+        new FanOut(dataSource).subscribe(k.group(), paper, List.of("opening-drive"), 1.0);
+        jdbc.update("update acct.strategy_subscription set enabled_at = now() - interval '1 hour' where copy_group_id = ?",
+                k.group());
+        BrokerRules rules = paperEarlyRules();
+        QuoteSource none = (d, u, t, at) -> Double.NaN;
+        try (ExecutionLoop loop = new ExecutionLoop(dataSource, "t-jo", "SET-jo", "worker-J", rules, none, 1e9,
+                List.of(new ZerodhaDryRunAdapter(dataSource, 1e9)))) {
+            loop.tick(today, 20_000);
+            assertThat(positionState(k.follower())).isEqualTo("OPEN");
+            assertThat(positionState(paper)).isEqualTo("OPEN");
+            Map<String, Object> entry = jdbc.queryForMap("select average_entry, quantity_open, charges from exec.position "
+                    + "where broker_account_id = ?", paper);
+            double price = ((Number) entry.get("average_entry")).doubleValue();
+            long quantity = ((Number) entry.get("quantity_open")).longValue();
+            CostModel v1 = CostModel.from(ThresholdConfig.load(Path.of("..", "config", "costs",
+                    "india-index-options-costs.v1.yaml")));
+            assertThat(((Number) entry.get("charges")).doubleValue()).as("PAPER's costs file (v1), not ZERODHA's (v2)")
+                    .isCloseTo(v1.costs(today, "NSE", com.autotrade.sim.Side.BUY, price, quantity).total(),
+                            org.assertj.core.data.Offset.offset(0.01))
+                    .isNotCloseTo(k.costs().costs(today, "NSE", com.autotrade.sim.Side.BUY, price, quantity).total(),
+                            org.assertj.core.data.Offset.offset(0.01));
+
+            assertThat(loop.squareOffDue(today, java.time.LocalTime.of(15, 9))).isEmpty();
+            assertThat(loop.squareOffDue(today, java.time.LocalTime.of(15, 10))).singleElement().asString()
+                    .startsWith("JO-PAPER: ");
+            assertThat(positionState(paper)).isEqualTo("CLOSED:EOD_SQUARE_OFF");
+            assertThat(positionState(k.follower())).as("ZERODHA's time is 15:20").isEqualTo("OPEN");
+            assertThat(loop.squareOffDue(today, java.time.LocalTime.of(15, 11))).as("once a day per broker").isEmpty();
+            assertThat(loop.squareOffDue(today, java.time.LocalTime.of(15, 20))).singleElement().asString()
+                    .startsWith("JO-KITE: ").contains("sold");
+            assertThat(positionState(k.follower())).isEqualTo("CLOSED:EOD_SQUARE_OFF");
+            assertThat(eodAudits(paper)).isEqualTo(1);
+            assertThat(eodAudits(k.follower())).isEqualTo(1);
         } finally {
             jdbc.update("update acct.copy_group set enabled = false where id = ?", k.group());
         }
@@ -495,7 +631,7 @@ class ExecutionLoopIT {
         QuoteSource none = (d, u, t, at) -> Double.NaN;
         try (ExecutionLoop loop = new ExecutionLoop(dataSource, "t-gus", "SET-gus", "worker-G", k.costs(), none, 1e9)) {
             loop.tick(today, 20_000);
-            loop.connections().simulator(k.follower()).cancelLag(1_000_000);   // its stop's cancel never shows
+            loop.connections().simulator(k.follower(), KiteSimulator.class).cancelLag(1_000_000);  // cancel never shows
             assertThat(loop.squareOff(today)).singleElement().asString().contains("NOT flattened");
             loop.squareOffRetry(java.time.Duration.ZERO);
             long start = System.nanoTime();

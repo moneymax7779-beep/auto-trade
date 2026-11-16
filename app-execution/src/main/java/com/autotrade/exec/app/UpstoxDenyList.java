@@ -3,6 +3,7 @@ package com.autotrade.exec.app;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.stream.Stream;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
@@ -23,9 +24,16 @@ public record UpstoxDenyList(List<String> deniedApiKeys, List<String> deniedUser
     /** Nothing denied (tests). */
     static final UpstoxDenyList NONE = new UpstoxDenyList(List.of(), List.of());
 
+    /**
+     * zt-tiger-v2's own Upstox user: denied whatever the configuration says (validation 16 Nov 2026: a relaxed-binding
+     * variable such as AUTOTRADE_BROKERS_UPSTOX_DENIED_USER_IDS replaces the configured list, so it cannot be left out).
+     */
+    static final String ZT_UPSTOX_USER = "BM6462";
+
     public UpstoxDenyList {
         deniedApiKeys = clean(deniedApiKeys);
-        deniedUserIds = clean(deniedUserIds);
+        deniedUserIds = clean(java.util.stream.Stream.concat(Stream.of(ZT_UPSTOX_USER),
+                deniedUserIds == null ? Stream.<String>empty() : deniedUserIds.stream()).toList());
     }
 
     boolean deniedKey(String apiKey) {

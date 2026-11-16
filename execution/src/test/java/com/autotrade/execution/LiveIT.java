@@ -66,6 +66,8 @@ class LiveIT {
             "10:00"))).atZone(IST).toInstant(), IST);
     private static final String V7 = "../config/risk/follower-risk.v7.yaml";
     private static final String V11 = "../config/risk/follower-risk.v11.yaml";
+    /** The worker's broker rules (16 Nov 2026, A1): ZERODHA's last LIVE entry 15:10, square-off 15:20. */
+    private static final BrokerRules RULES = BrokerRules.load(Path.of("..", "config", "brokers", "broker-rules.v1.yaml"));
     private static final int LOT = 65;
     private static final String[] KEYS = {"NSE_FO|47168", "NSE_FO|47169", "NSE_FO|47170"};
     private static final String[] SYMBOLS = {"NIFTY 23100 PE", "NIFTY 23150 PE", "NIFTY 23200 PE"};
@@ -198,7 +200,7 @@ class LiveIT {
         BrokerConnections.Route route = registry.route(account, risk);
         assertThat(route.venue()).as(route.description()).isNotNull();
         BrokerVenue venue = new BrokerVenue(dataSource, route.connection(), risk.orders().fast(), (k, u) -> 1755L, o -> { });
-        return new FollowerSimulator(dataSource, costs, risk, venue, null).withClock(CLOCK);
+        return new FollowerSimulator(dataSource, costs, risk, venue, null).withBrokerRules(RULES).withClock(CLOCK);
     }
 
     private static String intentState(BrokerAccount a) {
@@ -232,6 +234,42 @@ class LiveIT {
             follower(registry, a).withClock(Clock.fixed(clockAt, IST)).run(a, group, DAY);
         }
         assertThat(intentState(a)).isEqualTo("REJECTED_LATE_ENTRY");
+        assertThat(kite.requests("place")).as("nothing sent").isZero();
+    }
+
+    @Test
+    void theLastLiveEntryIsTheAccountsBrokersAndNoneWithoutTheRules() throws Exception {
+        // 16 Nov 2026 (A1): the last LIVE entry was one 15:10 for every broker; it is now the broker rules' for the
+        // account's broker, and a follower without the rules takes no LIVE entry at all
+        long group = group();
+        BrokerAccount a = account(group, true, "ma-cross");
+        enter(group, signalSession(group), "ma-cross", 0);
+        try (BrokerConnections registry = registry()) {
+            BrokerVenue venue = new BrokerVenue(dataSource, registry.route(a, FollowerRisk.load(Path.of(V7))).connection(),
+                    FollowerRisk.load(Path.of(V7)).orders().fast(), (k, u) -> 1755L, o -> { });
+            new FollowerSimulator(dataSource, costs, FollowerRisk.load(Path.of(V7)), venue, null).withClock(CLOCK)
+                    .run(a, group, DAY);
+        }
+        assertThat(intentState(a)).isEqualTo("REJECTED_NO_BROKER_RULES");
+
+        long group2 = group();
+        BrokerAccount b = account(group2, true, "ma-cross");
+        enter(group2, signalSession(group2), "ma-cross", 0);
+        java.nio.file.Path dir = java.nio.file.Files.createTempDirectory("broker-rules");
+        java.nio.file.Path file = java.nio.file.Files.createDirectories(dir.resolve("config/brokers"))
+                .resolve("broker-rules.v1.yaml");
+        LocalTime clockTime = CLOCK.instant().atZone(IST).toLocalTime().withSecond(0).withNano(0);
+        org.junit.jupiter.api.Assumptions.assumeTrue(clockTime.isBefore(LocalTime.of(15, 10)),
+                "a clock before v1's 15:10, so only the moved last entry refuses");
+        String time = clockTime.toString();                       // ZERODHA's last LIVE entry moved to the clock's minute
+        java.nio.file.Files.writeString(file, java.nio.file.Files.readString(Path.of("..", "config", "brokers",
+                "broker-rules.v1.yaml")).replace("last_live_entry: \"15:10\"", "last_live_entry: \"" + time + "\"")
+                .replace("config/costs/", Path.of("..", "config", "costs").toAbsolutePath().normalize() + "/"));
+        BrokerRules early = BrokerRules.load(file);
+        try (BrokerConnections registry = registry()) {
+            follower(registry, b).withBrokerRules(early).run(b, group2, DAY);
+        }
+        assertThat(intentState(b)).as("ZERODHA's last LIVE entry read from the rules").isEqualTo("REJECTED_LATE_ENTRY");
         assertThat(kite.requests("place")).as("nothing sent").isZero();
     }
 
@@ -628,7 +666,7 @@ class LiveIT {
     private FollowerSimulator liveFollower(LiveGuard guard) {
         FollowerRisk risk = FollowerRisk.load(Path.of(V7));
         return new FollowerSimulator(dataSource, costs, risk, new BrokerVenue(dataSource, guard, risk.orders().fast(),
-                (k, u) -> 1755L, o -> { }), null).withClock(CLOCK);
+                (k, u) -> 1755L, o -> { }), null).withBrokerRules(RULES).withClock(CLOCK);
     }
 
     /** The strategy's EXIT of contract {@code i}, decided now, fanned out. */
@@ -658,6 +696,11 @@ class LiveIT {
 
         HidingStops(com.autotrade.broker.BrokerConnection kite) {
             this.kite = kite;
+        }
+
+        @Override
+        public String product() {
+            return kite.product();
         }
 
         @Override

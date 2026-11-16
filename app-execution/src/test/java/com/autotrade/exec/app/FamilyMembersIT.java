@@ -94,7 +94,7 @@ class FamilyMembersIT {
         KiteLoginProperties props = new KiteLoginProperties(null, null, null, null, null, "/nonexistent/bot.env");
         members = new MembersController(access, dataSource, tx, new KeycloakAdmin(new KeycloakAdminProperties(null, null,
                 null, null)), new TelegramNotifier(props, dataSource));
-        admin = new AccountAdminController(access, dataSource, tx, properties);
+        admin = new AccountAdminController(access, dataSource, tx, properties, TestBrokers.live(dataSource));
         api = new AccountsController(access, dataSource, service);
         status = new StatusController(service, properties, access);
     }

@@ -65,6 +65,8 @@ public final class BrokerReconciler {
     private final Map<Long, Map<String, Instant>> lastDifferences = new java.util.concurrent.ConcurrentHashMap<>();
     /** Review 8 Nov 2026: the last SELLS_CUT audited per account and contract (the same one is not audited again). */
     private final Map<String, String> lastCut = new java.util.concurrent.ConcurrentHashMap<>();
+    /** The last NET_SHORT audited per account and contract (the same one is audited once a day). */
+    private final Map<String, String> lastNetShort = new java.util.concurrent.ConcurrentHashMap<>();
     /** The last RECONCILIATION_ACCEPTED audited per account (the same one is audited once a day). */
     private final Map<Long, String> lastAccepted = new java.util.concurrent.ConcurrentHashMap<>();
     private static final String MANUAL_NOTE = " (not ours: a manual trade?)";
@@ -140,7 +142,47 @@ public final class BrokerReconciler {
                         .filter(d -> !accepted.contains(core(d))).toList()), "reconciler");
             }
         }
+        netShorts(account, books);
         return new Check(differences.isEmpty(), differences);
+    }
+
+    /**
+     * Validation 16 Nov 2026: a contract the day's book shows net short across all products (an NRML sell by hand of a
+     * contract held MIS, then the MIS side sold too: the positions we compare are MIS only, so the difference above never
+     * shows it). The guard refuses any sell of ours that would do it; this alerts on one made another way, once a day per
+     * contract and quantity (audited NET_SHORT; an option short overnight is unbounded risk). Reads only.
+     */
+    private void netShorts(BrokerAccount account, BrokerBooks books) {
+        List<BrokerOrder> book;
+        try {
+            book = books.orders();
+        } catch (com.autotrade.broker.BrokerException e) {
+            if (e.kind() == com.autotrade.broker.BrokerException.Kind.SESSION) {
+                throw e;
+            }
+            return;                                                  // unreadable now: the next check looks again
+        }
+        java.util.Set<String> keys = new java.util.TreeSet<>();
+        for (BrokerOrder o : book) {
+            if (o.instrumentKey() != null && (o.instrumentKey().startsWith("NSE_FO|")
+                    || o.instrumentKey().startsWith("BSE_FO|"))) {
+                keys.add(o.instrumentKey());
+            }
+        }
+        for (String key : keys) {
+            long net = LiveGuard.held(book, key, null);
+            if (net >= 0) {
+                continue;
+            }
+            String said = java.time.LocalDate.now(IST) + " " + net;
+            if (!said.equals(lastNetShort.put(account.id() + ":" + key, said))) {
+                String symbol = book.stream().filter(o -> key.equals(o.instrumentKey())).map(BrokerOrder::symbol)
+                        .findFirst().orElse(key);
+                kills.audit(account, "reconciler", "NET_SHORT", Map.of("contract", key, "symbol", symbol,
+                        "net_quantity", net, "rule", "today's filled buys less sells across all products are below zero: "
+                                + "an option short (check NRML / hand orders at the broker)"));
+            }
+        }
     }
 
     /**
@@ -257,8 +299,9 @@ public final class BrokerReconciler {
      * then booked by {@link #bookHandSale} at the next check (no stop live), or stays a reconciliation difference.
      */
     private void cutOurSells(BrokerAccount account, BrokerConnection broker, BrokerBooks books, String key) {
-        long held = Math.max(0, LiveGuard.held(books.orders(), key));
+        long held = Math.max(0, LiveGuard.holds(books.orders(), key, broker.product()));
         List<BrokerOrder> working = books.orders().stream().filter(o -> key.equals(o.instrumentKey())
+                && o.ofProduct(broker.product())
                 && o.side() == OrderSide.SELL && !o.status().isTerminal() && o.clientTag() != null
                 && OUR_TAG.matcher(o.clientTag()).matches()).toList();
         if (working.stream().mapToLong(o -> o.quantity() - o.filledQuantity()).sum() <= held) {

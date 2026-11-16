@@ -50,8 +50,15 @@ import com.autotrade.kotak.KotakSimulator;
  *       the route opens); a quote never needs the Kotak session. A {@link ReadLiveProbe} reads the real book, trades
  *       and positions at the route's open and every few minutes.</li>
  * </ul>
- * There is no LIVE Kotak connection: {@link #live} returns null, so an account switched LIVE gets no route (and Kotak is
- * not in {@link LiveBrokers#LIVE}). LIVE needs the READ_LIVE sessions, the static IP and the canary of the plan first.
+ * LIVE ({@link #live}, production gaps C1, 16 Nov 2026; built and tested against the simulator, not reachable while Kotak
+ * is not in {@link LiveBrokers}): the same session read on every call, orders to Kotak through
+ * {@link KotakConfig#live} (the only config whose gateway sends to Kotak), behind a {@link LiveGuard} with the risk file's
+ * {@code live} limits and the lot size of today's checked scrip master. Only from the account's own egress address
+ * ({@link AccountEgress}; Kotak's session must be created from, and its orders sent from, the client's registered IP):
+ * without one the static-IP gate refuses it. A login during the day (a new token, sid, base URL or consumer key) never
+ * rebuilds the gateway: it swaps the session's client in ({@link KotakGateway#swap}), so the listeners, the tags already
+ * placed and the last report of each order stay, and a fill of an order placed before the login still reaches the venue.
+ * LIVE needs the READ_LIVE sessions, the static IP and the canary of the plan first.
  */
 public final class KotakDryRunAdapter implements BrokerAdapter {
 
@@ -67,6 +74,7 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
     private final BrokerSessions sessions;
     private final Function<String, Quote> liveQuotes;
     private final ReadLiveProbe.Settings probe;
+    private final AccountEgress egress;
     private final DailyScripMaster scripMaster = new DailyScripMaster();
 
     public KotakDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds) {
@@ -87,11 +95,23 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
     /** @param probe how often a READ_LIVE route's {@link ReadLiveProbe} reads the real books, and where it saves them */
     public KotakDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
                               Function<String, Quote> liveQuotes, ReadLiveProbe.Settings probe) {
+        this(dataSource, simulatedBrokerFunds, sessions, liveQuotes, probe, AccountEgress.NONE);
+    }
+
+    /** @param egress the accounts' source addresses and the static-IP LIVE gate (production gaps B1/B2) */
+    public KotakDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
+                              Function<String, Quote> liveQuotes, ReadLiveProbe.Settings probe, AccountEgress egress) {
         this.dataSource = dataSource;
         this.simulatedBrokerFunds = simulatedBrokerFunds;
         this.sessions = sessions;
         this.liveQuotes = liveQuotes;
         this.probe = probe == null ? ReadLiveProbe.Settings.OFF : probe;
+        this.egress = egress == null ? AccountEgress.NONE : egress;
+    }
+
+    @Override
+    public String egressRefusal(BrokerAccount account) {
+        return egress.refusal(account);
     }
 
     @Override
@@ -99,15 +119,36 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
         return BrokerType.KOTAK_NEO;
     }
 
+    /**
+     * The product of our Kotak orders: what its gateway configs carry ({@link KotakConfig#session} and
+     * {@link KotakConfig#simulator}: MIS); checked against the broker rules at the worker's start (16 Nov 2026, A1).
+     */
+    @Override
+    public String product() {
+        return KotakConfig.simulator(java.net.URI.create("http://127.0.0.1")).product();
+    }
+
     @Override
     public DryRun dryRun(BrokerAccount account, OrderRules rules) throws IOException {
         return rules.brokerMarket() ? brokerMarket(account) : storedMarket(account);
     }
 
-    /** No LIVE Kotak connection in this build (8 Nov 2026: DRY_RUN only, its gates first). */
+    /**
+     * The LIVE Kotak connection (production gaps C1, 16 Nov 2026), behind its {@link LiveGuard}; refused without the
+     * account's verified egress address (B2: Kotak takes the session and orders only from the registered IP).
+     */
     @Override
     public Live live(BrokerAccount account, FollowerRisk.LiveLimits limits) {
-        return null;
+        String refusal = egress.liveRefusal(account);
+        if (refusal != null) {
+            return Live.refused(refusal);
+        }
+        KotakSession kotak = new KotakSession(account, true);
+        Thread.ofVirtual().name("kotak-live-warmup-" + account.id()).start(kotak::warmUp);  // the scrip master, off orders
+        return new Live(new LiveGuard(kotak, limits, kotak::lotSize), "LIVE: Kotak Neo (the session's base URL) from "
+                + egress.configured(account.id()).map(java.net.InetAddress::getHostAddress).orElse("the default route")
+                + ", product MIS, at most " + limits.maxLotsPerOrder() + " lot(s) a buy and " + limits.maxOpenPositions()
+                + " contracts, book from our live capture");
     }
 
     private DryRun storedMarket(BrokerAccount account) throws IOException {
@@ -127,7 +168,7 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
 
     private DryRun brokerMarket(BrokerAccount account) throws IOException {
         KotakSimulator sim = new KotakSimulator(0, "sim-consumer-key", 3_000);
-        KotakReads reads = null;
+        KotakSession reads = null;
         ReadLiveProbe readProbe = null;
         try {
             sim.funds(UNLIMITED_FUNDS);
@@ -135,8 +176,8 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
             KotakGateway simulator = simulatorGateway(sim, simInstruments);
             Market listings = new Market(sim, simInstruments, dataSource);
             seedHoldings(account, sim, listings);
-            reads = new KotakReads(account);
-            KotakReads r = reads;
+            reads = new KotakSession(account, false);
+            KotakSession r = reads;
             readProbe = new ReadLiveProbe(dataSource, account, "KOTAK_NEO", reads, KotakGateway::knownStatus, probe,
                     () -> secrets(account));
             reads.tap(readProbe.tap());
@@ -202,7 +243,7 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
      * Kotak's checked scrip master names it, when the simulator does not have it (not in the checked list = refused);
      * what our simulated fills took in the last {@link ZerodhaDryRunAdapter#TAKEN_MEMORY} is taken off the levels.
      */
-    private static Quote book(Quote q, KotakReads reads, KotakSimulator sim, KotakInstruments simInstruments) {
+    private static Quote book(Quote q, KotakSession reads, KotakSimulator sim, KotakInstruments simInstruments) {
         String key = q.instrumentKey();
         if (sim.byKey(key) == null) {
             KotakInstruments.Contract c = reads.contract(key);
@@ -250,16 +291,27 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
     }
 
     /**
-     * The account's real Kotak session, read only: the consumer key, trade token, sid and base URL are looked up on every
-     * call (a login during the day takes effect at once; none = {@link Kind#SESSION}); the day's scrip master is checked
-     * against our contract master once a day, outside the session's lock (the route's thread warms it up). Quotes come
-     * from {@code liveQuotes}, never from Kotak, and need no session. Order calls are not offered (and
-     * {@link ReadLiveConnection} refuses them as well).
+     * The account's real Kotak session: the consumer key, trade token, sid and base URL are looked up on every call (a
+     * login during the day takes effect at once; none = {@link Kind#SESSION}), and every call leaves from the account's
+     * egress address (checked on every call: not on this host = SESSION, never the default route); the day's scrip master
+     * is checked against our contract master once a day, outside the session's lock (the route's thread warms it up).
+     * Quotes come from {@code liveQuotes}, never from Kotak, and need no session.
+     * <ul>
+     *   <li>Reads ({@code orders} false, READ_LIVE): a read config ({@link KotakConfig#session}); order calls are not
+     *       offered (and {@link ReadLiveConnection} and the gateway refuse them as well).</li>
+     *   <li>LIVE ({@code orders} true, production gaps C1): {@link KotakConfig#live}; order calls go to Kotak, always
+     *       behind the {@link LiveGuard} that {@link #live} puts in front.</li>
+     * </ul>
+     * One gateway for the session's whole life: a new base URL or consumer key swaps the client in
+     * ({@link KotakGateway#swap}) and retires the old one after its calls in flight end (16 Nov 2026; it was rebuilt, and
+     * the listeners, placed tags and last reports were lost).
      */
-    private final class KotakReads implements BrokerConnection {
+    private final class KotakSession implements BrokerConnection {
 
         private final BrokerAccount account;
+        private final boolean orders;
         private final KotakInstruments instruments = new KotakInstruments(List.of());
+        private final List<Consumer<OrderUpdate>> listeners = new java.util.concurrent.CopyOnWriteArrayList<>();
         private final Object dayLock = new Object();
         private String consumerKey;
         private URI baseUrl;
@@ -269,8 +321,9 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
         private LocalDate loadedDay;
         private Instant lastAttempt = Instant.EPOCH;
 
-        KotakReads(BrokerAccount account) {
+        KotakSession(BrokerAccount account, boolean orders) {
             this.account = account;
+            this.orders = orders;
         }
 
         void tap(java.util.function.BiConsumer<String, String> tap) {
@@ -283,6 +336,13 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
             loadToday(h);
             return instruments.byInstrumentKey(key).orElseThrow(() -> new BrokerException(Kind.TERMINAL, "instrument "
                     + key + " is not in Kotak's checked scrip master"));
+        }
+
+        /** The contract's lot size in today's checked scrip master, 0 when it is not there (the LIVE guard refuses). */
+        int lotSize(String instrumentKey) {
+            KotakHttp h = session();
+            loadToday(h);
+            return instruments.byInstrumentKey(instrumentKey).map(KotakInstruments.Contract::lotSize).orElse(0);
         }
 
         /** The route's first work, on its own thread: today's scrip master, so no order waits for the download. */
@@ -298,6 +358,17 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
         /** The gateway with today's session (no download here: the lock is held only to swap the session). */
         private KotakGateway gateway() {
             session();
+            synchronized (this) {
+                return gateway;
+            }
+        }
+
+        /** The gateway for an order call: LIVE only, with today's checked list (an exit of a contract needs it too). */
+        private KotakGateway orderGateway(String call) {
+            if (!orders) {
+                throw refused(call);
+            }
+            loadToday(session());
             synchronized (this) {
                 return gateway;
             }
@@ -321,9 +392,10 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
                 throw new BrokerException(Kind.SESSION, "the Kotak session of " + account.displayName()
                         + " names a base URL that is not Kotak's: log in again");
             }
+            java.net.InetAddress from = egress.address(account);        // on this host, or SESSION: nothing is sent
             String key = access.apiKey() == null ? "" : access.apiKey();
             if (gateway == null || !uri.equals(baseUrl) || !key.equals(consumerKey)) {
-                KotakConfig config = KotakConfig.session(key, uri);
+                KotakConfig config = orders ? KotakConfig.live(key, uri, from) : KotakConfig.session(key, uri, from);
                 KotakHttp old = http;
                 http = new KotakHttp(config);
                 http.tap((call, body) -> {
@@ -332,11 +404,18 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
                         t.accept(call, body);
                     }
                 });
-                gateway = new KotakGateway(config, http, instruments, liveQuotes);
+                if (gateway == null) {
+                    gateway = new KotakGateway(config, http, instruments, liveQuotes);
+                    listeners.forEach(gateway::onUpdate);
+                } else {
+                    gateway.swap(config, http);                         // listeners, placed tags, last reports stay
+                    log.info("account {} ({}): Kotak session moved to a new base URL or consumer key; the gateway's "
+                            + "orders and listeners are kept", account.id(), account.displayName());
+                }
                 baseUrl = uri;
                 consumerKey = key;
                 if (old != null) {
-                    old.close();                                        // the old base URL's client: never used again
+                    old.retire();                       // the old base URL's client: its calls in flight end, then it stops
                 }
             }
             http.session(access.accessToken(), sid);
@@ -395,6 +474,12 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
             return "KOTAK_NEO";
         }
 
+        /** Every order of ours is MIS (both configs); a hand order of another product is not counted as held. */
+        @Override
+        public String product() {
+            return "MIS";
+        }
+
         @Override
         public BrokerCapabilities capabilities() {
             return gateway().capabilities();
@@ -432,31 +517,39 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
 
         @Override
         public int poll() {
-            throw refused("poll");
+            return orderGateway("poll").poll();
         }
 
         @Override
         public void onUpdate(Consumer<OrderUpdate> listener) {
-            throw refused("onUpdate");
+            if (!orders) {
+                throw refused("onUpdate");
+            }
+            listeners.add(listener);
+            synchronized (this) {
+                if (gateway != null) {
+                    gateway.onUpdate(listener);
+                }
+            }
         }
 
         @Override
         public void place(OrderRequest request) {
-            throw refused("place");
+            orderGateway("place").place(request);
         }
 
         @Override
         public void modify(String clientOrderId, long quantity, double limitPrice, double triggerPrice) {
-            throw refused("modify");
+            orderGateway("modify").modify(clientOrderId, quantity, limitPrice, triggerPrice);
         }
 
         @Override
         public void cancel(String clientOrderId) {
-            throw refused("cancel");
+            orderGateway("cancel").cancel(clientOrderId);
         }
 
         private IllegalStateException refused(String call) {
-            return new IllegalStateException(call + " not offered: Kotak has no LIVE connection in this build (reads only)");
+            return new IllegalStateException(call + " not offered: a READ_LIVE Kotak connection (reads only)");
         }
     }
 

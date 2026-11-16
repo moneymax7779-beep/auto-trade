@@ -329,7 +329,9 @@ class UpstoxReadLiveIT {
 
     @Test
     void anUpstoxAccountSwitchedLiveGetsNoLiveRouteAndNothingIsSent() {
-        assertThat(LiveBrokers.live(BrokerType.UPSTOX)).as("Upstox is not in the LIVE set").isFalse();
+        assertThat(LiveBrokers.of("ZERODHA,UPSTOX", java.util.List.of(new ZerodhaDryRunAdapter(dataSource, 1e9),
+                new UpstoxDryRunAdapter(dataSource, 1e9))).live(BrokerType.UPSTOX))
+                .as("Upstox is configured LIVE here, but its adapter offers no LIVE connection").isFalse();
         AccountStore accounts = new AccountStore(dataSource);
         long tenant = accounts.ensureTenant("owner");
         long owner = accounts.ensureUser("uc-owner", "owner");
@@ -345,14 +347,16 @@ class UpstoxReadLiveIT {
         assertThat(v7.live()).as("a risk file with live limits: only the adapter can refuse").isNotNull();
         BrokerSessions sessions = a -> session.get();
         UpstoxDryRunAdapter adapter = new UpstoxDryRunAdapter(dataSource, 1e9, sessions, UpstoxConfig.at(upstox.baseUri()));
-        assertThat(adapter.live(live, v7.live())).as("no LIVE Upstox connection in this build").isNull();
+        assertThat(adapter.live(live, v7.live()).description())
+                .as("16 Nov 2026: no LIVE Upstox without the account's static IP").contains("registered static IP");
         try (BrokerConnections registry = new BrokerConnections(dataSource, 1e9, List.of(
                 new ZerodhaDryRunAdapter(dataSource, 1e9, sessions, upstox.baseUri()),
                 new KotakDryRunAdapter(dataSource, 1e9, sessions), adapter))) {
             BrokerConnections.Route route = registry.route(live, v7);
             assertThat(route.venue()).isNull();
             assertThat(route.connection()).isNull();
-            assertThat(route.description()).isEqualTo("LIVE refused: no LIVE adapter for UPSTOX");
+            assertThat(route.description()).as("16 Nov 2026: its LIVE connection exists but is unreachable")
+                    .isEqualTo("LIVE refused: UPSTOX is not a LIVE broker yet");
         }
         assertThat(upstox.requests()).as("nothing reached Upstox").isZero();
     }

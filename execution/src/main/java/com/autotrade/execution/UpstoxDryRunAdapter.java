@@ -7,6 +7,7 @@ import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.Consumer;
 import java.util.function.Function;
 
@@ -48,8 +49,16 @@ import com.autotrade.upstox.orders.UpstoxSimulator;
  *       go only to the simulator: the real connection is read-only ({@link ReadLiveConnection}), and the gateway itself
  *       refuses any order call to Upstox's host.</li>
  * </ul>
- * There is no LIVE Upstox connection: {@link #live} returns null, so an account switched LIVE gets no route (and Upstox is
- * not in {@link LiveBrokers#LIVE}). LIVE needs the READ_LIVE sessions, the static IP and the canary of the plan first.
+ * LIVE ({@link #live}, production gaps C1, 16 Nov 2026; built and tested against the simulator, not reachable while
+ * Upstox is not in {@link LiveBrokers}): the member's own session read on every call, orders to Upstox through the
+ * LIVE config ({@link UpstoxConfig#live}, the only one besides a simulator's whose gateway sends), behind a
+ * {@link LiveGuard} with the risk file's {@code live} limits and the lot size of today's checked instrument file; one
+ * gateway for the route's life (a new token is set on it, never a new gateway), so its listeners, placed tags and last
+ * reports survive a login during the day. Only from the account's own egress address ({@link AccountEgress}; Upstox
+ * takes orders only from the user's registered IP), and never for zt-tiger-v2's Upstox user ({@link #ZT_UPSTOX_USER}:
+ * registering a static IP for it would log zt out) or another denied user. The order budget is the Upstox user's,
+ * shared by every gateway of that user. LIVE needs the READ_LIVE sessions, the static IP and the canary of the plan
+ * first.
  */
 public final class UpstoxDryRunAdapter implements BrokerAdapter {
 
@@ -63,8 +72,17 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
     private final BrokerSessions sessions;
     private final UpstoxConfig upstox;
     private final Function<String, Quote> liveQuotes;
-    private final DailyFile files;
+    private final DailyFile files = new DailyFile();
     private final ReadLiveProbe.Settings probe;
+    private final UpstoxConfig liveConfig;
+    private final AccountEgress egress;
+    private final Set<String> deniedUsers;
+
+    /**
+     * zt-tiger-v2's Upstox user: never a LIVE account here, whatever the configuration (as UpstoxDenyList in the app;
+     * enforced again at {@link #live}, 16 Nov 2026).
+     */
+    public static final String ZT_UPSTOX_USER = "BM6462";
 
     public UpstoxDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds) {
         this(dataSource, simulatedBrokerFunds, BrokerSessions.NONE);
@@ -90,13 +108,45 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
     /** @param probe how often a READ_LIVE route's {@link ReadLiveProbe} reads the real books, and where it saves them */
     public UpstoxDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
                                UpstoxConfig upstox, Function<String, Quote> liveQuotes, ReadLiveProbe.Settings probe) {
+        this(dataSource, simulatedBrokerFunds, sessions, upstox, liveQuotes, probe, UpstoxConfig.live(),
+                AccountEgress.NONE, Set.of());
+    }
+
+    /**
+     * @param liveConfig  the LIVE connection's config ({@link UpstoxConfig#live}; {@link UpstoxConfig#liveSimulator} in
+     *                    the LIVE-against-simulator tests); must be of the LIVE kind
+     * @param egress      the accounts' source addresses and the static-IP LIVE gate (production gaps B1/B2)
+     * @param deniedUsers Upstox users never switched LIVE here (UpstoxDenyList's; {@link #ZT_UPSTOX_USER} always)
+     */
+    public UpstoxDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
+                               UpstoxConfig upstox, Function<String, Quote> liveQuotes, ReadLiveProbe.Settings probe,
+                               UpstoxConfig liveConfig, AccountEgress egress, java.util.Collection<String> deniedUsers) {
+        if (liveConfig == null || !liveConfig.isLive()) {
+            throw new IllegalArgumentException("the Upstox LIVE connection takes a LIVE config (UpstoxConfig.live)");
+        }
+        if (upstox.ordersAllowed()) {
+            throw new IllegalArgumentException("the READ_LIVE reads take a read-only config (UpstoxConfig.real or at)");
+        }
         this.probe = probe == null ? ReadLiveProbe.Settings.OFF : probe;
         this.dataSource = dataSource;
         this.simulatedBrokerFunds = simulatedBrokerFunds;
         this.sessions = sessions;
         this.upstox = upstox;
         this.liveQuotes = liveQuotes;
-        this.files = new DailyFile(new UpstoxHttp(upstox));         // no session: the files are public
+        this.liveConfig = liveConfig;
+        this.egress = egress == null ? AccountEgress.NONE : egress;
+        Set<String> denied = new java.util.TreeSet<>();
+        denied.add(ZT_UPSTOX_USER);
+        if (deniedUsers != null) {
+            deniedUsers.stream().filter(java.util.Objects::nonNull).map(u -> u.trim().toUpperCase(java.util.Locale.ROOT))
+                    .filter(u -> !u.isEmpty()).forEach(denied::add);
+        }
+        this.deniedUsers = Set.copyOf(denied);
+    }
+
+    @Override
+    public String egressRefusal(BrokerAccount account) {
+        return egress.refusal(account);
     }
 
     @Override
@@ -104,15 +154,54 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
         return BrokerType.UPSTOX;
     }
 
+    /**
+     * The product of our Upstox orders: its config's ({@link UpstoxConfig#INTRADAY}, I, for the reads and the simulator);
+     * checked against the broker rules at the worker's start (16 Nov 2026, A1).
+     */
+    @Override
+    public String product() {
+        return upstox.product();
+    }
+
     @Override
     public DryRun dryRun(BrokerAccount account, OrderRules rules) throws IOException {
         return rules.brokerMarket() ? brokerMarket(account) : storedMarket(account);
     }
 
-    /** No LIVE Upstox connection in this build (8 Nov 2026: DRY_RUN only, its gates first). */
+    /**
+     * The LIVE Upstox connection (production gaps C1, 16 Nov 2026), behind its {@link LiveGuard}. Refused: without the
+     * account's verified egress address (B2), without an Upstox client pinned on the account, and for a denied Upstox
+     * user (zt-tiger-v2's, always).
+     */
     @Override
     public Live live(BrokerAccount account, FollowerRisk.LiveLimits limits) {
-        return null;
+        String refusal = egress.liveRefusal(account);
+        if (refusal != null) {
+            return Live.refused(refusal);
+        }
+        String user = pinnedUser(account);
+        if (user == null) {
+            return Live.refused(account.displayName() + " has no Upstox client pinned (log in once first)");
+        }
+        if (deniedUsers.contains(user.trim().toUpperCase(java.util.Locale.ROOT))) {
+            log.error("account {} ({}): LIVE refused: a denied Upstox user (zt-tiger-v2's or configured)", account.id(),
+                    account.displayName());
+            return Live.refused("Upstox client " + user + " is never traded LIVE here (zt-tiger-v2's or denied)");
+        }
+        UpstoxSession upstoxLive = new UpstoxSession(account, liveConfig, user);
+        Thread.ofVirtual().name("upstox-live-warmup-" + account.id()).start(upstoxLive::warmUp);   // off the orders
+        return new Live(new LiveGuard(upstoxLive, limits, upstoxLive::lotSize), "LIVE: Upstox "
+                + liveConfig.orderBase().getHost() + " from " + egress.configured(account.id())
+                .map(java.net.InetAddress::getHostAddress).orElse("the default route") + ", product "
+                + liveConfig.product() + ", at most " + limits.maxLotsPerOrder() + " lot(s) a buy and "
+                + limits.maxOpenPositions() + " contracts, book from our live capture");
+    }
+
+    /** The Upstox client (UCC) pinned on the account (the login and the session source check the session against it). */
+    private String pinnedUser(BrokerAccount account) {
+        List<String> user = new JdbcTemplate(dataSource).queryForList("select external_broker_user_id from "
+                + "acct.broker_account where id = ?", String.class, account.id());
+        return user.isEmpty() || user.getFirst() == null || user.getFirst().isBlank() ? null : user.getFirst().trim();
     }
 
     private DryRun storedMarket(BrokerAccount account) throws IOException {
@@ -132,7 +221,7 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
 
     private DryRun brokerMarket(BrokerAccount account) throws IOException {
         UpstoxSimulator sim = new UpstoxSimulator(0, 3_000);
-        UpstoxReads reads = null;
+        UpstoxSession reads = null;
         ReadLiveProbe readProbe = null;
         try {
             sim.funds(UNLIMITED_FUNDS);
@@ -140,8 +229,8 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
             UpstoxGateway simulator = simulatorGateway(sim, simInstruments);
             Market listings = new Market(sim, simInstruments, dataSource);
             seedHoldings(account, sim, listings);
-            reads = new UpstoxReads(account);
-            UpstoxReads r = reads;
+            reads = new UpstoxSession(account, upstox, null);
+            UpstoxSession r = reads;
             readProbe = new ReadLiveProbe(dataSource, account, "UPSTOX", reads, UpstoxGateway::knownStatus, probe,
                     () -> sessions.access(account).map(a -> java.util.Arrays.asList(a.apiKey(), a.accessToken()))
                             .orElse(List.of()));
@@ -197,7 +286,7 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
      * Upstox's checked instrument file has it, when the simulator does not have it (not in the checked list = refused);
      * what our simulated fills took in the last {@link ZerodhaDryRunAdapter#TAKEN_MEMORY} is taken off the levels.
      */
-    private static Quote book(Quote q, UpstoxReads reads, UpstoxSimulator sim, UpstoxInstruments simInstruments) {
+    private static Quote book(Quote q, UpstoxSession reads, UpstoxSimulator sim, UpstoxInstruments simInstruments) {
         String key = q.instrumentKey();
         if (sim.byKey(key) == null) {
             UpstoxInstruments.Contract c = reads.contract(key);
@@ -221,20 +310,17 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
 
     /**
      * Upstox's instrument files of the day, read once for every account of this worker (they are public and the same for
-     * everyone; tens of MB): a failure is retried after a minute, and yesterday's list is never served.
+     * everyone; tens of MB) by whichever account first needs them, through that account's own client (its egress
+     * address, production gaps B1; the files are fetched without the token): a failure is retried after a minute, and
+     * yesterday's list is never served.
      */
     private static final class DailyFile {
 
-        private final UpstoxHttp http;
         private LocalDate day;
         private List<UpstoxInstruments.Contract> contracts = List.of();
         private Instant lastAttempt = Instant.EPOCH;
 
-        DailyFile(UpstoxHttp http) {
-            this.http = http;
-        }
-
-        synchronized List<UpstoxInstruments.Contract> today(LocalDate today) throws IOException {
+        synchronized List<UpstoxInstruments.Contract> today(LocalDate today, UpstoxHttp http) throws IOException {
             if (today.equals(day)) {
                 return contracts;
             }
@@ -249,23 +335,37 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
     }
 
     /**
-     * The account's real Upstox session, read only: the bearer token is looked up on every call (a login during the day
-     * takes effect at once; none = {@link Kind#SESSION}); the day's instrument file is checked against our contract master
-     * for this account once a day. Quotes come from {@code liveQuotes}, never from Upstox. Order calls are not offered
-     * (and {@link ReadLiveConnection} and the gateway refuse them as well).
+     * The account's real Upstox session: the bearer token is looked up on every call (a login during the day takes effect
+     * at once; none = {@link Kind#SESSION}) and set on the one gateway this session keeps for its life, so its listeners,
+     * placed tags and last reports survive a new login; every call leaves from the account's egress address (checked on
+     * every call: not on this host = SESSION). The day's instrument file is checked against our contract master for this
+     * account once a day. Quotes come from {@code liveQuotes}, never from Upstox.
+     * <ul>
+     *   <li>Reads (a read config, READ_LIVE): order calls are not offered (and {@link ReadLiveConnection} and the gateway
+     *       refuse them as well).</li>
+     *   <li>LIVE (the LIVE config, production gaps C1): order calls go to Upstox, always behind the {@link LiveGuard}
+     *       that {@link #live} puts in front, on the Upstox user's shared order budget.</li>
+     * </ul>
      */
-    private final class UpstoxReads implements BrokerConnection {
+    private final class UpstoxSession implements BrokerConnection {
 
         private final BrokerAccount account;
+        private final boolean orders;
         private final UpstoxInstruments instruments = new UpstoxInstruments(List.of());
-        private final UpstoxHttp http = new UpstoxHttp(upstox);
-        private final UpstoxGateway gateway = new UpstoxGateway(upstox, http, instruments, liveQuotes);
+        private final UpstoxHttp http;
+        private final UpstoxGateway gateway;
         private final Object dayLock = new Object();
         private LocalDate loadedDay;
         private Instant lastAttempt = Instant.EPOCH;
 
-        UpstoxReads(BrokerAccount account) {
+        /** @param user the pinned Upstox client (LIVE: its order budget); null for reads */
+        UpstoxSession(BrokerAccount account, UpstoxConfig config, String user) {
             this.account = account;
+            this.orders = config.isLive();
+            // the configured address, on this host or not: the registry refused the route if not, and every call checks
+            UpstoxConfig own = config.withEgress(egress.configured(account.id()).orElse(null));
+            this.http = new UpstoxHttp(own);
+            this.gateway = new UpstoxGateway(own, http, instruments, liveQuotes, orders ? user : null);
         }
 
         void tap(java.util.function.BiConsumer<String, String> tap) {
@@ -280,6 +380,13 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
                     + key + " is not in Upstox's checked instrument list"));
         }
 
+        /** The contract's lot size in today's checked list, 0 when it is not there (the LIVE guard refuses). */
+        int lotSize(String instrumentKey) {
+            gateway();
+            loadToday();
+            return instruments.byInstrumentKey(instrumentKey).map(UpstoxInstruments.Contract::lotSize).orElse(0);
+        }
+
         private synchronized UpstoxGateway gateway() {
             BrokerSessions.Access access = sessions.access(account).orElseThrow(() -> new BrokerException(Kind.SESSION,
                     "no Upstox session for " + account.displayName() + " today: log in"));
@@ -287,8 +394,19 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
                 throw new BrokerException(Kind.SESSION, "the Upstox session of " + account.displayName()
                         + " has no token: log in again");
             }
+            egress.address(account);                                    // on this host, or SESSION: nothing is sent
             http.session(access.accessToken());
             return gateway;                                             // no download under this lock
+        }
+
+        /** The gateway for an order call: LIVE only, with today's checked list (an exit of a contract needs it too). */
+        private UpstoxGateway orderGateway(String call) {
+            if (!orders) {
+                throw refused(call);
+            }
+            UpstoxGateway g = gateway();
+            loadToday();
+            return g;
         }
 
         /** The route's first work, on its own thread: today's list, so no order waits for the download. */
@@ -324,7 +442,7 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
             }
             lastAttempt = Instant.now();
             try {
-                UpstoxInstruments fresh = new UpstoxInstruments(files.today(today));
+                UpstoxInstruments fresh = new UpstoxInstruments(files.today(today, http));
                 UpstoxMappingCheck.Result check = UpstoxMappingCheck.apply(fresh, new JdbcTemplate(dataSource), today);
                 instruments.replaceWith(fresh);
                 loadedDay = today;
@@ -349,6 +467,12 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
         @Override
         public String name() {
             return "UPSTOX";
+        }
+
+        /** Every order of ours is intraday ("I"); a hand order of another product is not counted as held. */
+        @Override
+        public String product() {
+            return gateway.product();
         }
 
         @Override
@@ -388,31 +512,34 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
 
         @Override
         public int poll() {
-            throw refused("poll");
+            return orderGateway("poll").poll();
         }
 
         @Override
         public void onUpdate(Consumer<OrderUpdate> listener) {
-            throw refused("onUpdate");
+            if (!orders) {
+                throw refused("onUpdate");
+            }
+            gateway.onUpdate(listener);                                 // one gateway for the session's life
         }
 
         @Override
         public void place(OrderRequest request) {
-            throw refused("place");
+            orderGateway("place").place(request);
         }
 
         @Override
         public void modify(String clientOrderId, long quantity, double limitPrice, double triggerPrice) {
-            throw refused("modify");
+            orderGateway("modify").modify(clientOrderId, quantity, limitPrice, triggerPrice);
         }
 
         @Override
         public void cancel(String clientOrderId) {
-            throw refused("cancel");
+            orderGateway("cancel").cancel(clientOrderId);
         }
 
         private IllegalStateException refused(String call) {
-            return new IllegalStateException(call + " not offered: Upstox has no LIVE connection in this build (reads only)");
+            return new IllegalStateException(call + " not offered: a READ_LIVE Upstox connection (reads only)");
         }
     }
 

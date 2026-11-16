@@ -45,7 +45,11 @@ import com.autotrade.zerodha.KiteSimulator;
  *       moment. Orders still go only to the simulator: the real connection is read-only ({@link ReadLiveConnection}).</li>
  * </ul>
  * And LIVE ({@link #live}, the Kite pilot from 4 Nov 2026, switched by the user): the same session reads, and orders go
- * to the real Kite (product MIS), behind a {@link LiveGuard} with the risk file's {@code live} limits.
+ * to the real Kite (product MIS, from the broker rules), behind a {@link LiveGuard} with the risk file's {@code live} limits.
+ * <p>
+ * Egress (production gaps B1, 16 Nov 2026): an account with an address in {@link AccountEgress} reads and trades Kite from
+ * it (refused while it is not on this host); an account without one, ZERODHA-1 today, uses the host's default route
+ * exactly as before. Zerodha is not in the static-IP LIVE gate's default brokers (the pilot runs from the shared NAT).
  */
 public final class ZerodhaDryRunAdapter implements BrokerAdapter {
 
@@ -62,26 +66,78 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
     private final double simulatedBrokerFunds;
     private final BrokerSessions sessions;
     private final URI kiteApiBase;
+    /**
+     * The product every Kite order of ours carries (intraday): the broker rules' (16 Nov 2026, A1; MIS), else
+     * {@link KiteConfig}'s own default (MIS).
+     */
+    private final String product;
+    private final AccountEgress egress;
+    private final ReadLiveProbe.Settings probe;
 
     public ZerodhaDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds) {
         this(dataSource, simulatedBrokerFunds, BrokerSessions.NONE, KiteConfig.REAL_API);
     }
 
-    /**
-     * @param sessions    the accounts' real Kite sessions (BROKER market only)
-     * @param kiteApiBase Kite's API for those reads ({@link KiteConfig#REAL_API}; a local server in tests)
-     */
     public ZerodhaDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
                                 URI kiteApiBase) {
+        this(dataSource, simulatedBrokerFunds, sessions, kiteApiBase, ReadLiveProbe.Settings.OFF);
+    }
+
+
+    /** @param product the product of our Kite orders ({@link BrokerRules}); null: {@link KiteConfig}'s default */
+    public ZerodhaDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
+                                URI kiteApiBase, String product) {
+        this(dataSource, simulatedBrokerFunds, sessions, kiteApiBase, product, AccountEgress.NONE,
+                ReadLiveProbe.Settings.OFF);
+    }
+
+    /** @param egress the accounts' source addresses and the static-IP LIVE gate (production gaps B1/B2) */
+    public ZerodhaDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
+                                URI kiteApiBase, AccountEgress egress) {
+        this(dataSource, simulatedBrokerFunds, sessions, kiteApiBase, (String) null, egress, ReadLiveProbe.Settings.OFF);
+    }
+
+    /** @param probe the READ_LIVE route's probe (16 Nov 2026, D2: Kite's READ_LIVE route probes as the others do) */
+    public ZerodhaDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
+                                URI kiteApiBase, ReadLiveProbe.Settings probe) {
+        this(dataSource, simulatedBrokerFunds, sessions, kiteApiBase, (String) null, AccountEgress.NONE, probe);
+    }
+
+    /**
+     * @param product the product of our Kite orders ({@link BrokerRules}); null: {@link KiteConfig}'s default
+     * @param egress  the accounts' source addresses and the static-IP LIVE gate (production gaps B1/B2)
+     * @param probe   the READ_LIVE route's probe (D2)
+     */
+    public ZerodhaDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
+                                URI kiteApiBase, String product, AccountEgress egress, ReadLiveProbe.Settings probe) {
         this.dataSource = dataSource;
         this.simulatedBrokerFunds = simulatedBrokerFunds;
         this.sessions = sessions;
         this.kiteApiBase = kiteApiBase;
+        this.product = product != null ? product : KiteConfig.simulator(KiteConfig.REAL_API).product();
+        this.egress = egress == null ? AccountEgress.NONE : egress;
+        this.probe = probe == null ? ReadLiveProbe.Settings.OFF : probe;
+    }
+
+    @Override
+    public String egressRefusal(BrokerAccount account) {
+        return egress.refusal(account);
     }
 
     @Override
     public BrokerType broker() {
         return BrokerType.ZERODHA;
+    }
+
+    @Override
+    public String product() {
+        return product;
+    }
+
+    /** The Kite LIVE pilot (from 4 Nov 2026, switched by the user). */
+    @Override
+    public boolean offersLive() {
+        return true;
     }
 
     @Override
@@ -121,15 +177,30 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
         KiteReads reads = new KiteReads(account, false);
         ReadLiveConnection connection = new ReadLiveConnection(reads, simulator, q -> book(q, reads, sim, simInstruments),
                 sim::usedMargin);
+        // 16 Nov 2026 (D2): the READ_LIVE probe and recorder, as on the other brokers' routes (reads only)
+        ReadLiveProbe readProbe = new ReadLiveProbe(dataSource, account, "ZERODHA", reads, KITE_STATUSES::contains,
+                probe, () -> sessions.access(account).map(a -> java.util.Arrays.asList(a.apiKey(), a.accessToken()))
+                        .orElse(List.of()));
+        reads.tap = readProbe.tap();
+        readProbe.start(reads::warmUp);
         return new DryRun(connection, o -> { }, "Kite simulator " + sim.baseUri() + ", book and funds read from Kite "
-                + kiteApiBase.getHost(), sim);
+                + kiteApiBase.getHost(), sim, readProbe);
     }
+
+    /** Kite's order statuses (Kite Connect v3 docs) for the probe's check: what the gateway maps and the transient ones. */
+    static final java.util.Set<String> KITE_STATUSES = java.util.Set.of("OPEN", "COMPLETE", "CANCELLED", "REJECTED",
+            "TRIGGER PENDING", "PUT ORDER REQ RECEIVED", "VALIDATION PENDING", "OPEN PENDING", "MODIFY VALIDATION PENDING",
+            "MODIFY PENDING", "CANCEL PENDING", "AMO REQ RECEIVED", "MODIFIED");
 
     @Override
     public Live live(BrokerAccount account, FollowerRisk.LiveLimits limits) {
+        String refusal = egress.liveRefusal(account);       // null for an account without an address (ZERODHA-1)
+        if (refusal != null) {
+            return Live.refused(refusal);
+        }
         KiteReads kite = new KiteReads(account, true);
         return new Live(new LiveGuard(kite, limits, kite::lotSize), "LIVE: Kite " + kiteApiBase.getHost()
-                + ", product MIS, at most " + limits.maxLotsPerOrder() + " lot(s) a buy and "
+                + ", product " + product + ", at most " + limits.maxLotsPerOrder() + " lot(s) a buy and "
                 + limits.maxOpenPositions() + " contracts, LIVE strategies as chosen on the Accounts page");
     }
 
@@ -209,6 +280,8 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
         private KiteGateway gateway;
         private LocalDate loadedDay;
         private Instant lastAttempt = Instant.EPOCH;
+        /** The READ_LIVE probe's tap of a reads-only connection (null: none). */
+        private volatile java.util.function.BiConsumer<String, String> tap;
 
         KiteReads(BrokerAccount account, boolean orders) {
             this.account = account;
@@ -221,6 +294,16 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
             return instruments.byInstrumentKey(instrumentKey).map(KiteInstruments.Contract::lotSize).orElse(0);
         }
 
+        /** The route's first work, on its own thread: today's session and instrument list, off the order path. */
+        void warmUp() {
+            try {
+                gateway();
+            } catch (BrokerException e) {
+                log.info("account {} ({}): Kite instruments not warmed up: {}", account.id(), account.displayName(),
+                        e.getMessage());
+            }
+        }
+
         private KiteGateway orderGateway(String call) {
             if (!orders) {
                 throw new IllegalStateException(call + " not offered: reads only");
@@ -231,10 +314,24 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
         private synchronized KiteGateway gateway() {
             BrokerSessions.Access access = sessions.access(account).orElseThrow(() -> new BrokerException(Kind.SESSION,
                     "no Kite session for " + account.displayName() + " today: log in"));
+            // production gaps B1: the account's address (checked to be on this host on every call); null without one,
+            // which builds exactly the config and client of before 16 Nov 2026
+            java.net.InetAddress from = egress.address(account);
             if (gateway == null || !access.apiKey().equals(apiKey)) {
-                KiteConfig config = new KiteConfig(access.apiKey(), kiteApiBase, KiteConfig.REAL_LOGIN, "MIS",
-                        Duration.ofSeconds(5), 8, null);
+                KiteConfig config = new KiteConfig(access.apiKey(), kiteApiBase, KiteConfig.REAL_LOGIN, product,
+                        Duration.ofSeconds(5), 8, null, from);
+                if (http != null) {
+                    http.close();                                   // the previous app's client (review 16 Nov 2026)
+                }
                 http = new KiteHttp(config);
+                if (!orders) {                                          // READ_LIVE only: a LIVE client has no tap
+                    http.tap((call, body) -> {
+                        java.util.function.BiConsumer<String, String> t = tap;
+                        if (t != null) {
+                            t.accept(call, body);
+                        }
+                    });
+                }
                 gateway = new KiteGateway(config, http, instruments);
                 listeners.forEach(gateway::onUpdate);
                 apiKey = access.apiKey();
@@ -281,6 +378,20 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
         @Override
         public String name() {
             return "ZERODHA";
+        }
+
+        /** Lets this connection's HTTP client go (a canary's, a dropped route's); calls in flight finish. */
+        @Override
+        public synchronized void close() {
+            if (http != null) {
+                http.close();
+            }
+        }
+
+        /** Every order of ours is MIS (the config below); a hand NRML trade in the account is not counted as held. */
+        @Override
+        public String product() {
+            return product;
         }
 
         @Override
