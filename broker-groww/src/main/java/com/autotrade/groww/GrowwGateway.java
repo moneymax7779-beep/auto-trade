@@ -102,12 +102,47 @@ public final class GrowwGateway implements BrokerConnection {
      * @param quotes the executable book by our instrument key ({@code null}: no quote source; {@link #quote} refuses)
      */
     public GrowwGateway(GrowwConfig config, GrowwHttp http, GrowwInstruments instruments, Function<String, Quote> quotes) {
+        this(config, http, instruments, quotes, null);
+    }
+
+    /**
+     * @param growwUser the Groww client (UCC) the session belongs to: a LIVE config whose orders reach Groww must name
+     *                  one, and shares that client's order limiter ({@link #orderLimiter}); null for any other config
+     */
+    public GrowwGateway(GrowwConfig config, GrowwHttp http, GrowwInstruments instruments, Function<String, Quote> quotes,
+                        String growwUser) {
         this.config = config;
         this.http = http;
         this.instruments = instruments;
         this.quotes = quotes;
-        this.limiter = new GrowwHttp.Limiter(config.maxOrdersPerSecond(), config.maxOrdersPerMinute(),
-                Duration.ofMinutes(1));
+        this.limiter = orderLimiter(config, growwUser);
+    }
+
+    /** One order limiter per Groww client whose LIVE orders reach Groww (production gaps C2, 16 Nov 2026). */
+    private static final Map<String, GrowwHttp.Limiter> ORDER_LIMITS = new ConcurrentHashMap<>();
+
+    /**
+     * The order limiter of a config (Groww: 10 orders a second and 250 a minute per client; ours 8 and 200). Production
+     * gaps C2 (16 Nov 2026): a LIVE config whose orders reach Groww shares one per Groww client ({@code growwUser},
+     * required), so a rebuilt route or a second account of the same client does not start a fresh allowance; any other
+     * config (a simulator, LIVE against a simulator, a read config that never sends) gets its own, so the static map holds
+     * only real clients.
+     */
+    static GrowwHttp.Limiter orderLimiter(GrowwConfig config, String growwUser) {
+        if (config.isLive() && config.ordersReachGroww()) {
+            if (growwUser == null || growwUser.isBlank()) {
+                throw new IllegalArgumentException("a LIVE Groww gateway must name its Groww client (its order limits)");
+            }
+            return ORDER_LIMITS.computeIfAbsent(growwUser.trim().toUpperCase(java.util.Locale.ROOT),
+                    k -> new GrowwHttp.Limiter(config.maxOrdersPerSecond(), config.maxOrdersPerMinute(),
+                            Duration.ofMinutes(1)));
+        }
+        return new GrowwHttp.Limiter(config.maxOrdersPerSecond(), config.maxOrdersPerMinute(), Duration.ofMinutes(1));
+    }
+
+    /** The order limiter this gateway waits on (tests: shared per client for LIVE, its own otherwise). */
+    GrowwHttp.Limiter limiter() {
+        return limiter;
     }
 
     /** The product our orders carry (the config's), so product-aware checks skip a hand order of another product. */
@@ -194,11 +229,15 @@ public final class GrowwGateway implements BrokerConnection {
 
     // ------------------------------------------------------------------ orders
 
-    /** This build sends no order to Groww itself (DRY_RUN only; LIVE needs READ_LIVE, the static IP and the canary). */
+    /**
+     * An order call is allowed only on a simulator's or a LIVE config ({@link GrowwConfig#live}, behind the LIVE guard).
+     * Production gaps C1, 16 Nov 2026: decided by how the config was made, no longer by its host (a read config pointed
+     * at a loopback address could send before), so a read config can never send an order anywhere.
+     */
     private void refuseRealOrders(String call) {
-        if (config.ordersReachGroww()) {
-            throw new BrokerException(Kind.TERMINAL, call + " refused: this build has no LIVE Groww connection (orders "
-                    + "go only to a simulator)");
+        if (!config.ordersAllowed()) {
+            throw new BrokerException(Kind.TERMINAL, call + " refused: a read-only Groww configuration has no LIVE Groww "
+                    + "connection (orders go only to a simulator or through GrowwConfig.live)");
         }
     }
 

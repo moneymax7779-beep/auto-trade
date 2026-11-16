@@ -55,8 +55,21 @@ class LiveSwitchController {
     private final JdbcTemplate jdbc;
     private final KillSwitches audit;
     private final org.springframework.transaction.support.TransactionTemplate tx;
+    private final com.autotrade.execution.AccountEgress egress;
 
+    /** Tests: no egress addresses (the static-IP gate's default brokers still need one; Zerodha does not). */
     LiveSwitchController(Access access, DataSource dataSource) {
+        this(access, dataSource, com.autotrade.execution.AccountEgress.NONE);
+    }
+
+    /**
+     * {@code egress}: the static-IP LIVE gate (production gaps B2, 16 Nov 2026): an account of a broker that takes orders
+     * only from the client's registered IP is not switched LIVE without its verified egress address, and the switch
+     * says why.
+     */
+    @org.springframework.beans.factory.annotation.Autowired      // two constructors: Spring must be told which
+    LiveSwitchController(Access access, DataSource dataSource, com.autotrade.execution.AccountEgress egress) {
+        this.egress = egress == null ? com.autotrade.execution.AccountEgress.NONE : egress;
         this.tx = new org.springframework.transaction.support.TransactionTemplate(
                 new org.springframework.jdbc.datasource.DataSourceTransactionManager(dataSource));
         this.access = access;
@@ -85,6 +98,8 @@ class LiveSwitchController {
             require(a.displayName().equals(body.confirm()), "type the account's name (" + a.displayName() + ") to confirm");
             require(a.enabled() && a.role().name().equals("FOLLOWER_TRADE"), a.displayName() + " is not an enabled follower");
             require(com.autotrade.execution.LiveBrokers.live(a.brokerType()), a.brokerType() + " has no LIVE order adapter yet");
+            String staticIp = egress.liveRefusal(a);
+            require(staticIp == null, "LIVE refused: " + staticIp);
             require(a.tradeMode() == TradeMode.DRY_RUN, a.displayName() + " is " + a.tradeMode() + ", not DRY_RUN");
             FollowerRisk risk;
             try {

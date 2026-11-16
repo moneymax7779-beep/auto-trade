@@ -57,6 +57,16 @@ autotrade:
       # Idle accounts (a DAILY_SWITCH member's real account on a PAPER day) that keep a READ_LIVE probe while they have
       # today's login: account ids, comma-separated; blank = none. Reads only, never an order (user 8 Nov 2026).
       accounts: ${AUTOTRADE_READ_LIVE_PROBE_ACCOUNTS:}
+    # Per-account egress (multi-broker production gaps B1/B2, 16 Nov 2026): since 1 Apr 2026 an algo order must come from
+    # the static IP registered for that client. `accounts`: account-id=IP literal pairs, comma-separated (IPv4 or IPv6,
+    # never a host name), e.g. "21=10.20.0.21,15=10.20.0.22"; every broker call of such an account (reads, orders,
+    # instrument files, the daily login) leaves from that address. An address not on this host refuses the account's
+    # routes and logins (never the default route); an account without an entry keeps the default route (ZERODHA-1).
+    # `required-brokers`: a LIVE connection of these brokers needs the account's verified address (Zerodha's pilot runs
+    # from the shared NAT, so it is not listed). Assigning the addresses on the host is infra (E0/E2), not this setting.
+    egress:
+      accounts: ${AUTOTRADE_EGRESS_ACCOUNTS:}
+      required-brokers: ${AUTOTRADE_EGRESS_REQUIRED_BROKERS:KOTAK_NEO,UPSTOX,GROWW}
     # The daily Kite login (live L3, user go-ahead 24 Oct 2026): the app's key and secret as files in secrets-dir (read
     # only; the credential profile names them file:<name>), the day's access token per account in sessions-dir (owner
     # only), the 08:30 IST login link by Telegram to public-base-url/api/execution/accounts/{id}/kite/login.

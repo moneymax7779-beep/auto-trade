@@ -105,7 +105,8 @@ public final class GrowwHttp implements AutoCloseable {
 
     public GrowwHttp(GrowwConfig config) {
         this.config = config;
-        this.client = HttpClient.newBuilder().connectTimeout(config.timeout()).build();
+        // production gaps B1 (16 Nov 2026): from the account's egress address when it has one; else the default client
+        this.client = com.autotrade.broker.Egress.client(config.timeout(), config.egress());
         this.reads = config.readsReachGroww() ? new Limiter(GrowwConfig.READS_PER_SECOND, GrowwConfig.READS_PER_MINUTE,
                 Duration.ofMinutes(1)) : null;
     }

@@ -422,7 +422,8 @@ class KotakVenueIT {
                 risk.orders().fast(), (k, u) -> FREEZE, dryRun.beforeOrder()), null).run(s.broker(), s.group(), DAY);
         assertThat(position(s.broker()).get("status")).isEqualTo("CLOSED");
         assertThat(((KotakSimulator) dryRun.resource()).netQuantities()).containsValue(0L);
-        assertThat(adapter.live(s.broker(), null)).as("no LIVE Kotak connection in this build").isNull();
+        assertThat(adapter.live(s.broker(), null).description()).as("16 Nov 2026: no LIVE Kotak without the account's static IP")
+                .contains("registered static IP");
     }
 
     // ------------------------------------------------------------------ code review 8 Nov 2026: the rest of the matrix

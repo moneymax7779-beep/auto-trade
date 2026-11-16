@@ -139,7 +139,7 @@ class KotakSessionSourceIT {
                 com.autotrade.execution.ReadLiveProbe.Settings.OFF);
         assertThat(adapters).extracting(BrokerAdapter::broker).containsExactly(BrokerType.ZERODHA, BrokerType.KOTAK_NEO,
                 BrokerType.UPSTOX, BrokerType.GROWW);
-        assertThat(adapters.get(1).live(kotak, null)).isNull();
+        assertThat(adapters.get(1).live(kotak, null).isRefused()).as("no egress address: the static-IP gate").isTrue();
         assertThat(LiveBrokers.LIVE).containsExactly(BrokerType.ZERODHA);
     }
 }

@@ -339,6 +339,33 @@ class LiveSwitchIT {
                 + "'LIVE_OFF'", Integer.class, id)).isEqualTo(1);
     }
 
+    /**
+     * Production gaps B2 (16 Nov 2026): a broker that takes orders only from the client's registered static IP is never
+     * switched LIVE without the account's verified egress address, and the switch says why. Zerodha is not in the default
+     * list (its pilot runs from the shared NAT), so this uses a gate that names it.
+     */
+    @Test
+    void theStaticIpGateRefusesLiveWithoutTheAccountsVerifiedEgressAddress() {
+        long none = account(V7, 0, true);
+        long elsewhere = account(V7, 0, true);
+        long here = account(V7, 0, true);
+        com.autotrade.execution.AccountEgress egress = com.autotrade.execution.AccountEgress.parse(
+                elsewhere + "=192.0.2.77," + here + "=127.0.0.1", "ZERODHA");
+        LiveSwitchController gated = new LiveSwitchController(new Access(dataSource), dataSource, egress);
+        assertThat(refusal(() -> gated.live("local-owner", none, new LiveSwitchController.Switch(true, name(none)))))
+                .startsWith("400 LIVE refused: ZERODHA takes orders only from the client's registered static IP");
+        assertThat(refusal(() -> gated.live("local-owner", elsewhere, new LiveSwitchController.Switch(true,
+                name(elsewhere))))).contains("192.0.2.77").contains("not on this host");
+        assertThat(mode(none)).isEqualTo("DRY_RUN/false");
+        assertThat(mode(elsewhere)).isEqualTo("DRY_RUN/false");
+        gated.live("local-owner", here, new LiveSwitchController.Switch(true, name(here)));
+        assertThat(mode(here)).isEqualTo("LIVE/true");
+        gated.live("local-owner", here, new LiveSwitchController.Switch(false, null));
+        // the default gate (Kotak, Upstox, Groww) leaves a Zerodha account without an address as it was
+        assertThat(com.autotrade.execution.AccountEgress.NONE.liveRefusal(new AccountStore(dataSource).byId(none)
+                .orElseThrow())).isNull();
+    }
+
     @Test
     void everyConditionIsCheckedBeforeAnAccountGoesLive() {
         long noLimits = account(V6, 0, true);

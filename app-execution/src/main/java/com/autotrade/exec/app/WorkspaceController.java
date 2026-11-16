@@ -76,8 +76,18 @@ class WorkspaceController {
     private final TradingDay tradingDay;
     private final KillSwitches kills;
     private final TelegramNotifier telegram;
+    private final com.autotrade.execution.AccountEgress egress;
 
+    /** Tests: no egress addresses (the static-IP gate's default brokers still need one). */
     WorkspaceController(Access access, DataSource dataSource, TransactionTemplate tx, TelegramNotifier telegram) {
+        this(access, dataSource, tx, telegram, com.autotrade.execution.AccountEgress.NONE);
+    }
+
+    /** {@code egress}: the static-IP LIVE gate (production gaps B2, 16 Nov 2026). */
+    @org.springframework.beans.factory.annotation.Autowired      // two constructors: Spring must be told which
+    WorkspaceController(Access access, DataSource dataSource, TransactionTemplate tx, TelegramNotifier telegram,
+                        com.autotrade.execution.AccountEgress egress) {
+        this.egress = egress == null ? com.autotrade.execution.AccountEgress.NONE : egress;
         this.access = access;
         this.accounts = new AccountStore(dataSource);
         this.jdbc = new JdbcTemplate(dataSource);
@@ -207,6 +217,10 @@ class WorkspaceController {
         if (!LIVE_BROKERS.contains(a.brokerType())) {
             return a.brokerType() + " has no LIVE order adapter yet: it trades PAPER only";
         }
+        String staticIp = egress.liveRefusal(a);                        // production gaps B2, 16 Nov 2026
+        if (staticIp != null) {
+            return staticIp + ": it trades PAPER only";
+        }
         if (!a.enabled()) {
             return a.displayName() + " is disabled";
         }
@@ -286,6 +300,8 @@ class WorkspaceController {
             require(a.displayName().equals(body.confirm()), "type the account's name (" + a.displayName() + ") to confirm");
             require(a.role().name().equals("FOLLOWER_TRADE") && a.enabled(), a.displayName() + " is not an enabled follower");
             require(LIVE_BROKERS.contains(a.brokerType()), a.brokerType() + " has no LIVE order adapter yet");
+            String staticIp = egress.liveRefusal(a);                    // production gaps B2, 16 Nov 2026
+            require(staticIp == null, "LIVE refused: " + staticIp);
             Map<String, Object> row = jdbc.queryForMap("select external_broker_user_id, credential_profile_id from "
                     + "acct.broker_account where id = ?", id);
             require(row.get("external_broker_user_id") != null && row.get("credential_profile_id") != null,
