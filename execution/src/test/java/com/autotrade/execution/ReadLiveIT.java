@@ -126,8 +126,8 @@ class ReadLiveIT {
     @AfterEach
     void close() throws Exception {
         kite.close();
-        if (dryRun != null && dryRun.resource() != null) {
-            dryRun.resource().close();
+        if (dryRun != null) {
+            dryRun.closeAll();                                  // the simulator and, since 16 Nov 2026, the route's probe
         }
     }
 
@@ -284,6 +284,50 @@ class ReadLiveIT {
         assertThat(jdbc.queryForObject("select count(*) from exec.position where broker_account_id = ?", Integer.class,
                 s.broker().id())).isZero();
         assertThat(orderCalls()).isZero();
+    }
+
+    /**
+     * 16 Nov 2026 (D2): Kite's READ_LIVE route has the probe of the other brokers' routes (the real book, trades and
+     * positions read and audited) and, for an account named for the recorder, each distinct Kite answer saved redacted
+     * per endpoint and day; nothing reaches Kite but reads.
+     */
+    @Test
+    void theKiteRouteProbesTheRealBooksAndRecordsTheirAnswersForANamedAccount(@org.junit.jupiter.api.io.TempDir Path root)
+            throws Exception {
+        Setup s = setup();
+        ReadLiveRecorder recorder = new ReadLiveRecorder(root, java.util.Set.of(s.broker().id()), null, null);
+        ZerodhaDryRunAdapter adapter = new ZerodhaDryRunAdapter(dataSource, 1e9, a -> session.get(), kite.baseUri(),
+                new ReadLiveProbe.Settings(java.time.Duration.ofHours(1), null, recorder));
+        dryRun = adapter.dryRun(s.broker(), FollowerRisk.load(Path.of(V6)).orders());
+        String row = null;
+        for (int i = 0; i < 150 && row == null; i++) {
+            row = jdbc.queryForList("select detail::text from exec.audit_log where broker_account_id = ? and action = "
+                    + "'READ_LIVE_PROBE' order by id", String.class, s.broker().id()).stream().findFirst().orElse(null);
+            if (row == null) {
+                Thread.sleep(100);
+            }
+        }
+        assertThat(row).as("the probe's audit row").isNotNull();
+        var detail = tools.jackson.databind.json.JsonMapper.builder().build().readTree(row);
+        assertThat(detail.path("broker").asString()).isEqualTo("ZERODHA");
+        assertThat(detail.path("clean").asBoolean()).as(detail.toString()).isTrue();
+        Path day = root.resolve("zerodha").resolve(LocalDate.now(IST).toString());
+        for (int i = 0; i < 100 && !java.nio.file.Files.exists(day.resolve("get-portfolio-positions-1.json")); i++) {
+            Thread.sleep(50);
+        }
+        assertThat(day.resolve("get-orders-1.json")).exists();
+        assertThat(day.resolve("get-trades-1.json")).exists();
+        assertThat(day.resolve("get-portfolio-positions-1.json")).exists();
+        try (var files = java.nio.file.Files.list(day)) {
+            assertThat(files.map(f -> {
+                try {
+                    return java.nio.file.Files.readString(f);
+                } catch (java.io.IOException e) {
+                    throw new java.io.UncheckedIOException(e);
+                }
+            })).allMatch(b -> !b.contains("day-token") && !b.contains("real-key"));
+        }
+        assertThat(orderCalls()).as("reads only").isZero();
     }
 
     @Test
