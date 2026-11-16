@@ -29,3 +29,27 @@ without its READ_LIVE sessions, its canary and the user's switch.
 | R2 | Groww API subscription (D13) | user |
 | R3 | An Upstox LIVE user who is not BM6462 (D14) | user / family member |
 | R4 | Morning canary per broker, then a 1-lot pilot, one broker at a time | user's switch |
+
+## Status (16 Nov 2026, branch fix/broker-validation-16nov at the commit adding this section; not merged into main, not deployed)
+
+All of A1–A5, B1–B2, C1–C2 and D1–D2 are built. Build of broker-api, marketdata-store and every dependent module:
+686 tests, 0 failures, 0 skipped, including a Spring context start (ExecutionContextIT).
+
+| Item | Where | Notes |
+|---|---|---|
+| A1 per-broker rules | `config/brokers/broker-rules.v1.yaml`, `BrokerRules`, minute square-off tick | Zerodha unchanged (MIS, 15:10, 15:20). Kotak 15:05/15:15 against a cut-off of 15:20 that is UNCONFIRMED. Groww 15:05/15:15. Upstox 15:10/15:20. Kotak- and Groww-typed accounts square off at 15:15 even in PAPER. |
+| A2 LIVE brokers | `autotrade.execution.live-brokers` (default ZERODHA), one `LiveBrokers` for routes and pages | A LIVE route needs both the setting and the adapter's `offersLive()`; only Zerodha's is true |
+| A3 costs | per-broker `costs_file` | all four still on costs v2 (not checked against each broker's pricing) |
+| A4, A5 | broker-neutral `simulator()`; parallel square-off IT | |
+| B1 egress | `autotrade.execution.egress.accounts` (`id=IP`), every client and login of the account | fails closed; with open positions → kill switch + EGRESS_REFUSED alert |
+| B2 static-IP gate | `required-brokers` = KOTAK_NEO, UPSTOX, GROWW (the setting can only add) | Zerodha not required (shared NAT pilot) |
+| C1 LIVE connections | Kotak/Upstox/Groww `live()` behind LiveGuard; explicit LIVE config kinds | not tradable: `offersLive()` false; usable only by the canary; BM6462 refused |
+| C2 budgets | per user: Kite 350/min, 4,500/day; Upstox 450/min, 1,800/30 min; Kotak 200/min (assumed); Groww 250/min | only buys are ever refused |
+| D1 canary | `POST /api/execution/accounts/{id}/canary` (202 + run id), `GET …/canary/{runId}` | platform admin who manages the tenant, confirm phrase, 09:20–15:00 trading days, no open position or working order; a leftover engages the kill switch and alerts (CANARY_LEFTOVER, also for PAPER-mode accounts) |
+| D2 recorder | `autotrade.execution.read-live-record.accounts` | redacted, capped, bounded queue; Zerodha's READ_LIVE route now probes too |
+
+To make Kotak, Upstox or Groww tradable after section B's gates:
+1. Set `offersLive()` to true in that adapter (a code change, reviewed).
+2. Add the broker to `AUTOTRADE_LIVE_BROKERS`.
+3. Give the account its egress address.
+4. Switch the account LIVE.
