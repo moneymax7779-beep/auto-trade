@@ -29,6 +29,7 @@ import com.autotrade.broker.OrderRequest;
 import com.autotrade.broker.OrderSide;
 import com.autotrade.broker.OrderStatus;
 import com.autotrade.broker.OrderType;
+import com.autotrade.broker.OrderBudget;
 import com.autotrade.broker.OrderUpdate;
 import com.autotrade.broker.PartlyFilledModifyRefused;
 import com.autotrade.broker.Quote;
@@ -57,6 +58,13 @@ import tools.jackson.databind.JsonNode;
  *       source (the simulator's book in STORED DRY_RUN and tests; our own live capture when reading the real broker),
  *       and without one refuses with a {@link BrokerException} (never an unchecked crash on the account's lane), which
  *       the venue treats as no quote: no order is sent.</li>
+ *   <li><b>Who may send</b> (production gaps C1, 16 Nov 2026): order calls only on a {@link KotakConfig#simulator} or
+ *       {@link KotakConfig#live} config; a read config ({@link KotakConfig#session}) refuses them before anything is
+ *       sent, whatever its base URL.</li>
+ *   <li><b>A new session</b> ({@link #swap}): a login during the day may name another base URL or consumer key; the
+ *       gateway takes the new session's client and keeps its listeners, the tags it placed and the last report of each
+ *       order, so a fill of an order placed before the login still reaches the venue once, and a tag already placed is
+ *       never placed again.</li>
  * </ul>
  */
 public final class KotakGateway implements BrokerConnection {
@@ -85,11 +93,19 @@ public final class KotakGateway implements BrokerConnection {
             "partially filled");
     private static final Set<String> loggedUnknownStatuses = ConcurrentHashMap.newKeySet();
 
-    private final KotakConfig config;
-    private final KotakHttp http;
+    /**
+     * Production gaps C2 (16 Nov 2026): Kotak publishes 10 orders a second and no minute or day cap; this minute cap is
+     * OUR ASSUMPTION (a runaway loop stops here, far above any strategy's need), shared by every LIVE gateway of one
+     * consumer key ({@link #budgetFor}). Only buys are ever refused by it (OrderBudget); exits and cancels still go.
+     */
+    static final int ORDERS_PER_MINUTE = 200;
+
+    private volatile KotakConfig config;
+    private volatile KotakHttp http;
     private final KotakInstruments instruments;
     private final Function<String, Quote> quotes;
     private final RateLimiter limiter;
+    private volatile OrderBudget budget;
     private final List<Consumer<OrderUpdate>> listeners = new CopyOnWriteArrayList<>();
     private final Map<String, String> brokerIdByTag = new ConcurrentHashMap<>();
     private final Map<String, BrokerOrder> lastSeen = new ConcurrentHashMap<>();
@@ -103,6 +119,65 @@ public final class KotakGateway implements BrokerConnection {
         this.instruments = instruments;
         this.quotes = quotes;
         this.limiter = new RateLimiter(config.maxOrdersPerSecond());
+        this.budget = budgetFor(config);
+    }
+
+    /**
+     * The order budget of a config: a LIVE config whose orders reach Kotak shares one per consumer key (Kotak counts per
+     * app; the key itself is never a map key, only its SHA-256); any other (a simulator, a read config, LIVE against a
+     * simulator) gets its own, so the static map holds only real apps.
+     */
+    static OrderBudget budgetFor(KotakConfig config) {
+        OrderBudget.Window perMinute = new OrderBudget.Window(java.time.Duration.ofMinutes(1), ORDERS_PER_MINUTE);
+        return config.ordersReachKotak()
+                ? OrderBudget.shared("KOTAK_NEO:" + sha256(config.consumerKey()), Integer.MAX_VALUE, perMinute)
+                : new OrderBudget(Integer.MAX_VALUE, java.time.Clock.systemUTC(), perMinute);
+    }
+
+    private static String sha256(String value) {
+        try {
+            return java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                    .digest(value.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    /**
+     * A new session of the same account (production gaps C1, 16 Nov 2026; before, the adapter built a new gateway and
+     * lost the listeners, the placed tags and the last reports, so a fill of an order placed before a mid-day login was
+     * never heard and a retried tag could be placed twice): calls from now on go through {@code next} (its base URL,
+     * consumer key and token), and everything this gateway knows stays. Only a config of the same kind, product and
+     * egress is taken (a read config never becomes a LIVE one). The caller retires the old client.
+     */
+    public synchronized void swap(KotakConfig nextConfig, KotakHttp next) {
+        if (!nextConfig.sameKind(config) || next.config() != nextConfig) {
+            throw new IllegalArgumentException("a Kotak session swap keeps the config's kind, product and egress");
+        }
+        this.config = nextConfig;
+        this.http = next;
+        this.budget = budgetFor(nextConfig);
+    }
+
+    /** The order budget charged now (tests). */
+    OrderBudget budget() {
+        return budget;
+    }
+
+    /** The client calls go through now (the adapter retires it when a new session replaces it). */
+    public KotakHttp http() {
+        return http;
+    }
+
+    /**
+     * Order calls only on a simulator's or a LIVE config (production gaps C1, 16 Nov 2026: decided by how the config was
+     * made, never by its host, so a read config can never send an order anywhere).
+     */
+    private void refuseOrders(String call) {
+        if (!config.ordersAllowed()) {
+            throw new BrokerException(Kind.TERMINAL, call + " refused: a read-only Kotak configuration (no LIVE Kotak "
+                    + "connection here; orders go only to a simulator or through KotakConfig.live)");
+        }
     }
 
     /** The product our orders carry (the config's), so product-aware checks skip a hand order of another product. */
@@ -132,6 +207,7 @@ public final class KotakGateway implements BrokerConnection {
 
     @Override
     public void place(OrderRequest r) {
+        refuseOrders("place");
         String tag = r.clientOrderId();
         if (!TAG.matcher(tag).matches()) {
             throw new BrokerException(Kind.TERMINAL, "tag must be 1-20 alphanumerics: " + tag);
@@ -171,6 +247,7 @@ public final class KotakGateway implements BrokerConnection {
         j.put("ts", c.tradingSymbol());
         j.put("tt", r.side() == OrderSide.BUY ? "B" : "S");
         j.put(TAG_FIELD, tag);
+        budget.charge(r.side() == OrderSide.BUY, "place " + tag);
         for (int attempt = 1; ; attempt++) {
             try {
                 limiter.acquire();
@@ -244,6 +321,7 @@ public final class KotakGateway implements BrokerConnection {
      */
     @Override
     public void modify(String clientOrderId, long quantity, double limitPrice, double triggerPrice) {
+        refuseOrders("modify");
         BrokerOrder order = known(clientOrderId);
         if (order.filledQuantity() > 0 && order.filledQuantity() < order.quantity()) {
             // whether Kotak's qt is the total or the remaining quantity is UNCONFIRMED: until the canary proves it, a
@@ -270,12 +348,14 @@ public final class KotakGateway implements BrokerConnection {
         j.put("no", order.brokerOrderId());
         j.put("tt", order.side() == OrderSide.BUY ? "B" : "S");
         j.put("am", "NO");
+        budget.charge(order.side() == OrderSide.BUY, "modify " + clientOrderId);
         limiter.acquire();
         http.post(KotakHttp.MODIFY, j, Call.ORDER);
     }
 
     @Override
     public void cancel(String clientOrderId) {
+        refuseOrders("cancel");
         String id = brokerIdByTag.get(clientOrderId);              // the place's id when the book does not show it yet
         if (id == null || id.isEmpty()) {
             id = known(clientOrderId).brokerOrderId();
@@ -283,6 +363,7 @@ public final class KotakGateway implements BrokerConnection {
         Map<String, String> j = new LinkedHashMap<>();
         j.put("on", id);
         j.put("am", "NO");
+        budget.count();
         limiter.acquire();
         http.post(KotakHttp.CANCEL, j, Call.ORDER);
     }

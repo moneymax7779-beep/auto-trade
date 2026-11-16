@@ -41,7 +41,8 @@ public final class KiteHttp {
 
     public KiteHttp(KiteConfig config) {
         this.config = config;
-        this.client = HttpClient.newBuilder().connectTimeout(config.timeout()).build();
+        // 16 Nov 2026: bound to the account's egress address when it has one; without, the same default client as before
+        this.client = com.autotrade.broker.Egress.client(config.timeout(), config.egress());
     }
 
     /** The day's access token (from {@link KiteAuth#exchange}); never logged. */

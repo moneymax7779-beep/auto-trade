@@ -24,8 +24,9 @@ import tools.jackson.databind.JsonNode;
  *   <li>the UCC must be the pinned client id; the limits are read once ({@code POST {baseUrl}/quick/user/limits},
  *       "Net"); the session is kept until the end of the IST day (Kotak does not publish its lifetime).</li>
  * </ol>
- * Kotak's rule: the session must be created from the IP that sends orders. Kotak has no LIVE order adapter in this build,
- * so the account trades PAPER and the rule only matters once one exists. The base URL Kotak returns must be HTTPS on
+ * Kotak's rule: the session must be created from the IP that sends orders (error 1037 otherwise): every call here
+ * leaves from the account's egress address when it has one (production gaps B1, 16 Nov 2026), the same address its
+ * orders use, and the login is refused when that address is not on this host. The base URL Kotak returns must be HTTPS on
  * kotaksecurities.com (or the configured login host) before any token is sent there.
  */
 @Component
@@ -37,11 +38,18 @@ class KotakNeoLogin {
 
     private final SessionActivation sessions;
     private final BrokerLoginProperties props;
-    private final BrokerHttp http = new BrokerHttp("Kotak Neo");
+    private final BrokerHttp.PerAccount https;
 
+    /** Tests: no egress addresses. */
     KotakNeoLogin(SessionActivation sessions, BrokerLoginProperties props) {
+        this(sessions, props, com.autotrade.execution.AccountEgress.NONE);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired      // two constructors: Spring must be told which
+    KotakNeoLogin(SessionActivation sessions, BrokerLoginProperties props, com.autotrade.execution.AccountEgress egress) {
         this.sessions = sessions;
         this.props = props;
+        this.https = new BrokerHttp.PerAccount("Kotak Neo", egress);
     }
 
     KiteLogin.Result login(Access.User user, long accountId, String totp, String mpin) {
@@ -58,6 +66,7 @@ class KotakNeoLogin {
             throw new IllegalArgumentException("the Kotak app has no registered mobile number: set it on the Brokers page");
         }
         try {
+            BrokerHttp http = https.forAccount(account);                // the account's egress (Kotak's rule)
             String consumerKey = sessions.secrets.read(app.keyRef());
             // Kotak can answer 2xx with an error body and no data: the reason is read from the whole answer
             JsonNode first = http.postJson(props.kotakApi() + "/login/1.0/tradeApiLogin", Map.of("Authorization",

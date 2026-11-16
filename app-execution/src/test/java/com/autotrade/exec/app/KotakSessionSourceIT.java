@@ -139,9 +139,9 @@ class KotakSessionSourceIT {
                 com.autotrade.execution.ReadLiveProbe.Settings.OFF);
         assertThat(adapters).extracting(BrokerAdapter::broker).containsExactly(BrokerType.ZERODHA, BrokerType.KOTAK_NEO,
                 BrokerType.UPSTOX, BrokerType.GROWW);
-        assertThat(adapters.get(1).live(kotak, null)).isNull();
+        assertThat(adapters.get(1).live(kotak, null).isRefused()).as("no egress address: the static-IP gate").isTrue();
         assertThat(LiveBrokers.of(LiveBrokers.DEFAULT, adapters).live()).containsExactly(BrokerType.ZERODHA);
         assertThat(LiveBrokers.of("ZERODHA,KOTAK_NEO", adapters).live(BrokerType.KOTAK_NEO))
-                .as("configured LIVE, but its adapter offers no LIVE connection").isFalse();
+                .as("configured LIVE, but its adapter does not offer LIVE yet (READ_LIVE and canary first)").isFalse();
     }
 }

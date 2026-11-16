@@ -520,6 +520,42 @@ class BrokerLoginIT {
         kotakBase = "http://127.0.0.1:" + broker.getAddress().getPort();
     }
 
+    /**
+     * Production gaps B1 (16 Nov 2026): Kotak's session must be created from the IP that sends its orders, so the login
+     * leaves from the account's egress address; an address this host does not have refuses the login with the reason and
+     * sends nothing (never from the default route instead).
+     */
+    @Test
+    void kotakLogsInFromTheAccountsEgressAddressAndNeverFromAnotherOne() {
+        long t = member("ravali");
+        long id = app("ravali", t, "KOTAK_NEO", "Neo app R");
+        apps.keys("ravali", id, new BrokerAppController.Keys("consumer-key-r", null, "98765 43211"));
+        long acc = account("ravali", t, "Kotak R", "KOTAK_NEO", "KT5678");
+        apps.link("ravali", acc, new BrokerAppController.Link(id));
+        String ucc = kotakUcc;
+        kotakUcc = "KT5678";
+        try {
+            BrokerLoginController missing = new BrokerLoginController(new Access(db.ds()), db.ds(), upstox,
+                    new KotakNeoLogin(activation, brokerProps, com.autotrade.execution.AccountEgress.parse(
+                            acc + "=192.0.2.77", null)), new GrowwLogin(activation, brokerProps), activation);
+            seen.remove("/login/1.0/tradeApiLogin");
+            Map<String, Object> refused = missing.kotakLogin("ravali", acc, new BrokerLoginController.KotakCodes("123456",
+                    "4321"));
+            assertThat(refused).containsEntry("ok", false);
+            assertThat(String.valueOf(refused.get("message"))).contains("192.0.2.77").contains("not on this host");
+            assertThat(seen).as("nothing sent from the default route").doesNotContainKey("/login/1.0/tradeApiLogin");
+
+            BrokerLoginController bound = new BrokerLoginController(new Access(db.ds()), db.ds(), upstox,
+                    new KotakNeoLogin(activation, brokerProps, com.autotrade.execution.AccountEgress.parse(
+                            acc + "=127.0.0.1", null)), new GrowwLogin(activation, brokerProps), activation);
+            assertThat(bound.kotakLogin("ravali", acc, new BrokerLoginController.KotakCodes("123456", "4321")))
+                    .containsEntry("ok", true);
+            assertThat(seen).containsKey("/login/1.0/tradeApiLogin");
+        } finally {
+            kotakUcc = ucc;
+        }
+    }
+
     @Test
     void growwNeedsTheDaysApprovalAndThePinnedClient() {
         long t = member("ojas");

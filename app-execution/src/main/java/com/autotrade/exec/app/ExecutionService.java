@@ -48,12 +48,14 @@ class ExecutionService implements DisposableBean {
     private final BrokerRules rules;
     /** The worker's adapters, one per broker: the loop's, and what {@link BrokerSetup}'s LiveBrokers is built from. */
     private final List<BrokerAdapter> brokerAdapters;
+    private final com.autotrade.execution.AccountEgress egress;
+    private final UpstoxDenyList upstoxDenied;
     private volatile ExecutionLoop loop;
     private volatile java.time.Instant lastTick;
 
     /** Tests: no real broker sessions and no broker rules (the loop is not started). */
     ExecutionService(DataSource dataSource, ExecutionProperties properties) {
-        this(dataSource, properties, null, null, null, null, null, null, null, null, null);
+        this(dataSource, properties, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     @org.springframework.beans.factory.annotation.Autowired
@@ -65,7 +67,8 @@ class ExecutionService implements DisposableBean {
                      @org.springframework.beans.factory.annotation.Value("${autotrade.execution.read-live-probe.dir:}")
                      String probeDir,
                      @org.springframework.beans.factory.annotation.Value("${autotrade.execution.read-live-probe.accounts:}")
-                     String probeAccounts, BrokerRules rules) {
+                     String probeAccounts, com.autotrade.execution.AccountEgress egress, UpstoxDenyList upstoxDenied,
+                     BrokerRules rules) {
         this.dataSource = dataSource;
         this.properties = properties;
         this.kiteSessions = kiteSessions;
@@ -76,10 +79,12 @@ class ExecutionService implements DisposableBean {
         this.probeEvery = probeEvery;
         this.probeDir = probeDir;
         this.probeAccounts = probeAccounts;
+        this.egress = egress == null ? com.autotrade.execution.AccountEgress.NONE : egress;
+        this.upstoxDenied = upstoxDenied == null ? UpstoxDenyList.NONE : upstoxDenied;
         this.rules = rules;
         this.brokerAdapters = adapters(dataSource, properties.brokerFunds(), kiteSessions, kotakSessions, upstoxSessions,
                 growwSessions, kite == null ? com.autotrade.zerodha.KiteConfig.REAL_API : java.net.URI.create(kite.apiBase()),
-                null, null, probeSettings(), rules);
+                null, null, probeSettings(), this.egress, this.upstoxDenied, null, null, rules);
     }
 
     /** The worker's broker adapters (one per broker). */
@@ -89,7 +94,8 @@ class ExecutionService implements DisposableBean {
 
     /**
      * The worker's adapters, one per broker (8 Nov 2026): Zerodha (DRY_RUN and the LIVE pilot, unchanged), and Kotak Neo,
-     * Upstox and Groww (DRY_RUN only: their {@code live()} is null and they are not in LiveBrokers). Each reads its own
+     * Upstox and Groww (DRY_RUN; their LIVE connections exist since 16 Nov 2026 but they are not in LiveBrokers, and
+     * without an egress address the static-IP gate refuses them). Each reads its own
      * accounts' sessions; Upstox's and Groww's READ_LIVE reads go to {@code upstox} / {@code groww} (their own hosts when
      * null), with the member's own session, never zt-tiger-v2's; a READ_LIVE route's probe runs as {@code probe} says.
      */
@@ -103,13 +109,17 @@ class ExecutionService implements DisposableBean {
                                                                          com.autotrade.groww.GrowwConfig groww,
                                                                          ReadLiveProbe.Settings probe) {
         return adapters(dataSource, brokerFunds, kiteSessions, kotakSessions, upstoxSessions, growwSessions, kiteApiBase,
-                upstox, groww, probe, null);
+                upstox, groww, probe, com.autotrade.execution.AccountEgress.NONE, UpstoxDenyList.NONE, null, null, null);
     }
 
     /**
-     * As above, with the Kite product from the broker rules (16 Nov 2026, A1; null rules: the Kite config's default, MIS).
-     * The other adapters' products are their configs' and are checked against the rules at start
-     * ({@link BrokerRules#requireProducts}).
+     * As above, with each account's egress address and the static-IP LIVE gate ({@code egress}, production gaps B1/B2,
+     * 16 Nov 2026: every adapter's real-broker clients of an account leave from its address), the Upstox users never
+     * switched LIVE ({@code upstoxDenied}: zt-tiger-v2's always), the LIVE configs of Upstox and Groww (their own hosts
+     * when null; a simulator in tests), and the Kite product from the broker rules (A1; null rules: the Kite config's
+     * default, MIS; the other adapters' products are checked against the rules at start, {@link BrokerRules#requireProducts}).
+     * Kotak, Upstox and Groww have LIVE connections, reachable only once their adapter offers LIVE and their broker is
+     * configured in LiveBrokers (neither in this build).
      */
     static java.util.List<com.autotrade.execution.BrokerAdapter> adapters(DataSource dataSource, double brokerFunds,
                                                                          KiteSessionSource kiteSessions,
@@ -120,6 +130,10 @@ class ExecutionService implements DisposableBean {
                                                                          com.autotrade.upstox.orders.UpstoxConfig upstox,
                                                                          com.autotrade.groww.GrowwConfig groww,
                                                                          ReadLiveProbe.Settings probe,
+                                                                         com.autotrade.execution.AccountEgress egress,
+                                                                         UpstoxDenyList upstoxDenied,
+                                                                         com.autotrade.upstox.orders.UpstoxConfig upstoxLive,
+                                                                         com.autotrade.groww.GrowwConfig growwLive,
                                                                          BrokerRules rules) {
         java.util.Map<com.autotrade.account.BrokerType, com.autotrade.execution.BrokerSessions> byBroker =
                 new java.util.EnumMap<>(com.autotrade.account.BrokerType.class);
@@ -139,12 +153,15 @@ class ExecutionService implements DisposableBean {
         com.autotrade.execution.CapturedQuotes captured = new com.autotrade.execution.CapturedQuotes(dataSource);
         return java.util.List.of(
                 new com.autotrade.execution.ZerodhaDryRunAdapter(dataSource, brokerFunds, sessions, kiteApiBase,
-                        rules == null ? null : rules.rule(com.autotrade.account.BrokerType.ZERODHA).product()),
-                new com.autotrade.execution.KotakDryRunAdapter(dataSource, brokerFunds, sessions, captured, probe),
+                        rules == null ? null : rules.rule(com.autotrade.account.BrokerType.ZERODHA).product(), egress),
+                new com.autotrade.execution.KotakDryRunAdapter(dataSource, brokerFunds, sessions, captured, probe, egress),
                 new com.autotrade.execution.UpstoxDryRunAdapter(dataSource, brokerFunds, sessions,
-                        upstox == null ? com.autotrade.upstox.orders.UpstoxConfig.real() : upstox, captured, probe),
+                        upstox == null ? com.autotrade.upstox.orders.UpstoxConfig.real() : upstox, captured, probe,
+                        upstoxLive == null ? com.autotrade.upstox.orders.UpstoxConfig.live() : upstoxLive, egress,
+                        upstoxDenied.deniedUserIds()),
                 new com.autotrade.execution.GrowwDryRunAdapter(dataSource, brokerFunds, sessions,
-                        groww == null ? com.autotrade.groww.GrowwConfig.real() : groww, captured, probe));
+                        groww == null ? com.autotrade.groww.GrowwConfig.real() : groww, captured, probe,
+                        growwLive == null ? com.autotrade.groww.GrowwConfig.live() : growwLive, egress));
     }
 
     /**

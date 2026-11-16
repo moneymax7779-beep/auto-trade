@@ -100,7 +100,9 @@ public final class KotakHttp implements AutoCloseable {
 
     public KotakHttp(KotakConfig config) {
         this.config = config;
-        this.client = HttpClient.newBuilder().connectTimeout(config.timeout()).build();
+        // production gaps B1 (16 Nov 2026): from the account's egress address when it has one (Kotak's session must be
+        // made from, and its orders sent from, the client's registered IP); without, the same default client as before
+        this.client = com.autotrade.broker.Egress.client(config.timeout(), config.egress());
     }
 
     /** The day's trade token and sid (from the login's tradeApiValidate); never logged. */
@@ -121,10 +123,18 @@ public final class KotakHttp implements AutoCloseable {
         this.tap = tap;
     }
 
-    /** Ends the client's connections and threads (a session replaced by a new base URL, a closed route). */
+    /** Ends the client's connections and threads (a closed route). */
     @Override
     public void close() {
         client.close();
+    }
+
+    /**
+     * Retires a client replaced by a new session's (another base URL or consumer key): calls already sent run to their
+     * end (an order in flight is never cut off), no new call is taken, and its threads stop after. Never blocks.
+     */
+    public void retire() {
+        client.shutdown();
     }
 
     JsonNode get(String path, Call call) {

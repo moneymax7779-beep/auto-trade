@@ -1,5 +1,6 @@
 package com.autotrade.zerodha;
 
+import java.net.InetAddress;
 import java.net.URI;
 import java.time.Duration;
 
@@ -12,9 +13,11 @@ import java.time.Duration;
  * @param maxOrdersPerSecond our limiter's rate per account; Kite allows 10 a second (HTTP 429 above), SEBI's algo
  *                         threshold is also 10, so this stays below
  * @param placeLookupWait  after a place call timed out: how long to wait before looking the order up by tag
+ * @param egress           the account's own source address (multi-broker production gaps B1, 16 Nov 2026: the static IP
+ *                         registered with Zerodha for it); null = the host's default route, as before
  */
 public record KiteConfig(String apiKey, URI apiBase, URI loginBase, String product, Duration timeout,
-                         int maxOrdersPerSecond, Duration placeLookupWait) {
+                         int maxOrdersPerSecond, Duration placeLookupWait, InetAddress egress) {
 
     public static final URI REAL_API = URI.create("https://api.kite.trade");
     public static final URI REAL_LOGIN = URI.create("https://kite.zerodha.com");
@@ -29,6 +32,17 @@ public record KiteConfig(String apiKey, URI apiBase, URI loginBase, String produ
         product = product == null ? "MIS" : product;
         timeout = timeout == null ? Duration.ofSeconds(5) : timeout;
         placeLookupWait = placeLookupWait == null ? Duration.ofSeconds(1) : placeLookupWait;
+    }
+
+    /** Without an egress address: the host's default route (every account before 16 Nov 2026, and ZERODHA-1 today). */
+    public KiteConfig(String apiKey, URI apiBase, URI loginBase, String product, Duration timeout, int maxOrdersPerSecond,
+                      Duration placeLookupWait) {
+        this(apiKey, apiBase, loginBase, product, timeout, maxOrdersPerSecond, placeLookupWait, null);
+    }
+
+    /** The same app, its calls leaving from {@code egress} (null: the default route). */
+    public KiteConfig withEgress(InetAddress egress) {
+        return new KiteConfig(apiKey, apiBase, loginBase, product, timeout, maxOrdersPerSecond, placeLookupWait, egress);
     }
 
     /** Against a local simulator: the same app shape, short timeouts. */

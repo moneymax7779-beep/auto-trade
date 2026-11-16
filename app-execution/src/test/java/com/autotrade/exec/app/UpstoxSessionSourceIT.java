@@ -177,7 +177,7 @@ class UpstoxSessionSourceIT {
                 com.autotrade.groww.GrowwConfig.at(local), com.autotrade.execution.ReadLiveProbe.Settings.OFF);
         assertThat(adapters).extracting(BrokerAdapter::broker).containsExactly(BrokerType.ZERODHA, BrokerType.KOTAK_NEO,
                 BrokerType.UPSTOX, BrokerType.GROWW);
-        assertThat(adapters.get(2).live(upstox, null)).isNull();
+        assertThat(adapters.get(2).live(upstox, null).isRefused()).as("no egress address: the static-IP gate").isTrue();
         assertThat(LiveBrokers.of(LiveBrokers.DEFAULT, adapters).live()).containsExactly(BrokerType.ZERODHA);
     }
 }

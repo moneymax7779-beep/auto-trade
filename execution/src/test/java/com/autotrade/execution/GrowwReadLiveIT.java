@@ -348,7 +348,8 @@ class GrowwReadLiveIT {
         assertThat(v7.live()).as("a risk file with live limits: only the adapter can refuse").isNotNull();
         BrokerSessions sessions = a -> session.get();
         GrowwDryRunAdapter adapter = new GrowwDryRunAdapter(dataSource, 1e9, sessions, GrowwConfig.at(groww.baseUri()));
-        assertThat(adapter.live(live, v7.live())).as("no LIVE Groww connection in this build").isNull();
+        assertThat(adapter.live(live, v7.live()).description())
+                .as("16 Nov 2026: no LIVE Groww without the account's static IP").contains("registered static IP");
         try (BrokerConnections registry = new BrokerConnections(dataSource, 1e9, List.of(
                 new ZerodhaDryRunAdapter(dataSource, 1e9, sessions, groww.baseUri()),
                 new KotakDryRunAdapter(dataSource, 1e9, sessions),
@@ -357,7 +358,8 @@ class GrowwReadLiveIT {
             BrokerConnections.Route route = registry.route(live, v7);
             assertThat(route.venue()).isNull();
             assertThat(route.connection()).isNull();
-            assertThat(route.description()).isEqualTo("LIVE refused: no LIVE adapter for GROWW");
+            assertThat(route.description()).as("16 Nov 2026: its LIVE connection exists but is unreachable")
+                    .isEqualTo("LIVE refused: GROWW is not a LIVE broker yet");
         }
         assertThat(groww.requests()).as("nothing reached Groww").isZero();
     }

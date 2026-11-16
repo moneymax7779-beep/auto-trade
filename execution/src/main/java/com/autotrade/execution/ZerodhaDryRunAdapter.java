@@ -46,6 +46,10 @@ import com.autotrade.zerodha.KiteSimulator;
  * </ul>
  * And LIVE ({@link #live}, the Kite pilot from 4 Nov 2026, switched by the user): the same session reads, and orders go
  * to the real Kite (product MIS, from the broker rules), behind a {@link LiveGuard} with the risk file's {@code live} limits.
+ * <p>
+ * Egress (production gaps B1, 16 Nov 2026): an account with an address in {@link AccountEgress} reads and trades Kite from
+ * it (refused while it is not on this host); an account without one, ZERODHA-1 today, uses the host's default route
+ * exactly as before. Zerodha is not in the static-IP LIVE gate's default brokers (the pilot runs from the shared NAT).
  */
 public final class ZerodhaDryRunAdapter implements BrokerAdapter {
 
@@ -67,6 +71,7 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
      * {@link KiteConfig}'s own default (MIS).
      */
     private final String product;
+    private final AccountEgress egress;
 
     public ZerodhaDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds) {
         this(dataSource, simulatedBrokerFunds, BrokerSessions.NONE, KiteConfig.REAL_API);
@@ -78,17 +83,38 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
      */
     public ZerodhaDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
                                 URI kiteApiBase) {
-        this(dataSource, simulatedBrokerFunds, sessions, kiteApiBase, null);
+        this(dataSource, simulatedBrokerFunds, sessions, kiteApiBase, (String) null, AccountEgress.NONE);
     }
 
     /** @param product the product of our Kite orders ({@link BrokerRules}); null: {@link KiteConfig}'s default */
     public ZerodhaDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
                                 URI kiteApiBase, String product) {
+        this(dataSource, simulatedBrokerFunds, sessions, kiteApiBase, product, AccountEgress.NONE);
+    }
+
+    /** @param egress the accounts' source addresses and the static-IP LIVE gate (production gaps B1/B2) */
+    public ZerodhaDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
+                                URI kiteApiBase, AccountEgress egress) {
+        this(dataSource, simulatedBrokerFunds, sessions, kiteApiBase, null, egress);
+    }
+
+    /**
+     * @param product the product of our Kite orders ({@link BrokerRules}); null: {@link KiteConfig}'s default
+     * @param egress  the accounts' source addresses and the static-IP LIVE gate (production gaps B1/B2)
+     */
+    public ZerodhaDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
+                                URI kiteApiBase, String product, AccountEgress egress) {
         this.dataSource = dataSource;
         this.simulatedBrokerFunds = simulatedBrokerFunds;
         this.sessions = sessions;
         this.kiteApiBase = kiteApiBase;
         this.product = product != null ? product : KiteConfig.simulator(KiteConfig.REAL_API).product();
+        this.egress = egress == null ? AccountEgress.NONE : egress;
+    }
+
+    @Override
+    public String egressRefusal(BrokerAccount account) {
+        return egress.refusal(account);
     }
 
     @Override
@@ -150,6 +176,10 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
 
     @Override
     public Live live(BrokerAccount account, FollowerRisk.LiveLimits limits) {
+        String refusal = egress.liveRefusal(account);       // null for an account without an address (ZERODHA-1)
+        if (refusal != null) {
+            return Live.refused(refusal);
+        }
         KiteReads kite = new KiteReads(account, true);
         return new Live(new LiveGuard(kite, limits, kite::lotSize), "LIVE: Kite " + kiteApiBase.getHost()
                 + ", product " + product + ", at most " + limits.maxLotsPerOrder() + " lot(s) a buy and "
@@ -254,9 +284,12 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
         private synchronized KiteGateway gateway() {
             BrokerSessions.Access access = sessions.access(account).orElseThrow(() -> new BrokerException(Kind.SESSION,
                     "no Kite session for " + account.displayName() + " today: log in"));
+            // production gaps B1: the account's address (checked to be on this host on every call); null without one,
+            // which builds exactly the config and client of before 16 Nov 2026
+            java.net.InetAddress from = egress.address(account);
             if (gateway == null || !access.apiKey().equals(apiKey)) {
                 KiteConfig config = new KiteConfig(access.apiKey(), kiteApiBase, KiteConfig.REAL_LOGIN, product,
-                        Duration.ofSeconds(5), 8, null);
+                        Duration.ofSeconds(5), 8, null, from);
                 http = new KiteHttp(config);
                 gateway = new KiteGateway(config, http, instruments);
                 listeners.forEach(gateway::onUpdate);

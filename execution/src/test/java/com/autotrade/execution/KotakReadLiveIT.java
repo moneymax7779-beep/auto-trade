@@ -344,7 +344,8 @@ class KotakReadLiveIT {
             BrokerConnections.Route route = registry.route(live, v7);
             assertThat(route.venue()).isNull();
             assertThat(route.connection()).isNull();
-            assertThat(route.description()).isEqualTo("LIVE refused: no LIVE adapter for KOTAK_NEO");
+            assertThat(route.description()).as("16 Nov 2026: its LIVE connection exists but is unreachable")
+                    .isEqualTo("LIVE refused: KOTAK_NEO is not a LIVE broker yet");
         }
         assertThat(kotak.requests()).as("nothing reached Kotak").isZero();
     }

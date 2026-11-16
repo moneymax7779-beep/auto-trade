@@ -35,17 +35,26 @@ class GrowwLogin {
 
     private final SessionActivation sessions;
     private final BrokerLoginProperties props;
-    private final BrokerHttp http = new BrokerHttp("Groww");
+    private final BrokerHttp.PerAccount https;
 
+    /** Tests: no egress addresses. */
     GrowwLogin(SessionActivation sessions, BrokerLoginProperties props) {
+        this(sessions, props, com.autotrade.execution.AccountEgress.NONE);
+    }
+
+    /** {@code egress}: the account's source address for every call (production gaps B1, 16 Nov 2026). */
+    @org.springframework.beans.factory.annotation.Autowired      // two constructors: Spring must be told which
+    GrowwLogin(SessionActivation sessions, BrokerLoginProperties props, com.autotrade.execution.AccountEgress egress) {
         this.sessions = sessions;
         this.props = props;
+        this.https = new BrokerHttp.PerAccount("Groww", egress);
     }
 
     KiteLogin.Result login(Access.User user, long accountId) {
         BrokerAccount account = sessions.account(user, accountId, BrokerType.GROWW);
         SessionActivation.App app = sessions.app(account);
         try {
+            BrokerHttp http = https.forAccount(account);                // the account's egress (Groww's registered IP)
             String key = sessions.secrets.read(app.keyRef());
             String timestamp = String.valueOf(Instant.now().getEpochSecond());
             JsonNode t = http.postJson(props.growwApi() + "/v1/token/api/access", Map.of("Authorization", "Bearer " + key,
