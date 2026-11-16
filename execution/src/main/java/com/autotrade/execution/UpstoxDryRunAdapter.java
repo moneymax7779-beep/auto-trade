@@ -351,6 +351,7 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
             return "UPSTOX";
         }
 
+
         @Override
         public BrokerCapabilities capabilities() {
             return gateway.capabilities();

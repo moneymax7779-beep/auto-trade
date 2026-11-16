@@ -517,6 +517,35 @@ class KotakVenueIT {
     }
 
     @Test
+    void aPartlyFilledExitWhoseRePriceIsRefusedIsCancelledAtOnceAndTheRestSoldAnew() throws Exception {
+        // review 16 Nov 2026: Kotak refuses to modify a partly filled order (its qt may be the rest); the exit chase must
+        // cancel at once, never re-price by guessing, and the rest is sold by a new exit
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        FollowerSimulator kotak = brokerFollower();
+        kotak.run(s.broker(), s.group(), DAY);
+        long bought = (Long) position(s.broker()).get("quantity_open");
+        long half = bought / 2 / LOT * LOT;
+        assertThat(half).isPositive();
+        decide(s, "10:00:00", SignalDecision.Action.EXIT, 120);
+        bookOverride.set(new double[] {120, half, 120.5, 650, 120});    // bids for half only
+        int modifies = sim.requests("modify");
+        kotak.run(s.broker(), s.group(), DAY);
+        assertThat(sim.requests("modify")).as("no re-price sent for a partly filled exit").isEqualTo(modifies);
+        assertThat(orders(s.broker())).filteredOn(r -> r.get("role").equals("EXIT")).first().satisfies(r -> {
+            assertThat(r.get("status")).isEqualTo("CANCELLED");
+            assertThat(((Number) r.get("quantity_filled")).longValue()).isEqualTo(half);
+        });
+        assertThat(position(s.broker()).get("quantity_open")).isEqualTo(bought - half);
+        jdbc.update("update exec.trade_intent set updated_at = now() - interval '1 minute' where broker_account_id = ? "
+                + "and action = 'EXIT'", s.broker().id());
+        kotak.run(s.broker(), s.group(), DAY);                          // the rest, at a full book
+        assertThat(position(s.broker()).get("status")).isEqualTo("CLOSED");
+        assertThat(sim.netQuantities()).containsEntry(KOTAK_SYMBOL, 0L);
+        assertThat(new KillSwitches(dataSource).engaged(s.broker(), "opening-drive", KEY)).isNull();
+    }
+
+    @Test
     void aStopModifyTheAdapterRefusesIsCancelledAndPlacedAgain() throws Exception {
         Setup s = setup(false);
         decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
@@ -554,6 +583,7 @@ class KotakVenueIT {
         }
 
         @Override public String name() { return c.name(); }
+        @Override public String product() { return c.product(); }
         @Override public BrokerCapabilities capabilities() { return c.capabilities(); }
         @Override public void onUpdate(java.util.function.Consumer<OrderUpdate> l) { c.onUpdate(l); }
         @Override public void place(OrderRequest r) { c.place(r); }

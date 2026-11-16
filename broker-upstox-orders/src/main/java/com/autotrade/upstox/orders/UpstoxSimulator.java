@@ -61,7 +61,9 @@ public final class UpstoxSimulator implements AutoCloseable {
 
     public enum Fault {
         NONE, HTTP_429, HTTP_500, HTTP_500_PROCESSED, TIMEOUT, TIMEOUT_PROCESSED, TOKEN_EXPIRED, INPUT_ERROR,
-        REJECT_FUNDS, STATIC_IP, TOKEN_INVALID, FUNDS_DOWN
+        REJECT_FUNDS, STATIC_IP, TOKEN_INVALID, FUNDS_DOWN,
+        /** The place answers two order ids for one order (as if sliced). */
+        SPLIT_IDS
     }
 
     /** One contract the simulator lists (as its instrument file row). */
@@ -333,6 +335,13 @@ public final class UpstoxSimulator implements AutoCloseable {
     }
 
     /** Only the token issued by {@link #login} is accepted (default: any non-blank bearer token, for DRY_RUN). */
+    /** The next {@code reads} order-book reads show every order's tag as null (it is filled in afterwards). */
+    public synchronized void tagLate(int reads) {
+        this.tagLateReads = reads;
+    }
+
+    private int tagLateReads;
+
     public synchronized void strictSessions() {
         this.strict = true;
     }
@@ -669,7 +678,10 @@ public final class UpstoxSimulator implements AutoCloseable {
         }
         ObjectNode answer = success(null);
         ObjectNode data = answer.putObject("data");
-        data.putArray("order_ids").add(o.id);
+        ArrayNode ids = data.putArray("order_ids").add(o.id);
+        if (fault == Fault.SPLIT_IDS) {
+            ids.add(o.id + "9");
+        }
         answer.putObject("metadata").put("latency", 30);
         return answer;
     }
@@ -691,6 +703,11 @@ public final class UpstoxSimulator implements AutoCloseable {
         }
         if (terminal(o)) {
             return status(400, error(FINISHED_MODIFY, "Order cannot be modified as it is " + o.status));
+        }
+        if (b.has("disclosed_quantity") && b.get("disclosed_quantity").asLong() == 0) {
+            // Upstox's modify docs: disclosed_quantity, when sent, must be non-zero (at least 10 % of the quantity)
+            return status(400, error("UDAPI1039", "Disclosed quantity should be at least 10% of the quantity",
+                    "disclosed_quantity"));
         }
         Listing l = listings.get(o.key);
         if (b.has("quantity")) {
@@ -833,7 +850,14 @@ public final class UpstoxSimulator implements AutoCloseable {
                         .put("pending_quantity", o.quantity));
                 continue;
             }
-            now.add(row(o, shown));
+            ObjectNode r = row(o, shown);
+            if (tagLateReads > 0) {                                 // Upstox's examples show tag null early in a life
+                r.putNull("tag");
+            }
+            now.add(r);
+        }
+        if (tagLateReads > 0) {
+            tagLateReads--;
         }
         List<ObjectNode> shown = staleOnce ? previousBook : now;
         staleOnce = false;

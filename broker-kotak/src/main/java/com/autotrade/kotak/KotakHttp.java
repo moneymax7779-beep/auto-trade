@@ -53,6 +53,15 @@ public final class KotakHttp implements AutoCloseable {
 
     // Kotak stCodes (Kotak's docs list 1003/1004/1005/1006/1007/1009/1021/1037; 100008 from the static-IP page)
     static final int SESSION_INVALID = 1003;
+    /**
+     * Validation 16 Nov 2026: a refusal without an stCode whose message says the session is gone (an HTTP 200 Not_Ok
+     * "Invalid session"): SESSION, so the member is asked to log in again, never retried for the rest of the day.
+     */
+    static final java.util.regex.Pattern SESSION_WORDS = java.util.regex.Pattern.compile(
+            "invalid (session|token|sid|access token)|session (has )?(expired|invalid|timed out)"
+                    + "|(access token|token|sid) (has )?expired|log ?in again|re-?login",
+            java.util.regex.Pattern.CASE_INSENSITIVE);                      // never bare "not authorized": a segment
+                                                                             // or product refusal says that too
     static final int INSUFFICIENT_BALANCE = 1004;
     static final int SERVER_ERROR = 1005;
     static final int ORDER_FINISHED = 1006;
@@ -234,7 +243,8 @@ public final class KotakHttp implements AutoCloseable {
         }
         int stCode = body == null ? 0 : (int) KotakHttp.number(body.path("stCode"), 0);
         String message = body == null ? "" : firstText(body, "emsg", "errMsg", "message", "error");
-        Kind kind = kind(code, stCode, call);
+        Kind kind = stCode == 0 && SESSION_WORDS.matcher(message == null ? "" : message).find() ? Kind.SESSION
+                : kind(code, stCode, call);
         boolean notOk = body != null && body.isObject() && stat.equalsIgnoreCase("Not_Ok");
         throw new KotakException(kind, what + ": " + explain(code, stCode, message), code, stCode,
                 code != 429, null, notOk ? message : null);

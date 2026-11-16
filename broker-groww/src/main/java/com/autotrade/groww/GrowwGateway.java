@@ -31,6 +31,7 @@ import com.autotrade.broker.OrderSide;
 import com.autotrade.broker.OrderStatus;
 import com.autotrade.broker.OrderType;
 import com.autotrade.broker.OrderUpdate;
+import com.autotrade.broker.PartlyFilledModifyRefused;
 import com.autotrade.broker.Quote;
 
 import tools.jackson.databind.JsonNode;
@@ -107,6 +108,12 @@ public final class GrowwGateway implements BrokerConnection {
         this.quotes = quotes;
         this.limiter = new GrowwHttp.Limiter(config.maxOrdersPerSecond(), config.maxOrdersPerMinute(),
                 Duration.ofMinutes(1));
+    }
+
+    /** The product our orders carry (the config's), so product-aware checks skip a hand order of another product. */
+    @Override
+    public String product() {
+        return config.product();
     }
 
     @Override
@@ -213,6 +220,22 @@ public final class GrowwGateway implements BrokerConnection {
         if (r.quantity() > Integer.MAX_VALUE) {
             throw new BrokerException(Kind.TERMINAL, "place " + tag + ": quantity too large");
         }
+        if (r.side() == OrderSide.BUY && c.freezeQuantity() > 0 && r.quantity() >= c.freezeQuantity()) {
+            // validation 16 Nov 2026: Groww's file gives the exchange's freeze (its example 601: orders must stay below;
+            // UNCONFIRMED whether inclusive). Buys only: the venue slices by its own freeze table, and an exit is never
+            // refused on an unproven reading (the exchange refuses a frozen sell itself, which the venue handles)
+            throw new BrokerException(Kind.TERMINAL, "place " + tag + ": quantity " + r.quantity() + " is at or over "
+                    + c.tradingSymbol() + "'s freeze quantity " + c.freezeQuantity());
+        }
+        if (r.side() == OrderSide.BUY && !c.buyAllowed()) {
+            throw new BrokerException(Kind.TERMINAL, "place " + tag + ": Groww does not allow a buy of "
+                    + c.tradingSymbol() + " (buy_allowed)");
+        }
+        if (r.side() == OrderSide.SELL && !c.sellAllowed()) {
+            // an exit is never refused here (that would trap a long): sell_allowed may mean writing; Groww decides
+            log.warn("place {}: {} is marked sell_allowed = no; the exit is sent and Groww decides", tag,
+                    c.tradingSymbol());
+        }
         boolean stop = r.type() == OrderType.STOP_LIMIT;
         ObjectNode body = http.object();
         body.put("trading_symbol", c.tradingSymbol());
@@ -317,10 +340,13 @@ public final class GrowwGateway implements BrokerConnection {
                     + MAX_MODIFICATIONS + " modifications of an order");
         }
         BrokerOrder order = known(clientOrderId);
-        if (order.filledQuantity() > 0 && quantity > 0 && quantity != order.quantity()) {
-            // whether Groww's quantity is the total or what remains is UNCONFIRMED until the canary: never guessed
-            throw new BrokerException(Kind.TERMINAL, "modify " + clientOrderId + " refused: resize a partly filled order "
-                    + "by cancel and re-place (" + order.filledQuantity() + " of " + order.quantity() + " filled)");
+        if (order.filledQuantity() > 0 && order.filledQuantity() < order.quantity()) {
+            // whether Groww's quantity is the total or what remains is UNCONFIRMED until the canary: never guessed.
+            // Validation 16 Nov 2026: a price-only change (quantity 0) also sends a quantity here (the total), which
+            // would oversell a partly filled exit if Groww reads it as the rest: refused too; the venue cancels and
+            // places what is left
+            throw new PartlyFilledModifyRefused("modify " + clientOrderId + " refused: a partly filled order is "
+                    + "cancelled and placed again (" + order.filledQuantity() + " of " + order.quantity() + " filled)");
         }
         GrowwInstruments.Contract c = contract(order.instrumentKey());
         boolean stop = order.type() == OrderType.STOP_LIMIT;
@@ -407,8 +433,27 @@ public final class GrowwGateway implements BrokerConnection {
         Map<String, BrokerOrder> orders = new java.util.LinkedHashMap<>();
         String firstOfPrevious = null;
         for (int page = 0; page < MAX_PAGES; page++) {
-            JsonNode list = http.get(GrowwHttp.LIST + "?segment=" + GrowwHttp.SEGMENT + "&page=" + page + "&page_size="
-                    + config.pageSize()).path("payload").path("order_list");
+            JsonNode list;
+            try {
+                list = http.get(GrowwHttp.LIST + "?segment=" + GrowwHttp.SEGMENT + "&page=" + page + "&page_size="
+                        + config.pageSize()).path("payload").path("order_list");
+            } catch (GrowwException e) {
+                // validation 16 Nov 2026: a page past the end may be answered with Groww's "not found" (GA004) instead
+                // of an empty list: after the first page that ends the list (a bare 404, from a proxy or a wrong path,
+                // does not). On the first page it is never read as an empty book (a broken endpoint would hide every
+                // order, and the guard's same-tag check with them): the book is unreadable until READ_LIVE proves
+                // what Groww answers for a day without orders
+                if (page > 0 && GrowwHttp.NOT_FOUND.equals(e.errorCode())) {
+                    log.warn("Groww order list: page {} answered {} ({}); taken as the end of the list", page,
+                            e.errorCode(), e.httpStatus());
+                    break;
+                }
+                if (page == 0 && GrowwHttp.NOT_FOUND.equals(e.errorCode())) {
+                    throw new BrokerException(Kind.RETRYABLE, "Groww order list: the first page answered not found "
+                            + "(GA004); the book is unreadable, never taken as empty", e);
+                }
+                throw e;
+            }
             if (!list.isArray() || list.isEmpty()) {
                 break;
             }
@@ -631,7 +676,8 @@ public final class GrowwGateway implements BrokerConnection {
                 GrowwHttp.number(o.path("price"), 0), GrowwHttp.number(o.path("trigger_price"), 0),
                 status(raw, filled, quantity),
                 raw, remark.isEmpty() || remark.equalsIgnoreCase("null") ? null : remark,
-                updated != null ? updated : GrowwHttp.time(o.path("created_at").asString("")));
+                updated != null ? updated : GrowwHttp.time(o.path("created_at").asString("")),
+                o.path("product").asString(""));
     }
 
     /** Groww's {@code transaction_type}: BUY or SELL; anything else (missing, unknown) is no side (null), never a buy. */
@@ -665,8 +711,23 @@ public final class GrowwGateway implements BrokerConnection {
             }
             return OrderStatus.FILLED;
         }
+        String word = raw == null ? "" : raw.trim().toUpperCase(Locale.ROOT);
+        if (quantity > 0 && (word.equals("EXECUTED") || word.equals("COMPLETED"))) {
+            // validation 16 Nov 2026: a "done" word with less than the quantity filled (a partial fill shown as EXECUTED,
+            // or the filled quantity missing) is never taken as filled: what is filled stays open to later reports
+            long nowMs = System.currentTimeMillis();
+            long lastMs = lastShortExecutedLog.get();
+            if (nowMs - lastMs > 60_000 && lastShortExecutedLog.compareAndSet(lastMs, nowMs)) {   // once a minute
+                log.warn("Groww order {} with {} of {} filled: taken as {}", word, filled, quantity,
+                        filled > 0 ? "partly filled" : "working");
+            }
+            return filled > 0 ? OrderStatus.PARTIALLY_FILLED : OrderStatus.PENDING;
+        }
         return status(raw, filled);
     }
+
+    private static final java.util.concurrent.atomic.AtomicLong lastShortExecutedLog =
+            new java.util.concurrent.atomic.AtomicLong();
 
     /** {@link #status(String, long, long)} without the order's quantity (no all-filled rule). */
     static OrderStatus status(String raw, long filled) {

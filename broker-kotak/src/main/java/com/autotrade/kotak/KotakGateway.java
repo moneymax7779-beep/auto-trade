@@ -30,6 +30,7 @@ import com.autotrade.broker.OrderSide;
 import com.autotrade.broker.OrderStatus;
 import com.autotrade.broker.OrderType;
 import com.autotrade.broker.OrderUpdate;
+import com.autotrade.broker.PartlyFilledModifyRefused;
 import com.autotrade.broker.Quote;
 import com.autotrade.broker.RateLimiter;
 import com.autotrade.kotak.KotakHttp.Call;
@@ -102,6 +103,12 @@ public final class KotakGateway implements BrokerConnection {
         this.instruments = instruments;
         this.quotes = quotes;
         this.limiter = new RateLimiter(config.maxOrdersPerSecond());
+    }
+
+    /** The product our orders carry (the config's), so product-aware checks skip a hand order of another product. */
+    @Override
+    public String product() {
+        return config.product();
     }
 
     @Override
@@ -238,11 +245,12 @@ public final class KotakGateway implements BrokerConnection {
     @Override
     public void modify(String clientOrderId, long quantity, double limitPrice, double triggerPrice) {
         BrokerOrder order = known(clientOrderId);
-        if (order.filledQuantity() > 0 && quantity > 0 && quantity != order.quantity()) {
+        if (order.filledQuantity() > 0 && order.filledQuantity() < order.quantity()) {
             // whether Kotak's qt is the total or the remaining quantity is UNCONFIRMED: until the canary proves it, a
-            // partly filled order is never re-sized here (the venue cancels and places again)
-            throw new BrokerException(Kind.TERMINAL, "resize a partly filled order by cancel and re-place: " + clientOrderId
-                    + " has " + order.filledQuantity() + " of " + order.quantity() + " filled");
+            // partly filled order is never modified here (the venue cancels and places again). Validation 16 Nov 2026:
+            // a price-only change sends qt too (the total), which would oversell a partly filled exit: refused as well
+            throw new PartlyFilledModifyRefused("a partly filled order is cancelled and placed again, not modified: "
+                    + clientOrderId + " has " + order.filledQuantity() + " of " + order.quantity() + " filled");
         }
         KotakInstruments.Contract c = contract(order.instrumentKey());
         boolean stop = order.type() == OrderType.STOP_LIMIT;
@@ -460,8 +468,9 @@ public final class KotakGateway implements BrokerConnection {
                 type.equals("SL") ? OrderType.STOP_LIMIT : OrderType.LIMIT, quantity, filled,
                 KotakHttp.number(o.path("avgPrc"), 0), KotakHttp.number(o.path("prc"), 0),
                 KotakHttp.number(o.path("trgPrc"), 0), status(raw, filled, quantity), raw,
-                reason.isEmpty() || reason.equalsIgnoreCase("NA") ? null : reason,
-                updated != null ? updated : KotakHttp.time(o.path("ordDtTm").asString("")));
+                reason.isEmpty() || reason.equalsIgnoreCase("NA") || reason.matches("-+") ? null : reason,
+                updated != null ? updated : KotakHttp.time(o.path("ordDtTm").asString("")),
+                o.path("prod").asString(""));
     }
 
     /** B / BUY and S / SELL; anything else (missing, unknown) is null, never taken as a buy. */

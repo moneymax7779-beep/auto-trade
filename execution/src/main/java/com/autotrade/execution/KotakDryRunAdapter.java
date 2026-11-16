@@ -395,6 +395,7 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
             return "KOTAK_NEO";
         }
 
+
         @Override
         public BrokerCapabilities capabilities() {
             return gateway().capabilities();

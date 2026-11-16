@@ -661,6 +661,11 @@ class LiveIT {
         }
 
         @Override
+        public String product() {
+            return kite.product();
+        }
+
+        @Override
         public java.util.List<com.autotrade.broker.BrokerOrder> orders() {
             java.util.List<com.autotrade.broker.BrokerOrder> book = kite.orders();
             if (hideOnRead > 0 && --hideOnRead == 0) {

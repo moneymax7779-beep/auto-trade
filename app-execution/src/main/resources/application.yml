@@ -12,7 +12,12 @@ spring:
     username: ${AUTOTRADE_DB_USER:autotrade}
     password: ${AUTOTRADE_DB_PASSWORD:autotrade}
     hikari:
-      maximum-pool-size: 13           # one held connection per leased account + the loop's own + SignalWakeup's LISTEN
+      # one held connection per leased account + the loop's own + SignalWakeup's LISTEN + lanes/logins/alerts.
+      # Validation 16 Nov 2026: 13 starved every lane past ~10 active followers; 32 with execution 32 + core 6 + tools 8
+      # stays well under Postgres's max_connections 100 (raise both together)
+      maximum-pool-size: ${AUTOTRADE_EXEC_DB_POOL:32}
+      minimum-idle: 4                 # grown on demand: Hikari would otherwise open all 32 at start (Keycloak, the
+                                      # replay trading-core and tracker workers share this Postgres's 100)
       pool-name: execution
   flyway:
     enabled: false
@@ -78,4 +83,5 @@ autotrade:
   brokers:
     upstox:
       denied-api-keys: ${AUTOTRADE_UPSTOX_DENIED_API_KEYS:}
-      denied-user-ids: ${AUTOTRADE_UPSTOX_DENIED_USER_IDS:BM6462}
+      # validation 16 Nov 2026: BM6462 (zt-tiger-v2's Upstox user) is always denied; the variable adds to it
+      denied-user-ids: BM6462,${AUTOTRADE_UPSTOX_DENIED_USER_IDS:}

@@ -430,21 +430,41 @@ public final class ExecutionLoop implements AutoCloseable {
         squareOffLast = Instant.now();
         squareOffDay = day;
         List<String> lines = new ArrayList<>();
+        // validation 16 Nov 2026: every account at once, each on its own lane (one slow or stuck broker account no longer
+        // holds the others back toward the broker's own MIS cut-off); the results are gathered in account order
+        Map<Long, java.util.concurrent.Future<List<String>>> runs = new java.util.LinkedHashMap<>();
+        try (ExecutorService all = Executors.newVirtualThreadPerTaskExecutor()) {
+            for (long accountId : List.copyOf(leases.keySet())) {
+                BrokerAccount account = accounts.byId(accountId).orElse(null);
+                if (account == null || openPositions(accountId) == 0) {
+                    continue;
+                }
+                runs.put(accountId, all.submit(() -> {
+                    List<String> out = new ArrayList<>();
+                    try {
+                        List<String> done = flattenOnLane(account, day, "EOD_SQUARE_OFF");
+                        new KillSwitches(dataSource).audit(account, workerId, "EOD_SQUARE_OFF",
+                                java.util.Map.of("positions", done));
+                        done.forEach(line -> out.add(account.displayName() + ": " + line));
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        out.add(account.displayName() + ": square-off interrupted");
+                    } catch (Exception e) {
+                        out.add(account.displayName() + ": square-off failed (" + e.getMessage() + ")");
+                    }
+                    return out;
+                }));
+            }
+        }                                                           // close() waits for every account
         boolean flat = true;
-        for (long accountId : List.copyOf(leases.keySet())) {
-            BrokerAccount account = accounts.byId(accountId).orElse(null);
-            int open = account == null ? 0 : openPositions(accountId);
-            if (open == 0) {
-                continue;
-            }
+        for (Map.Entry<Long, java.util.concurrent.Future<List<String>>> run : runs.entrySet()) {
             try {
-                List<String> done = flattenOnLane(account, day, "EOD_SQUARE_OFF");
-                new KillSwitches(dataSource).audit(account, workerId, "EOD_SQUARE_OFF", java.util.Map.of("positions", done));
-                done.forEach(line -> lines.add(account.displayName() + ": " + line));
+                lines.addAll(run.getValue().get());
             } catch (Exception e) {
-                lines.add(account.displayName() + ": square-off failed (" + e.getMessage() + ")");
+                lines.add(accounts.byId(run.getKey()).map(BrokerAccount::displayName).orElse("account " + run.getKey())
+                        + ": square-off failed (" + e.getMessage() + ")");
             }
-            flat &= openPositions(accountId) == 0;
+            flat &= openPositions(run.getKey()) == 0;
         }
         if (flat) {
             squareOffDay = null;                                    // done: no more attempts today

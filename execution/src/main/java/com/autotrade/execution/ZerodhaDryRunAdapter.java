@@ -51,6 +51,8 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
 
     private static final Logger log = LoggerFactory.getLogger(ZerodhaDryRunAdapter.class);
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
+    /** The product every LIVE Kite order of ours carries (intraday). */
+    static final String PRODUCT = "MIS";
     /** The simulator never refuses for funds when the broker's real funds decide (CapitalPolicy reads them). */
     private static final double UNLIMITED_FUNDS = 1e12;
     /** A failed instrument load is tried again after this long, not on every read. */
@@ -232,7 +234,7 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
             BrokerSessions.Access access = sessions.access(account).orElseThrow(() -> new BrokerException(Kind.SESSION,
                     "no Kite session for " + account.displayName() + " today: log in"));
             if (gateway == null || !access.apiKey().equals(apiKey)) {
-                KiteConfig config = new KiteConfig(access.apiKey(), kiteApiBase, KiteConfig.REAL_LOGIN, "MIS",
+                KiteConfig config = new KiteConfig(access.apiKey(), kiteApiBase, KiteConfig.REAL_LOGIN, PRODUCT,
                         Duration.ofSeconds(5), 8, null);
                 http = new KiteHttp(config);
                 gateway = new KiteGateway(config, http, instruments);
@@ -281,6 +283,12 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
         @Override
         public String name() {
             return "ZERODHA";
+        }
+
+        /** Every order of ours is MIS (the config below); a hand NRML trade in the account is not counted as held. */
+        @Override
+        public String product() {
+            return PRODUCT;
         }
 
         @Override
