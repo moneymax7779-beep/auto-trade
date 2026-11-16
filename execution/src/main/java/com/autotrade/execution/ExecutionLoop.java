@@ -659,7 +659,7 @@ public final class ExecutionLoop implements AutoCloseable {
             FollowerRisk risk = FollowerRisk.load(Path.of(account.riskFile()));
             if (risk.live() == null || !risk.live().strategies().contains(ManualOrders.STRATEGY)) {
                 throw new IllegalArgumentException(account.displayName() + "'s risk file " + account.riskFile()
-                        + " does not allow manual LIVE orders (follower-risk v8 does): nothing sent");
+                        + " does not allow manual LIVE orders (follower-risk v13 does: v11 plus manual): nothing sent");
             }
         }
         return manual().buy(account, manualGroup(account), underlying, side, expectedSymbol, actor, day);

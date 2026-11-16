@@ -281,6 +281,25 @@ class CanaryTest {
 
     @ParameterizedTest
     @EnumSource(Broker.class)
+    void anotherOrderFillingTheContractDuringTheRunIsNeverTakenForTheCanarysFill(Broker b) throws Exception {
+        // review 16 Nov 2026 (D3): a strategy's (or a hand) buy of the same contract while the canary rests moved the
+        // position; the canary counted it as its own fill and sold it back, dumping the real position
+        Venue v = start(b);
+        Hooked hooked = new Hooked(v.gateway());
+        hooked.afterModify = () -> v.gateway().place(new OrderRequest("F5E1", 3000047168L, KEY, "NIFTY 23100 PE", "NSE_FO",
+                OrderSide.BUY, OrderType.LIMIT, LOT, 100.2, 0, "F5E1"));        // marketable: fills at the ask
+        Canary.Report r = new Canary(live(hooked), contract(), FAST, null, Clock.systemUTC()).run();
+
+        assertThat(r.result()).isEqualTo(Canary.Result.FAIL);
+        assertThat(r.message()).contains("without a fill of " + r.tag()).contains("not sold back by the canary");
+        assertThat(r.filledQuantity()).isZero();
+        assertThat(r.leftover()).isFalse();
+        assertThat(names(r)).doesNotContain("SELL_BACK");
+        assertThat(net(v)).as("the other order's position is left alone").isEqualTo(LOT);
+    }
+
+    @ParameterizedTest
+    @EnumSource(Broker.class)
     void theBrokersRefusalOfTheBuyFailsAndLeavesNothing(Broker b) throws Exception {
         Venue v = start(b);
         v.failPlace().accept("place");

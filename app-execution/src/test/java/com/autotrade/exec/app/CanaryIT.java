@@ -38,6 +38,7 @@ import com.autotrade.account.TradeMode;
 import com.autotrade.broker.BrokerConnection;
 import com.autotrade.execution.BrokerAdapter;
 import com.autotrade.execution.Canary;
+import com.autotrade.execution.KillSwitches;
 import com.autotrade.execution.LiveGuard;
 import com.autotrade.zerodha.KiteConfig;
 import com.autotrade.zerodha.KiteGateway;
@@ -236,8 +237,12 @@ class CanaryIT {
         assertThat(out.get("buyPrice")).isEqualTo(49.75);
         assertThat(kite.requests("place")).isEqualTo(1);
         assertThat(kite.requests("cancel")).isEqualTo(1);
-        List<Map<String, Object>> rows = jdbc.queryForList("select action, actor, detail::text detail from exec.audit_log "
+        List<Map<String, Object>> all = jdbc.queryForList("select action, actor, detail::text detail from exec.audit_log "
                 + "where broker_account_id = ? order by id", a.id());
+        // review 16 Nov 2026 (D3): the account's entries are held for the run (its switch), and released after it
+        assertThat(all.getFirst().get("action")).isEqualTo("KILL_ACCOUNT");
+        assertThat(all.getLast().get("action")).isEqualTo("KILL_RELEASED");
+        List<Map<String, Object>> rows = all.stream().filter(r -> ((String) r.get("action")).startsWith("CANARY_")).toList();
         assertThat(rows).extracting(r -> r.get("action")).containsExactly("CANARY_STEP", "CANARY_STEP", "CANARY_STEP",
                 "CANARY_STEP", "CANARY_STEP", "CANARY_STEP", "CANARY_STEP", "CANARY_STEP", "CANARY_STEP", "CANARY_STEP",
                 "CANARY_RESULT");
@@ -258,8 +263,38 @@ class CanaryIT {
         assertThat(file.path("runId").asString()).isEqualTo(out.get("runId"));
         assertThat(rows).allMatch(r -> JSON.readTree((String) r.get("detail")).path("runId").asString()
                 .equals(out.get("runId")));
-        assertThat(jdbc.queryForObject("select count(*) from exec.kill_switch where broker_account_id = ?", Integer.class,
-                a.id())).as("a clean pass engages nothing").isZero();
+        assertThat(jdbc.queryForObject("select count(*) from exec.kill_switch where broker_account_id = ? and released_at "
+                + "is null", Integer.class, a.id())).as("a clean pass leaves nothing engaged").isZero();
+    }
+
+    @Test
+    void noStrategyEntryCanStartOnTheAccountWhileTheCanaryRuns(@TempDir Path dir) throws Exception {
+        // review 16 Nov 2026 (D3): a strategy's buy of the contract during the run was taken for the canary's fill and sold
+        // back; now the account's switch holds new entries for the run (exits go on), released when it ends
+        BrokerAccount a = account(BrokerType.ZERODHA, V9, true);
+        java.util.concurrent.atomic.AtomicReference<String> atPlace = new java.util.concurrent.atomic.AtomicReference<>();
+        CanaryController api = api(clock(10, 0), dir, (acct, limits) -> {
+            BrokerAdapter.Live real = live(acct, limits);
+            BrokerConnection guard = real.connection();
+            BrokerConnection hooked = (BrokerConnection) java.lang.reflect.Proxy.newProxyInstance(
+                    BrokerConnection.class.getClassLoader(), new Class<?>[] {BrokerConnection.class}, (p, m, args) -> {
+                        if (m.getName().equals("place")) {
+                            atPlace.set(new KillSwitches(dataSource).engaged(acct, "ma-cross", KEY));
+                        }
+                        try {
+                            return m.invoke(guard, args);
+                        } catch (java.lang.reflect.InvocationTargetException e) {
+                            throw e.getCause();
+                        }
+                    });
+            return new BrokerAdapter.Live(hooked, real.description());
+        });
+        Map<String, Object> out = run(api, "kc-admin", a.id(), new CanaryController.Request(KEY, phrase(a)));
+
+        assertThat(out.get("result")).as(String.valueOf(out.get("message"))).isEqualTo("PASS");
+        assertThat(atPlace.get()).as("an entry would be refused during the run")
+                .startsWith("ACCOUNT: " + CanaryController.FENCE);
+        assertThat(new KillSwitches(dataSource).engaged(a, "ma-cross", KEY)).as("released after it").isNull();
     }
 
     @Test

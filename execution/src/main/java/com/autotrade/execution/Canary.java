@@ -45,7 +45,9 @@ import com.autotrade.broker.Quote;
  *   <li>READ_BY_TAG: found in the order book by its tag (the tag round-trip), one lot, at our price;</li>
  *   <li>MODIFY, then CONFIRM_MODIFY: the book shows the new price;</li>
  *   <li>CANCEL, then CONFIRM_CANCELLED: the book shows it cancelled;</li>
- *   <li>NO_FILL: nothing filled, no trade of the order, the contract's position unchanged.</li>
+ *   <li>NO_FILL: nothing filled, no trade of the order, the contract's position unchanged. Only the canary's own order
+ *       and its trades count as its fill (review 16 Nov 2026): a position change without one is another order of the
+ *       account, reported as a FAIL and never sold back.</li>
  * </ol>
  * Every step's timing, the broker's raw status word and what was seen go to the {@link Journal}. Any failure after the
  * place leaves nothing behind if it can: the order is looked up by tag, cancelled when working, and a fill (it should
@@ -359,10 +361,18 @@ public final class Canary {
                     && o.brokerOrderId().equals(t.brokerOrderId())).toList();
             long net = net(broker.positions());
             long traded = trades.stream().mapToLong(BrokerTrade::quantity).sum();
-            if (o.filledQuantity() > 0 || traded > 0 || net != netBefore) {
-                filled = Math.max(o.filledQuantity(), Math.max(traded, net - netBefore));
+            if (o.filledQuantity() > 0 || traded > 0) {
+                filled = Math.max(o.filledQuantity(), traded);
                 throw new Stop(Result.FAIL, "FAIL: filled " + o.filledQuantity() + ", " + trades.size()
                         + " trade(s), position " + netBefore + " -> " + net);
+            }
+            if (net != netBefore) {
+                // review 16 Nov 2026 (D3): the position moved but the canary's own order shows no fill and no trade: another
+                // order of the account traded the contract (a strategy, a hand trade). It was counted as the canary's
+                // fill and sold back, dumping a real position; now it is reported and left alone
+                throw new Stop(Result.FAIL, "FAIL: the position in " + contract.symbol() + " went " + netBefore + " -> "
+                        + net + " during the run without a fill of " + tag + " (another order of the account traded "
+                        + "it): not sold back by the canary; check the account");
             }
             return o;
         }, o -> new Seen(true, o.status().name(), o.rawStatus(), "filled 0, no trade of " + o.brokerOrderId()

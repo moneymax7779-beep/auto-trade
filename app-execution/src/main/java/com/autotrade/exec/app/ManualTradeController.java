@@ -157,7 +157,7 @@ class ManualTradeController {
                 FollowerRisk risk = FollowerRisk.load(Path.of(a.riskFile()));
                 if (risk.live() == null || !risk.live().strategies().contains(ManualOrders.STRATEGY)) {
                     why = "its risk file " + Path.of(a.riskFile()).getFileName() + " does not list manual as a LIVE "
-                            + "strategy (follower-risk v8 does)";
+                            + "strategy (follower-risk v13 does: v11 plus manual)";
                 }
             } catch (RuntimeException e) {
                 why = "its risk file cannot be read: " + e.getMessage();

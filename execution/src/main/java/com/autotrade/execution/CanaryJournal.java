@@ -78,12 +78,8 @@ public final class CanaryJournal implements Canary.Journal {
         }
     }
 
-    /**
-     * Something was left at the broker: the account's kill switch first (new entries stop; exits continue), then the
-     * {@code CANARY_LEFTOVER} row the alerts send. Neither failure stops the other.
-     */
-    @Override
-    public void leftover(Canary.Report r) {
+    /** The account switch's reason for what a canary left at the broker. */
+    public static String leftoverReason(Canary.Report r) {
         List<String> what = new java.util.ArrayList<>();
         if (r.filledQuantity() > 0 && !r.soldBack()) {
             what.add("filled " + r.filledQuantity() + " of " + r.symbol() + " NOT sold back");
@@ -91,8 +87,17 @@ public final class CanaryJournal implements Canary.Journal {
         if (r.leftWorking()) {
             what.add("order " + r.tag() + " may still be working at the broker (or its outcome is unknown)");
         }
-        String reason = REASON + " " + String.join("; ", what) + " (" + r.instrumentKey() + "): check the broker and clear "
-                + "it by hand, then release the switch";
+        return REASON + " " + String.join("; ", what) + " (" + r.instrumentKey() + "): check the broker and clear it by "
+                + "hand, then release the switch";
+    }
+
+    /**
+     * Something was left at the broker: the account's kill switch first (new entries stop; exits continue), then the
+     * {@code CANARY_LEFTOVER} row the alerts send. Neither failure stops the other.
+     */
+    @Override
+    public void leftover(Canary.Report r) {
+        String reason = leftoverReason(r);
         try {
             audit.engageAccount(account, reason, actor);
         } catch (RuntimeException e) {
