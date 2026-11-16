@@ -401,20 +401,27 @@ public final class ManualOrders {
      * and the next turn resumes it by its tag, books what filled with its stop, and EXIT then sells that. Returns the lines.
      */
     public List<String> cancelNotRun(BrokerAccount account, String underlying, String actor) {
+        return cancelNotRun(account, underlying, actor, null);
+    }
+
+    /** As {@link #cancelNotRun}, of the one buy {@code entryIntent} when given (a chart order's own; second review). */
+    public List<String> cancelNotRun(BrokerAccount account, String underlying, String actor, Long entryIntent) {
         List<String> cancelled = jdbc.queryForList("update exec.trade_intent i set state = 'CANCELLED', reject_code = "
                 + "'MANUAL_EXIT', reject_reason = 'EXIT before the buy ran', updated_at = now() where i.broker_account_id = ? "
                 + "and i.strategy_id = ? and i.action = 'ENTER' and i.state = 'CREATED' and (? or i.underlying = ?) "
+                + "and (?::bigint is null or i.id = ?) "
                 + "and not exists (select 1 from exec.order_execution e where e.trade_intent_id = i.id) returning i.symbol",
-                String.class, account.id(), STRATEGY, underlying == null, underlying == null ? "" : underlying);
+                String.class, account.id(), STRATEGY, underlying == null, underlying == null ? "" : underlying, entryIntent,
+                entryIntent);
         if (!cancelled.isEmpty()) {
             kills.audit(account, actor, "MANUAL_BUY_CANCELLED", Map.of("symbols", cancelled));
         }
         List<String> lines = new ArrayList<>();
         cancelled.forEach(symbol -> lines.add(symbol + ": buy cancelled before it was sent"));
         jdbc.queryForList("select i.symbol from exec.trade_intent i where i.broker_account_id = ? and i.strategy_id = ? "
-                + "and i.action = 'ENTER' and i.state = 'CREATED' and (? or i.underlying = ?) and exists (select 1 from "
-                + "exec.order_execution e where e.trade_intent_id = i.id)", String.class, account.id(), STRATEGY,
-                underlying == null, underlying == null ? "" : underlying)
+                + "and i.action = 'ENTER' and i.state = 'CREATED' and (? or i.underlying = ?) and (?::bigint is null or "
+                + "i.id = ?) and exists (select 1 from exec.order_execution e where e.trade_intent_id = i.id)", String.class,
+                account.id(), STRATEGY, underlying == null, underlying == null ? "" : underlying, entryIntent, entryIntent)
                 .forEach(symbol -> lines.add(symbol + ": the buy is at the broker and its outcome is not known yet (no "
                         + "broker session?); once it shows filled, EXIT again, or cancel it in the broker's app"));
         return lines;
@@ -422,9 +429,15 @@ public final class ManualOrders {
 
     /** The account's open manual positions ({@code underlying} null = every index), oldest first. */
     public List<Long> openPositions(long accountId, String underlying) {
+        return openPositions(accountId, underlying, null);
+    }
+
+    /** As {@link #openPositions}, of the one buy {@code entryIntent} when given (a chart order's own; second review). */
+    public List<Long> openPositions(long accountId, String underlying, Long entryIntent) {
         return jdbc.queryForList("select id from exec.position where broker_account_id = ? and strategy_id = ? "
-                + "and status <> 'CLOSED' and quantity_open > 0 and (? or underlying = ?) order by opened_at, id", Long.class,
-                accountId, STRATEGY, underlying == null, underlying == null ? "" : underlying);
+                + "and status <> 'CLOSED' and quantity_open > 0 and (? or underlying = ?) and (?::bigint is null or "
+                + "entry_trade_intent_id = ?) order by opened_at, id", Long.class, accountId, STRATEGY, underlying == null,
+                underlying == null ? "" : underlying, entryIntent, entryIntent);
     }
 
     /**

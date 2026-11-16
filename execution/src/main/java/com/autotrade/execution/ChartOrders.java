@@ -382,7 +382,7 @@ public final class ChartOrders {
     }
 
     /** The trade intent written under an idempotency key (the decision's key + ":" + the account), or null. */
-    Long intentByKey(String key) {
+    public Long intentByKey(String key) {
         return jdbc.queryForList("select id from exec.trade_intent where idempotency_key = ?", Long.class, key).stream()
                 .findFirst().orElse(null);
     }

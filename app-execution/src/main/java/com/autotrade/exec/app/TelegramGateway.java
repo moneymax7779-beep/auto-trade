@@ -132,13 +132,20 @@ class TelegramGateway implements DisposableBean {
             // update ever kept, which after ids restarted lower confirmed every new update unread
             offset = next;
         } else {
-            Long max = jdbc.queryForObject("select max(update_id) from exec.telegram_update", Long.class);
+            Long max = jdbc.queryForObject("select max(update_id) from exec.telegram_update where bot_id = ?", Long.class,
+                    botKey());
             offset = max == null ? 0 : max + 1;                    // before V42: the old rule, once
         }
         saveBot();
     }
 
     /** The bot and the offset the reader goes on from, together (a crash between them must not pair them wrongly). */
+    /** The bot the updates are kept under: its id, or 0 when the token gives none (as the updates kept before V43). */
+    long botKey() {
+        Long b = botId != null ? botId : commands.bot().botId();
+        return b == null ? 0 : b;
+    }
+
     private void saveBot() {
         jdbc.update("insert into exec.telegram_poller (id, worker_id, bot_id, next_offset) values (1, ?, ?, ?) on conflict "
                 + "(id) do update set bot_id = excluded.bot_id, next_offset = excluded.next_offset", workerId, botId,
@@ -204,8 +211,9 @@ class TelegramGateway implements DisposableBean {
             lastUpdateAt = Instant.now();
             if (fresh) {
                 String outcome = commands.handle(update);
-                jdbc.update("update exec.telegram_update set processed_at = now(), outcome = ? where update_id = ?",
-                        outcome.length() > 200 ? outcome.substring(0, 200) : outcome, id);
+                jdbc.update("update exec.telegram_update set processed_at = now(), outcome = ? where bot_id = ? and "
+                        + "update_id = ?",
+                        outcome.length() > 200 ? outcome.substring(0, 200) : outcome, botKey(), id);
             }
         }
         jdbc.update("insert into exec.telegram_poller (id, worker_id, last_ok_at, bot_id, next_offset) values (1, ?, now(), "
@@ -223,9 +231,10 @@ class TelegramGateway implements DisposableBean {
                 : kind.equals("CALLBACK") ? u.path("callback_query").path("data").asString(null) : null;
         java.sql.Timestamp sent = kind.equals("MESSAGE") && message.path("date").isNumber()
                 ? java.sql.Timestamp.from(Instant.ofEpochSecond(message.path("date").asLong())) : null;
-        return jdbc.update("insert into exec.telegram_update (update_id, sent_at, from_user_id, chat_id, chat_type, kind, "
-                        + "text) values (?, ?, ?, ?, ?, ?, ?) on conflict (update_id) do nothing",
-                u.path("update_id").asLong(), sent, from.path("id").isNumber() ? from.path("id").asLong() : null,
+        // second review: a repeat is the same bot's same update (update_id is unique per bot only)
+        return jdbc.update("insert into exec.telegram_update (bot_id, update_id, sent_at, from_user_id, chat_id, chat_type, "
+                        + "kind, text) values (?, ?, ?, ?, ?, ?, ?, ?) on conflict (bot_id, update_id) do nothing",
+                botKey(), u.path("update_id").asLong(), sent, from.path("id").isNumber() ? from.path("id").asLong() : null,
                 message.path("chat").path("id").isNumber() ? message.path("chat").path("id").asLong() : null,
                 message.path("chat").path("type").asString(null), kind,
                 text == null ? null : text.length() > 4096 ? text.substring(0, 4096) : text) > 0;

@@ -411,9 +411,10 @@ class TelegramCommands {
             return reply(c, refused, "FORBIDDEN");
         }
         String nonce = nonce();
-        long id = jdbc.queryForObject("insert into exec.telegram_command (update_id, app_user_id, chat_id, tenant_id, verb, "
-                        + "broker_account_id, position_id, trade_mode, nonce) values (?, ?, ?, ?, ?, ?, ?, ?, ?) returning id",
-                Long.class, updateId, c.appUserId(), Long.parseLong(c.chat()), tenant, verb,
+        Long botId = bot.botId();
+        long id = jdbc.queryForObject("insert into exec.telegram_command (bot_id, update_id, app_user_id, chat_id, tenant_id, "
+                        + "verb, broker_account_id, position_id, trade_mode, nonce) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                        + "returning id", Long.class, botId == null ? 0 : botId, updateId, c.appUserId(), Long.parseLong(c.chat()), tenant, verb,
                 account == null ? null : account.id(), positionId,
                 account == null ? null : account.tradeMode().name(), nonce);
         String text = "T" + id + " " + describe(verb, tenant, account, positionId) + "\n\nConfirm within "

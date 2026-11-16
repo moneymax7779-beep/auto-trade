@@ -799,6 +799,12 @@ class SessionRunner implements ApplicationRunner {
                     chartOrders.close();
                 }
                 timer.shutdownNow();                             // its heartbeat and snapshot flush, too
+                if (signalFeed != null) {
+                    // third review 16 Nov 2026: a signal source started alongside read a feed nothing would ever fill;
+                    // its feed is ended, so its run returns and its own finally stops its timer
+                    signalFeed.stop();
+                    signalFeed.end();
+                }
             }
         }
     }

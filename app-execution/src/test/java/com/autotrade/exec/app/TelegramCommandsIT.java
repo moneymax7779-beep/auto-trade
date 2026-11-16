@@ -379,13 +379,20 @@ class TelegramCommandsIT {
             assertThat(pollQueries.get(2)).as("a restart goes on from the reader's own offset").contains("offset=8&");
 
             Files.writeString(botFile, "TELEGRAM_BOT_TOKEN=5353:BBB\nTELEGRAM_CHAT_ID=42\n");
+            ObjectNode clash = message(STRANGER, STRANGER, "private", "/start CLASH234", 0);
+            clash.put("update_id", 7);                                    // the new bot's id 7: not the old bot's 7
+            pollBodies.add("[" + clash + "]");
             assertThat(gateway.pollOnce(0)).isTrue();
             assertThat(pollQueries.get(3)).as("another bot: its own first update").doesNotContain("offset=");
+            assertThat(jdbc.queryForObject("select outcome from exec.telegram_update where bot_id = 5353 and update_id = 7",
+                    String.class)).as("third pass: handled, not dropped as the other bot's repeat").isEqualTo("START");
+            assertThat(gateway.pollOnce(0)).isTrue();                     // index 4: from the new bot's next id
+            assertThat(pollQueries.get(4)).contains("offset=8&");
             assertThat(jdbc.queryForObject("select bot_id from exec.telegram_poller", Long.class)).isEqualTo(5353L);
             Files.writeString(botFile, "TELEGRAM_BOT_TOKEN=6464:CCC\nTELEGRAM_CHAT_ID=42\n");
             gateway.prepare();                                            // a restart on a third bot
             assertThat(gateway.pollOnce(0)).isTrue();
-            assertThat(pollQueries.get(4)).doesNotContain("offset=");
+            assertThat(pollQueries.get(5)).doesNotContain("offset=");
         } finally {
             Files.copy(saved, botFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
             jdbc.update("update exec.telegram_update set received_at = now() where received_at < now() - interval '1 day'");

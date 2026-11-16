@@ -135,8 +135,27 @@ public final class KotakHttp implements AutoCloseable {
      */
     public void retire() {
         retired = true;
-        client.shutdown();
+        if (calls.get() == 0) {
+            shutdownOnce();
+        }                                   // else the last call in flight shuts it down as it ends
     }
+
+    private void shutdownOnce() {
+        if (shut.compareAndSet(false, true)) {
+            client.shutdown();
+        }
+    }
+
+    /**
+     * Calls between their "retired?" check and their end (third review 16 Nov 2026): a retire that landed between a
+     * call's check and its send shut the client under it, and an order call's IOException read as UNKNOWN. Now a call
+     * counts itself in before the check and a retire shuts the client only when none is in: either the call sees it
+     * retired (not sent) or the retire sees the call (the last one out shuts it down).
+     */
+    private final java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicBoolean shut = new java.util.concurrent.atomic.AtomicBoolean();
+    /** Tests: run between a call's check and its send, with the call ("POST /path"). */
+    volatile java.util.function.Consumer<String> beforeSend = what -> { };
 
     /**
      * Retired (review 16 Nov 2026, D9): a call that starts after it is refused as not sent (RETRYABLE), never sent into
@@ -222,18 +241,24 @@ public final class KotakHttp implements AutoCloseable {
     private JsonNode send(HttpRequest.Builder builder, Call call) {
         HttpRequest request = builder.build();
         String what = request.method() + " " + request.uri().getPath();
-        if (retired) {
-            throw new KotakException(Kind.RETRYABLE, what + ": not sent, this session's client was replaced by a newer "
-                    + "login's", 0, 0, false, null);
-        }
         HttpResponse<String> response;
+        calls.incrementAndGet();
         try {
+            if (retired) {
+                throw new KotakException(Kind.RETRYABLE, what + ": not sent, this session's client was replaced by a newer "
+                        + "login's", 0, 0, false, null);
+            }
+            beforeSend.accept(what);
             response = client.send(request, HttpResponse.BodyHandlers.ofString());
         } catch (IOException e) {
             throw failure(e, call, what, config.baseUrl().getHost());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new KotakException(Kind.UNKNOWN, "interrupted", 0, 0, true, e);
+        } finally {
+            if (calls.decrementAndGet() == 0 && retired) {
+                shutdownOnce();
+            }
         }
         BiConsumer<String, String> t = tap;
         if (t != null) {
