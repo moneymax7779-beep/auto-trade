@@ -897,6 +897,17 @@ public final class UpstoxSimulator implements AutoCloseable {
         return list;
     }
 
+    /**
+     * A position the account carried into today in D (Upstox's carry product) (an overnight lot; negative: a carried short), as the
+     * positions book shows it: a row of that product with the carry and no trade today (review 16 Nov 2026, D1b).
+     */
+    public synchronized void carried(String instrumentKey, long quantity) {
+        listing(instrumentKey);
+        carriedIn.merge(instrumentKey, quantity, Long::sum);
+    }
+
+    private final Map<String, Long> carriedIn = new LinkedHashMap<>();
+
     private List<ObjectNode> positions() {
         Map<String, long[]> qty = new LinkedHashMap<>();
         Map<String, double[]> value = new LinkedHashMap<>();
@@ -926,6 +937,16 @@ public final class UpstoxSimulator implements AutoCloseable {
                     .put("trading_symbol", l.tradingSymbol()).put("tradingsymbol", l.tradingSymbol())
                     .put("close_price", 0.0).put("buy_price", money(q[0] > 0 ? v[0] / q[0] : 0))
                     .put("sell_price", money(q[1] > 0 ? v[1] / q[1] : 0)));
+        }
+        for (Map.Entry<String, Long> e : carriedIn.entrySet()) {
+            Listing l = listing(e.getKey());
+            long c = e.getValue();
+            list.add(json.createObjectNode().put("exchange", l.segment().startsWith("BSE") ? "BFO" : "NFO")
+                    .put("product", "D").put("instrument_token", l.instrumentKey()).put("quantity", c)
+                    .put("overnight_quantity", c).put("overnight_buy_quantity", Math.max(0, c))
+                    .put("overnight_sell_quantity", Math.max(0, -c)).put("day_buy_quantity", 0).put("day_sell_quantity", 0)
+                    .put("day_buy_value", 0.0).put("day_sell_value", 0.0).put("average_price", 100.0)
+                    .put("trading_symbol", l.tradingSymbol()).put("tradingsymbol", l.tradingSymbol()));
         }
         return list;
     }

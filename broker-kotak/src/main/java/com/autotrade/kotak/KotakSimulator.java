@@ -758,6 +758,17 @@ public final class KotakSimulator implements AutoCloseable {
         return list;
     }
 
+    /**
+     * A position the account carried into today in NRML (an overnight lot; negative: a carried short), as the
+     * positions book shows it: a row of that product with the carry and no trade today (review 16 Nov 2026, D1b).
+     */
+    public synchronized void carried(String instrumentKey, long quantity) {
+        listing(instrumentKey);
+        carriedIn.merge(instrumentKey, quantity, Long::sum);
+    }
+
+    private final Map<String, Long> carriedIn = new LinkedHashMap<>();
+
     private ArrayNode positions() {
         Map<String, long[]> qty = new LinkedHashMap<>();
         Map<String, double[]> value = new LinkedHashMap<>();
@@ -779,6 +790,15 @@ public final class KotakSimulator implements AutoCloseable {
                     .put("exSeg", l.segment()).put("prod", product).put("flBuyQty", Long.toString(q[0]))
                     .put("flSellQty", Long.toString(q[1])).put("buyAmt", plain(v[0])).put("sellAmt", plain(v[1]))
                     .put("cfBuyQty", "0").put("cfSellQty", "0").put("cfBuyAmt", "0.00").put("cfSellAmt", "0.00")
+                    .put("lotSz", Long.toString(l.lotSize())).put("type", l.type()));
+        }
+        for (Map.Entry<String, Long> e : carriedIn.entrySet()) {
+            Listing l = listing(e.getKey());
+            long c = e.getValue();
+            list.add(json.createObjectNode().put("trdSym", l.tradingSymbol()).put("tok", Long.toString(l.token()))
+                    .put("exSeg", l.segment()).put("prod", "NRML").put("flBuyQty", "0").put("flSellQty", "0")
+                    .put("buyAmt", "0.00").put("sellAmt", "0.00").put("cfBuyQty", Long.toString(Math.max(0, c)))
+                    .put("cfSellQty", Long.toString(Math.max(0, -c))).put("cfBuyAmt", "0.00").put("cfSellAmt", "0.00")
                     .put("lotSz", Long.toString(l.lotSize())).put("type", l.type()));
         }
         return list;

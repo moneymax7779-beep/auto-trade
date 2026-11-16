@@ -364,6 +364,24 @@ class MultiBrokerLiveIT {
         }
     }
 
+    /** Review 16 Nov 2026 (D1b): Kotak's carry (cfBuyQty - cfSellQty, any product) reaches the LIVE guard. */
+    @Test
+    void kotakLiveConnectionPassesWhatWasCarriedIntoTodayToTheGuard() throws Exception {
+        BrokerAccount account = liveAccount(BrokerType.KOTAK_NEO, "UCC4");
+        try (KotakSimulator kotak = new KotakSimulator(0, "member-key", 1_500)) {
+            kotak.list(new KotakSimulator.Listing(47168, "nse_fo", "NIFTY26X1023100PE", "NIFTY", DAY.plusDays(2), 23100,
+                    "PE", LOT, 0.05));
+            kotak.carried(KEY, -LOT);
+            KotakSimulator.Session first = kotak.login();
+            BrokerSessions.Access access = new BrokerSessions.Access("member-key", first.token(), Map.of(
+                    KotakDryRunAdapter.SID, first.sid(), KotakDryRunAdapter.BASE_URL, kotak.baseUri().toString()));
+            BrokerAdapter.Live live = new KotakDryRunAdapter(dataSource, 1e9, a -> Optional.of(access), kotak::book,
+                    ReadLiveProbe.Settings.OFF, loopbackFor(account)).live(account, ONE_LOT);
+            assertThat(live.connection()).isInstanceOf(LiveGuard.class);
+            assertThat(live.connection().carriedIn()).as("a carried short").containsExactlyEntriesOf(Map.of(KEY, (long) -LOT));
+        }
+    }
+
     // ------------------------------------------------------------------ Upstox
 
     @Test
@@ -396,6 +414,23 @@ class MultiBrokerLiveIT {
             }, () -> session.set(Optional.of(new BrokerSessions.Access("member-api-key",
                     upstox.login().accessToken()))));
             assertThat(upstox.tokensSentToAssets()).as("the instrument file never sees the token").isZero();
+        }
+    }
+
+    /** Review 16 Nov 2026 (D1b): Upstox's carry (a D-product overnight row) reaches the LIVE guard. */
+    @Test
+    void upstoxLiveConnectionPassesWhatWasCarriedIntoTodayToTheGuard() throws Exception {
+        BrokerAccount account = liveAccount(BrokerType.UPSTOX, "AB4323");
+        try (UpstoxSimulator upstox = new UpstoxSimulator(0, 1_500)) {
+            upstox.list(new UpstoxSimulator.Listing(KEY, SYMBOL, "NIFTY", DAY.plusDays(2), 23100, "PE", LOT, 0.05));
+            upstox.carried(KEY, LOT);
+            String token = upstox.login().accessToken();
+            BrokerAdapter.Live live = new UpstoxDryRunAdapter(dataSource, 1e9,
+                    a -> Optional.of(new BrokerSessions.Access("member-api-key", token)), UpstoxConfig.at(upstox.baseUri()),
+                    upstox::book, ReadLiveProbe.Settings.OFF, UpstoxConfig.liveSimulator(upstox.baseUri()),
+                    loopbackFor(account), List.of()).live(account, ONE_LOT);
+            assertThat(live.connection()).isInstanceOf(LiveGuard.class);
+            assertThat(live.connection().carriedIn()).containsExactlyEntriesOf(Map.of(KEY, (long) LOT));
         }
     }
 
@@ -460,6 +495,23 @@ class MultiBrokerLiveIT {
                 }
             }, () -> session.set(Optional.of(new BrokerSessions.Access(null, groww.login().accessToken()))));
             assertThat(groww.tokensSentToAssets()).as("the instrument CSV never sees the token").isZero();
+        }
+    }
+
+    /** Review 16 Nov 2026 (D1b): Groww's carry (carry_forward credit - debit, any product) reaches the LIVE guard. */
+    @Test
+    void growwLiveConnectionPassesWhatWasCarriedIntoTodayToTheGuard() throws Exception {
+        BrokerAccount account = liveAccount(BrokerType.GROWW, "GW4324");
+        try (GrowwSimulator groww = new GrowwSimulator(0, 1_500)) {
+            groww.list(new GrowwSimulator.Listing(KEY, SYMBOL, "NIFTY", DAY.plusDays(2), 23100, "PE", LOT, 0.05));
+            groww.carried(KEY, LOT);
+            String token = groww.login().accessToken();
+            BrokerAdapter.Live live = new GrowwDryRunAdapter(dataSource, 1e9,
+                    a -> Optional.of(new BrokerSessions.Access(null, token)), GrowwConfig.at(groww.baseUri()), groww::book,
+                    ReadLiveProbe.Settings.OFF, GrowwConfig.liveSimulator(groww.baseUri()), loopbackFor(account))
+                    .live(account, ONE_LOT);
+            assertThat(live.connection()).isInstanceOf(LiveGuard.class);
+            assertThat(live.connection().carriedIn()).containsExactlyEntriesOf(Map.of(KEY, (long) LOT));
         }
     }
 
@@ -539,6 +591,26 @@ class MultiBrokerLiveIT {
                 .contains("ZERODHA is not configured LIVE on this worker");
         assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? and action = "
                 + "'LIVE_ROUTE_REFUSED'", Integer.class, kite.id())).isEqualTo(1);
+    }
+
+    @Test
+    void aRefusedRouteIsOpenedAgainAfterAPauseWithoutARestart() throws Exception {
+        // review 16 Nov 2026 (D5): a refused route was kept until a restart, so an account whose cause went away (its
+        // egress address came up a few seconds after the worker started, the LIVE setting put right) had no exits all day
+        BrokerAccount kite = liveAccount(BrokerType.ZERODHA, "AB6666");
+        List<BrokerAdapter> adapters = List.of(new ZerodhaDryRunAdapter(dataSource, 1e9));
+        FollowerRisk v7 = FollowerRisk.load(Path.of(V7));
+        java.util.concurrent.atomic.AtomicBoolean configured = new java.util.concurrent.atomic.AtomicBoolean(false);
+        try (BrokerConnections registry = new BrokerConnections(dataSource, 1e9, adapters)) {
+            registry.liveBrokers(b -> configured.get() && b == BrokerType.ZERODHA);
+            assertThat(registry.route(kite, v7).venue()).isNull();
+            configured.set(true);
+            registry.retryRefusedAfter(java.time.Duration.ofHours(1));
+            assertThat(registry.route(kite, v7).venue()).as("within the pause: the refusal stands").isNull();
+            registry.retryRefusedAfter(java.time.Duration.ZERO);
+            assertThat(registry.route(kite, v7).venue()).as("after it: opened again").isNotNull();
+            assertThat(registry.route(kite, v7)).as("an open route is kept").isSameAs(registry.route(kite, v7));
+        }
     }
 
     @Test

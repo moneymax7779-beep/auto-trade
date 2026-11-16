@@ -5,6 +5,7 @@ import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -21,6 +22,7 @@ import org.slf4j.LoggerFactory;
 
 import com.autotrade.broker.BrokerCapabilities;
 import com.autotrade.broker.BrokerConnection;
+import com.autotrade.broker.DailyCarry;
 import com.autotrade.broker.BrokerException;
 import com.autotrade.broker.BrokerException.Kind;
 import com.autotrade.broker.BrokerOrder;
@@ -637,6 +639,37 @@ public final class GrowwGateway implements BrokerConnection {
         }
         return positions;
     }
+
+    /**
+     * What each contract carried into today across every product (review 16 Nov 2026, D1b): each row's
+     * {@code carry_forward_credit_quantity} less {@code carry_forward_debit_quantity}, unfiltered by product. Kept for the
+     * day ({@link DailyCarry}).
+     */
+    @Override
+    public Map<String, Long> carriedIn() {
+        return carry.get(() -> {
+            Map<String, Long> byKey = new LinkedHashMap<>();
+            JsonNode list = http.get(GrowwHttp.POSITIONS + "?segment=" + GrowwHttp.SEGMENT).path("payload")
+                    .path("positions");
+            for (JsonNode p : list.isArray() ? list : List.<JsonNode>of()) {
+                long carried = GrowwHttp.whole(p.path("carry_forward_credit_quantity"))
+                        - GrowwHttp.whole(p.path("carry_forward_debit_quantity"));
+                String key = key(p);
+                if (carried != 0 && key == null) {
+                    // review 16 Nov 2026: the day's instrument list not loaded yet (the route's warm-up): not kept as
+                    // "nothing carried" for the day; read again at the next call
+                    throw new BrokerException(Kind.RETRYABLE, "a carried position (" + carried + ") is not mapped to a "
+                            + "contract yet");
+                }
+                if (carried != 0 && key != null) {
+                    byKey.merge(key, carried, Long::sum);
+                }
+            }
+            return byKey;
+        });
+    }
+
+    private final DailyCarry carry = new DailyCarry("Groww");
 
     @Override
     public int poll() {

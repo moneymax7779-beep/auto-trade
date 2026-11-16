@@ -484,6 +484,13 @@ public final class GrowwDryRunAdapter implements BrokerAdapter {
         }
 
         @Override
+        public Map<String, Long> carriedIn() {
+            GrowwGateway g = gateway();
+            loadToday();                                  // the rows are mapped to contracts through today's list
+            return g.carriedIn();
+        }
+
+        @Override
         public int poll() {
             return orderGateway("poll").poll();
         }

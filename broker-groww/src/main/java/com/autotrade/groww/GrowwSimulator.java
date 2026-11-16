@@ -922,6 +922,17 @@ public final class GrowwSimulator implements AutoCloseable {
         return answer;
     }
 
+    /**
+     * A position the account carried into today in NRML (an overnight lot; negative: a carried short), as the
+     * positions book shows it: a row of that product with the carry and no trade today (review 16 Nov 2026, D1b).
+     */
+    public synchronized void carried(String instrumentKey, long quantity) {
+        listing(instrumentKey);
+        carriedIn.merge(instrumentKey, quantity, Long::sum);
+    }
+
+    private final Map<String, Long> carriedIn = new LinkedHashMap<>();
+
     private ObjectNode positions() {
         Map<String, long[]> qty = new LinkedHashMap<>();
         Map<String, double[]> value = new LinkedHashMap<>();
@@ -950,6 +961,17 @@ public final class GrowwSimulator implements AutoCloseable {
                     .put("net_price", money(q[0] - q[1] != 0 ? (v[0] - v[1]) / (q[0] - q[1]) : 0))
                     .put("net_carry_forward_price", 0).put("realised_pnl", money(Math.min(q[0], q[1])
                             * (sellPrice - buyPrice))));
+        }
+        for (Map.Entry<String, Long> e : carriedIn.entrySet()) {
+            Listing l = listing(e.getKey());
+            long c = e.getValue();
+            list.add(json.createObjectNode().put("trading_symbol", l.tradingSymbol()).put("segment", "FNO")
+                    .put("credit_quantity", 0).put("credit_price", 0).put("debit_quantity", 0).put("debit_price", 0)
+                    .put("carry_forward_credit_quantity", Math.max(0, c)).put("carry_forward_credit_price", 100)
+                    .put("carry_forward_debit_quantity", Math.max(0, -c)).put("carry_forward_debit_price", 0)
+                    .put("exchange", l.exchange()).put("symbol_isin", (String) null).put("quantity", c)
+                    .put("product", "NRML").put("net_carry_forward_quantity", c).put("net_price", 100)
+                    .put("net_carry_forward_price", 100).put("realised_pnl", 0));
         }
         return answer;
     }
