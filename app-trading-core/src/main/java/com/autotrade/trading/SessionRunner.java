@@ -74,6 +74,8 @@ class SessionRunner implements ApplicationRunner {
 
     private static final int MAX_STARTS_PER_DAY = 3;
     private static final Duration RESTART_BACKOFF = Duration.ofMinutes(1);
+    /** V35: how often a live session re-reads the owner's OFF list (a switch applies within this). */
+    static final Duration OFF_READ_EVERY = Duration.ofSeconds(5);
 
     /** A running session and what it owns. */
     private record Running(LocalDate date, TradingSession session, Thread worker, ScheduledExecutorService timer) {
@@ -564,6 +566,9 @@ class SessionRunner implements ApplicationRunner {
                 risk, CostModel.from(costsFile), FillModel.from(costsFile, t.fillModel()),
                 instruments, hashes, CodeVersion.current());
         TradingSession trading = new TradingSession(settings, feed, new TradeStore(target));
+        if (!replay) {
+            trading.strategySwitch(com.autotrade.execution.LiveStrategies.offReader(target, OFF_READ_EVERY));   // V35
+        }
         if (replay && t.replaySpeed() > 0) {
             trading.replayControl(replayControl);
         }
@@ -689,6 +694,9 @@ class SessionRunner implements ApplicationRunner {
                 t.underlyings(), t.tradeUnderlyingList(), features, history, strategies, risk, CostModel.from(costsFile),
                 FillModel.from(costsFile, t.fillModel()), instruments, signalHashes, CodeVersion.current());
         TradingSession signalSession = new TradingSession(settings, feed, new TradeStore(target));
+        if (!replay) {
+            signalSession.strategySwitch(com.autotrade.execution.LiveStrategies.offReader(target, OFF_READ_EVERY));   // V35
+        }
         com.autotrade.account.AccountStore accounts = new com.autotrade.account.AccountStore(target);
         long tenant = accounts.ensureTenant(signal.tenantName());
         long owner = accounts.ensureUser(signal.ownerSubjectOr(), "owner");

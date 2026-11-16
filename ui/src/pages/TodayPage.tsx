@@ -172,8 +172,8 @@ function TodayFor({ tenant }: { tenant: number }) {
         {s.mode !== "LIVE" && t.canManage && liveBlock && <p className="mt-2 text-xs text-muted">LIVE not possible now: {liveBlock}.</p>}
         {s.mode !== "LIVE" && !t.canManage && <p className="mt-2 text-xs text-muted">Only the workspace's owner switches LIVE.</p>}
         {chosen && chosen.liveStrategies.length > 0 && (
-          <p className="mt-2 text-xs text-muted">LIVE trades these strategies only: {chosen.liveStrategies.join(", ")} (one lot an
-            entry). The others keep paper-trading.</p>
+          <p className="mt-2 text-xs text-muted">LIVE trades these strategies only: {chosen.liveStrategies.join(", ")} ({chosen.sizeStepPct > 0
+            ? "lots from the allocation" : "one lot an entry"}). The others keep paper-trading.</p>
         )}
       </Panel>
 

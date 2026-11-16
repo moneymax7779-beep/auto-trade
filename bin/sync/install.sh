@@ -16,4 +16,4 @@ sed -e "s|/Users/satyasiripuram/Desktop/Dev/Code/auto-trade/bin/sync/daily-sync.
 plutil -lint "$PLIST" >/dev/null
 launchctl bootout "gui/$(id -u)/com.autotrade.daily-sync" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$PLIST"
-echo "installed: $DEST, weekdays 16:45 (logs: $DEST/logs)"
+echo "installed: $DEST, weekdays 16:00 (logs: $DEST/logs)"

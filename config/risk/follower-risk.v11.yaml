@@ -1,0 +1,57 @@
+# follower-risk v11 (user 11 Nov 2026, ZERODHA-1: "I want to make my zerodha account to be allowed to trade the capital
+# and stop loss specified"; answers: size "Full (size step 100 %)", lot ceiling "Allocation only", loss limit "Count
+# open loss, close all"): v10 with the one-lot pilot caps lifted, so a LIVE account sizes every entry (and its adds)
+# from its own allocation like a paper follower, and with the daily loss counting open positions:
+#   - live.max_lots_per_order 1 -> 50 and positions.max_lots_per_underlying 2 -> 50 (no ceiling below what the
+#     allocation buys: the capital limits below decide the size; 50 is only a guard against a sizing bug);
+#   - capital.daily_loss_counts_open: true: closed trades + open positions marked at the bid; at the limit (the
+#     account's own rupee limit, else daily_loss_pct of equity) every open position is sold and entries stop for the day.
+# The account's size step (acct.broker_account.size_step_pct) must be above 0 for allocation sizing (100 = full size;
+# 0 stays one lot). Every other limit is v10's: 3 open positions, premium in use <= equity, broker funds + 10 %,
+# the broker stop, the LIVE strategy list and defaults.
+version: follower-risk-v11
+name: follower-risk
+status: UNCALIBRATED
+
+capital:
+  daily_loss_pct: 10                   # v5: Rs 20,000 on Rs 2,00,000 (user's limit); v3 had 22 as paper-risk v17
+  daily_loss_counts_open: true         # v11: closed + open (at the bid); at the limit sell everything, no entries today
+  max_premium_per_trade_pct: 100
+  max_open_premium_pct: 100            # premium in use + this entry <= equity (paper-risk v17's capital check)
+  broker_funds_buffer_pct: 10          # the broker's available funds must exceed the entry premium by 10 %
+
+positions:
+  max_open_positions: 3                # v10 (A-372; v7-v9 pilot: 2, v6: 4)
+  max_lots_per_underlying: 50          # v11: allocation sizing (v7-v10 pilot: 2, v6: 400)
+
+sizing:                                # as paper-risk v17
+  rvol_boost_threshold: 1.5
+  rvol_boost_factor: 1.5
+
+simulation:                            # PAPER followers (simulated fills) only
+  adverse_bps: 0
+
+orders:                                # as paper-risk v17 orders (PAPER-1's OMS)
+  entry_buffer_ticks: 4                # marketable limit: the broker's ask + 4 ticks
+  entry_timeout_sec: 10                # what is unfilled after this is cancelled; the position is what filled
+  exit_buffer_ticks: 4                 # sell limit: bid − max(4 ticks, exit_buffer_pct of the bid)
+  exit_buffer_pct: 1.0
+  exit_chase_sec: 2                    # an unfilled exit is re-priced at the new touch after this
+  exit_chase_max: 6                    # re-pricings before the exit crosses exit_cross_pct through the touch
+  exit_cross_pct: 5
+  tick: 0.05                           # index option price step
+  poll_ms: 250                         # how often the order book is pulled while an order works
+  dry_run_market: BROKER               # v6: DRY_RUN reads the broker (funds, quotes + depth, instruments); orders simulated
+
+broker_stop:                           # plan section 3: catastrophic stop resting at the broker after every entry fill
+  default_stop_pct: 25                 # when the signal carries no stop_pct (the strategies publish theirs)
+  limit_offset_pct: 5                  # its limit this far below the trigger (paper-risk v17 stop_limit_offset_pct)
+
+live:                                  # v7: the LIVE pilot's hard limits (LiveGuard checks them again at the broker)
+  max_lots_per_order: 50               # v11: allocation sizing (v7-v10 pilot: 1)
+  max_open_positions: 3                # v10 (A-372; v7-v9: 2)
+  # v9: the strategies the owner may choose to trade LIVE on an account (the live set of PAPER-1); the account's choice
+  # (acct.broker_account.live_strategies, Accounts page) is what trades LIVE, never wider than this list
+  strategies: [early-confirm-runner, expiry-trend-rider, ma-cross, oi-burst-cross, wall-break-rider, break-retest-runner]
+  # an account the owner has not chosen for: v7's list, so moving a v7 account to v9 changes nothing
+  default_strategies: [early-confirm-runner, ma-cross, oi-burst-cross]

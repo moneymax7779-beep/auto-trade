@@ -305,10 +305,16 @@ class AlertMonitor implements ApplicationRunner {
     /** "⬜ EXIT CALL (auto, PAPER) · NIFTY 22700 CE 06 OCT 26 · 38 lots (2470) · ₹49.45 → ₹31.37 (−36.6%) · swing low lost · net −₹44,913 · 14:27". */
     static String closeMessage(String strategy, String symbol, String side, String lots, double entry, double exit,
                                String reason, double net, String closed) {
+        return closeMessage(strategy, symbol, side, lots, entry, exit, reason, net, closed, false);
+    }
+
+    /** {@code shortLeg} (A-358): sold to open, so {@code entry} is the credit and the gain is the premium that went away. */
+    static String closeMessage(String strategy, String symbol, String side, String lots, double entry, double exit,
+                               String reason, double net, String closed, boolean shortLeg) {
         boolean call = "CE".equals(side) || (side == null && symbol != null && symbol.contains(" CE "));
-        double pct = entry > 0 ? 100 * (exit / entry - 1) : Double.NaN;
+        double pct = entry > 0 ? 100 * (shortLeg ? 1 - exit / entry : exit / entry - 1) : Double.NaN;
         String why = reason == null ? "" : reason.toLowerCase(java.util.Locale.ROOT).replace('_', ' ');
-        return (net >= 0 ? "✅" : "❌") + " EXIT " + (call ? "CALL" : "PUT") + " (auto, PAPER) · " + symbol
+        return (net >= 0 ? "✅" : "❌") + " EXIT " + (shortLeg ? "SHORT " : "") + (call ? "CALL" : "PUT") + " (auto, PAPER) · " + symbol
                 + (lots.isEmpty() ? "" : " · " + lots) + " · ₹" + SurgeAlertRules.fmt(entry, 2) + " → ₹" + SurgeAlertRules.fmt(exit, 2)
                 + (Double.isFinite(pct) ? String.format(" (%s%.1f%%)", pct >= 0 ? "+" : "−", Math.abs(pct)) : "")
                 + (why.isEmpty() ? "" : " · " + why) + " · net " + (net < 0 ? "−" : "") + "₹" + SurgeAlertRules.fmt(Math.abs(net), 0)
@@ -321,7 +327,7 @@ class AlertMonitor implements ApplicationRunner {
         }
         jdbc.query("select id, strategy_id, symbol, option_side, to_char(opened_at at time zone 'Asia/Kolkata', 'HH24:MI') opened, "
                         + "to_char(closed_at at time zone 'Asia/Kolkata', 'HH24:MI') closed, closed_at is not null done, "
-                        + "exit_reason, quantity, lot_size, average_cost, average_exit, net "
+                        + "exit_reason, quantity, lot_size, average_cost, average_exit, net, direction "
                         + "from trade.position where session_id = ? order by id", rs -> {
             long id = rs.getLong("id");
             String what = rs.getString("strategy_id") + " · " + rs.getString("symbol");
@@ -336,7 +342,7 @@ class AlertMonitor implements ApplicationRunner {
             if (rs.getBoolean("done") && seenClosed.add(id) && !first) {
                 alerts.info(closeMessage(rs.getString("strategy_id"), rs.getString("symbol"), rs.getString("option_side"), lots,
                         rs.getDouble("average_cost"), rs.getDouble("average_exit"), rs.getString("exit_reason"),
-                        rs.getDouble("net"), rs.getString("closed")));
+                        rs.getDouble("net"), rs.getString("closed"), "SHORT".equals(rs.getString("direction"))));
             }
         }, session);
     }

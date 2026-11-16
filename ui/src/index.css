@@ -24,3 +24,9 @@
 html, body, #root { height: 100%; }
 body { background: var(--color-bg); color: var(--color-text); font-family: var(--font-sans); }
 .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* The OI ladder's huge-change cell: pulses a few times when a strike newly becomes one on a live update, then stays
+   steadily tinted (the fill-opacity attribute); no pulse when the OS asks for reduced motion. */
+@keyframes oi-huge-pulse { 0%, 100% { fill-opacity: 0.16; } 50% { fill-opacity: 0.6; } }
+.oi-huge-pulse { animation: oi-huge-pulse 0.7s ease-in-out 4; }
+@media (prefers-reduced-motion: reduce) { .oi-huge-pulse { animation: none; } }

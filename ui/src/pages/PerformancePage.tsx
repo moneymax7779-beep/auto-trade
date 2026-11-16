@@ -111,7 +111,8 @@ interface DayTotal {
 
 /** Premium points of one trade: exit minus entry per unit; falls back to realised / quantity when a price is missing. */
 function tradePoints(r: PerformanceRow): number | null {
-  if (r.average_exit != null && r.average_cost != null) return r.average_exit - r.average_cost;
+  // a SHORT leg (A-358) was sold at average_cost and bought back at average_exit: its points are the premium kept
+  if (r.average_exit != null && r.average_cost != null) return r.direction === "SHORT" ? r.average_cost - r.average_exit : r.average_exit - r.average_cost;
   if (r.quantity) return r.realised / r.quantity;
   return null;
 }

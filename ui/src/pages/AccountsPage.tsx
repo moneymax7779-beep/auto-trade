@@ -1,10 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import {
-  get, postJson, type AuditRow, type ExecMe, type ExecutionAccount, type KillSwitch, type WorkerStatus,
+  get, postJson, type AuditRow, type ExecMe, type ExecutionAccount, type GlobalLiveStrategies, type KillSwitch,
+  type WorkerStatus,
 } from "../api";
-import { ErrorNote, Loading, Panel, Table } from "../components/ui";
+import { ErrorNote, Loading, Panel, Stat, Table } from "../components/ui";
 import { AccountDetailPanel, AddAccountPanel } from "./AccountManagement";
+import { describeAudit } from "../components/auditText";
 
 // Live execution: the caller's broker accounts across copy groups, kill switches, flatten and the audit log. Every call
 // goes to the execution workers (app-execution) through trading-core; the workers scope it to the user's tenants.
@@ -29,6 +31,266 @@ const connectionTone = (c: string | null) =>
 const stateTone = (s: string | undefined) =>
   s === "RUNNING" ? "up" : s === "REFUSED" || s === "LEASE_HELD_ELSEWHERE" ? "warn" : s ? "down" : "muted";
 const modeTone = (m: string) => (m === "LIVE" ? "down" : m === "DRY_RUN" ? "accent" : "muted");
+
+const BROKER_LABELS: Record<string, string> = {
+  ZERODHA: "Zerodha (Kite)", UPSTOX: "Upstox", KOTAK_NEO: "Kotak Neo", GROWW: "Groww", PAPER: "Paper (simulated fills)",
+};
+const brokerName = (b: string) => BROKER_LABELS[b] ?? b;
+const connectionLabel = (c: string | null) => ({
+  ACTIVE: "LOGGED IN", TOKEN_EXPIRED: "LOGIN EXPIRED", DISCONNECTED: "DISCONNECTED", PENDING_CONNECT: "NOT CONNECTED",
+} as Record<string, string>)[c ?? ""] ?? c ?? "?";
+const modeRank = (m: string) => (m === "LIVE" ? 0 : m === "DRY_RUN" ? 1 : 2);
+
+type Row = { a: ExecutionAccount; twin: boolean };
+type Col = { key: string; label: string; render: (row: Row) => ReactNode; align?: "right"; width?: string };
+
+/**
+ * The trader's reading order: per workspace (the caller's own first), real broker accounts first (LIVE, then
+ * DRY_RUN, then PAPER), each followed by its paper twin; then stand-alone paper accounts; disabled accounts last.
+ */
+function orderAccounts(rows: ExecutionAccount[], tenantRank: (id: number) => number): Row[] {
+  const ids = new Set(rows.map((a) => a.id));
+  const twinsOf = new Map<number, ExecutionAccount[]>();
+  rows.forEach((a) => { if (a.paperOf != null && ids.has(a.paperOf)) twinsOf.set(a.paperOf, [...(twinsOf.get(a.paperOf) ?? []), a]); });
+  const rank = (t: number) => { const r = tenantRank(t); return r < 0 ? Number.MAX_SAFE_INTEGER : r; };
+  const heads = rows.filter((a) => a.paperOf == null || !ids.has(a.paperOf)).sort((x, y) =>
+    rank(x.tenantId) - rank(y.tenantId) || x.tenantId - y.tenantId
+    || Number(!x.enabled) - Number(!y.enabled)
+    || Number(x.broker === "PAPER") - Number(y.broker === "PAPER")
+    || modeRank(x.mode) - modeRank(y.mode)
+    || x.name.localeCompare(y.name));
+  return heads.flatMap((a) => [{ a, twin: false }, ...(twinsOf.get(a.id) ?? []).map((t) => ({ a: t, twin: true }))]);
+}
+
+/** Today's books added up; live* = entered with a LIVE intent. Accounts without a book (older worker) add nothing. */
+function dayTotals(xs: ExecutionAccount[]) {
+  const t = { net: 0, trades: 0, open: 0, liveNet: 0, liveTrades: 0, liveOpen: 0 };
+  xs.forEach((a) => {
+    const d = a.today;
+    if (!d) return;
+    t.net += d.net; t.trades += d.trades; t.open += d.open;
+    t.liveNet += d.liveNet ?? 0; t.liveTrades += d.liveTrades ?? 0; t.liveOpen += d.liveOpen ?? 0;
+  });
+  return t;
+}
+const tone = (v: number) => (v > 0 ? "up" : v < 0 ? "down" : "muted") as "up" | "down" | "muted";
+
+const signed = (v: number) => (v > 0 ? "+" : v < 0 ? "−" : "") + rupees(Math.abs(v));
+const netTone = (v: number) => (v > 0 ? "text-up" : v < 0 ? "text-down" : "text-muted");
+
+function TodayCell({ a }: { a: ExecutionAccount }) {
+  if (!a.today) return <span className="text-muted">–</span>;
+  const { net, trades, open } = a.today;
+  return (
+    <div className="whitespace-nowrap">
+      <div className={`font-semibold ${netTone(net)}`}>{trades === 0 && net === 0 ? "–" : signed(net)}</div>
+      <div className="text-[11px] text-muted">{trades} closed{open > 0 && <span className="font-semibold text-warn"> · {open} open</span>}</div>
+      {(a.today.liveTrades ?? 0) + (a.today.liveOpen ?? 0) > 0 && (a.today.liveTrades !== trades || a.today.liveOpen !== open) && (
+        <div className="text-[11px] text-down">of which LIVE {signed(a.today.liveNet)}</div>)}
+    </div>
+  );
+}
+
+/** What a trader checks first: real money today, paper today, what is still open, and what needs a hand. */
+function FollowerSummary({ rows, killed }: { rows: ExecutionAccount[]; killed: Set<number> }) {
+  const live = rows.filter((a) => a.mode === "LIVE");
+  const b = dayTotals(rows);
+  const issues: string[] = [];
+  rows.forEach((a) => {
+    if (!a.enabled) return;
+    const st = a.lastTurn?.state;
+    // an IDLE account (a workspace's real account that is not the day's broker) needs no login today
+    if (a.broker !== "PAPER" && a.connection !== "ACTIVE" && st !== "IDLE") {
+      issues.push(`${a.name}: ${connectionLabel(a.connection).toLowerCase()}`);
+    }
+    if (st && st !== "RUNNING" && st !== "IDLE") issues.push(`${a.name}: ${st.toLowerCase().replaceAll("_", " ")}`);
+    if (killed.has(a.id)) issues.push(`${a.name}: entries stopped`);
+  });
+  const hasBooks = rows.some((a) => a.today);
+  // real-money figures only where real money can trade (11 Nov 2026: a paper-only account showed "LIVE today ₹0" and
+  // "LIVE-eligible capital ₹0"); paper-only shows its capital instead
+  const anyLive = live.length > 0 || b.liveTrades + b.liveOpen > 0;
+  return (
+    <div className="mb-3 space-y-2 border-b border-line pb-3">
+      {anyLive ? (
+      <div className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-4">
+        <Stat label={`LIVE today (real money, ${b.liveTrades} closed)`} value={hasBooks ? signed(b.liveNet) : "–"}
+          tone={tone(b.liveNet)} />
+        <Stat label={`LIVE-eligible capital (${live.length} account${live.length === 1 ? "" : "s"})`}
+          value={rupees(live.reduce((s, a) => s + a.allocatedCapital, 0))} />
+        <Stat label={`PAPER / DRY_RUN today (${b.trades - b.liveTrades} closed)`} value={hasBooks ? signed(b.net - b.liveNet) : "–"}
+          tone={tone(b.net - b.liveNet)} />
+        <Stat label="Open positions (live · paper)" value={hasBooks ? `${b.liveOpen} · ${b.open - b.liveOpen}` : "–"}
+          tone={b.open > 0 ? "warn" : "muted"} />
+      </div>
+      ) : (
+      <div className="grid grid-cols-2 gap-x-6 gap-y-2 sm:grid-cols-4">
+        <Stat label={`Today, ${rows.some((a) => a.mode === "DRY_RUN") ? "PAPER / DRY_RUN" : "paper"} (${b.trades} closed)`}
+          value={hasBooks ? signed(b.net) : "–"} tone={tone(b.net)} />
+        {/* a paper twin mirrors its real account's capital: counted once */}
+        <Stat label="Capital" value={rupees(rows.filter((a) => a.enabled && a.paperOf == null).reduce((s, a) => s + a.allocatedCapital, 0))} />
+        <Stat label="Open positions" value={hasBooks ? String(b.open) : "–"} tone={b.open > 0 ? "warn" : "muted"} />
+      </div>
+      )}
+      {issues.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5 text-xs">
+          <span className="text-muted">Needs attention:</span>
+          {issues.map((t, i) => <span key={i} className="rounded bg-warn/15 px-1.5 py-0.5 text-warn">{t}</span>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GroupHeading({ name, daily, accounts }: { name: string; daily: boolean; accounts: ExecutionAccount[] }) {
+  const b = dayTotals(accounts);
+  return (
+    <div className="flex flex-wrap items-baseline gap-x-3 border-b border-line pb-1">
+      <span className="text-sm font-semibold">{name}</span>
+      <span className="text-xs text-muted">{daily ? "daily-switch workspace" : "own accounts"} · {accounts.length} account
+        {accounts.length === 1 ? "" : "s"}</span>
+      {/* real money and paper are never added together */}
+      {accounts.some((a) => a.today) && <span className="num text-xs">
+        {b.liveTrades + b.liveOpen > 0 && <span className={netTone(b.liveNet)}>LIVE {signed(b.liveNet)} · </span>}
+        <span className={netTone(b.net - b.liveNet)}>paper {signed(b.net - b.liveNet)}</span></span>}
+    </div>
+  );
+}
+
+type StrategyState = "OFF" | "PAPER" | "LIVE";
+const STATES: StrategyState[] = ["OFF", "PAPER", "LIVE"];
+const sameSet = (a: string[], b: string[]) => [...a].sort().join() === [...b].sort().join();
+
+/**
+ * The owner's switch per strategy for every account (user, 9 Nov 2026: "as admin ... select or deselect the live
+ * strategies at global"; 11 Nov 2026: "select/disselect which strategies ... to be in PAPER/LIVE or disselect from both
+ * PAPER and LIVE"). Off: no new entry or add on any account (V35). Paper: paper accounts only. Live: paper and real money
+ * (V33, within each account's risk file). Standing until changed; exits of held positions always run.
+ */
+function GlobalLivePanel({ onDone }: { onDone: (text: string, ok: boolean) => void }) {
+  const client = useQueryClient();
+  const q = useQuery({ queryKey: ["live-strategies-global"], refetchInterval: 30000,
+    queryFn: () => get<GlobalLiveStrategies>("/api/execution/live-strategies") });
+  const [picked, setPicked] = useState<Record<string, StrategyState> | null>(null);
+  const save = useMutation({
+    mutationFn: (body: { strategies?: string[]; reset?: boolean; off?: string[] }) =>
+      postJson<GlobalLiveStrategies>("/api/execution/live-strategies", body),
+    onSuccess: (r) => {
+      onDone(`Strategies (all accounts): LIVE ${r.global == null ? "each account's default" : r.global.join(", ") || "none"}`
+        + ` · OFF ${r.off.join(", ") || "none"}`, true);
+      setPicked(null);
+      client.setQueryData(["live-strategies-global"], r);
+      ["exec-audit", "exec-accounts", "live-strategies"].forEach((k) => client.invalidateQueries({ queryKey: [k] }));
+    },
+    onError: (e) => onDone(e instanceof Error ? e.message : String(e), false),
+  });
+  if (q.error) return <ErrorNote error={q.error} />;
+  if (!q.data) return null;
+  const g = q.data;
+  const running = g.running ?? [];
+  const offNow = g.off ?? [];
+  const names = [...new Set([...running, ...g.available, ...offNow])].sort();
+  if (names.length === 0) return null;
+  // not set: what the accounts trade now by their defaults (the union), so the switches start where things are
+  const liveNow = g.global ?? [...new Set(g.accounts.filter((a) => a.source === "DEFAULT").flatMap((a) => a.effective))];
+  const saved = (s: string): StrategyState => offNow.includes(s) ? "OFF" : liveNow.includes(s) ? "LIVE" : "PAPER";
+  const state = (s: string): StrategyState => picked?.[s] ?? saved(s);
+  const offNext = names.filter((s) => state(s) === "OFF");
+  const liveNext = names.filter((s) => state(s) === "LIVE");
+  const offChanged = !sameSet(offNext, offNow);
+  // OFF takes a strategy out of the LIVE list on the server, so a newly OFF one is not a LIVE change by itself. With no
+  // global list (each account on its risk-file default) the LIVE list is always sent, so what the switches show is what
+  // trades: otherwise a default strategy switched Off and back to Paper would trade LIVE again on those accounts.
+  const liveChanged = !sameSet(liveNext, liveNow.filter((s) => !offNext.includes(s)))
+    || (g.global == null && offChanged);
+  const changed = offChanged || liveChanged;
+  const toLive = liveNext.filter((s) => saved(s) !== "LIVE");
+  const fromLive = names.filter((s) => saved(s) === "LIVE" && state(s) !== "LIVE");
+  const toOff = offNext.filter((s) => !offNow.includes(s));
+  const backOn = offNow.filter((s) => !offNext.includes(s));
+  const liveAccounts = g.accounts.filter((a) => a.mode === "LIVE" && a.source !== "ACCOUNT").map((a) => a.account);
+  const set = (s: string, to: StrategyState) => setPicked((p) => ({ ...(p ?? {}), [s]: to }));
+  const own = g.accounts.filter((a) => a.source === "ACCOUNT");
+  const tone = (st: StrategyState) => st === "LIVE" ? "bg-down text-white" : st === "PAPER" ? "bg-accent text-white"
+    : "bg-muted text-white";
+  return (
+    <Panel title="Strategies · all accounts" right={<span className="text-xs text-muted">
+      {g.global == null ? "LIVE list not set: each account's risk-file default" : "your global list"}</span>}>
+      <div className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2 xl:grid-cols-3">
+        {names.map((s) => {
+          const st = state(s);
+          const liveOk = g.available.includes(s);
+          const notRunning = running.length > 0 && !running.includes(s);
+          return (
+            <div key={s} className="flex flex-wrap items-center justify-between gap-2">
+              <span>
+                <span className={st === "OFF" ? "text-muted line-through" : "font-semibold"}>{s}</span>
+                {picked?.[s] != null && picked[s] !== saved(s) && <span className="ml-1 text-warn" title="not saved">•</span>}
+                {notRunning && <span className="ml-1 text-[10px] text-muted">not in the running set</span>}
+              </span>
+              <span role="group" aria-label={`${s}: off, paper or live`}
+                className="inline-flex overflow-hidden rounded border border-line text-[11px] font-semibold">
+                {STATES.map((to) => {
+                  const disabled = !g.canEdit || save.isPending || (to === "LIVE" && !liveOk);
+                  return (
+                    <button key={to} type="button" disabled={disabled} onClick={() => set(s, to)}
+                      aria-pressed={st === to}
+                      title={to === "LIVE" && !liveOk ? "No account's risk file lets it trade LIVE" : undefined}
+                      className={`px-2 py-0.5 ${st === to ? tone(to) : "text-muted hover:bg-panel-2"} disabled:cursor-not-allowed ${
+                        disabled && st !== to ? "opacity-40" : ""}`}>
+                      {to === "OFF" ? "Off" : to === "PAPER" ? "Paper" : "Live"}
+                    </button>
+                  );
+                })}
+              </span>
+            </div>
+          );
+        })}
+      </div>
+      {g.canEdit && (
+        <div className="mt-3 flex flex-wrap items-center gap-2">
+          <button className="rounded bg-accent px-3 py-1 text-sm font-semibold text-white disabled:opacity-40"
+            disabled={!changed || save.isPending} onClick={() => save.mutate({
+              ...(liveChanged ? { strategies: liveNext } : {}), ...(offChanged ? { off: offNext } : {}) })}>
+            {save.isPending ? "Saving…" : "Save for all accounts"}</button>
+          {picked != null && <button className="rounded border border-line px-3 py-1 text-sm hover:bg-panel-2"
+            disabled={save.isPending} onClick={() => setPicked(null)}>Undo</button>}
+          {g.global != null && <button className="rounded border border-line px-3 py-1 text-sm hover:bg-panel-2"
+            disabled={save.isPending || picked != null} onClick={() => save.mutate({ reset: true })}>
+            LIVE back to each account's default</button>}
+        </div>
+      )}
+      {changed && (
+        <ul className="mt-2 space-y-0.5 text-xs">
+          {toLive.length > 0 && <li className="font-semibold text-down">Real money: {toLive.join(", ")} will trade LIVE
+            {liveAccounts.length > 0 ? ` on ${liveAccounts.join(", ")}` : " on LIVE accounts"} from its next entry.</li>}
+          {fromLive.length > 0 && <li>No longer LIVE: {fromLive.join(", ")}.</li>}
+          {toOff.length > 0 && <li>Off everywhere (no new entry or add, paper or real): {toOff.join(", ")}.</li>}
+          {backOn.length > 0 && <li>Back on: {backOn.join(", ")}.</li>}
+        </ul>
+      )}
+      <p className="mt-2 text-xs text-muted">
+        <b>Off</b>: no new entry or add from it on any account, paper or real (the live session still records what it
+        would have done). <b>Paper</b>: paper accounts only (PAPER-1 and the paper followers). <b>Live</b>: paper and real
+        money on LIVE accounts, within each account's risk file. Applies to the running session within seconds; exits of
+        open positions always run. Turning a strategy Off takes it out of every LIVE list, so switching it back on makes
+        it Paper. Which strategies run at all is still the deployed set.</p>
+      <div className="mt-3 border-t border-line pt-2 text-xs">
+        {g.accounts.map((a) => (
+          <div key={a.id} className="flex flex-wrap gap-x-2">
+            <span className="font-semibold">{a.account}</span>
+            <span className="text-muted">{a.mode} ·</span>
+            <span>{a.effective.join(", ") || "nothing LIVE"}</span>
+            <span className="text-muted">({a.source === "ACCOUNT" ? "its own list, set on its Manage panel"
+              : a.source === "GLOBAL" ? "global list" : "risk-file default"})</span>
+          </div>
+        ))}
+        {own.length > 0 && <p className="mt-1 text-warn">{own.map((a) => a.account).join(", ")} keep their own list; open
+          Manage → LIVE strategies → "Follow the global list" to put them under this one.</p>}
+      </div>
+    </Panel>
+  );
+}
 
 /** A destructive action that needs its word typed before it is sent. */
 function TypedConfirm({ word, label, busy, onConfirm }: {
@@ -69,6 +331,7 @@ export function AccountsPage() {
   const [flattenFor, setFlattenFor] = useState<number | null>(null);
   const [openAccount, setOpenAccount] = useState<number | null>(null);
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  const [rawAudit, setRawAudit] = useState(false);
 
   const act = useMutation({
     mutationFn: ({ path, body }: { path: string; body: unknown; done: string }) => postJson<unknown>(path, body),
@@ -80,7 +343,8 @@ export function AccountsPage() {
     onError: (e) => setMessage({ ok: false, text: e instanceof Error ? e.message : String(e) }),
   });
 
-  if (accounts.isLoading) return <Loading what="accounts" />;
+  // until /me answers, nothing role-dependent is drawn (a viewer saw the "Execution worker" panel flash before)
+  if (accounts.isLoading || me.isLoading) return <Loading what="accounts" />;
   if (accounts.error) return <ErrorNote error={accounts.error} />;
   const rows = accounts.data!.filter((a) => a.role === "FOLLOWER_TRADE");
   const names = new Map(accounts.data!.map((a) => [a.id, a.name]));
@@ -98,10 +362,29 @@ export function AccountsPage() {
     mayAct: true, manages: true })) : [];
   const acting = legacy ? legacyTenants : [...tenants.values()].filter((t) => t.canStop ?? t.mayAct);
   const managed = legacy ? legacyTenants : [...tenants.values()].filter((t) => t.manages && t.control !== "DAILY_SWITCH");
+  // accounts whose own kill switch is engaged (entries and adds stop; exits run)
+  const killedAccounts = new Set((switches.data ?? []).filter((k) => k.scope === "ACCOUNT" && k.accountId != null)
+    .map((k) => k.accountId!));
+  const ordered = orderAccounts(rows, (id) => [...tenants.keys()].indexOf(id));
+  // a VIEWER (user, 11 Nov 2026: "Organize it well"): one panel with their accounts and what they may do, the engine's
+  // internals (route, last result, lease) left out, and the account's history in plain words instead of the audit log
+  const readOnly = !legacy && !!me.data && !me.data.admin && me.data.tenants.length > 0
+    && me.data.tenants.every((t) => !t.mayAct && !t.manages && !(t.canStop ?? false));
+  // the history view follows the server: only a VIEWER gets the account-only, name-free history; an AUDITOR (read-only
+  // too) reads the whole audit log with its raw detail
+  const historyOnly = readOnly && me.data!.tenants.every((t) => t.role === "VIEWER");
+  const auditRows = audit.data ?? [];
+  const auditLines = new Map(auditRows.map((r, i) => [r.id, describeAudit(auditRows, i)]));
+  // what the accounts are, from the accounts themselves, not assumed (a viewer can follow a LIVE account)
+  const accountsNote = rows.some((a) => a.mode === "LIVE") ? "LIVE accounts place real orders with the broker."
+    : rows.every((a) => a.broker === "PAPER") ? "Paper only: simulated fills, no real orders."
+    : "PAPER and DRY_RUN only: no real orders.";
+  const engineText = (st: string) => (st === "RUNNING" ? "running" : st === "IDLE" ? "not trading today" : "stopped");
+  const lineTone = { down: "text-down", warn: "text-warn", up: "text-up", muted: "text-muted", plain: "" };
 
   return (
     <div className="space-y-4">
-      {me.data && !me.data.admin ? (
+      {readOnly ? null : me.data && !me.data.admin ? (
         <Panel title="Your access" right={s && (s.stale ? <Badge text="STALE" tone="down" /> : <Badge text="RUNNING" tone="up" />)}>
           <div className="space-y-1 text-sm">
             {me.data.tenants.map((t) => (
@@ -142,44 +425,91 @@ export function AccountsPage() {
         </div>
       )}
 
-      <Panel title="Follower accounts" right={<span className="text-xs text-muted">{rows.length} accounts</span>}>
-        <Table rows={rows} columns={[
-          { key: "n", label: "Account", render: (a) => <span className="font-semibold">{a.name}</span> },
-          ...(several ? [{ key: "o", label: "Owner", render: (a: ExecutionAccount) =>
-            <span className="text-xs">{tenants.get(a.tenantId)?.name ?? a.tenantId}</span> }] : []),
-          { key: "b", label: "Broker", render: (a) => a.broker },
-          { key: "m", label: "Mode", render: (a) => <Badge text={a.mode} tone={modeTone(a.mode)} /> },
-          { key: "c", label: "Session", render: (a) => a.broker === "PAPER" ? <span className="text-muted">–</span>
-              : <Badge text={a.connection ?? "?"} tone={connectionTone(a.connection)} /> },
-          { key: "cap", label: "Allocation", align: "right", render: (a) => rupees(a.allocatedCapital) },
-          { key: "r", label: "Route", render: (a) => <span className="text-xs">{a.lastTurn?.route ?? (a.enabled ? "not served" : "disabled")}</span> },
-          { key: "s", label: "Turn", render: (a) => a.lastTurn
-              ? <span title={a.lastTurn.lastResult}><Badge text={a.lastTurn.state} tone={stateTone(a.lastTurn.state)} />
-                  <span className="ml-2 text-xs text-muted">{time(a.lastTurn.lastRun)} · epoch {a.lastTurn.leaseEpoch ?? "–"}</span></span>
-              : <span className="text-muted">–</span> },
-          { key: "res", label: "Last result", render: (a) => <span className="text-xs text-muted">{a.lastTurn?.lastResult ?? ""}</span> },
-          { key: "a", label: "", render: (a) => (
-            <div className="flex flex-wrap gap-1.5">
+      {me.data?.admin && <GlobalLivePanel onDone={(text, ok) => setMessage({ ok, text })} />}
+
+      <Panel title={readOnly ? "Your accounts" : "Follower accounts"} right={readOnly
+        // the worker's health stays visible to a viewer (it was on the "Your access" panel this one replaces)
+        ? <span className="flex gap-1.5">{s?.stale && <Badge text="STALE" tone="down" />}<Badge text="READ-ONLY" tone="muted" /></span>
+        : <span className="text-xs text-muted">{rows.length} account{rows.length === 1 ? "" : "s"}</span>}>
+        {readOnly && me.data && (
+          <div className="mb-3 space-y-0.5 text-xs text-muted">
+            {me.data.tenants.map((t) => (
+              <div key={t.id}><span className="font-semibold text-text">{t.role.charAt(0) + t.role.slice(1).toLowerCase()}</span>
+                {" "}· follows {(t.follows ?? []).join(", ") || "nothing yet"} · you can see your accounts; the admin makes changes</div>
+            ))}
+            <div>{me.data.tenants.some((t) => t.control === "DAILY_SWITCH")
+              ? "Your day's broker and its PAPER/LIVE switch are on the Today page. Each broker account's paper twin (\"… paper\") "
+                + "holds what traded in PAPER. Open positions are squared off at 15:20."
+              : `${accountsNote} Open positions are squared off at 15:20.`}</div>
+          </div>
+        )}
+        <FollowerSummary rows={rows} killed={killedAccounts} />
+        <Table rows={ordered} rowStyle={(o) => (o.a.enabled || o.a.today == null || o.a.today.open > 0 ? undefined : { opacity: 0.55 })}
+          before={(o, i) => several && (i === 0 || ordered[i - 1].a.tenantId !== o.a.tenantId)
+            ? <GroupHeading name={tenants.get(o.a.tenantId)?.name ?? String(o.a.tenantId)} daily={daily(o.a.tenantId)}
+                accounts={rows.filter((r) => r.tenantId === o.a.tenantId)} />
+            : null}
+          columns={([
+          { key: "n", label: "Account", render: ({ a, twin }) => (
+            <div className={`whitespace-nowrap ${twin ? "pl-4" : ""}`}>
+              <div className={twin ? "text-muted" : "font-semibold"}>{twin && <span className="mr-1">↳</span>}{a.name}</div>
+              <div className="text-[11px] text-muted">{twin ? "paper twin (PAPER-day fills)" : brokerName(a.broker)}</div>
+            </div>
+          ) },
+          { key: "st", label: "Status", render: ({ a }) => (
+            <div className="flex min-w-36 flex-wrap items-center gap-1">
+              {a.mode === "LIVE" && daily(a.tenantId)
+                ? <span title="May trade real money; whether today is LIVE is the workspace's switch on the Today page">
+                    <Badge text="LIVE-ELIGIBLE" tone="down" /></span>
+                : <Badge text={a.mode} tone={modeTone(a.mode)} />}
+              {a.broker !== "PAPER" && <Badge text={connectionLabel(a.connection)} tone={connectionTone(a.connection)} />}
+              {killedAccounts.has(a.id) && <Badge text="ENTRIES STOPPED" tone="down" />}
+              {!a.enabled && <Badge text="DISABLED" tone="muted" />}
+              {readOnly && a.lastTurn && <span className="text-[11px] text-muted">
+                {s?.stale ? "engine stale" : engineText(a.lastTurn.state)} · {time(a.lastTurn.lastRun)}</span>}
+            </div>
+          ) },
+          { key: "cap", label: "Capital", align: "right", render: ({ a }) => rupees(a.allocatedCapital) },
+          { key: "d", label: "Today", align: "right", render: ({ a }) => <TodayCell a={a} /> },
+          { key: "e", label: "Engine", render: ({ a }) => a.lastTurn
+              ? <span className="whitespace-nowrap" title={`lease epoch ${a.lastTurn.leaseEpoch ?? "–"}`}>
+                  <Badge text={a.lastTurn.state} tone={stateTone(a.lastTurn.state)} />
+                  <span className="ml-1.5 text-[11px] text-muted">{time(a.lastTurn.lastRun)}</span></span>
+              : <span className="text-xs text-muted">{a.enabled ? "not served" : "–"}</span> },
+          { key: "r", label: "Route · last result", render: ({ a }) => (
+            <div className="max-w-md text-xs" title={[a.lastTurn?.route, a.lastTurn?.lastResult].filter(Boolean).join("\n")}>
+              <div className="line-clamp-2">{a.lastTurn?.route ?? (a.enabled ? "no route: the worker does not serve it now"
+                : "disabled")}</div>
+              {a.lastTurn?.lastResult && <div className="line-clamp-2 text-muted">{a.lastTurn.lastResult}</div>}
+            </div>
+          ) },
+          { key: "a", label: "", render: ({ a }) => (
+            <div className="flex flex-nowrap justify-end gap-1.5 whitespace-nowrap">
               <button className="rounded border border-accent/60 px-2 py-0.5 text-xs text-accent hover:bg-accent/10"
                 onClick={() => setOpenAccount(openAccount === a.id ? null : a.id)}>
                 {openAccount === a.id ? "Close" : manages(a.tenantId) ? "Manage" : "Details"}</button>
               {mayAct(a.tenantId) && a.broker === "ZERODHA" && a.connection !== "ACTIVE" && (
-                <a className="rounded border border-line px-2 py-0.5 text-xs hover:bg-panel-2" target="_blank" rel="noreferrer"
-                  href={`/api/execution/accounts/${a.id}/kite/login`}>Log in to Kite</a>
+                <a className="whitespace-nowrap rounded border border-line px-2 py-0.5 text-xs hover:bg-panel-2" target="_blank"
+                  rel="noreferrer" href={`/api/execution/accounts/${a.id}/kite/login`}>Log in to Kite</a>
               )}
-              {canStop(a.tenantId) && <>
+              {/* a disabled account holding nothing can neither enter nor hold: no stop controls to misclick */}
+              {canStop(a.tenantId) && (a.enabled || a.today == null || a.today.open > 0) && <>
+              {!killedAccounts.has(a.id) && (
               <button className="rounded border border-warn/60 px-2 py-0.5 text-xs text-warn hover:bg-warn/10" disabled={act.isPending}
+                title="Stop new entries and adds on this account (exits still run)"
                 onClick={() => {
                   const reason = window.prompt(`Stop new entries on ${a.name}: reason`);
                   if (reason) act.mutate({ path: "/api/execution/kill-switches",
                     body: { scope: "ACCOUNT", accountId: a.id, reason }, done: `${a.name}: entries stopped` });
                 }}>Kill</button>
+              )}
               <button className="rounded border border-down/60 px-2 py-0.5 text-xs text-down hover:bg-down/10"
+                title="Stop entries, take broker stops off and sell every open position now"
                 onClick={() => setFlattenFor(flattenFor === a.id ? null : a.id)}>Flatten…</button>
               </>}
             </div>
           ) },
-        ]} />
+        ] as Col[]).filter((c) => !readOnly || (c.key !== "e" && c.key !== "r"))} />
         {flattenFor != null && (
           <div className="mt-3 rounded border border-down/40 p-3">
             <p className="mb-2 text-sm">
@@ -222,20 +552,30 @@ export function AccountsPage() {
       </Panel>
       </>}
 
-      <Panel title="Audit log" right={
+      <Panel title={historyOnly ? "Account history" : "Audit log"} right={<span className="flex items-center gap-2">
+        {!historyOnly && <label className="flex items-center gap-1 text-xs text-muted">
+          <input type="checkbox" checked={rawAudit} onChange={(e) => setRawAudit(e.target.checked)} />raw detail</label>}
+        {rows.length > 1 && (
         <select className="rounded border border-line bg-bg px-2 py-1 text-xs" value={auditAccount}
           onChange={(e) => setAuditAccount(e.target.value === "" ? "" : Number(e.target.value))}>
           <option value="">all accounts</option>
           {rows.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
         </select>
-      }>
+        )}</span>}>
         {audit.error ? <ErrorNote error={audit.error} /> : (
-          <Table rows={audit.data ?? []} empty="No actions yet." columns={[
-            { key: "t", label: "At", render: (r) => <span className="num text-xs">{dateTime(r.at)}</span> },
-            { key: "a", label: "Account", render: (r) => r.broker_account_id == null ? "–" : names.get(r.broker_account_id) ?? r.broker_account_id },
-            { key: "w", label: "By", render: (r) => <span className="text-xs">{r.actor}</span> },
-            { key: "x", label: "Action", render: (r) => <span className="font-semibold">{r.action}</span> },
-            { key: "d", label: "Detail", render: (r) => <span className="num break-all text-xs text-muted">{r.detail}</span> },
+          <Table rows={auditRows} empty={historyOnly ? "Nothing has changed on your accounts yet." : "No actions yet."} baseline columns={[
+            { key: "t", label: "When", width: "9.5rem", render: (r) => <span className="num whitespace-nowrap text-xs">{dateTime(r.at)}</span> },
+            ...(rows.length > 1 || !historyOnly ? [{ key: "a", label: "Account", width: "8rem", render: (r: (typeof auditRows)[number]) =>
+              <span className="whitespace-nowrap">{r.broker_account_id == null ? "–" : names.get(r.broker_account_id) ?? r.broker_account_id}</span> }] : []),
+            { key: "x", label: "What happened", render: (r) => {
+              const l = auditLines.get(r.id)!;
+              // the people who run the workspace can still read (and copy) the action code and raw detail
+              return <div>
+                <span className={`font-semibold ${lineTone[l.tone]}`}>{l.title}</span>
+                {l.text && <span className="text-muted"> · {l.text}</span>}
+                {rawAudit && !historyOnly && <div className="num mt-0.5 break-all text-[11px] text-muted">{r.action} {r.detail}</div>}</div>;
+            } },
+            { key: "w", label: "By", width: "7rem", render: (r) => <span className="whitespace-nowrap text-xs">{r.actor}</span> },
           ]} />
         )}
       </Panel>

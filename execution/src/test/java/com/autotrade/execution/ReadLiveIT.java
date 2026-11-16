@@ -4,8 +4,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.nio.file.Path;
-import java.time.Instant;
+import java.time.Clock;
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
@@ -51,6 +52,15 @@ class ReadLiveIT {
             DockerImageName.parse("timescale/timescaledb:2.30.1-pg17").asCompatibleSubstituteFor("postgres");
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     private static final LocalDate DAY = LocalDate.now(IST);
+    /**
+     * The tests' one clock, today at 10:00 IST ({@code -Dexecution.it.time=HH:mm} for another time): subscriptions,
+     * decisions and the follower read it, never the wall clock. With the wall clock the subscription's {@code enabled_at}
+     * came from the database container's clock and the decision's {@code decided_at} from the JVM's; the container ran a
+     * few ms ahead, so a decision made right after subscribing fell "before" the subscription and FanOut never gave it
+     * an intent (6 Nov 2026: 3-4 of these tests at 08:42 and 14:56, none at 10:21).
+     */
+    private static final Clock CLOCK = Clock.fixed(DAY.atTime(LocalTime.parse(System.getProperty("execution.it.time",
+            "10:00"))).atZone(IST).toInstant(), IST);
     private static final String KEY = "NSE_FO|47168";
     private static final String SYMBOL = "NIFTY 23100 PE";
     private static final String OTHER = "NSE_FO|47169";
@@ -135,10 +145,7 @@ class ReadLiveIT {
         long group = accounts.ensureCopyGroup(tenant, "READLIVE-" + n, signal);
         long broker = accounts.ensureFollowerAccount(tenant, owner, "KITE-R" + n, BrokerType.ZERODHA, TradeMode.DRY_RUN,
                 500_000, EquityMode.FIXED, DAY, V6, 100);
-        new FanOut(dataSource).subscribe(group, broker, List.of("opening-drive"), 1.0);
-        // the test's clock and the database's differ by up to a second in Docker (LiveIT, 8 Nov 2026)
-        jdbc.update("update acct.strategy_subscription set enabled_at = now() - interval '1 hour' where copy_group_id = ?",
-                group);
+        new FanOut(dataSource).withClock(CLOCK).subscribe(group, broker, List.of("opening-drive"), 1.0);
         long sessionId = jdbc.queryForObject("insert into trade.session (account, mode, session_date, feed, strategy_id, "
                 + "strategy_hash, configs, code_version, status) values (?, 'PAPER_REPLAY', ?, 'it', 'live-set', 'sha256:it', "
                 + "'{}'::jsonb, 'it', 'DONE') returning id", Long.class, "SIG-R" + n, DAY);
@@ -146,14 +153,14 @@ class ReadLiveIT {
     }
 
     /**
-     * An opening-drive ENTER of 40 lots (Rs 2,60,000 at Rs 100) in {@code key}, decided now (a subscription made today
-     * receives only decisions taken after it).
+     * An opening-drive ENTER of 40 lots (Rs 2,60,000 at Rs 100) in {@code key}, decided at {@link #CLOCK} (a
+     * subscription made today receives only decisions taken after it).
      */
     private void enter(Setup s, String key, String symbol) {
         int i = jdbc.queryForObject("select count(*) from exec.signal_decision where copy_group_id = ?", Integer.class,
                 s.group()) + 1;
         long token = 3_000_000_000L + Long.parseLong(key.substring(key.indexOf('|') + 1));
-        new SignalDecisionStore(dataSource).insert(new SignalDecision(s.group(), s.session(), DAY, Instant.now(),
+        new SignalDecisionStore(dataSource).insert(new SignalDecision(s.group(), s.session(), DAY, CLOCK.instant(),
                 "opening-drive", 2, "NIFTY", SignalDecision.Action.ENTER, "PE", null, "CONFIRMED", "IT", token, key, symbol,
                 LOT, 100, 260_000, 500_000, 0, s.group() + ":" + s.session() + ":" + i,
                 Map.of("strategy_lots", 1.0, "intended_lots", 1.0, "liquidity_lots", 1000.0, "stop_pct", 25.0)));
@@ -167,7 +174,7 @@ class ReadLiveIT {
         dryRun = adapter.dryRun(account, risk.orders());
         BrokerVenue venue = new BrokerVenue(dataSource, dryRun.connection(), risk.orders().fast(), (k, u) -> FREEZE,
                 dryRun.beforeOrder());
-        return new FollowerSimulator(dataSource, costs, risk, venue, null);
+        return new FollowerSimulator(dataSource, costs, risk, venue, null).withClock(CLOCK);
     }
 
     private static String intentState(BrokerAccount a) {

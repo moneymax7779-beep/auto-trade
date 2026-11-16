@@ -84,18 +84,16 @@ class SecurityConfig {
     static final String[] MEMBER_APIS = {"/api/me", "/api/execution", "/api/execution/**"};
 
     /**
-     * And, read-only, what the NIFTY / SENSEX / BANKNIFTY chart pages read (user, 29 Oct 2026: "I just the demo user to
-     * see the chart that admin sees exactly"): the live status, the session list and one session's last decisions and
-     * positions, the surge / premium / OI tape / PCR / levels charts, alerts and cues; and what the Overview page reads
-     * (user, 5 Nov 2026: "Viewer account should see Overview too ... should n't act on it, just viewing"): the PAPER
-     * account's equity and a finished session's refusals; the index pages' ma-cross structure and day context (6 Nov
-     * 2026, market data only). A session's full decisions and orders, research, replay and config stay the operator's,
-     * and so does every POST.
+     * And, read-only, what the NIFTY / SENSEX / BANKNIFTY chart pages read for a member: the live status (trimmed to the
+     * session and its trades, {@link TradingController#MEMBER_STATUS}), the session list and one session's positions, the
+     * index and futures volume ({@link SurgeController#chartOnly}), the pushed price and the days that can be shown.
+     * User, 10 Nov 2026: "Other than Owner, all other accounts ... should only see the chart and trades, nothing more":
+     * the day context, levels, OI tape, PCR, premium, max pain, auction, alerts, cues, equity, ma-cross structure and a
+     * session's last decisions and refusals (the Overview and the index pages' panels until then) are the operator's
+     * again, with a session's decisions and orders, research, replay, config and every POST.
      */
-    static final String[] MEMBER_CHART_GETS = {"/api/status", "/api/sessions", "/api/sessions/*/last-decisions",
-            "/api/sessions/*/positions", "/api/sessions/*/rejections", "/api/surges", "/api/premium", "/api/oi-tape",
-            "/api/oi-tape/**", "/api/pcr", "/api/levels", "/api/close-auction", "/api/live/ticks", "/api/alerts", "/api/cues",
-            "/api/equity", "/api/structure", "/api/day-context"};
+    static final String[] MEMBER_CHART_GETS = {"/api/status", "/api/sessions", "/api/sessions/*/positions", "/api/surges",
+            "/api/live/ticks", "/api/oi-tape/days"};
 
     @Bean
     SecurityFilterChain securityChain(HttpSecurity http, AuthProperties auth) throws Exception {

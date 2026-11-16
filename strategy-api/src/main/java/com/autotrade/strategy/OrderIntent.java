@@ -11,6 +11,11 @@ package com.autotrade.strategy;
  * (rupees, capped by free capital) and closes both legs when their combined bid reaches
  * {@code targetPct} above or {@code premiumStopPct} below the combined premium paid.
  *
+ * <p>{@link Action#SELL_STRADDLE} (A-358) sells a call and a put together (side null), {@code lots} of each at
+ * {@code strikeOffset}; the executor counts the risk file's short margin as capital in use and buys both back when
+ * their combined ask reaches {@code premiumStopPct} above the combined credit. PAPER only: a signal-source session
+ * refuses it, so it is never copied to a member's broker account.
+ *
  * <p>{@code stopPoints} is the index-point distance from spot to the strategy's structure stop at entry
  * (NaN = the strategy has none); risk v6 sizes single-leg entries from it and the option's delta.
  */
@@ -27,7 +32,9 @@ public record OrderIntent(Action action, OptionSide side, int lots, Stage stage,
         ENTER,
         ADD,
         EXIT,
-        ENTER_STRADDLE
+        ENTER_STRADDLE,
+        /** A-358: sell a call and a put together (a short straddle); PAPER only. */
+        SELL_STRADDLE
     }
 
     public OrderIntent(Action action, OptionSide side, int lots, Stage stage, String reason, double premiumStopPct,
@@ -63,6 +70,16 @@ public record OrderIntent(Action action, OptionSide side, int lots, Stage stage,
                                        Stage stage, String reason) {
         return new OrderIntent(Action.ENTER_STRADDLE, null, 0, stage, reason, stopPct, strikeOffset, targetPct,
                 premiumBudget);
+    }
+
+    /**
+     * A-358: sell {@code lots} of a call and a put together at {@code strikeOffset} (0 = ATM); the executor buys both
+     * back when their combined ask is {@code stopPct} above the combined credit. No target: a short straddle that is not
+     * stopped is held (the strategy exits it, or it settles at expiry).
+     */
+    public static OrderIntent shortStraddle(int strikeOffset, int lots, double stopPct, Stage stage, String reason) {
+        return new OrderIntent(Action.SELL_STRADDLE, null, lots, stage, reason, stopPct, strikeOffset, Double.NaN,
+                Double.NaN);
     }
 
     /** The strike of one straddle leg: offset 0 is ATM for both; −1 puts each leg one strike out of the money. */

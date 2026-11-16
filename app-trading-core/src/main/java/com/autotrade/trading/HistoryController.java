@@ -3,6 +3,7 @@ package com.autotrade.trading;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.security.Principal;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -38,6 +39,13 @@ class HistoryController {
             "exit_features");
     private static final String IST = "Asia/Kolkata";
     private final SessionRunner runner;
+    private final AuthProperties auth;
+
+    /**
+     * The live PAPER account's own sessions (as the UI's isPrimaryLive): not the signal source's (SIGNAL-1), and never a
+     * replay or a shadow (SHADOW-1 runs as PAPER_REPLAY). The only sessions a member sees (user, 10 Nov 2026).
+     */
+    static final String PRIMARY_LIVE = "mode = 'PAPER_LIVE' and account not like 'SIGNAL-%' and account not like 'SHADOW-%'";
     private static final String SESSION_COLUMNS = "select id, account, mode, session_date::text, feed, strategy_id, "
             + "left(strategy_hash, 19) strategy_hash, code_version, " + ist("started_at") + ", " + ist("ended_at") + ", status, "
             + "summary::text summary, error, configs::text configs from trade.session ";
@@ -52,9 +60,10 @@ class HistoryController {
     private final JdbcTemplate jdbc;
 
     /** @param runner the trading service's session runner (null in tests: no running session is consulted) */
-    HistoryController(DataSource dataSource, SessionRunner runner) {
+    HistoryController(DataSource dataSource, SessionRunner runner, AuthProperties auth) {
         this.jdbc = new JdbcTemplate(dataSource);
         this.runner = runner;
+        this.auth = auth;
     }
 
     /**
@@ -74,7 +83,20 @@ class HistoryController {
         }
     }
 
+    /**
+     * A member (signed in without the operator role, user 10 Nov 2026: "the chart and trades, nothing more") gets the live
+     * sessions only, with what the chart's day list needs: no replays, research runs, configs, code versions or P&L, and
+     * the filters are ignored.
+     */
     @GetMapping("/sessions")
+    List<Map<String, Object>> sessions(SessionFilter filter, Principal principal) {
+        if (auth.member(principal)) {
+            return query("select id, account, mode, session_date::text from trade.session where " + PRIMARY_LIVE
+                    + " order by id desc");
+        }
+        return sessions(filter);
+    }
+
     List<Map<String, Object>> sessions(SessionFilter filter) {
         if (filter == null || filter.isEmpty()) {
             return query(SESSION_COLUMNS + "where mode = 'PAPER_LIVE' or id > (select coalesce(max(id), 0) - 200 from trade.session) "
@@ -157,10 +179,19 @@ class HistoryController {
                 + "where o.session_id = ? order by o.sent_at", id);
     }
 
+    /** A member reads a live session's trades only: any other session (a replay, a shadow, the signal source) is a 404. */
     @GetMapping("/sessions/{id}/positions")
-    List<Map<String, Object>> positions(@PathVariable long id) {
+    ResponseEntity<List<Map<String, Object>>> positions(@PathVariable long id, Principal principal) {
+        if (auth.member(principal) && !jdbc.queryForObject("select exists (select 1 from trade.session where id = ? and "
+                + PRIMARY_LIVE + ")", Boolean.class, id)) {
+            return ResponseEntity.notFound().build();
+        }
+        return ResponseEntity.ok(positions(id));
+    }
+
+    List<Map<String, Object>> positions(long id) {
         return query("select id, strategy_id, underlying, option_side, symbol, " + ist("opened_at") + ", " + ist("closed_at")
-                + ", stages, exit_reason, realised, costs, net, quantity, lot_size, average_cost, average_exit "
+                + ", stages, exit_reason, realised, costs, net, quantity, lot_size, average_cost, average_exit, direction "
                 + "from trade.position where session_id = ? order by opened_at", id);
     }
 
@@ -255,7 +286,7 @@ class HistoryController {
         String mark = "(select o.ltp from md.option_tick o where o.session_date = ?::date and o.symbol = ? "
                 + "and o.recv_ts > ? and o.recv_ts <= ? order by o.recv_ts desc limit 1)";
         List<Map<String, Object>> open = query("select p.strategy_id, p.option_side, p.symbol, " + ist("p.opened_at") + ", "
-                + "p.quantity, p.average_cost, " + mark.replace("o.symbol = ?", "o.symbol = p.symbol") + " mark "
+                + "p.quantity, p.average_cost, p.direction, " + mark.replace("o.symbol = ?", "o.symbol = p.symbol") + " mark "
                 + "from trade.position p where p.session_id = ? and p.underlying = ? and p.quantity > 0 and p.opened_at <= ? "
                 + "and (p.closed_at is null or p.closed_at > ?) order by p.opened_at", day.toString(), from, at, id, underlying,
                 at, at);
@@ -274,6 +305,7 @@ class HistoryController {
                         row.put("opened_at", day + " " + p.get("opened"));
                         row.put("quantity", p.get("boughtQuantity"));        // as the stored rows: the quantity bought
                         row.put("average_cost", p.get("averageCost"));
+                        row.put("direction", p.get("direction"));             // A-358: SHORT legs are marked the other way
                         row.put("mark", jdbc.queryForList("select " + mark, Double.class, day.toString(), p.get("symbol"), from, at)
                                 .stream().findFirst().orElse(null));
                         open.add(row);
@@ -296,7 +328,7 @@ class HistoryController {
     List<Map<String, Object>> performance(@RequestParam(defaultValue = "PAPER_LIVE") String mode) {
         return query("select s.id session_id, s.session_date::text session_date, p.strategy_id, p.underlying, p.option_side, "
                 + "p.symbol, " + ist("p.opened_at") + ", " + ist("p.closed_at") + ", p.exit_reason, p.realised, p.costs, p.net, "
-                + "p.quantity, p.lot_size, p.average_cost, p.average_exit from trade.position p join trade.session s on s.id = p.session_id "
+                + "p.quantity, p.lot_size, p.average_cost, p.average_exit, p.direction from trade.position p join trade.session s on s.id = p.session_id "
                 + "where s.mode = ? and p.closed_at is not null and (s.mode <> 'PAPER_LIVE' or s.account not like 'SIGNAL-%') "
                 + "order by s.session_date, p.opened_at", mode);     // the live account only, never the signal source too
     }

@@ -24,3 +24,4 @@ com.autotrade.strategy.egb.SetupProviders$OiBurstAlldayProvider
 com.autotrade.strategy.egb.SetupProviders$GapFadeProvider
 com.autotrade.strategy.egb.SetupProviders$ExpiryLateAtmProvider
 com.autotrade.strategy.egb.SetupProviders$ExpiryLevelStraddleProvider
+com.autotrade.strategy.egb.ExpiryShortStraddleProvider

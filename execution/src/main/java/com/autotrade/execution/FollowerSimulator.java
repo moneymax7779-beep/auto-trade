@@ -15,6 +15,8 @@ import java.util.Set;
 
 import javax.sql.DataSource;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.jdbc.core.JdbcTemplate;
 
 import com.autotrade.account.AccountStore;
@@ -85,6 +87,8 @@ public final class FollowerSimulator {
     static final java.time.Duration PROTECT_RETRY_AFTER = java.time.Duration.ofSeconds(60);
     /** Review 8 Nov 2026: a stop place that failed (not refused by the broker) is tried again after this. */
     static final java.time.Duration PROTECT_BACK_OFF = java.time.Duration.ofSeconds(30);
+    private static final Logger log = LoggerFactory.getLogger(FollowerSimulator.class);
+
     /** The wall clock of the LIVE entry checks (tests set their own). */
     private java.time.Clock clock = java.time.Clock.systemUTC();
 
@@ -96,6 +100,7 @@ public final class FollowerSimulator {
     private final QuoteSource quotes;            // null: capital-refused adds are not retried
     private final KillSwitches kills;
     private final TradingDay tradingDay;
+    private final LiveStrategies liveStrategies;
 
     public FollowerSimulator(DataSource dataSource, CostModel costs, FollowerRisk risk, double simulatedBrokerFunds) {
         this(dataSource, costs, risk, simulatedBrokerFunds, null);
@@ -118,6 +123,7 @@ public final class FollowerSimulator {
         this.quotes = quotes;
         this.kills = new KillSwitches(dataSource);
         this.tradingDay = new TradingDay(dataSource);
+        this.liveStrategies = new LiveStrategies(dataSource);
     }
 
     private String workerId;                     // set by an execution worker: claim intents before running them
@@ -161,6 +167,10 @@ public final class FollowerSimulator {
         final double equity;
         final double dailyLossLimit;                 // the account's own rupee limit (V25), NaN = the risk file's %
         boolean dailyLossLatched;
+        boolean dailyLossStopped;                    // v11: the loss with open positions reached the limit: all sold
+        Instant lossCheckedAt;                       // v11: the last mark of the open positions
+        Instant lossFlattenAt;                       // v11: the last sale of what was still open after the stop
+        int lossFlattenTries;                        // v11: sales after the stop (each waits twice as long, to 5 min)
         final List<Retry> retries = new ArrayList<>();
         final Map<String, Integer> retried = new LinkedHashMap<>();
 
@@ -231,6 +241,20 @@ public final class FollowerSimulator {
                 sessionLost = true;
             } else if (unarmed == 0) {
                 protectionChecked.add(checked);
+            }
+        }
+        if (risk.dailyLossCountsOpen() && venue.broker() && !sessionLost) {
+            try {
+                String stop = dailyLossStop(day);
+                if (stop != null) {
+                    reasons.merge(stop, 1, Integer::sum);
+                }
+            } catch (BrokerException e) {
+                if (e.kind() != BrokerException.Kind.SESSION) {
+                    throw e;
+                }
+                sessionLost = true;
+                loseSession(account, e.getMessage());
             }
         }
         List<Pending> pending = pending(account.id(), copyGroupId, date);
@@ -311,6 +335,123 @@ public final class FollowerSimulator {
         return new DayResult(account.displayName(), executed, skipped, rejected, closed, day.todayNet(), reasons);
     }
 
+    /** v11: how often the open positions are marked for the daily loss, and how often a stop's unsold rest is sold again. */
+    static final java.time.Duration DAILY_LOSS_MARK_EVERY = java.time.Duration.ofSeconds(5);
+    static final java.time.Duration DAILY_LOSS_SELL_AGAIN = java.time.Duration.ofSeconds(30);
+    static final java.time.Duration DAILY_LOSS_SELL_AGAIN_MAX = java.time.Duration.ofMinutes(5);
+    /** v11: own capture younger than this marks a position; older, the broker's quote is read. */
+    static final java.time.Duration DAILY_LOSS_FRESH_TICK = java.time.Duration.ofSeconds(15);
+
+    /**
+     * v11 (capital.daily_loss_counts_open, user 11 Nov 2026: "Count open loss, close all"): the day's loss is the closed
+     * trades' net plus what every open position would make sold at the bid now (own capture in the last minute, else the
+     * broker's quote; exit charges not counted). When it reaches the limit (the account's own rupee limit, else the risk
+     * file's % of equity), entries and adds stop for the day (the daily loss latch) and every open position is sold like
+     * the Flatten button: broker stop off first, then sold. Audited DAILY_LOSS_STOP (a Telegram alert), once a day; what a
+     * sale leaves open (a sell of unknown outcome, a contract sold by hand that reconciliation has not booked yet, a part
+     * fill) is sold again after {@link #DAILY_LOSS_SELL_AGAIN}, each wait twice the last, at most
+     * {@link #DAILY_LOSS_SELL_AGAIN_MAX} (every try is a FLATTEN alert). Today's session only. The limit is a trigger,
+     * not a cap: the day ends below it by the move during the sale, the exit charges and up to one mark interval.
+     * Returns the turn's outcome, or null when nothing happened.
+     */
+    private String dailyLossStop(Day day) {
+        java.time.ZoneId ist = java.time.ZoneId.of("Asia/Kolkata");
+        if (!day.date.equals(LocalDate.now(clock.withZone(ist)))) {
+            return null;                                           // a mark is now: never on another day's replay
+        }
+        Instant now = clock.instant();
+        if (day.dailyLossStopped) {
+            java.time.Duration wait = DAILY_LOSS_SELL_AGAIN.multipliedBy(1L << Math.min(day.lossFlattenTries, 10));
+            if (wait.compareTo(DAILY_LOSS_SELL_AGAIN_MAX) > 0) {
+                wait = DAILY_LOSS_SELL_AGAIN_MAX;
+            }
+            if (day.lossFlattenAt != null && now.isBefore(day.lossFlattenAt.plus(wait)) || openPositions(day.account.id()) == 0) {
+                return null;
+            }
+            day.lossFlattenAt = now;
+            day.lossFlattenTries++;
+            flatten(day.account, day.date, this::markOrEntry, "DAILY_LOSS_STOP");
+            return "DAILY_LOSS_STOP_SELL_AGAIN";
+        }
+        if (day.lossCheckedAt != null && now.isBefore(day.lossCheckedAt.plus(DAILY_LOSS_MARK_EVERY))) {
+            return null;
+        }
+        List<Map<String, Object>> open = jdbc.queryForList("select id, instrument_token, instrument_key, symbol, "
+                + "quantity_open, average_entry from exec.position where broker_account_id = ? and status = 'OPEN' "
+                + "and quantity_open > 0 order by id", day.account.id());
+        if (open.isEmpty()) {
+            return null;
+        }
+        day.lossCheckedAt = now;
+        double limit = day.dailyLossLimit > 0 ? day.dailyLossLimit : day.equity * risk.limits().dailyLossPct() / 100;
+        if (!(limit > 0)) {
+            return null;
+        }
+        double openNet = 0;
+        List<String> unmarked = new ArrayList<>();
+        for (Map<String, Object> pos : open) {
+            double bid = mark(day.account, pos);
+            if (!(bid > 0)) {
+                unmarked.add((String) pos.get("symbol"));          // not known now: counted at nothing, marked next time
+                continue;
+            }
+            openNet += (bid - ((Number) pos.get("average_entry")).doubleValue())
+                    * ((Number) pos.get("quantity_open")).longValue();
+        }
+        double closedNet = day.todayNet();
+        if (closedNet + openNet > -limit) {
+            return null;
+        }
+        day.dailyLossLatched = true;
+        day.dailyLossStopped = true;
+        day.lossFlattenAt = now;
+        Map<String, Object> detail = new LinkedHashMap<>();
+        detail.put("limit", Math.round(limit));
+        detail.put("closed", Math.round(closedNet));
+        detail.put("open", Math.round(openNet));
+        detail.put("positions", open.size());
+        if (!unmarked.isEmpty()) {
+            detail.put("unmarked", unmarked);
+        }
+        kills.audit(day.account, "execution", "DAILY_LOSS_STOP", detail);
+        log.warn("account {} ({}): daily loss {} (closed {} + open {}) reached the limit {}: selling every open position, "
+                + "no entries today", day.account.id(), day.account.displayName(), Math.round(closedNet + openNet),
+                Math.round(closedNet), Math.round(openNet), Math.round(limit));
+        flatten(day.account, day.date, this::markOrEntry, "DAILY_LOSS_STOP");
+        return "DAILY_LOSS_STOP";
+    }
+
+    /**
+     * An open position's bid now: own capture of the last {@link #DAILY_LOSS_FRESH_TICK}, else the broker's quote, else
+     * the newest captured bid of today however old (a stale bid beats counting the position at nothing); NaN when none.
+     */
+    private double mark(BrokerAccount account, Map<String, Object> pos) {
+        long token = ((Number) pos.get("instrument_token")).longValue();
+        List<Map<String, Object>> captured = jdbc.queryForList("select bid_px[1] bid, recv_ts from md.option_tick "
+                + "where instrument_token = ? and recv_ts > ? and bid_px[1] > 0 order by recv_ts desc limit 1", token,
+                Timestamp.from(clock.instant().minus(java.time.Duration.ofHours(8))));
+        Double bid = captured.isEmpty() ? null : (Double) captured.getFirst().get("bid");
+        Instant at = captured.isEmpty() ? null : ((Timestamp) captured.getFirst().get("recv_ts")).toInstant();
+        if (bid != null && at.isAfter(clock.instant().minus(DAILY_LOSS_FRESH_TICK))) {
+            return bid;
+        }
+        double quoted = venue.bid(account, InstrumentKeys.normalize((String) pos.get("instrument_key"), token));
+        return quoted > 0 ? quoted : bid != null ? bid : Double.NaN;
+    }
+
+    /** The simulated sale price of a flatten (a broker venue prices from the broker): the mark, else the entry. */
+    private double markOrEntry(Map<String, Object> pos) {
+        double bid;
+        try {
+            bid = jdbc.queryForList("select bid_px[1] from md.option_tick where instrument_token = ? and bid_px[1] > 0 "
+                    + "order by recv_ts desc limit 1", Double.class, ((Number) pos.get("instrument_token")).longValue())
+                    .stream().filter(java.util.Objects::nonNull).findFirst().orElse(Double.NaN);
+        } catch (RuntimeException e) {
+            bid = Double.NaN;
+        }
+        return bid > 0 ? bid : ((Number) pos.get("average_entry")).doubleValue();
+    }
+
     /** A day met again after a restart: the latched daily loss and the adds still waiting for capital. */
     private Day restore(Day day, long copyGroupId) {
         Integer latched = jdbc.queryForObject("select count(*) from exec.trade_intent i join exec.trade_batch b "
@@ -318,6 +459,13 @@ public final class FollowerSimulator {
                 + "where i.broker_account_id = ? and d.session_date = ? and i.reject_code = 'DAILY_LOSS'", Integer.class,
                 day.account.id(), Date.valueOf(day.date));
         day.dailyLossLatched = latched != null && latched > 0;
+        Boolean stopped = jdbc.queryForObject("select exists (select 1 from exec.audit_log where broker_account_id = ? "
+                + "and action = 'DAILY_LOSS_STOP' and (at at time zone 'Asia/Kolkata')::date = ?)", Boolean.class,
+                day.account.id(), Date.valueOf(day.date));
+        if (Boolean.TRUE.equals(stopped)) {                          // v11: a stop before a restart holds all day
+            day.dailyLossLatched = true;
+            day.dailyLossStopped = true;
+        }
         if (quotes != null) {
             for (Pending add : query(PENDING + "where i.broker_account_id = ? and d.copy_group_id = ? and d.session_date = ? "
                     + "and i.state = 'REJECTED' and i.reject_code = 'CAPITAL' and d.action = 'ADD' "
@@ -360,7 +508,7 @@ public final class FollowerSimulator {
         double step = day.account.sizeStepPct();
         if (step == 0) {
             lots = 1;                                                                   // the one-lot pilot
-        } else if (step < 100) {
+        } else if (step < 100 && !risk.fullSizeAt(p.rvol())) {                          // v12 (A-378): high RVOL = full
             lots = (long) Math.floor(lots * step / 100);
             scale = scale * step / 100;
         }
@@ -519,7 +667,7 @@ public final class FollowerSimulator {
         double step = day.account.sizeStepPct();
         if (step == 0 && lots >= 1) {
             lots = 1;
-        } else if (step > 0 && step < 100) {
+        } else if (step > 0 && step < 100 && !risk.fullSizeAt(ce.rvol())) {           // v12 (A-378), as enter()
             lots = (long) Math.floor(lots * step / 100);
         }
         for (Pending leg : List.of(ce, pe)) {                            // replay depth ceiling, per leg
@@ -558,13 +706,20 @@ public final class FollowerSimulator {
         if (killed != null) {
             return reject(p, "KILL_SWITCH", killed);
         }
+        if (liveStrategies.off().contains(p.strategyId())) {
+            // V35 (user 11 Nov 2026): the owner turned the strategy OFF; a signal published before the switch opens nothing
+            return reject(p, "STRATEGY_OFF", p.strategyId() + " is turned OFF by the owner (no new entry or add)");
+        }
         String switched = dailySwitchRefusal(day, add);
         if (switched != null) {
             return reject(p, switched.substring(0, switched.indexOf(':')), switched.substring(switched.indexOf(':') + 2));
         }
-        if ((day.account.tradeMode() == TradeMode.LIVE || TradeMode.LIVE.name().equals(p.mode()))
-                && (risk.live() == null || !risk.live().strategies().contains(p.strategyId()))) {
-            return reject(p, "LIVE_STRATEGY", p.strategyId() + " is not one of the risk file's LIVE strategies");
+        if (day.account.tradeMode() == TradeMode.LIVE || TradeMode.LIVE.name().equals(p.mode())) {
+            // the owner's choice of LIVE strategies within the risk file's list (V32, user 9 Nov 2026)
+            List<String> live = liveStrategies.effective(day.account.id(), risk);
+            if (!live.contains(p.strategyId())) {
+                return reject(p, "LIVE_STRATEGY", p.strategyId() + " is not one of the account's LIVE strategies " + live);
+            }
         }
         if (venue.live()) {
             // code review 3 Nov 2026: a LIVE entry follows its signal at once or not at all (a worker that was down, a lease

@@ -892,6 +892,22 @@ public final class BrokerVenue implements FollowerVenue {
         }
     }
 
+    @Override
+    public double bid(BrokerAccount account, String instrumentKey) {
+        if (instrumentKey == null) {
+            return Double.NaN;
+        }
+        try {
+            com.autotrade.broker.Quote q = broker.quote(instrumentKey);
+            return q != null && q.bid() > 0 ? q.bid() : Double.NaN;
+        } catch (BrokerException e) {
+            if (e.kind() == Kind.SESSION) {
+                throw e;
+            }
+            return Double.NaN;                             // not known now: the next check reads it again
+        }
+    }
+
     private void markBooked(long accountId, String tag, long quantity) {
         jdbc.update("update exec.order_execution set booked_quantity = ? where broker_account_id = ? and client_tag = ?",
                 quantity, accountId, tag);

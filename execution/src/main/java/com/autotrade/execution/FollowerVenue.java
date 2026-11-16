@@ -178,4 +178,12 @@ public interface FollowerVenue {
     default Long brokerHolds(BrokerAccount account, String instrumentKey) {
         return null;
     }
+
+    /**
+     * v11 daily loss with open positions: the best bid of a contract at the broker now (what a sale would get); NaN when
+     * not known (another venue, no bid, or the quote could not be read).
+     */
+    default double bid(BrokerAccount account, String instrumentKey) {
+        return Double.NaN;
+    }
 }

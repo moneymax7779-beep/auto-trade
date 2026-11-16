@@ -59,7 +59,7 @@ export function groupTrades(rows: TradePositionRow[]): Trade[] {
       const exits = [...new Set(legs.map((l) => l.exit_reason ?? "open"))];
       trades.push({
         strategy: call.strategy_id ?? null, underlying: call.underlying,
-        title: `${call.underlying} ${strikes}`,
+        title: `${call.direction === "SHORT" ? "SHORT " : ""}${call.underlying} ${strikes}`,
         detail: `CE ${signed(call.net)} · PE ${signed(put.net)}${c ? ` · ${c.expiry}` : ""}`,
         opened: call.opened_at, closed: closes.length === 2 ? closes[1] : null,
         stages: [...new Set(legs.flatMap((l) => l.stages))].join(" → "),
@@ -73,7 +73,8 @@ export function groupTrades(rows: TradePositionRow[]): Trade[] {
         const s = parse(leg.symbol);
         trades.push({
           strategy: leg.strategy_id ?? null, underlying: leg.underlying,
-          title: s ? `${s.index} ${s.strike} ${s.type}` : leg.symbol, detail: s ? s.expiry : "",
+          title: `${leg.direction === "SHORT" ? "SHORT " : ""}${s ? `${s.index} ${s.strike} ${s.type}` : leg.symbol}`,
+          detail: s ? s.expiry : "",
           opened: leg.opened_at, closed: leg.closed_at, stages: leg.stages.join(" → "), exit: leg.exit_reason,
           costs: leg.costs, net: leg.net, quantity: leg.quantity ?? null, lots: lotsOf(leg), prices: legPrices(leg),
           legs: [leg],
@@ -108,7 +109,8 @@ export function tradeMarkers(rows: TradePositionRow[], underlying: string, strat
     const what = t.legs.length === 2 ? `straddle ${s?.strike ?? ""}` : s ? `${s.type} ${s.strike}` : leg.symbol;
     const entryPx = t.legs.length === 2 ? "" : ` @${px(leg.average_cost)}`;
     const tone = t.legs.length === 2 ? "info" as const : leg.option_side === "CE" ? "up" as const : "down" as const;
-    out.push({ t: time(t.opened)!, text: `${who} buy ${what}${entryPx}`.trim(), tone });
+    const verb = leg.direction === "SHORT" ? "sell" : "buy";          // A-358: a short straddle is sold to open
+    out.push({ t: time(t.opened)!, text: `${who} ${verb} ${what}${entryPx}`.trim(), tone });
     if (t.closed != null) {
       const exitPx = t.legs.length === 2 ? "" : ` @${px(leg.average_exit)}`;
       out.push({ t: time(t.closed)!, text: `${who} exit${exitPx} ${t.exit ?? ""} ${signed(t.net)}`.replace(/\s+/g, " ").trim(),
@@ -188,7 +190,8 @@ export function TradesTable({ rows, showStrategy, empty = "No trades.", numbered
         { key: "q", label: "Qty", align: "right", render: (t: Trade) => <PerLeg trade={t} value={(l) => l.quantity == null ? "–" : l.quantity.toLocaleString("en-IN")} /> },
         { key: "e", label: "Entry ₹", align: "right", render: (t: Trade) => <PerLeg trade={t} value={(l) => px(l.average_cost)} /> },
         { key: "x", label: "Exit ₹", align: "right", render: (t: Trade) => <PerLeg trade={t} value={(l) => px(l.average_exit)} /> },
-        { key: "p", label: "Premium paid", align: "right", render: (t: Trade) => { const v = paid(t); return <span className="whitespace-nowrap">{v == null ? "–" : rupees(v)}</span>; } },
+        // a short (A-358): the entry is the credit received and this column is the premium received
+        { key: "p", label: "Premium paid", align: "right", render: (t: Trade) => { const v = paid(t); return <span className="whitespace-nowrap">{v == null ? "–" : rupees(v)}{t.legs[0]?.direction === "SHORT" && <span className="text-xs text-muted"> credit</span>}</span>; } },
         {
           key: "t", label: "IST", render: (t: Trade) => (
             <span className="num whitespace-nowrap">{time(t.opened)}–{time(t.closed) ?? "open"}</span>

@@ -29,6 +29,13 @@ import com.zaxxer.hikari.HikariDataSource;
 class SessionHistoryIT {
 
     private static final LocalDate DAY = LocalDate.of(2026, 9, 25);
+    private static final AuthProperties NO_LOGIN = new AuthProperties("none", null, null, null, null, null, null, null);
+    private static final AuthProperties OIDC = new AuthProperties("oidc", null, null, null, null, null, null, null);
+    private static final org.springframework.security.core.Authentication MEMBER =
+            new org.springframework.security.authentication.UsernamePasswordAuthenticationToken("demo", "x", List.of());
+    private static final org.springframework.security.core.Authentication OPERATOR =
+            new org.springframework.security.authentication.UsernamePasswordAuthenticationToken("satya", "x",
+                    List.of(new org.springframework.security.core.authority.SimpleGrantedAuthority("ROLE_OPERATOR")));
 
     private static PostgreSQLContainer postgres;
     private static HikariDataSource dataSource;
@@ -138,7 +145,7 @@ class SessionHistoryIT {
         store.decision(id, "expiry-gamma-breakout", decision("NIFTY", "09:44", Stage.COMPRESSION), 23050);
         store.decision(id, "early-confirm-runner", decision("SENSEX", "09:40", Stage.IDLE), 74000);
 
-        List<Map<String, Object>> rows = new HistoryController(dataSource, null).lastDecisions(id);
+        List<Map<String, Object>> rows = new HistoryController(dataSource, null, NO_LOGIN).lastDecisions(id);
 
         assertThat(rows).extracting(r -> r.get("underlying") + "/" + r.get("strategy_id") + "/" + r.get("t") + "/"
                 + r.get("ce_stage")).containsExactly(
@@ -166,7 +173,7 @@ class SessionHistoryIT {
     @Test
     void sessionRunsGroupABatchAcrossTickFeedsAndTheFilterReturnsItsSessions() {
         TradeStore store = new TradeStore(dataSource);
-        HistoryController history = new HistoryController(dataSource, null);
+        HistoryController history = new HistoryController(dataSource, null, NO_LOGIN);
         Map<String, String> v1 = Map.of("runs-test.v1.yaml", "sha256:a", "paper-risk.v17.yaml", "sha256:r");
         Map<String, String> v2 = Map.of("runs-test.v2.yaml", "sha256:b", "paper-risk.v17.yaml", "sha256:r");
         long zt = store.startSession("PAPER-1", "PAPER_REPLAY", LocalDate.of(2026, 9, 2), "replay-as-live:zt-tiger-v2",
@@ -210,11 +217,49 @@ class SessionHistoryIT {
                 .extracting(r -> ((Number) r.get("id")).longValue()).contains(zt, ztAgain, own, bars, other);
     }
 
+    /**
+     * User, 10 Nov 2026 (members see "the chart and trades, nothing more"): a member's session list is the live PAPER
+     * account's sessions only, without configs, code or P&L, whatever the filter; and only their trades can be read.
+     */
+    @Test
+    void aMemberSeesTheLiveSessionsAndTheirTradesOnly() {
+        TradeStore store = new TradeStore(dataSource);
+        HistoryController history = new HistoryController(dataSource, null, OIDC);
+        long live = store.startSession("PAPER-1", "PAPER_LIVE", LocalDate.of(2026, 11, 6), "live", "member-test", "sha256:x",
+                Map.of("member-test.v1.yaml", "sha256:a"), "member1");
+        long signal = store.startSession("SIGNAL-1", "PAPER_LIVE", LocalDate.of(2026, 11, 6), "live", "member-test",
+                "sha256:x", Map.of(), "member1");
+        long replay = store.startSession("PAPER-1", "PAPER_REPLAY", LocalDate.of(2026, 11, 6), "replay-as-live:own-capture",
+                "member-test", "sha256:x", Map.of(), "member1");
+        long shadow = store.startSession("SHADOW-1", "PAPER_REPLAY", LocalDate.of(2026, 11, 6), "replay-as-live:own-capture",
+                "member-test", "sha256:x", Map.of(), "member1");
+        for (long id : List.of(live, signal, replay, shadow)) {                // none left RUNNING for the other tests
+            store.endSession(id, "DONE", Map.of("net", 1234), null);
+        }
+
+        for (HistoryController.SessionFilter filter : java.util.Arrays.asList(null,
+                new HistoryController.SessionFilter("member1", null, null, "PAPER_REPLAY", null))) {
+            List<Map<String, Object>> rows = history.sessions(filter, MEMBER);
+            assertThat(rows).extracting(r -> ((Number) r.get("id")).longValue()).contains(live)
+                    .doesNotContain(signal, replay, shadow);
+            assertThat(rows).allSatisfy(r -> assertThat(r).containsOnlyKeys("id", "account", "mode", "session_date"));
+        }
+        assertThat(history.positions(live, MEMBER).getStatusCode().value()).isEqualTo(200);
+        for (long other : List.of(signal, replay, shadow, 987_654_321L)) {
+            assertThat(history.positions(other, MEMBER).getStatusCode().value()).as("session %d", other).isEqualTo(404);
+        }
+        // the owner: everything, as before
+        assertThat(history.sessions(null, OPERATOR)).extracting(r -> ((Number) r.get("id")).longValue())
+                .contains(live, signal, replay, shadow);
+        assertThat(history.sessions(null, OPERATOR).getFirst()).containsKeys("configs", "summary", "code_version");
+        assertThat(history.positions(replay, OPERATOR).getStatusCode().value()).isEqualTo(200);
+    }
+
     /** A session's page loads it by id, so a replay older than the newest 200 still has its strategy (and chart). */
     @Test
     void oneSessionIsFoundByIdEvenWhenNotAmongTheNewest200() {
         TradeStore store = new TradeStore(dataSource);
-        HistoryController history = new HistoryController(dataSource, null);
+        HistoryController history = new HistoryController(dataSource, null, NO_LOGIN);
         long old = store.startSession("PAPER-1", "PAPER_REPLAY", LocalDate.of(2026, 10, 1), "replay-as-live:own-capture",
                 "wall-break-rider", "sha256:x", Map.of(), "old1");
         for (int i = 0; i < 201; i++) {
@@ -259,7 +304,7 @@ class SessionHistoryIT {
         store.candidate(id, "early-confirm-runner", "NIFTY", Instant.parse("2026-09-25T06:00:00Z"), "ENTER", "PE", "BREAKDOWN",
                 true, null, 23100, Map.of());
 
-        HistoryController history = new HistoryController(dataSource, null);
+        HistoryController history = new HistoryController(dataSource, null, NO_LOGIN);
         List<Map<String, Object>> trades = history.tradeContext(id);
         assertThat(trades).singleElement().satisfies(t -> {
             assertThat(t.get("entry_reason")).isEqualTo("BREAKOUT");

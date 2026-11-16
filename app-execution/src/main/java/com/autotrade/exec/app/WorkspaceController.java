@@ -12,7 +12,6 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.TreeSet;
 
 import javax.sql.DataSource;
 
@@ -294,7 +293,6 @@ class WorkspaceController {
             Integer logins = jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? "
                     + "and action = 'SESSION_LOGIN'", Integer.class, id);
             require(logins != null && logins > 0, "no broker login has worked yet: log in once first");
-            require(a.sizeStepPct() == 0, "LIVE trades one lot an entry: set the size step to 0 first");
             FollowerRisk risk;
             try {
                 risk = FollowerRisk.load(Path.of(a.riskFile()));
@@ -303,12 +301,15 @@ class WorkspaceController {
             }
             require(risk.live() != null && risk.orders() != null, "risk file " + a.riskFile()
                     + " has no live limits (follower-risk v7 or later)");
+            require(a.sizeStepPct() == 0 || risk.live().maxLotsPerOrder() > 1, "the risk file " + a.riskFile()
+                    + " trades one lot an entry (live.max_lots_per_order 1): set the size step to 0, or move the account "
+                    + "to a risk file that sizes LIVE from the allocation (follower-risk v11)");
             int changed = jdbc.update("update acct.broker_account set trade_mode = 'LIVE', live_trading_enabled = true, "
                     + "updated_at = now() where id = ? and not live_trading_enabled" + NO_EXPOSURE, id);
             require(changed == 1, a.displayName() + " is already LIVE-eligible, or holds a position or a working order");
             detail.put("riskFile", a.riskFile());
             detail.put("maxLotsPerOrder", risk.live().maxLotsPerOrder());
-            detail.put("strategies", new TreeSet<>(risk.live().strategies()));
+            detail.put("strategies", new com.autotrade.execution.LiveStrategies(jdbc.getDataSource()).effective(id, risk));
         } else {
             int changed = tx.execute(t -> {
                 tradingDay.lock(a.tenantId());
@@ -409,8 +410,9 @@ class WorkspaceController {
             b.put("allocation", a.allocatedCapital());
             b.put("equityMode", a.equityMode().name());
             b.put("sizeStepPct", a.sizeStepPct());
-            b.put("strategies", jdbc.queryForList("select strategy_id from acct.strategy_subscription where "
-                    + "broker_account_id = ? and enabled order by strategy_id", String.class, a.id()));
+            b.put("strategies", jdbc.queryForList("select strategy_id from acct.strategy_subscription where "     // not OFF (V35)
+                    + "broker_account_id = ? and enabled and strategy_id not in (select strategy from acct.strategy_off) "
+                    + "order by strategy_id", String.class, a.id()));
             b.put("liveStrategies", liveStrategies(a));
             b.put("chosen", Long.valueOf(a.id()).equals(state.brokerAccountId()));
             Map<String, Object> paper = result(a.brokerType() == BrokerType.PAPER ? Long.valueOf(a.id()) : twin, today);
@@ -483,21 +485,21 @@ class WorkspaceController {
         return r;
     }
 
-    /** A risk file's LIVE strategies, read once per file (risk files are versioned: a change is a new file). */
-    private static final Map<String, List<String>> LIVE_STRATEGIES = new java.util.concurrent.ConcurrentHashMap<>();
+    /** Risk files read once per file (risk files are versioned: a change is a new file). */
+    private static final Map<String, FollowerRisk> RISKS = new java.util.concurrent.ConcurrentHashMap<>();
 
-    private static List<String> liveStrategies(BrokerAccount a) {
+    /** What trades LIVE on the account: the owner's choice within its risk file's list (V32, user 9 Nov 2026). */
+    private List<String> liveStrategies(BrokerAccount a) {
         if (!LIVE_BROKERS.contains(a.brokerType())) {
             return List.of();
         }
-        return LIVE_STRATEGIES.computeIfAbsent(a.riskFile(), file -> {
-            try {
-                FollowerRisk risk = FollowerRisk.load(Path.of(file));
-                return risk.live() == null ? List.of() : List.copyOf(new TreeSet<>(risk.live().strategies()));
-            } catch (RuntimeException e) {
-                return List.of();
-            }
-        });
+        FollowerRisk risk;
+        try {
+            risk = RISKS.computeIfAbsent(a.riskFile(), file -> FollowerRisk.load(Path.of(file)));
+        } catch (RuntimeException e) {
+            return List.of();
+        }
+        return new com.autotrade.execution.LiveStrategies(jdbc.getDataSource()).effective(a.id(), risk);
     }
 
     // ------------------------------------------------------------------------------------------------- helpers

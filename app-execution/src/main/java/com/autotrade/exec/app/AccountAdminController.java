@@ -69,7 +69,7 @@ class AccountAdminController {
     private static final double MAX_CAPITAL = 100_000_000;               // Rs 10 Cr: a typo guard, not a policy
     private static final String DEFAULT_RISK = "config/risk/follower-risk.v3.yaml";
     /** A member's real broker account: the risk file with LIVE limits, one lot an entry (what LIVE eligibility needs). */
-    private static final String MEMBER_BROKER_RISK = "config/risk/follower-risk.v7.yaml";
+    private static final String MEMBER_BROKER_RISK = "config/risk/follower-risk.v9.yaml";   // v9: owner-chosen LIVE strategies
 
     private final Access access;
     private final AccountStore accounts;
@@ -119,9 +119,11 @@ class AccountAdminController {
         out.put("session", jdbc.queryForList("select status, to_char(expires_at at time zone 'Asia/Kolkata', 'DD Mon HH24:MI') "
                 + "expires from acct.broker_session where broker_account_id = ? order by id desc limit 1", id).stream()
                 .findFirst().orElse(null));
+        // an OFF strategy (V35) is not shown to follower or demo accounts (user 11 Nov 2026); its subscription is kept
         out.put("strategies", jdbc.queryForList("select s.strategy_id, s.enabled, s.size_multiplier, g.name copy_group "
                 + "from acct.strategy_subscription s join acct.copy_group g on g.id = s.copy_group_id "
-                + "where s.broker_account_id = ? order by s.strategy_id", id));
+                + "where s.broker_account_id = ? and s.strategy_id not in (select strategy from acct.strategy_off) "
+                + "order by s.strategy_id", id));
         LocalDate today = LocalDate.now(IST);
         out.put("today", jdbc.queryForMap("select count(*) filter (where status = 'OPEN') open, "
                 + "count(*) filter (where status = 'CLOSED') closed, coalesce(sum(realised_gross - coalesce(charges, 0)) "
@@ -234,7 +236,19 @@ class AccountAdminController {
             ids.addAll(jdbc.queryForList("select distinct s.strategy_id from acct.strategy_subscription s join "
                     + "acct.broker_account a on a.id = s.broker_account_id where a.tenant_id = ?", String.class, tenant));
         }
+        ids.removeAll(off());                                   // V35: an OFF strategy is not offered (user 11 Nov 2026)
         return ids.stream().sorted().toList();
+    }
+
+    /** The strategies the platform owner turned OFF (V35): not shown, offered or subscribable on any account. */
+    private Set<String> off() {
+        return new com.autotrade.execution.LiveStrategies(jdbc.getDataSource()).off();
+    }
+
+    private void notOff(List<String> strategies) {
+        Set<String> refused = new java.util.TreeSet<>(strategies);
+        refused.retainAll(off());
+        require(refused.isEmpty(), "turned OFF by the platform owner: " + refused);
     }
 
     // ------------------------------------------------------------------------------------------------- writes
@@ -279,6 +293,7 @@ class AccountAdminController {
         }
         long group = copyGroup(tenant);
         List<String> strategies = strategyList(body.strategies());
+        notOff(strategies);
         Long profileId = profile;
         long id = tx.execute(t -> {
             Integer taken = jdbc.queryForObject("select count(*) from acct.broker_account where tenant_id = ? and display_name = ?",
@@ -332,8 +347,18 @@ class AccountAdminController {
         return n == null ? 0 : n;
     }
 
+    /**
+     * {@code sizeStepPct} (11 Nov 2026): the share of the allocation-sized entry an account takes, 0 = one lot an entry
+     * (the LIVE pilot), 100 = full size; a LIVE account above 0 needs a risk file that sizes LIVE from the allocation
+     * (live.max_lots_per_order above 1, follower-risk v11).
+     */
     record Settings(Double allocation, String equityMode, Double dailyLossLimit, Boolean clearDailyLossLimit, String mode,
-                    Boolean enabled, String clientId, List<String> strategies) {
+                    Boolean enabled, String clientId, List<String> strategies, Double sizeStepPct) {
+
+        Settings(Double allocation, String equityMode, Double dailyLossLimit, Boolean clearDailyLossLimit, String mode,
+                 Boolean enabled, String clientId, List<String> strategies) {
+            this(allocation, equityMode, dailyLossLimit, clearDailyLossLimit, mode, enabled, clientId, strategies, null);
+        }
     }
 
     @PostMapping("/api/execution/accounts/{id}/settings")
@@ -370,6 +395,24 @@ class AccountAdminController {
                 Double loss = lossLimit(body.dailyLossLimit(), allocation);
                 jdbc.update("update acct.broker_account set daily_loss_limit = ?, updated_at = now() where id = ?", loss, id);
                 changed.put("dailyLossLimit", loss);
+            }
+            if (body.sizeStepPct() != null && body.sizeStepPct() != a.sizeStepPct()) {
+                double step = body.sizeStepPct();
+                require(step >= 0 && step <= 100, "size: 0 (one lot an entry) to 100 (full size)");
+                if (step > 0 && (a.tradeMode() == TradeMode.LIVE || daily)) {
+                    com.autotrade.execution.FollowerRisk risk;
+                    try {
+                        risk = com.autotrade.execution.FollowerRisk.load(java.nio.file.Path.of(a.riskFile()));
+                    } catch (RuntimeException e) {
+                        throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "risk file " + a.riskFile()
+                                + " not readable");
+                    }
+                    require(risk.live() == null || risk.live().maxLotsPerOrder() > 1, a.displayName() + " trades LIVE "
+                            + "on " + risk.version() + ", one lot an entry: full size needs a risk file that sizes LIVE "
+                            + "from the allocation (follower-risk v11)");
+                }
+                jdbc.update("update acct.broker_account set size_step_pct = ?, updated_at = now() where id = ?", step, id);
+                changed.put("sizeStepPct", step);
             }
             if (body.mode() != null) {
                 require(!daily, "a member's account trades by the day's PAPER/LIVE switch, not a mode of its own");
@@ -414,6 +457,10 @@ class AccountAdminController {
             }
             if (body.strategies() != null) {
                 List<String> wanted = strategyList(body.strategies());
+                notOff(wanted);
+                // the OFF strategies are not shown, so they are not in the list sent: their subscriptions stay as they are
+                // (back as they were when the owner switches them on), and a position held in one keeps its exits
+                Set<String> off = off();
                 for (String held : jdbc.queryForList("select distinct strategy_id from exec.position where "
                         + "broker_account_id = any(?) and status <> 'CLOSED'", String.class,
                         (Object) (twin == null ? new Long[] {id} : new Long[] {id, twin}))) {
@@ -421,12 +468,13 @@ class AccountAdminController {
                         continue;                  // a manual position is no subscription: its EXIT is the trader's
                     }
                     // an unsubscribed strategy's EXIT is no longer fanned out to this account (code review 3 Nov 2026)
-                    require(wanted.contains(held), a.displayName() + " holds an open " + held + " position: keep the "
+                    require(wanted.contains(held) || off.contains(held), a.displayName() + " holds an open " + held + " position: keep the "
                             + "strategy until it is closed");
                 }
                 long group = copyGroup(a.tenantId());
                 jdbc.update("update acct.strategy_subscription set enabled = false where broker_account_id = ? "
-                        + "and copy_group_id = ? and not (strategy_id = any(?))", id, group, wanted.toArray(new String[0]));
+                        + "and copy_group_id = ? and not (strategy_id = any(?)) and not (strategy_id = any(?))", id, group,
+                        wanted.toArray(new String[0]), off.toArray(new String[0]));
                 if (!wanted.isEmpty()) {
                     fanOut.subscribe(group, id, wanted, 1.0);
                 }
@@ -440,7 +488,7 @@ class AccountAdminController {
         Map<String, Object> detail = new LinkedHashMap<>(changed);
         detail.put("before", Map.of("allocation", before.get("allocatedCapital"), "equityMode", before.get("equityMode"),
                 "dailyLossLimit", String.valueOf(before.get("dailyLossLimit")), "mode", before.get("mode"),
-                "enabled", before.get("enabled")));
+                "enabled", before.get("enabled"), "sizeStepPct", before.get("sizeStepPct")));
         audit.audit(accounts.byId(id).orElseThrow(), user.subject(), "ACCOUNT_SETTINGS", detail);
         return details(subject, id);
     }

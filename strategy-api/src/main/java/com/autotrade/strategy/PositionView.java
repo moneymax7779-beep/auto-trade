@@ -10,13 +10,21 @@ import java.util.List;
  * session (an entry that never filled does not count; a position the executor opened and closed
  * between two decisions shows only here). {@code heldValueRatio} is what all of the strategy's open legs in the
  * underlying are worth at their bids over what they cost (a straddle's combined value; NaN when unknown, e.g. a leg
- * still filling). {@code legs} are those open legs one by one (empty when the executor did not say).
+ * still filling); for a short position (A-358) it is the combined ask over the combined credit. {@code legs} are
+ * those open legs one by one (empty when the executor did not say).
  */
 public record PositionView(boolean open, OptionSide side, int lots, double averagePremium, Instant openedAt,
                            double bid, int closedToday, double heldValueRatio, List<Leg> legs) {
 
-    /** One held contract: its strike (NaN when unknown), quantity, average cost and latest bid (NaN when none). */
-    public record Leg(OptionSide side, double strike, long quantity, double averageCost, double bid) {
+    /**
+     * One held contract: its strike (NaN when unknown), quantity, average cost (for a short leg the average sale price,
+     * its credit), latest bid and latest ask (NaN when none; a short leg is valued and bought back at the ask).
+     */
+    public record Leg(OptionSide side, double strike, long quantity, double averageCost, double bid, double ask) {
+
+        public Leg(OptionSide side, double strike, long quantity, double averageCost, double bid) {
+            this(side, strike, quantity, averageCost, bid, Double.NaN);
+        }
     }
 
     public static final PositionView FLAT = new PositionView(false, null, 0, Double.NaN, null);

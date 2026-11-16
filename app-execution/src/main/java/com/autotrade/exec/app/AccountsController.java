@@ -57,25 +57,66 @@ class AccountsController {
         this.jdbc = new JdbcTemplate(dataSource);
     }
 
+    /**
+     * One account. {@code paperOf}: the real account this one is the paper twin of (null otherwise), so the page can
+     * show a twin under its account. {@code today}: the account's own book for today (IST), see {@link DayBook}
+     * (Accounts page layout, user 9 Nov 2026).
+     */
     record AccountView(long id, long tenantId, String name, String broker, String mode, String role, boolean enabled,
-                       double allocatedCapital, String riskFile, String connection, ExecutionLoop.AccountStatus lastTurn) {
+                       double allocatedCapital, String riskFile, String connection, ExecutionLoop.AccountStatus lastTurn,
+                       Long paperOf, DayBook today) {
     }
 
+    /**
+     * Positions closed today (net after charges, count) and open now; the {@code live*} figures are the part entered
+     * with a LIVE intent (real money). Split by the intent, not by the account's mode now: an account switched back
+     * to PAPER after a LIVE morning still shows that morning as LIVE (code review 9 Nov 2026).
+     */
+    record DayBook(double net, int trades, int open, double liveNet, int liveTrades, int liveOpen) {
+        static final DayBook NONE = new DayBook(0, 0, 0, 0, 0, 0);
+    }
     @GetMapping("/api/execution/accounts")
     List<AccountView> accounts(@RequestHeader(value = Access.HEADER, required = false) String subject) {
         Access.User user = access.user(subject);
         Map<Long, ExecutionLoop.AccountStatus> turns = new LinkedHashMap<>();
         service.status().forEach(s -> turns.put(s.accountId(), s));
         List<AccountView> out = new ArrayList<>();
+        LocalDate today = LocalDate.now(IST);
         for (long tenant : user.tenants()) {
             Map<Long, String> connections = accounts.connectionStatuses(tenant);
+            Map<Long, DayBook> books = dayBooks(tenant, today);
             for (BrokerAccount a : accounts.ofTenant(tenant)) {
                 out.add(new AccountView(a.id(), a.tenantId(), a.displayName(), a.brokerType().name(), a.tradeMode().name(),
                         a.role().name(), a.enabled(), a.allocatedCapital(), a.riskFile(), connections.get(a.id()),
-                        turns.get(a.id())));
+                        turns.get(a.id()), a.paperOf(), books.getOrDefault(a.id(), DayBook.NONE)));
             }
         }
         return out;
+    }
+
+    /** Today's book of every account of {@code tenant} with a position open now or closed today, in one query. */
+    private Map<Long, DayBook> dayBooks(long tenant, LocalDate day) {
+        Map<Long, DayBook> books = new LinkedHashMap<>();
+        java.sql.Timestamp from = java.sql.Timestamp.from(day.atStartOfDay(IST).toInstant());
+        jdbc.query("select p.broker_account_id id, i.execution_mode = 'LIVE' live, "
+                + "coalesce(sum(p.realised_gross - coalesce(p.charges, 0)) filter (where p.status = 'CLOSED'), 0)::float8 net, "
+                + "count(*) filter (where p.status = 'CLOSED') trades, count(*) filter (where p.status <> 'CLOSED') open "
+                + "from exec.position p join exec.trade_intent i on i.id = p.entry_trade_intent_id "
+                + "where p.tenant_id = ? and (p.status <> 'CLOSED' or p.closed_at >= ?) group by 1, 2", rs -> {
+                    long id = rs.getLong("id");
+                    boolean live = rs.getBoolean("live");
+                    double net = rs.getDouble("net");
+                    int trades = rs.getInt("trades"), open = rs.getInt("open");
+                    DayBook b = books.getOrDefault(id, DayBook.NONE);
+                    books.put(id, new DayBook(cents(b.net() + net), b.trades() + trades, b.open() + open,
+                            live ? cents(b.liveNet() + net) : b.liveNet(), b.liveTrades() + (live ? trades : 0),
+                            b.liveOpen() + (live ? open : 0)));
+                }, tenant, from);
+        return books;
+    }
+
+    private static double cents(double v) {
+        return Math.round(v * 100) / 100.0;
     }
 
     record Session(String status) {
@@ -254,6 +295,21 @@ class AccountsController {
         return out;
     }
 
+    /**
+     * What a VIEWER's history shows (11 Nov 2026): what happened to their own accounts, the settings they trade with and
+     * the stops and exits on them. Not the workspace's members, logins, broker apps, keys or support access, and not the
+     * engine's internals (late fills, retries, reconciliation): those are for the people who run the workspace.
+     */
+    static final List<String> VIEWER_ACTIONS = List.of("ACCOUNT_CREATED", "ACCOUNT_SETTINGS", "LIVE_ON", "LIVE_OFF",
+            "LIVE_ELIGIBLE_ON", "LIVE_ELIGIBLE_OFF", "LIVE_STRATEGIES", "TODAYS_BROKER", "KILL_ACCOUNT", "KILL_RELEASED",
+            "FLATTEN", "POSITION_EXIT", "MANUAL_EXIT", "EOD_SQUARE_OFF", "MODE_PAPER_SESSION_LOST", "MODE_PAPER_NEW_SESSION",
+            "BROKER_SESSION_LOST");
+
+    /**
+     * The audit log of the caller's tenants, newest first. Every role but VIEWER (an AUDITOR included) reads it whole; a
+     * VIEWER reads {@link #VIEWER_ACTIONS} on accounts only, and who did it as "you", "admin" (a person) or "system" (the
+     * engine), never a username (user, 11 Nov 2026: "is audit log required for Follower/Demo accounts?").
+     */
     @GetMapping("/api/execution/audit")
     List<Map<String, Object>> audit(@RequestHeader(value = Access.HEADER, required = false) String subject,
                                     @RequestParam(value = "account", required = false) Long accountId) {
@@ -262,9 +318,17 @@ class AccountsController {
             accounts.byId(accountId).filter(x -> user.sees(x.tenantId()))
                     .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "no account " + accountId));
         }
-        return jdbc.queryForList("select id, tenant_id, broker_account_id, actor, action, detail::text detail, at "
-                        + "from exec.audit_log where tenant_id = any(?) and (?::bigint is null or broker_account_id = ?) "
-                        + "order by id desc limit 200", user.tenants().toArray(new Long[0]), accountId, accountId);
+        Long[] full = user.roles().entrySet().stream().filter(e -> !"VIEWER".equals(e.getValue())).map(Map.Entry::getKey)
+                .toArray(Long[]::new);
+        Long[] viewing = user.roles().entrySet().stream().filter(e -> "VIEWER".equals(e.getValue())).map(Map.Entry::getKey)
+                .toArray(Long[]::new);
+        return jdbc.queryForList("select l.id, l.tenant_id, l.broker_account_id, case when l.tenant_id = any(?) then l.actor "
+                        + "when l.actor = ? then 'you' when exists (select 1 from acct.app_user u where u.external_subject = "
+                        + "l.actor) then 'admin' else 'system' end actor, l.action, l.detail::text detail, l.at "
+                        + "from exec.audit_log l where (l.tenant_id = any(?) or (l.tenant_id = any(?) and l.broker_account_id "
+                        + "is not null and l.action = any(?))) and (?::bigint is null or l.broker_account_id = ?) "
+                        + "order by l.id desc limit 200", full, user.subject(), full, viewing,
+                VIEWER_ACTIONS.toArray(new String[0]), accountId, accountId);
     }
 
     /**

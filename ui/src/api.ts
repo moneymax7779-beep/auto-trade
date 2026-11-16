@@ -58,6 +58,8 @@ export interface PositionRow {
   exitReason: string | null;
   opened: string | null;
   closed: string | null;
+  /** A-358: LONG or SHORT (sold to open). */
+  direction?: string | null;
 }
 
 export interface MarketState {
@@ -196,6 +198,8 @@ export interface TradePositionRow {
   lot_size?: number | null;
   average_cost?: number | null;
   average_exit?: number | null;
+  /** A-358: LONG (bought to open; every row before V31) or SHORT (sold to open: average_cost is the credit). */
+  direction?: string | null;
   underlying: string;
   option_side: string;
   symbol: string;
@@ -321,6 +325,8 @@ export interface PerformanceRow {
   lot_size: number | null;
   average_cost: number | null;
   average_exit: number | null;
+  /** A-358: LONG or SHORT (sold to open); undefined on rows older than V31 means LONG. */
+  direction?: string | null;
 }
 
 // ---------------------------------------------------------------- execution workers (Accounts page)
@@ -499,6 +505,50 @@ export interface ExecutionAccount {
   riskFile: string;
   connection: string | null;
   lastTurn: AccountTurn | null;
+  /** the real account this one is the paper twin of (absent from older workers) */
+  paperOf?: number | null;
+  /** the account's own book today (IST): closed net after charges, closed trades, open positions; live* = the part
+   *  entered with a LIVE intent (real money), whatever the account's mode is now */
+  today?: DayResult & { liveNet: number; liveTrades: number; liveOpen: number };
+}
+
+/** GET/POST /api/execution/accounts/{id}/live-strategies: the owner's choice of LIVE strategies (V32, 9 Nov 2026) */
+export interface LiveStrategyChoice {
+  id: number;
+  account: string;
+  riskFile: string;
+  /** what the risk file lets trade LIVE (the list to choose from) */
+  available: string[];
+  /** what trades LIVE until the owner chooses */
+  defaults: string[];
+  /** the account's own choice; null = it follows the global list (or, with none, its default) */
+  chosen: string[] | null;
+  /** the owner's global list (V33); null = not set */
+  global?: string[] | null;
+  /** where the account's list comes from now */
+  source?: "ACCOUNT" | "GLOBAL" | "DEFAULT";
+  /** turned OFF by the owner for every account (V35) */
+  off?: string[];
+  /** what this account may switch between PAPER and LIVE: the owner's LIVE strategies within its risk file, not OFF */
+  choosable?: string[];
+  /** in the risk file but on PAPER only by the owner's choice: not for this account to make LIVE */
+  paperOnly?: string[];
+  /** what trades LIVE now */
+  effective: string[];
+  canEdit: boolean;
+}
+
+/** GET/POST /api/execution/live-strategies: the owner's global LIVE list (V33, 9 Nov 2026) and OFF list (V35, 11 Nov) */
+export interface GlobalLiveStrategies {
+  /** what some account's risk file lets trade LIVE */
+  available: string[];
+  /** what the live PAPER session runs (PAPER-1's set, from its latest session) */
+  running: string[];
+  global: string[] | null;
+  /** turned OFF by the owner: no new entry or add on any paper or LIVE account */
+  off: string[];
+  accounts: { id: number; account: string; mode: string; source: "ACCOUNT" | "GLOBAL" | "DEFAULT"; effective: string[] }[];
+  canEdit: boolean;
 }
 
 export interface KillSwitch {

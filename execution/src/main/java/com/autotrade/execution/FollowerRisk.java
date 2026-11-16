@@ -9,23 +9,51 @@ import com.autotrade.config.ThresholdConfig;
  * A follower's risk file (config/risk/follower-risk.vN.yaml): capital limits, position and lot limits, the RVOL boost
  * (v2), the simulated fill model and, from v3, the broker order rules ({@code orders}: null before v3, when only
  * simulated fills are possible). Limits a file does not set are off (v1: no position, lot or boost rules). From v7,
- * {@code live}: the limits a LIVE account trades under (null: the file cannot be used LIVE).
+ * {@code live}: the limits a LIVE account trades under (null: the file cannot be used LIVE). From v11,
+ * {@code dailyLossCountsOpen} (capital.daily_loss_counts_open): the day's loss is closed trades plus what the open
+ * positions would lose sold at the bid now, and reaching the limit sells every open position and stops entries for the
+ * day (before v11: closed trades only, and reaching it only refuses new entries). From v12,
+ * {@code convictionRvolFull} (sizing.conviction_rvol_full; NaN = off): an entry whose signal carries futures RVOL at or
+ * above it is taken at full size whatever the account's size step (A-378, the PAPER forward test of A-377's X1 flag).
  */
 public record FollowerRisk(String version, CapitalLimits limits, int maxOpenPositions, int maxLotsPerUnderlying,
                            double rvolBoostThreshold, double rvolBoostFactor, double adverseBps, OrderRules orders,
-                           Combined combined, LiveLimits live) {
+                           Combined combined, LiveLimits live, boolean dailyLossCountsOpen, double convictionRvolFull) {
+
+    public FollowerRisk {
+        // review 12 Nov 2026: a threshold of 0 or below (a typo) would take every entry at full size, a LIVE account's
+        // size step included; only off (absent = NaN) or a positive RVOL is accepted
+        if (!Double.isNaN(convictionRvolFull) && !(convictionRvolFull > 0 && Double.isFinite(convictionRvolFull))) {
+            throw new IllegalArgumentException("sizing.conviction_rvol_full must be a positive RVOL, not "
+                    + convictionRvolFull);
+        }
+    }
 
     /**
      * v7 (the Kite LIVE pilot, user 2 Nov 2026): a LIVE account's hard limits, checked again in front of the broker
      * connection ({@link LiveGuard}): lots per buy order, contracts held at once, and the only strategies it may enter.
      */
-    public record LiveLimits(int maxLotsPerOrder, int maxOpenPositions, java.util.Set<String> strategies) {
+    /**
+     * {@code strategies}: what may trade LIVE on an account (v9: what the owner may choose from); {@code defaults}: what
+     * trades LIVE on an account the owner has not chosen for (live.default_strategies; a file without them: all of
+     * {@code strategies}). See {@link LiveStrategies}.
+     */
+    public record LiveLimits(int maxLotsPerOrder, int maxOpenPositions, java.util.Set<String> strategies,
+                             java.util.Set<String> defaults) {
 
         public LiveLimits {
             if (maxLotsPerOrder < 1 || maxOpenPositions < 1 || strategies == null || strategies.isEmpty()) {
                 throw new IllegalArgumentException("live: max_lots_per_order, max_open_positions >= 1 and strategies");
             }
             strategies = java.util.Set.copyOf(strategies);
+            defaults = defaults == null ? strategies : java.util.Set.copyOf(defaults);
+            if (!strategies.containsAll(defaults)) {
+                throw new IllegalArgumentException("live: default_strategies must be among live.strategies");
+            }
+        }
+
+        public LiveLimits(int maxLotsPerOrder, int maxOpenPositions, java.util.Set<String> strategies) {
+            this(maxLotsPerOrder, maxOpenPositions, strategies, null);
         }
     }
 
@@ -51,12 +79,23 @@ public record FollowerRisk(String version, CapitalLimits limits, int maxOpenPosi
                 c.has("combined.max_open_premium_pct") ? new Combined(c.getDouble("combined.max_open_premium_pct"),
                         c.getInt("combined.max_lots_per_contract"), c.getBoolean("combined.share_liquidity")) : null,
                 c.has("live.max_lots_per_order") ? new LiveLimits(c.getInt("live.max_lots_per_order"),
-                        c.getInt("live.max_open_positions"), ((java.util.List<?>) c.get("live.strategies")).stream()
-                        .map(String::valueOf).collect(java.util.stream.Collectors.toSet())) : null);
+                        c.getInt("live.max_open_positions"), names(c.get("live.strategies")),
+                        c.has("live.default_strategies") ? names(c.get("live.default_strategies")) : null) : null,
+                c.has("capital.daily_loss_counts_open") && c.getBoolean("capital.daily_loss_counts_open"),
+                c.has("sizing.conviction_rvol_full") ? c.getDouble("sizing.conviction_rvol_full") : Double.NaN);
+    }
+
+    private static java.util.Set<String> names(Object list) {
+        return ((java.util.List<?>) list).stream().map(String::valueOf).collect(java.util.stream.Collectors.toSet());
     }
 
     /** The budget multiplier for an entry at this RVOL (risk v17: the factor at or above the threshold, else 1). */
     public double boost(double rvolTod) {
         return !Double.isNaN(rvolBoostThreshold) && rvolTod >= rvolBoostThreshold ? rvolBoostFactor : 1.0;
+    }
+
+    /** v12 (A-378): true when an entry at this RVOL is taken at full size whatever the size step (a missing RVOL: no). */
+    public boolean fullSizeAt(double rvolTod) {
+        return !Double.isNaN(convictionRvolFull) && rvolTod >= convictionRvolFull;
     }
 }

@@ -37,6 +37,20 @@ public record AuthProperties(String mode, String publicBase, String internalBase
         return "oidc".equals(mode);
     }
 
+    /**
+     * A family member or viewer (signed in with Keycloak, without the operator role): they see the index charts and the
+     * trades only (user, 10 Nov 2026: "Other than Owner, all other accounts ... should only see the chart and trades,
+     * nothing more"). Never true with mode none (no login: the single owner).
+     */
+    boolean member(java.security.Principal principal) {
+        if (!oidc()) {
+            return false;
+        }
+        String operator = operatorAuthority();
+        return !(principal instanceof org.springframework.security.core.Authentication a
+                && a.getAuthorities().stream().anyMatch(g -> operator.equals(g.getAuthority())));
+    }
+
     /** The Spring authority of the operator role, as {@link SecurityConfig} checks it and {@link MeController} shows it. */
     String operatorAuthority() {
         return authority(operatorRole);

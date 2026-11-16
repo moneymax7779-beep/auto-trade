@@ -4,7 +4,7 @@ import { get, type SessionStructure } from "../api";
 import { ErrorNote, Loading, Panel } from "./ui";
 import {
   LEVEL_COLORS, LevelTogglesBar, levelColor, mergeLevels, tagName, useCloseAuction, useLevels, useLevelToggles, useMaxPain, visibleLevels,
-  visibleZones, type LevelToggles, type LevelsData,
+  visibleZones, NO_LEVELS, type LevelToggles, type LevelsData,
 } from "./levels";
 import { presetView, useChartView, useLinkedTime, type View, useMoment } from "./chartView";
 import { compactRupees, type ChartTrade } from "./TimelineChart";
@@ -12,7 +12,7 @@ import { MomentInspector, TradeDetail, useTradeContext, type TradeContext } from
 import { useLiveBars, withLiveCloses } from "./liveTicks";
 import { strategyShort } from "./strategies";
 import {
-  EMA9_COLOR, EMA20_3M_COLOR, STOP_COLOR, StructureTogglesBar, TARGET_COLOR, useStructure, useStructureToggles, type StructureToggles,
+  EMA9_COLOR, EMA20_3M_COLOR, STOP_COLOR, StructureTogglesBar, TARGET_COLOR, useStructure, useStructureToggles, NO_STRUCTURE, type StructureToggles,
 } from "./structure";
 
 /** One option side's flow around a surge: ATM ± 2 total OI change and the ATM mid before / after. */
@@ -159,13 +159,18 @@ function cutStructure(s: SessionStructure | undefined, until: string): SessionSt
     trades: s.trades.filter((tr) => known(tr.at)).map((tr) => (tr.exit && !known(tr.exit) ? { ...tr, exit: null } : tr)) };
 }
 
-export function SurgePanel({ live, date, underlying, nav, trades = NO_TRADES, until, sessionId }: { live?: boolean; date?: string; underlying?: string; nav?: DayNav;
+export function SurgePanel({ live, date, underlying, nav, trades = NO_TRADES, until, sessionId, plain = false }: { live?: boolean; date?: string; underlying?: string; nav?: DayNav;
   /** the day's trades on this index, drawn on the price chart (entry arrow, exit square, the index from entry to exit) */
   trades?: ChartTrade[];
   /** a running replay's clock: the chart shows the day up to it */
   until?: string;
   /** the session whose trades are drawn: a trade's marker opens its entry / exit data, a pinned minute the session then */
-  sessionId?: number }) {
+  sessionId?: number;
+  /**
+   * A member's chart (user, 10 Nov 2026: everyone but the owner sees "the chart and trades, nothing more"): the index,
+   * its futures volume and the trades; no surges, levels, lines, premium, structure, inspector or surge table.
+   */
+  plain?: boolean }) {
   const q = useQuery({
     queryKey: ["surges", date ?? "latest"],
     queryFn: () => get<SurgeReport>(`/api/surges${date ? `?date=${date}` : ""}`),
@@ -178,22 +183,22 @@ export function SurgePanel({ live, date, underlying, nav, trades = NO_TRADES, un
   const r = q.data!;
   if (!r.date) return null;
   if (underlying && !r.underlyings.some((u) => u.underlying === underlying)) {
-    return <Panel title={`${underlying} · futures surges`}><p className="text-sm text-muted">No {underlying} surge data for {r.date}.</p></Panel>;
+    return <Panel title={plain ? `${underlying} · ${r.date}` : `${underlying} · futures surges`}><p className="text-sm text-muted">No {underlying} {plain ? "chart" : "surge"} data for {r.date}.</p></Panel>;
   }
   return (
     <div className="space-y-4">
       {r.underlyings.filter((u) => !underlying || u.underlying === underlying).map((u) => (
         <UnderlyingSurgesPanel key={u.underlying} date={r.date!} data={until ? cutDay(u, until) : u} live={live} until={until} sessionId={sessionId}
-          filters={filters} onFilters={update} nav={nav}
+          filters={filters} onFilters={update} nav={nav} plain={plain}
           trades={u.underlying === underlying ? trades : NO_TRADES} />
       ))}
     </div>
   );
 }
 
-function UnderlyingSurgesPanel({ date, data: polled, live, until, sessionId, filters, onFilters, nav, trades }:
+function UnderlyingSurgesPanel({ date, data: polled, live, until, sessionId, filters, onFilters, nav, trades, plain }:
   { date: string; data: UnderlyingSurges; live?: boolean; until?: string; sessionId?: number; filters: Filters; onFilters: (f: Filters) => void;
-    nav?: DayNav; trades: ChartTrade[] }) {
+    nav?: DayNav; trades: ChartTrade[]; plain: boolean }) {
   // the pushed price (live and paced replays): the last minute moves as the index does, between the 30-second refreshes
   const pushed = useLiveBars(polled.underlying, date, !!live);
   const data = useMemo(() => (pushed.bars ? { ...polled, index: withLiveCloses(polled.index, pushed.bars, until) } : polled),
@@ -221,15 +226,27 @@ function UnderlyingSurgesPanel({ date, data: polled, live, until, sessionId, fil
     if (!open) setSelected(null);                         // a selected surge keeps the table open
     try { localStorage.setItem(TABLE_KEY, open ? "open" : "closed"); } catch { /* not kept */ }
   };
-  const fetched = useLevels(date, data.underlying, live);
+  const fetched = useLevels(date, data.underlying, live, !plain);
   const levels = { ...fetched, data: until ? cutLevels(fetched.data, until) : fetched.data };
   const [toggles, setToggles] = useLevelToggles();
   // ma-cross's view (6 Nov 2026, as on the session page): the session's structure with its trades' stops for the operator,
   // the day's alone otherwise
   const [structureToggles, setStructureToggles] = useStructureToggles();
-  const structureQuery = useStructure(date, data.underlying, sessionId, live);
+  const structureQuery = useStructure(date, data.underlying, sessionId, live, !plain);
   const structure = until ? cutStructure(structureQuery.data, until) : structureQuery.data;
   const count = (f: Flow) => data.surges.filter((s) => s.flow === f).length;
+  if (plain) {
+    return (
+      <Panel title={<>{data.underlying} · {date}
+        {live && <span className="ml-2 text-xs font-normal text-muted">
+          {pushed.streaming ? <><span className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-up align-middle" />live</> : "updates every 30 s"}
+        </span>}</>}>
+        <SurgeChart date={date} live={live} until={until} nav={nav} data={data} shown={NO_SURGES} groups={NO_BURSTS} selected={null}
+          onSelect={() => {}} levels={undefined} toggles={NO_LEVELS} trades={trades} structure={undefined}
+          structureToggles={NO_STRUCTURE} plain />
+      </Panel>
+    );
+  }
   return (
     <Panel
       title={<>{data.underlying} · futures surges and OI flow · {date}
@@ -359,6 +376,8 @@ interface Premium { strike: number; expiry: string; CE: [string, number, number]
 const PREMIUM_KEY = "surge-chart-premium";
 const TRADE_UP = "#16a34a", TRADE_DOWN = "#dc2626", TRADE_STRADDLE = "#2563eb";   // as on the session chart
 const NO_TRADES: ChartTrade[] = [];
+const NO_SURGES: Surge[] = [];
+const NO_BURSTS: Burst[] = [];
 /** a halo in the panel's colour, so a label stays readable over the price line and the surge dots */
 const HALO = { stroke: "var(--color-panel)", strokeWidth: 3, paintOrder: "stroke" } as const;
 const TABLE_KEY = "surge-table";                     // the surge-minute table: "open" / "closed" (default closed)
@@ -384,13 +403,15 @@ function loadSize(): Size {
 }
 
 function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onSelect, levels, toggles, trades, onPickTrade,
-  structure, structureToggles }:
+  structure, structureToggles, plain = false }:
   { date: string; live?: boolean; until?: string; nav?: DayNav; data: UnderlyingSurges; shown: Surge[]; groups: Burst[]; selected: string | null;
     onSelect: (t: string | null) => void; levels?: LevelsData; toggles: LevelToggles; trades: ChartTrade[];
     /** a click on a trade's entry arrow or exit square (its data opens under the chart) */
     onPickTrade?: (t: ChartTrade) => void;
     /** ma-cross's 3-minute candles, EMA9 / EMA20 and its trades' stops and targets, each drawn when toggled on */
-    structure?: SessionStructure; structureToggles: StructureToggles }) {
+    structure?: SessionStructure; structureToggles: StructureToggles;
+    /** a member's chart: no premium pane */
+    plain?: boolean }) {
   const svgRef = useRef<SVGSVGElement>(null);
   const clipId = `plot-${useId().replace(/:/g, "")}`;
   const [hover, setHover] = useState<{ m: number; y: number } | null>(null);
@@ -402,7 +423,8 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
   const hoverMinute = hover?.m ?? null;
   useEffect(() => { setCursor(hoverMinute); }, [hoverMinute]);   // eslint-disable-line react-hooks/exhaustive-deps
   const [linked, setLinked] = useLinkedTime();
-  const [showPremium, setShowPremium] = useState(() => { try { return localStorage.getItem(PREMIUM_KEY) !== "false"; } catch { return true; } });
+  const [premiumChosen, setShowPremium] = useState(() => { try { return localStorage.getItem(PREMIUM_KEY) !== "false"; } catch { return true; } });
+  const showPremium = premiumChosen && !plain;
   const [pickedStrike, setPickedStrike] = useState<number | null>(null);
   const pointers = useRef(new Map<number, number>());
   const pinch = useRef<Pinch | null>(null);
@@ -752,7 +774,7 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
             <button key={s} type="button" className={btn(size === s)} aria-pressed={size === s} onClick={() => setSize(s)}>{s}</button>
           ))}
         </div>}
-        <div className="flex items-center gap-0.5" role="group" aria-label="Premium pane">
+        {!plain && <div className="flex items-center gap-0.5" role="group" aria-label="Premium pane">
           <button type="button" className={btn(showPremium)} aria-pressed={showPremium}
             onClick={() => { setShowPremium(!showPremium); try { localStorage.setItem(PREMIUM_KEY, String(!showPremium)); } catch { /* not kept */ } }}
             title="the call and put of one strike, by minute">premium</button>
@@ -765,7 +787,7 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
                 title="back to the selected surge's ATM, or the latest ATM">ATM</button>}
             </>
           )}
-        </div>
+        </div>}
         <button type="button" className={btn(linked)} aria-pressed={linked} onClick={() => setLinked(!linked)}
           title="NIFTY and SENSEX show the same minutes">link time</button>
         {zoomed && <button type="button" className="text-accent hover:underline" onClick={reset}>reset</button>}
@@ -936,11 +958,11 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
                     {tr.side === "STRADDLE"
                       ? <circle cx={x0} cy={y0} r={4.5} fill={entryCol} stroke="var(--color-panel)" />
                       : <path d={`M${x0 - 5},${ay - 4 * dir} L${x0 + 5},${ay - 4 * dir} L${x0},${ay + 5 * dir} Z`} fill={entryCol} />}
-                    <title>#{tr.n} {tr.who} entry {tr.from}: click for the data at entry and exit</title>
+                    <title>#{tr.n} {tr.who} entry {tr.from}{onPickTrade ? ": click for the data at entry and exit" : ""}</title>
                   </g>
                   <text x={x0 + 6} y={put ? ay - 6 : ay + 13} fontSize="10" fill={entryCol} className="num" {...HALO}>#{tr.n} {tr.who}</text>
                   {tr.to && <rect x={x1 - 4} y={y1p + (put ? 6 : -14)} width={8} height={8} fill={col} {...pickable(tr)}>
-                    <title>#{tr.n} {tr.who} exit {tr.to}: click for the data at entry and exit</title></rect>}
+                    <title>#{tr.n} {tr.who} exit {tr.to}{onPickTrade ? ": click for the data at entry and exit" : ""}</title></rect>}
                   <text x={x1 + 6} y={y1p + (put ? 15 : -8)} fontSize="10" fill={col} className="num font-semibold" {...HALO}>
                     #{tr.n} {tr.to ? "" : "open "}{compactRupees(tr.net)}</text>
                 </g>

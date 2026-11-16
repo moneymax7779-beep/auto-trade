@@ -4,8 +4,10 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.nio.file.Path;
+import java.time.Clock;
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.LocalTime;
 import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
@@ -53,7 +55,17 @@ class LiveIT {
             DockerImageName.parse("timescale/timescaledb:2.30.1-pg17").asCompatibleSubstituteFor("postgres");
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     private static final LocalDate DAY = LocalDate.now(IST);
+    /**
+     * The tests' one clock, today at 10:00 IST ({@code -Dexecution.it.time=HH:mm} for another time; the entries that
+     * should reach Kite need one before the 15:10 last LIVE entry): subscriptions, decisions and the LIVE checks read it,
+     * never the wall clock. Decisions made at the wall clock were STALE_SIGNAL against a fixed 10:00 check clock before
+     * 09:59, and fell "before" a subscription stamped by the database container's clock, a few ms ahead of the JVM's,
+     * so FanOut gave them no intent (6 Nov 2026).
+     */
+    private static final Clock CLOCK = Clock.fixed(DAY.atTime(LocalTime.parse(System.getProperty("execution.it.time",
+            "10:00"))).atZone(IST).toInstant(), IST);
     private static final String V7 = "../config/risk/follower-risk.v7.yaml";
+    private static final String V11 = "../config/risk/follower-risk.v11.yaml";
     private static final int LOT = 65;
     private static final String[] KEYS = {"NSE_FO|47168", "NSE_FO|47169", "NSE_FO|47170"};
     private static final String[] SYMBOLS = {"NIFTY 23100 PE", "NIFTY 23150 PE", "NIFTY 23200 PE"};
@@ -117,22 +129,24 @@ class LiveIT {
 
     /** A ZERODHA follower on v7 at one lot an entry, switched LIVE ({@code live}) or LIVE without its switch. */
     private BrokerAccount account(long group, boolean live, String... strategies) {
+        return account(group, live, V7, 0, strategies);
+    }
+
+    /** A ZERODHA follower on {@code riskFile} at {@code sizeStep} (v11: 100 = full size from the allocation). */
+    private BrokerAccount account(long group, boolean live, String riskFile, double sizeStep, String... strategies) {
         int n = ++seq;
         AccountStore accounts = new AccountStore(dataSource);
         long tenant = accounts.ensureTenant("owner");
         long owner = accounts.ensureUser("kc-owner", "owner");
         accounts.ensureMembership(tenant, owner, "OWNER");
         long id = accounts.ensureFollowerAccount(tenant, owner, "KITE-L" + n, BrokerType.ZERODHA, TradeMode.DRY_RUN,
-                200_000, EquityMode.FIXED, DAY, V7, 0);
+                200_000, EquityMode.FIXED, DAY, riskFile, sizeStep);
         long profile = jdbc.queryForObject("insert into acct.broker_credential_profile (tenant_id, broker_type, name, "
                 + "api_key_ref, api_secret_ref) values (?, 'ZERODHA', ?, 'file:kite-key', 'file:kite-secret') returning id",
                 Long.class, tenant, "kite-app-" + n);
         jdbc.update("update acct.broker_account set credential_profile_id = ?, trade_mode = 'LIVE', "
                 + "live_trading_enabled = ? where id = ?", profile, live, id);
-        new FanOut(dataSource).subscribe(group, id, List.of(strategies), 1.0);
-        // the test's clock (decided_at) and the database's (enabled_at) differ by up to a second in Docker: a
-        // subscription made a moment before its decision must not count as made after it (full-suite flake, 8 Nov 2026)
-        jdbc.update("update acct.strategy_subscription set enabled_at = now() - interval '1 hour' where copy_group_id = ?", group);
+        new FanOut(dataSource).withClock(CLOCK).subscribe(group, id, List.of(strategies), 1.0);
         return accounts.byId(id).orElseThrow();
     }
 
@@ -152,15 +166,24 @@ class LiveIT {
                 + "'{}'::jsonb, 'it', 'DONE') returning id", Long.class, "SIG-" + group, DAY);
     }
 
-    /** An ENTER of {@code strategy} in contract {@code i}, decided now, fanned out. */
+    /** An ENTER of {@code strategy} in contract {@code i}, decided at {@link #CLOCK}, fanned out. */
     private void enter(long group, long sessionId, String strategy, int i) {
+        enter(group, sessionId, strategy, i, Double.NaN);
+    }
+
+    /** The same, with the signal's futures RVOL ({@code rvol_tod}; NaN: none published). */
+    private void enter(long group, long sessionId, String strategy, int i, double rvol) {
         int n = jdbc.queryForObject("select count(*) from exec.signal_decision where copy_group_id = ?", Integer.class,
                 group) + 1;
         long token = 3_000_000_000L + Long.parseLong(KEYS[i].substring(7));
-        new SignalDecisionStore(dataSource).insert(new SignalDecision(group, sessionId, DAY, Instant.now(), strategy, 2,
+        Map<String, Double> sizing = new java.util.HashMap<>(
+                Map.of("strategy_lots", 40.0, "intended_lots", 40.0, "liquidity_lots", 1000.0, "stop_pct", 25.0));
+        if (!Double.isNaN(rvol)) {
+            sizing.put("rvol_tod", rvol);
+        }
+        new SignalDecisionStore(dataSource).insert(new SignalDecision(group, sessionId, DAY, CLOCK.instant(), strategy, 2,
                 "NIFTY", SignalDecision.Action.ENTER, "PE", null, "CONFIRMED", "IT", token, KEYS[i], SYMBOLS[i], LOT, 100,
-                260_000, 500_000, 0, group + ":" + sessionId + ":" + n,
-                Map.of("strategy_lots", 40.0, "intended_lots", 40.0, "liquidity_lots", 1000.0, "stop_pct", 25.0)));
+                260_000, 500_000, 0, group + ":" + sessionId + ":" + n, sizing));
         new FanOut(dataSource).fanOut(group, DAY);
     }
 
@@ -171,11 +194,11 @@ class LiveIT {
 
     /** The account's follower over its LIVE route, with the waits shortened. */
     private FollowerSimulator follower(BrokerConnections registry, BrokerAccount account) {
-        FollowerRisk risk = FollowerRisk.load(Path.of(V7));
+        FollowerRisk risk = FollowerRisk.load(Path.of(account.riskFile()));
         BrokerConnections.Route route = registry.route(account, risk);
         assertThat(route.venue()).as(route.description()).isNotNull();
         BrokerVenue venue = new BrokerVenue(dataSource, route.connection(), risk.orders().fast(), (k, u) -> 1755L, o -> { });
-        return new FollowerSimulator(dataSource, costs, risk, venue, null).withClock(MORNING);
+        return new FollowerSimulator(dataSource, costs, risk, venue, null).withClock(CLOCK);
     }
 
     private static String intentState(BrokerAccount a) {
@@ -183,32 +206,14 @@ class LiveIT {
                 + "where i.broker_account_id = ? order by i.id desc limit 1", String.class, a.id());
     }
 
-    /**
-     * The LIVE checks' clock, so decisions made "now" are never stale or late (code review 3 Nov 2026): now while that is
-     * before the 15:10 IST entry cut-off, else 10:00 today (a decision made later is then in the clock's future, never
-     * stale). 7 Nov 2026: a fixed 10:00 made every decision of a run before 09:59 IST stale.
-     */
-    private static final java.time.Clock MORNING = morning();
-
-    private static java.time.Clock morning() {
-        java.time.ZoneId ist = java.time.ZoneId.of("Asia/Kolkata");
-        java.time.ZonedDateTime now = java.time.ZonedDateTime.now(ist);
-        java.time.Instant at = now.toLocalTime().isBefore(java.time.LocalTime.of(15, 10)) ? now.toInstant()
-                : now.toLocalDate().atTime(10, 0).atZone(ist).toInstant();
-        return java.time.Clock.fixed(at, ist);
-    }
-
     @Test
     void aLiveEntryFollowsItsSignalAtOnceOrNotAtAll() {
         long group = group();
         BrokerAccount a = account(group, true, "ma-cross");
         enter(group, signalSession(group), "ma-cross", 0);
-        java.time.Instant ten = MORNING.instant();                                  // decided 10:00, run at 10:02
-        jdbc.update("update exec.signal_decision set decided_at = ? where copy_group_id = ?", java.sql.Timestamp.from(ten),
-                group);
+        Instant decided = CLOCK.instant();                                          // decided 10:00, run at 10:02
         try (BrokerConnections registry = registry()) {
-            follower(registry, a).withClock(java.time.Clock.fixed(ten.plusSeconds(120), java.time.ZoneId.of("UTC")))
-                    .run(a, group, DAY);
+            follower(registry, a).withClock(Clock.fixed(decided.plusSeconds(120), IST)).run(a, group, DAY);
         }
         assertThat(intentState(a)).isEqualTo("REJECTED_STALE_SIGNAL");
         assertThat(kite.requests("place")).as("nothing sent").isZero();
@@ -219,14 +224,12 @@ class LiveIT {
         long group = group();
         BrokerAccount a = account(group, true, "ma-cross");
         enter(group, signalSession(group), "ma-cross", 0);
-        java.time.Instant at1512 = java.time.LocalDate.now(java.time.ZoneId.of("Asia/Kolkata")).atTime(15, 12)
-                .atZone(java.time.ZoneId.of("Asia/Kolkata")).toInstant();
-        java.time.Instant decided = jdbc.queryForObject("select max(decided_at) from exec.signal_decision where copy_group_id = ?",
-                java.sql.Timestamp.class, group).toInstant();
-        java.time.Instant clockAt = decided.isAfter(at1512) ? decided.plusSeconds(1)  // run late in the day: the same day
-                : at1512;                                                              // decided earlier: 15:12 today
+        Instant at1512 = DAY.atTime(15, 12).atZone(IST).toInstant();
+        Instant decided = CLOCK.instant();
+        Instant clockAt = decided.isAfter(at1512) ? decided.plusSeconds(1)    // a clock set late in the day: the same day
+                : at1512;                                                    // decided earlier: 15:12 today
         try (BrokerConnections registry = registry()) {
-            follower(registry, a).withClock(java.time.Clock.fixed(clockAt, java.time.ZoneId.of("UTC"))).run(a, group, DAY);
+            follower(registry, a).withClock(Clock.fixed(clockAt, IST)).run(a, group, DAY);
         }
         assertThat(intentState(a)).isEqualTo("REJECTED_LATE_ENTRY");
         assertThat(kite.requests("place")).as("nothing sent").isZero();
@@ -245,6 +248,117 @@ class LiveIT {
         assertThat(kite.requests("place")).as("the entry and its resting stop were sent to Kite").isEqualTo(2);
         assertThat(jdbc.queryForObject("select count(*) from exec.order_execution where broker_account_id = ? "
                 + "and role = 'STOP'", Integer.class, a.id())).isEqualTo(1);
+    }
+
+    @Test
+    void aV11LiveEntryIsSizedFromTheAllocationAndItsStopCoversAllOfIt() {
+        long group = group();
+        BrokerAccount a = account(group, true, V11, 100, "ma-cross");
+        enter(group, signalSession(group), "ma-cross", 0);
+        try (BrokerConnections registry = registry()) {
+            follower(registry, a).run(a, group, DAY);
+        }
+        // the signal's 40 lots on a 260,000 budget at 5 L reference capital; this account's 2 L: 104,000, 16 lots at 100
+        long held = jdbc.queryForObject("select quantity_open from exec.position where broker_account_id = ?", Long.class,
+                a.id());
+        assertThat(held).as("the allocation's share of the signal, not one lot").isEqualTo(16L * LOT);
+        assertThat(jdbc.queryForObject("select max(quantity_requested) from exec.order_execution where broker_account_id = ? "
+                + "and role = 'STOP'", Long.class, a.id())).as("the broker stop covers the whole position").isEqualTo(held);
+    }
+
+    /**
+     * v12 (A-378): at size step 40 % an entry whose signal carries RVOL >= 2.5 is taken at full size; below 2.5, or with no
+     * RVOL published, the step applies exactly as on v11. The 2 L account's budget is 1,04,000 (16 lots at 100); at RVOL
+     * 3.0 the v17 boost (1.5x on spare capital) makes it 1,56,000 = 24 lots.
+     */
+    @Test
+    void aV12EntryAtHighRvolIsFullSizeOtherwiseTheSizeStepApplies() {
+        String v12 = "../config/risk/follower-risk.v12.yaml";
+        long[] lots = new long[5];
+        Object[][] cases = {{v12, 3.0}, {V11, 3.0}, {v12, 2.0}, {V11, 2.0}, {v12, Double.NaN}};
+        for (int c = 0; c < cases.length; c++) {
+            long group = group();
+            BrokerAccount a = account(group, true, (String) cases[c][0], 40, "ma-cross");
+            enter(group, signalSession(group), "ma-cross", 0, (Double) cases[c][1]);
+            try (BrokerConnections registry = registry()) {
+                follower(registry, a).run(a, group, DAY);
+            }
+            lots[c] = jdbc.queryForObject("select coalesce(sum(quantity_open), 0) from exec.position "
+                    + "where broker_account_id = ?", Long.class, a.id()) / LOT;
+        }
+        assertThat(lots[0]).as("v12, RVOL 3.0: full size (boosted)").isEqualTo(24);
+        assertThat(lots[1]).as("v11, RVOL 3.0: 40 % of 24").isEqualTo(9);
+        assertThat(lots[2]).as("v12, RVOL 2.0: the step applies, 40 % of the boosted 24").isEqualTo(9);
+        assertThat(lots[3]).as("v11, RVOL 2.0").isEqualTo(9);
+        assertThat(lots[4]).as("v12, no RVOL published: 40 % of 16").isEqualTo(6);
+    }
+
+    /**
+     * A-378's arms as they run: PAPER followers (simulated fills, no broker) on v12 and v11 at 40 %. The same signal at
+     * RVOL 3.0 gives the v12 arm full size and the v11 arm 40 %; at RVOL 1.0 (no boost) both take 40 % of 16 lots.
+     */
+    @Test
+    void paperArmsOnV12AndV11DifferOnlyOnHighRvolEntries() {
+        String v12 = "../config/risk/follower-risk.v12.yaml";
+        Object[][] cases = {{v12, 3.0, 24L}, {V11, 3.0, 9L}, {v12, 1.0, 6L}, {V11, 1.0, 6L}};
+        for (Object[] c : cases) {
+            long group = group();
+            int n = ++seq;
+            AccountStore accounts = new AccountStore(dataSource);
+            long tenant = accounts.ensureTenant("owner");
+            long owner = accounts.ensureUser("kc-owner", "owner");
+            long id = accounts.createFollowerAccount(tenant, owner, "PAPER-A378-" + n, BrokerType.PAPER, TradeMode.PAPER,
+                    200_000, EquityMode.FIXED, DAY, (String) c[0], 40);
+            new FanOut(dataSource).withClock(CLOCK).subscribe(group, id, List.of("ma-cross"), 1.0);
+            BrokerAccount a = accounts.byId(id).orElseThrow();
+            enter(group, signalSession(group), "ma-cross", 0, (Double) c[1]);
+            new FollowerSimulator(dataSource, costs, FollowerRisk.load(Path.of(a.riskFile())), 1e9).withClock(CLOCK)
+                    .run(a, group, DAY);
+            assertThat(jdbc.queryForObject("select coalesce(sum(quantity_open), 0) from exec.position "
+                    + "where broker_account_id = ?", Long.class, id) / LOT).as(c[0] + " at RVOL " + c[1]).isEqualTo(c[2]);
+        }
+    }
+
+    @Test
+    void aV11DailyLossWithOpenPositionsSellsEverythingAndStopsEntriesForTheDay() {
+        long group = group();
+        BrokerAccount a = account(group, true, V11, 100, "ma-cross", "oi-burst-cross");
+        jdbc.update("update acct.broker_account set daily_loss_limit = 10000 where id = ?", a.id());
+        a = new AccountStore(dataSource).byId(a.id()).orElseThrow();
+        long session = signalSession(group);
+        enter(group, session, "ma-cross", 0);
+        try (BrokerConnections registry = registry()) {
+            FollowerSimulator follower = follower(registry, a);
+            follower.run(a, group, DAY);
+            long held = jdbc.queryForObject("select quantity_open from exec.position where broker_account_id = ?",
+                    Long.class, a.id());
+            assertThat(held).isEqualTo(16L * LOT);
+
+            // the bid drops 9 a unit: 1,040 x 9 = 9,360 open loss, under the 10,000 limit: nothing happens
+            kite.depth(KEYS[0], List.of(new Quote.Level(91.0, 65_000)), List.of(new Quote.Level(91.5, 65_000)), 91.2);
+            follower.run(a, group, DAY);
+            assertThat(jdbc.queryForObject("select status from exec.position where broker_account_id = ?", String.class,
+                    a.id())).isEqualTo("OPEN");
+
+            // 11 a unit: 11,440 open loss: past the limit, sold now (the next mark is 5 s later)
+            kite.depth(KEYS[0], List.of(new Quote.Level(89.0, 65_000)), List.of(new Quote.Level(89.5, 65_000)), 89.2);
+            FollowerSimulator later = follower.withClock(Clock.fixed(CLOCK.instant().plusSeconds(6), IST));
+            later.run(a, group, DAY);
+            assertThat(jdbc.queryForObject("select status || ' ' || quantity_open from exec.position "
+                    + "where broker_account_id = ?", String.class, a.id())).isEqualTo("CLOSED 0");
+            assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? "
+                    + "and action = 'DAILY_LOSS_STOP'", Integer.class, a.id())).isEqualTo(1);
+
+            // a new entry the same day is refused, here and by a fresh follower (a restarted worker)
+            enter(group, session, "oi-burst-cross", 1);
+            later.run(a, group, DAY);
+            assertThat(intentState(a)).isEqualTo("REJECTED_DAILY_LOSS");
+        }
+        try (BrokerConnections registry = registry()) {
+            enter(group, signalSession(group), "ma-cross", 2);
+            follower(registry, a).withClock(Clock.fixed(CLOCK.instant().plusSeconds(7), IST)).run(a, group, DAY);
+            assertThat(intentState(a)).isEqualTo("REJECTED_DAILY_LOSS");
+        }
     }
 
     @Test
@@ -282,6 +396,110 @@ class LiveIT {
         }
         assertThat(intentState(a)).isEqualTo("REJECTED_LIVE_STRATEGY");
         assertThat(kite.requests("place")).isZero();
+    }
+
+    /** V32 (user 9 Nov 2026): the owner's choice decides what trades LIVE, within the risk file's list. */
+    @Test
+    void theOwnersChoiceOfLiveStrategiesRefusesADeselectedOne() {
+        long group = group();
+        BrokerAccount a = account(group, true, "ma-cross", "oi-burst-cross");
+        FollowerRisk risk = FollowerRisk.load(Path.of(V7));
+        LiveStrategies live = new LiveStrategies(dataSource);
+        assertThat(live.chosen(a.id())).isNull();
+        assertThat(live.effective(a.id(), risk)).containsExactly("early-confirm-runner", "ma-cross", "oi-burst-cross");
+        live.choose(a.id(), risk, List.of("oi-burst-cross"));                     // ma-cross deselected
+        assertThat(live.effective(a.id(), risk)).containsExactly("oi-burst-cross");
+        enter(group, signalSession(group), "ma-cross", 0);
+        try (BrokerConnections registry = registry()) {
+            follower(registry, a).run(a, group, DAY);
+        }
+        assertThat(intentState(a)).isEqualTo("REJECTED_LIVE_STRATEGY");
+        assertThat(kite.requests("place")).isZero();
+        // never wider than the file: a strategy it does not list cannot be chosen
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> live.choose(a.id(), risk, List.of("opening-drive")))
+                .hasMessageContaining("not allowed LIVE by the risk file: [opening-drive]");
+        live.choose(a.id(), risk, null);                                           // back to the defaults
+        assertThat(live.chosen(a.id())).isNull();
+    }
+
+    /** V33: the owner's global list governs every account without its own list; a strategy left out stays PAPER. */
+    @Test
+    void theGlobalListRefusesAStrategyLeftOutOnEveryAccountWithoutItsOwnList() {
+        long group = group();
+        BrokerAccount a = account(group, true, "ma-cross", "oi-burst-cross");
+        BrokerAccount own = account(group, true, "ma-cross");
+        FollowerRisk risk = FollowerRisk.load(Path.of(V7));
+        LiveStrategies live = new LiveStrategies(dataSource);
+        try {
+            live.choose(own.id(), risk, List.of("ma-cross"));                       // keeps its own list
+            live.chooseGlobal(List.of("oi-burst-cross"), risk.live().strategies(), "it");
+            assertThat(live.source(a.id())).isEqualTo(LiveStrategies.Source.GLOBAL);
+            assertThat(live.effective(a.id(), risk)).containsExactly("oi-burst-cross");
+            assertThat(live.source(own.id())).isEqualTo(LiveStrategies.Source.ACCOUNT);
+            // user 11 Nov 2026: the owner's PAPER caps the account's own list (ma-cross is not in the owner's LIVE list)
+            assertThat(live.effective(own.id(), risk)).isEmpty();
+            enter(group, signalSession(group), "ma-cross", 0);
+            try (BrokerConnections registry = registry()) {
+                follower(registry, own).run(own, group, DAY);
+            }
+            assertThat(intentState(own)).isEqualTo("REJECTED_LIVE_STRATEGY");
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> live.choose(own.id(), risk, List.of("ma-cross")))
+                    .hasMessageContaining("on PAPER only");
+            enter(group, signalSession(group), "ma-cross", 0);
+            try (BrokerConnections registry = registry()) {
+                follower(registry, a).run(a, group, DAY);
+            }
+            assertThat(intentState(a)).isEqualTo("REJECTED_LIVE_STRATEGY");
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> live.chooseGlobal(List.of("opening-drive"),
+                    risk.live().strategies(), "it")).hasMessageContaining("not a LIVE strategy of any account's risk file");
+            live.chooseGlobal(null, risk.live().strategies(), "it");
+            assertThat(live.global()).isNull();
+            assertThat(live.source(a.id())).isEqualTo(LiveStrategies.Source.DEFAULT);
+        } finally {
+            jdbc.update("delete from acct.live_strategy_policy");                 // other tests run without a global list
+        }
+    }
+
+    /**
+     * V35 (user 11 Nov 2026): a strategy the owner turned OFF opens nothing on a LIVE account, even from a signal that
+     * reached the follower, whatever the account's lists say; it cannot be chosen LIVE while OFF.
+     */
+    @Test
+    void aStrategyTurnedOffIsRefusedOnALiveAccount() {
+        long group = group();
+        BrokerAccount a = account(group, true, "ma-cross", "oi-burst-cross");
+        FollowerRisk risk = FollowerRisk.load(Path.of(V7));
+        LiveStrategies live = new LiveStrategies(dataSource);
+        try {
+            live.choose(a.id(), risk, List.of("ma-cross", "oi-burst-cross"));
+            live.chooseOff(List.of("ma-cross"), java.util.Set.of("ma-cross", "oi-burst-cross"), "it");
+            assertThat(live.effective(a.id(), risk)).containsExactly("oi-burst-cross");
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> live.choose(a.id(), risk, List.of("ma-cross")))
+                    .hasMessageContaining("turned OFF for every account: [ma-cross]");
+            enter(group, signalSession(group), "ma-cross", 0);
+            try (BrokerConnections registry = registry()) {
+                follower(registry, a).run(a, group, DAY);
+            }
+            assertThat(intentState(a)).isEqualTo("REJECTED_STRATEGY_OFF");
+            assertThat(kite.requests("place")).isZero();
+        } finally {
+            jdbc.update("delete from acct.strategy_off");                         // other tests run with every strategy on
+        }
+    }
+
+    /** follower-risk v9: every live-set strategy may be chosen; v7's three trade until the owner chooses. */
+    @Test
+    void riskV9OffersTheLiveSetAndDefaultsToV7sList() {
+        FollowerRisk v9 = FollowerRisk.load(Path.of("../config/risk/follower-risk.v9.yaml"));
+        FollowerRisk v7 = FollowerRisk.load(Path.of(V7));
+        assertThat(v9.live().strategies()).containsExactlyInAnyOrder("early-confirm-runner", "expiry-trend-rider",
+                "ma-cross", "oi-burst-cross", "wall-break-rider", "break-retest-runner");
+        assertThat(v9.live().defaults()).isEqualTo(v7.live().strategies());
+        assertThat(v7.live().defaults()).isEqualTo(v7.live().strategies());   // a file without defaults: all of its list
+        assertThat(v9.live().maxLotsPerOrder()).isEqualTo(v7.live().maxLotsPerOrder());
+        assertThat(v9.live().maxOpenPositions()).isEqualTo(v7.live().maxOpenPositions());
+        assertThat(v9.maxOpenPositions()).isEqualTo(v7.maxOpenPositions());
+        assertThat(v9.maxLotsPerUnderlying()).isEqualTo(v7.maxLotsPerUnderlying());
     }
 
     @Test
@@ -410,15 +628,24 @@ class LiveIT {
     private FollowerSimulator liveFollower(LiveGuard guard) {
         FollowerRisk risk = FollowerRisk.load(Path.of(V7));
         return new FollowerSimulator(dataSource, costs, risk, new BrokerVenue(dataSource, guard, risk.orders().fast(),
-                (k, u) -> 1755L, o -> { }), null).withClock(MORNING);
+                (k, u) -> 1755L, o -> { }), null).withClock(CLOCK);
     }
 
     /** The strategy's EXIT of contract {@code i}, decided now, fanned out. */
+    /**
+     * An exit's decision time: now, but never before {@link #CLOCK}'s entries (a run before 10:00 IST would otherwise
+     * decide the exit before the entry it closes; merge of the test-clock branch, 9 Nov 2026).
+     */
+    private static Instant exitAt() {
+        Instant now = Instant.now();
+        return now.isAfter(CLOCK.instant()) ? now : CLOCK.instant().plusSeconds(1);
+    }
+
     private void exit(long group, long session, int i) {
         long token = 3_000_000_000L + Long.parseLong(KEYS[i].substring(7));
         int n = jdbc.queryForObject("select count(*) from exec.signal_decision where copy_group_id = ?", Integer.class,
                 group) + 1;
-        new SignalDecisionStore(dataSource).insert(new SignalDecision(group, session, DAY, Instant.now(), "ma-cross", 2,
+        new SignalDecisionStore(dataSource).insert(new SignalDecision(group, session, DAY, exitAt(), "ma-cross", 2,
                 "NIFTY", SignalDecision.Action.EXIT, "PE", null, "EXIT", "IT", token, KEYS[i], SYMBOLS[i], LOT, 100,
                 Double.NaN, 500_000, 0, group + ":" + session + ":" + n, Map.of()));
         new FanOut(dataSource).fanOut(group, DAY);

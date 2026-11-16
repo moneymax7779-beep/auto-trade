@@ -15,6 +15,13 @@ public final class ManagedPosition {
 
     public enum State { OPENING, OPEN, CANCELLING_FOR_EXIT, EXITING, CLOSED }
 
+    /**
+     * A-358: LONG bought to open and sells to close (every position before v19); SHORT sold to open and buys to close.
+     * For a SHORT, {@link #averageCost()} is the average sale price (the credit), {@link #boughtQuantity()} the quantity
+     * sold to open, and the position is valued and bought back at the ask.
+     */
+    public enum Direction { LONG, SHORT }
+
     final String underlying;
     /** The strategy that owns this position (several strategies may hold the same underlying). */
     final String strategy;
@@ -30,6 +37,10 @@ public final class ManagedPosition {
     final Map<String, Long> orderQuantity = new HashMap<>();
 
     State state = State.OPENING;
+    /** A-358: LONG unless the OMS opened it with a sale; final once set at entry. */
+    Direction direction = Direction.LONG;
+    /** A-358, SHORT only: the margin this leg ties up (rupees), counted as capital in use instead of premium. */
+    double margin;
     long quantity;
     double averageCost;
     long boughtQuantity;
@@ -85,9 +96,22 @@ public final class ManagedPosition {
         return strategy + "|" + underlying + "|" + leg;
     }
 
-    /** Capital this position ties up: what it paid, or what its entries asked for while they work. */
+    /** Capital this position ties up: what it paid, or what its entries asked for while they work; a short's margin. */
     double premiumInUse() {
-        return Math.max(committedPremium, averageCost * quantity);
+        return isShort() ? margin : Math.max(committedPremium, averageCost * quantity);
+    }
+
+    boolean isShort() {
+        return direction == Direction.SHORT;
+    }
+
+    public Direction direction() {
+        return direction;
+    }
+
+    /** A-358, SHORT only: the margin this leg ties up (0 for a long). */
+    public double margin() {
+        return margin;
     }
 
     public String leg() {
@@ -145,12 +169,24 @@ public final class ManagedPosition {
         return lastBid;
     }
 
+    /** The last ask seen for this contract (NaN before any quote); what a short would pay to buy back. */
+    public double lastAsk() {
+        return lastAsk;
+    }
+
     public double lastPrice() {
         return lastPrice;
     }
 
+    /** Held quantity marked to the bid (a long: what it could sell for) or, for a short, to the ask (what buying back costs). */
     public double unrealised() {
-        return quantity > 0 && !Double.isNaN(lastBid) ? (lastBid - averageCost) * quantity : 0;
+        if (quantity <= 0) {
+            return 0;
+        }
+        if (isShort()) {
+            return !Double.isNaN(lastAsk) ? (averageCost - lastAsk) * quantity : 0;
+        }
+        return !Double.isNaN(lastBid) ? (lastBid - averageCost) * quantity : 0;
     }
 
     public double net() {
