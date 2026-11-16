@@ -307,7 +307,7 @@ public final class ChartOrderEngine implements AutoCloseable {
                 BrokerAccount account = accounts.byId(o.accountId())
                         .orElseThrow(() -> new IllegalArgumentException("account " + o.accountId() + " is gone"));
                 intent = manual.exit(account, o.copyGroupId(), o.underlying(), "chart #" + o.id() + " (" + o.createdBy()
-                        + ")", day, "TRADER_EXIT".equals(trigger) ? trigger : "CHART_" + trigger, key);
+                        + ")", day, "TRADER_EXIT".equals(trigger) ? trigger : "CHART_" + trigger, key, o.positionId());
             } catch (RuntimeException e) {
                 String why = e.getMessage() == null ? e.toString() : e.getMessage();
                 Long written = orders.intentByKey(key + ":" + o.accountId());
@@ -469,6 +469,18 @@ public final class ChartOrderEngine implements AutoCloseable {
             if (orders.transition(o.id(), o.version(), o.status(), "CLOSED", "closed as " + position.get("exit_reason"),
                     Map.of())) {
                 orders.event(o.id(), "CLOSED", ACTOR, null, closed(position));
+            }
+            return;
+        }
+        if ("OPEN".equals(o.status()) && "TRADER_EXIT".equals(o.exitTrigger())) {
+            // review 16 Nov 2026 (D9): the engine's own sale for an Exit now failed (not written, or refused): it went back
+            // to OPEN and only its lines were watched, the trader's Exit forgotten. Tried again after the pause. Only after
+            // a failed try of the engine's (its pause set): the web's Exit now runs its own sale
+            Instant retry = retryAfter.get(o.id());
+            Instant now = clock.instant();
+            if (retry != null && !now.isBefore(retry) && !inFlight.contains(o.id())) {
+                retryAfter.remove(o.id());
+                exit(o, "TRADER_EXIT", Double.NaN, now);
             }
             return;
         }

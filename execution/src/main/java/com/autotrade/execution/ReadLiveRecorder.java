@@ -252,6 +252,11 @@ public final class ReadLiveRecorder {
     }
 
     private void ownerOnlyDirectories(Path dir) throws IOException {
+        ownerOnlyDirectories(root, dir);
+    }
+
+    /** Creates {@code dir} and makes it and every folder up to {@code root} the owner's only (also the probe's files). */
+    static void ownerOnlyDirectories(Path root, Path dir) throws IOException {
         if (Files.isDirectory(dir)) {
             return;
         }
@@ -263,7 +268,7 @@ public final class ReadLiveRecorder {
         }
     }
 
-    private static void ownerOnly(Path file) throws IOException {
+    static void ownerOnly(Path file) throws IOException {
         if (posix()) {
             Files.setPosixFilePermissions(file, PosixFilePermissions.fromString("rw-------"));
         }

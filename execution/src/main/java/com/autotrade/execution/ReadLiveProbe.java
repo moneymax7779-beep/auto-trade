@@ -432,9 +432,11 @@ public final class ReadLiveProbe implements AutoCloseable {
                 if (before != null && before == hash) {
                     continue;                                           // the same answer as last time: kept once
                 }
-                Files.createDirectories(day);
-                Files.writeString(day.resolve(STAMP.format(now) + "-" + i + "-" + slug + ".json"), body,
-                        StandardCharsets.UTF_8);
+                // review 16 Nov 2026 (D9): owner-only, as the recorder's (redacted, but real order books and funds)
+                ReadLiveRecorder.ownerOnlyDirectories(settings.dir(), day);
+                Path file = day.resolve(STAMP.format(now) + "-" + i + "-" + slug + ".json");
+                Files.writeString(file, body, StandardCharsets.UTF_8);
+                ReadLiveRecorder.ownerOnly(file);
                 written++;
             }
         } catch (IOException | RuntimeException e) {

@@ -67,6 +67,19 @@ class KotakGatewayTest {
         sim.close();
     }
 
+    @Test
+    void aCallOnARetiredClientIsNotSentNeverUnknown() {
+        // review 16 Nov 2026 (D9): a caller holding the old client when a new login swapped it got an IOException from the
+        // shut-down client, read as an order of unknown outcome
+        gateway.place(buy("F1E1", 65, 90.0));                                     // resting below the ask
+        http.retire();
+        int before = sim.requests("cancel");
+        assertThatThrownBy(() -> gateway.cancel("F1E1")).isInstanceOf(BrokerException.class)  // an order call, no read first
+                .satisfies(e -> assertThat(((BrokerException) e).kind()).isEqualTo(Kind.RETRYABLE))
+                .hasMessageContaining("not sent");
+        assertThat(sim.requests("cancel")).as("nothing reached Kotak").isEqualTo(before);
+    }
+
     private static OrderRequest buy(String tag, long quantity, double limit) {
         return new OrderRequest(tag, 3000047168L, KEY, "NIFTY 23100 PE 11 NOV 26", "NSE_FO", OrderSide.BUY,
                 OrderType.LIMIT, quantity, limit, 0, tag);

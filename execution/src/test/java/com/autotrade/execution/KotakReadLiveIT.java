@@ -414,6 +414,12 @@ class KotakReadLiveIT {
             assertThat(files.filter(java.nio.file.Files::isRegularFile).map(Path::toString))
                     .allMatch(f -> f.contains("/kotak_neo/" + s.broker().id() + "/" + DAY + "/"));
         }
+        // review 16 Nov 2026 (D9): the owner's only, as the recorder's (real order books and funds, if redacted)
+        try (var files = java.nio.file.Files.walk(dir)) {
+            assertThat(files.filter(p -> !p.equals(dir)).toList()).isNotEmpty().allSatisfy(p -> assertThat(
+                    java.nio.file.attribute.PosixFilePermissions.toString(java.nio.file.Files.getPosixFilePermissions(p)))
+                    .isEqualTo(java.nio.file.Files.isDirectory(p) ? "rwx------" : "rw-------"));
+        }
     }
 
     @Test

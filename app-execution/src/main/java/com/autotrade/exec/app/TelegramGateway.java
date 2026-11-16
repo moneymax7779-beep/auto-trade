@@ -6,6 +6,7 @@ import java.time.LocalTime;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -62,6 +63,18 @@ class TelegramGateway implements DisposableBean {
     private volatile String lastError;
     private volatile Instant webhookCheckedAt = Instant.EPOCH;
     private long offset;
+    /** When the newest update was received (null: none kept); after {@link #QUIET} Telegram may restart its ids. */
+    private volatile Instant lastUpdateAt;
+    /** The bot the offset belongs to (its token's id). */
+    private Long botId;
+    /**
+     * Review 16 Nov 2026 (D8): Telegram picks the next update_id at random after a week without updates; one below our
+     * offset would be confirmed without being returned (a command lost, the poller healthy). Past this quiet, or with
+     * another bot, the reader reads once without an offset (the update_id table drops repeats).
+     */
+    static final Duration QUIET = Duration.ofDays(6);
+    static final String NO_TOKEN = "Telegram commands are ON on this worker, but bot.env has no command bot token: nothing "
+            + "reads your commands. Use the web or the broker app; put the token in bot.env and restart.";
 
     TelegramGateway(DataSource dataSource, TelegramCommands commands, TelegramCommandProperties props,
                     TelegramNotifier notifier, TradingDays tradingDays, ExecutionProperties execution) {
@@ -82,7 +95,8 @@ class TelegramGateway implements DisposableBean {
             return;
         }
         if (!commands.bot().configured()) {
-            log.warn("Telegram commands on, but no bot token: nothing to read");
+            // review 16 Nov 2026 (D9): only a log line, so commands looked on while nothing read them; health() repeats it
+            alarm("NO_TOKEN", NO_TOKEN);
             return;
         }
         prepare();
@@ -101,6 +115,23 @@ class TelegramGateway implements DisposableBean {
         commands.recover();
         Long max = jdbc.queryForObject("select max(update_id) from exec.telegram_update", Long.class);
         offset = max == null ? 0 : max + 1;
+        java.sql.Timestamp newest = jdbc.queryForObject("select max(received_at) from exec.telegram_update",
+                java.sql.Timestamp.class);
+        lastUpdateAt = newest == null ? null : newest.toInstant();
+        List<Long> stored = jdbc.queryForList("select bot_id from exec.telegram_poller where id = 1", Long.class);
+        Long known = stored.isEmpty() ? null : stored.getFirst();
+        botId = commands.bot().botId();
+        if (known != null && botId != null && !known.equals(botId)) {
+            log.warn("Telegram: the command bot changed ({} -> {}): reading it from its first unconfirmed update", known,
+                    botId);
+            offset = 0;
+        }
+        saveBot();
+    }
+
+    private void saveBot() {
+        jdbc.update("insert into exec.telegram_poller (id, worker_id, bot_id) values (1, ?, ?) on conflict (id) do update "
+                + "set bot_id = excluded.bot_id", workerId, botId);
     }
 
     private void loop() {
@@ -108,8 +139,9 @@ class TelegramGateway implements DisposableBean {
             boolean ok;
             try {
                 ok = pollOnce(POLL_SECONDS);
-            } catch (RuntimeException e) {
+            } catch (Throwable e) {
                 // the database (or anything else) failed: the thread must live on, or every later /kill is lost unheard
+                // (review 16 Nov 2026, D9: an Error, not only a RuntimeException, ended it for good)
                 lastError = e.getClass().getSimpleName();
                 log.error("Telegram reader: poll failed, trying again in 5 s", e);
                 ok = false;
@@ -131,6 +163,20 @@ class TelegramGateway implements DisposableBean {
      * poll (its age then decides whether it still runs). Throws when the database fails.
      */
     boolean pollOnce(int timeoutSeconds) {
+        Long bot = commands.bot().botId();
+        if (bot != null && !bot.equals(botId)) {                     // bot.env pointed at another bot meanwhile
+            log.warn("Telegram: the command bot changed ({} -> {}): reading it from its first unconfirmed update", botId,
+                    bot);
+            botId = bot;
+            offset = 0;
+            saveBot();
+        }
+        Instant newest = lastUpdateAt;
+        if (offset > 0 && newest != null && newest.isBefore(Instant.now().minus(QUIET))) {
+            log.info("Telegram: no update for {} days: reading without an offset (its next id may be lower)",
+                    Duration.between(newest, Instant.now()).toDays());
+            offset = 0;
+        }
         TelegramBot.Polled polled = commands.bot().getUpdates(offset, timeoutSeconds);
         if (polled.status() != 200) {
             failed(polled.status(), polled.error());
@@ -144,6 +190,7 @@ class TelegramGateway implements DisposableBean {
             }
             boolean fresh = store(update);                          // false: kept before (a repeat)
             offset = Math.max(offset, id + 1);
+            lastUpdateAt = Instant.now();
             if (fresh) {
                 String outcome = commands.handle(update);
                 jdbc.update("update exec.telegram_update set processed_at = now(), outcome = ? where update_id = ?",
@@ -191,13 +238,16 @@ class TelegramGateway implements DisposableBean {
     /** Every 15 s: no poll for {@link #STALE} in market hours, or a webhook on the bot → alarm. */
     @Scheduled(fixedDelay = 15_000, initialDelay = 60_000)
     void health() {
-        if (!running) {
-            return;
-        }
         ZonedDateTime now = ZonedDateTime.now(IST);
         LocalTime t = now.toLocalTime();
         boolean market = tradingDays.isTradingDay(now.toLocalDate()) && !t.isBefore(LocalTime.of(9, 0))
                 && t.isBefore(LocalTime.of(15, 35));
+        if (!running) {
+            if (props.commands() && !commands.bot().configured() && market) {
+                alarm("NO_TOKEN", NO_TOKEN);
+            }
+            return;
+        }
         Instant ok = lastOk;
         if (market && (ok == null || Duration.between(ok, Instant.now()).compareTo(STALE) > 0)) {
             alarm("STALE", "Telegram command bot: no successful read for " + (ok == null ? "ever"

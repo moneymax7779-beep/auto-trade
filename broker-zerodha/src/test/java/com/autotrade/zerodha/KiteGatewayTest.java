@@ -116,6 +116,20 @@ class KiteGatewayTest {
     }
 
     @Test
+    void aRestartedWorkerCountsTheDaysOrdersAlreadyAtKiteAgainstTheDayCap() throws Exception {
+        // review 16 Nov 2026 (D9): the budget is in memory; a restart started the day's count from 0
+        for (int i = 1; i <= 3; i++) {
+            gateway.place(buy("F" + i + "E1", 65, 90.00));                       // resting below the ask
+        }
+        KiteGateway restarted = new KiteGateway(KiteConfig.simulator(sim.baseUri()), http, KiteInstruments.load(http),
+                new com.autotrade.broker.OrderBudget(3, java.time.Clock.systemUTC()));
+        restarted.orders();                                   // the book, as the LIVE guard reads it before every place
+        assertThatThrownBy(() -> restarted.place(buy("F4E1", 65, 90.00)))
+                .isInstanceOf(com.autotrade.broker.OrderBudget.Exceeded.class).hasMessageContaining("used up");
+        assertThat(sim.orderCount()).as("nothing sent").isEqualTo(3);
+    }
+
+    @Test
     void aMarketableLimitFillsAtTheAskAndPollReportsTheFillOnce() {
         gateway.place(buy("F1E1", 130, 100.20));
         assertThat(gateway.poll()).isEqualTo(1);

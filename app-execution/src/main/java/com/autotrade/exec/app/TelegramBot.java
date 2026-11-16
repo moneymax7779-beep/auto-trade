@@ -49,15 +49,32 @@ class TelegramBot {
         return token.get() != null;
     }
 
-    /** Long poll: waits up to {@code timeoutSeconds} for updates after {@code offset - 1} (and so uses those up). */
+    /** The bot's id: the token's part before ':' (null without a token or when it has none). */
+    Long botId() {
+        String t = token.get();
+        int colon = t == null ? -1 : t.indexOf(':');
+        if (colon <= 0) {
+            return null;
+        }
+        try {
+            return Long.parseLong(t.substring(0, colon));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    /**
+     * Long poll: waits up to {@code timeoutSeconds} for updates after {@code offset - 1} (and so uses those up); an
+     * offset of 0 or below sends none, so Telegram returns every update not yet confirmed (review 16 Nov 2026, D8).
+     */
     Polled getUpdates(long offset, int timeoutSeconds) {
         String t = token.get();
         if (t == null) {
             return new Polled(0, List.of(), "no bot token");
         }
         try {
-            HttpResponse<String> r = http.send(HttpRequest.newBuilder(URI.create(api + "/bot" + t + "/getUpdates?offset="
-                            + offset + "&timeout=" + timeoutSeconds
+            HttpResponse<String> r = http.send(HttpRequest.newBuilder(URI.create(api + "/bot" + t + "/getUpdates?"
+                            + (offset > 0 ? "offset=" + offset + "&" : "") + "timeout=" + timeoutSeconds
                             + "&allowed_updates=%5B%22message%22%2C%22callback_query%22%5D"))
                     .timeout(Duration.ofSeconds(timeoutSeconds + 10L)).GET().build(), HttpResponse.BodyHandlers.ofString());
             if (r.statusCode() != 200) {

@@ -437,15 +437,26 @@ public final class ManualOrders {
      */
     public long exit(BrokerAccount account, long copyGroupId, String underlying, String actor, LocalDate day, String reason,
                      String idempotencyKey) {
+        return exit(account, copyGroupId, underlying, actor, day, reason, idempotencyKey, null);
+    }
+
+    /**
+     * As {@link #exit}, selling exactly {@code positionId} when given (a chart order's own position; review 16 Nov 2026,
+     * D9: the oldest manual position of the index was sold, which a panel buy opened in the second after the chart
+     * order's position closed could be); refused when that position is not open.
+     */
+    public long exit(BrokerAccount account, long copyGroupId, String underlying, String actor, LocalDate day, String reason,
+                     String idempotencyKey, Long positionId) {
         String u = checkUnderlying(underlying);
         List<Map<String, Object>> held = jdbc.queryForList("select p.id, p.option_side, p.instrument_token, p.instrument_key, "
                 + "p.symbol, p.quantity_open, d.lot_size from exec.position p join exec.trade_intent i on i.id = "
                 + "p.entry_trade_intent_id join exec.trade_batch b on b.id = i.trade_batch_id join exec.signal_decision d on "
                 + "d.id = b.signal_decision_id where p.broker_account_id = ? and p.strategy_id = ? and p.underlying = ? "
-                + "and p.status <> 'CLOSED' and p.quantity_open > 0 order by p.opened_at, p.id limit 1", account.id(),
-                STRATEGY, u);
+                + "and p.status <> 'CLOSED' and p.quantity_open > 0 and (?::bigint is null or p.id = ?) "
+                + "order by p.opened_at, p.id limit 1", account.id(), STRATEGY, u, positionId, positionId);
         if (held.isEmpty()) {
-            throw new IllegalArgumentException(account.displayName() + " holds no manual " + u + " position");
+            throw new IllegalArgumentException(account.displayName() + (positionId == null ? " holds no manual " + u
+                    + " position" : "'s position #" + positionId + " is not open"));
         }
         Map<String, Object> p = held.getFirst();
         long token = ((Number) p.get("instrument_token")).longValue();

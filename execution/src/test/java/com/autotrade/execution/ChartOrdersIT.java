@@ -485,6 +485,74 @@ class ChartOrdersIT {
     }
 
     @Test
+    void anExitNowWhoseSaleFailedIsTriedAgainAfterAPause() {
+        // review 16 Nov 2026 (D9): the engine's TRADER_EXIT sale was not written (no bid): back to OPEN, and only its lines
+        // were watched; the trader's Exit now was never tried again
+        Setup s = setup(TradeMode.PAPER);
+        try (ExecutionLoop loop = loop("worker-chart-15")) {
+            long group = loop.manualGroup(s.account().id());
+            ChartOrders.Order o = orders().arm(s.account(), group, arm("CE", 23_170, 23_120, 23_260), "kc", DAY);
+            java.util.concurrent.atomic.AtomicReference<java.time.Instant> now =
+                    new java.util.concurrent.atomic.AtomicReference<>(MORNING.instant());
+            Clock moving = new Clock() {
+                public java.time.ZoneId getZone() { return java.time.ZoneOffset.UTC; }
+                public Clock withZone(java.time.ZoneId zone) { return this; }
+                public java.time.Instant instant() { return now.get(); }
+            };
+            ChartOrderEngine engine = new ChartOrderEngine(dataSource, DAY).withClock(moving).inline();
+            engine.onIndexTick("NIFTY", 23_173, now.get());
+            assertThat(orders().exitNow(s.account(), o.id(), "kc")).isFalse();      // marked: sold once bought
+            loop.tick(DAY, 20_000);                                       // the buy fills
+            jdbc.update("delete from md.option_tick");                    // the capture stopped: no bid to sell at
+            engine.sync();                                                // filled: the trader's sale, not written
+            assertThat(status(o.id())).startsWith("OPEN: exit not written");
+            market();                                                     // quotes again
+            engine.sync();
+            assertThat(status(o.id())).as("not before the pause").startsWith("OPEN");
+            now.set(now.get().plus(ChartOrderEngine.EXIT_RETRY));
+            engine.sync();
+            assertThat(status(o.id())).as("tried again, without a tick").isEqualTo("EXITING");
+            loop.tick(DAY, 20_000);
+            engine.sync();
+            assertThat(status(o.id())).isEqualTo("CLOSED: closed as TRADER_EXIT");
+        }
+    }
+
+    @Test
+    void aChartStopSellsItsOwnPositionNeverAPanelBuyOfTheSameIndex() {
+        // review 16 Nov 2026 (D9): the chart exit sold the oldest manual position of the index; its own closed and a panel
+        // buy opened in the second before the engine's next sync, so a stop seen then sold the panel's position
+        Setup s = setup(TradeMode.PAPER);
+        try (ExecutionLoop loop = loop("worker-chart-16")) {
+            long group = loop.manualGroup(s.account().id());
+            ChartOrders.Order o = orders().arm(s.account(), group, arm("CE", 23_170, 23_120, 23_260), "kc", DAY);
+            ChartOrderEngine engine = engine();
+            tick(engine, 23_173);
+            loop.tick(DAY, 20_000);
+            engine.sync();
+            assertThat(status(o.id())).isEqualTo("OPEN");
+            long own = ((Number) position(s.account()).get("id")).longValue();
+            jdbc.update("update exec.position set status = 'CLOSED', quantity_open = 0, exit_reason = 'MANUAL', closed_at = "
+                    + "now() where id = ?", own);                         // sold by hand, booked
+            ManualOrders panel = new ManualOrders(dataSource).withClock(MORNING);
+            panel.buy(s.account(), group, "NIFTY", "PE", panel.pick("NIFTY", "PE", DAY).chosen().symbol(), "kc", DAY);
+            loop.tick(DAY, 20_000);
+            long other = ((Number) position(s.account()).get("id")).longValue();
+            assertThat(other).isNotEqualTo(own);
+
+            tick(engine, 23_117);                                         // the engine has not synced since: still OPEN
+            assertThat(status(o.id())).startsWith("OPEN: exit not written").contains("#" + own + " is not open");
+            loop.tick(DAY, 20_000);
+            assertThat(jdbc.queryForObject("select status from exec.position where id = ?", String.class, other))
+                    .as("the panel's position is not the chart order's to sell").isEqualTo("OPEN");
+            engine.sync();
+            assertThat(status(o.id())).startsWith("CLOSED");
+            jdbc.update("update exec.position set status = 'CLOSED', quantity_open = 0, closed_at = now() where id = ?",
+                    other);                                               // the other tests' engines watch every order
+        }
+    }
+
+    @Test
     void aStopMovedWhileTheIndexIsNearTheEntryIsTakenAndKeepsTheKind() {
         Setup s = setup(TradeMode.PAPER);
         try (ExecutionLoop loop = loop("worker-chart-9")) {
