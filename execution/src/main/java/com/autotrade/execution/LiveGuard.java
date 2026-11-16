@@ -61,6 +61,13 @@ public final class LiveGuard implements BrokerConnection {
                 throw refused("a buy is a limit order only, got " + r.type());
             }
             checkBuyQuantity(r.instrumentKey(), r.quantity());
+            long all = heldAll(book, r.instrumentKey(), carried());
+            if (all < 0) {
+                // second review 16 Nov 2026: the account short of the contract across products (an NRML short carried or
+                // sold by hand): our sells are refused while it is short, so a buy here could never be exited or stopped
+                throw refused("buy of " + r.symbol() + ": the account is short " + (-all) + " of it across products: "
+                        + "what this buys could not be sold again");
+            }
             Set<String> held = new HashSet<>();
             for (BrokerOrder o : book) {                       // derivatives only: a share bought by hand is no contract
                 if (!o.ofProduct(product)) {
@@ -132,6 +139,14 @@ public final class LiveGuard implements BrokerConnection {
 
     /** What the account carried into today (none when it cannot be read now: today's book alone, as before). */
     private java.util.Map<String, Long> carried() {
+        return carriedOrNone(broker);
+    }
+
+    /**
+     * {@code broker}'s carry into today, or none while it is not known (a failed read): the guard and the venue then go
+     * by today's book alone, as before the carry was counted. A lost session is thrown.
+     */
+    static java.util.Map<String, Long> carriedOrNone(BrokerConnection broker) {
         try {
             return broker.carriedIn();
         } catch (BrokerException e) {

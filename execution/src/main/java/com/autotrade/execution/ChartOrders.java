@@ -184,7 +184,11 @@ public final class ChartOrders {
             throw new IllegalArgumentException("chart order #" + id + " changed meanwhile (now " + o.status()
                     + "): look again and move it from there");
         }
-        requireEngine(day, "the line was not moved");
+        if ("ARMED".equals(o.status())) {
+            // second review: only a waiting order needs the engine to be moved; an open position's stop or target is read
+            // by the engine when it starts again, so a tighter stop is never refused while it is down
+            requireEngine(day, "the line was not moved");
+        }
         double e = entry == null ? o.entry() : entry, s = stop == null ? o.stop() : stop, t = target == null ? o.target() : target;
         ChartLines.Lines lines = new ChartLines.Lines(o.side(), e, s, t, o.buffer(), o.noChase());
         double spot = spot(o.underlying(), day);

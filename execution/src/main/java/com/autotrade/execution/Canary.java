@@ -113,14 +113,26 @@ public final class Canary {
     public record Report(Result result, String broker, String instrumentKey, String symbol, int lotSize, String tag,
                          double bid, double ask, double buyPrice, double modifiedPrice, double funds,
                          long filledQuantity, boolean soldBack, boolean leftWorking, String message, Instant startedAt,
-                         Instant finishedAt, List<Step> steps) {
+                         Instant finishedAt, List<Step> steps, long positionMoved) {
+
+        /** {@code positionMoved}: none (the reports built before it was kept). */
+        public Report(Result result, String broker, String instrumentKey, String symbol, int lotSize, String tag,
+                      double bid, double ask, double buyPrice, double modifiedPrice, double funds, long filledQuantity,
+                      boolean soldBack, boolean leftWorking, String message, Instant startedAt, Instant finishedAt,
+                      List<Step> steps) {
+            this(result, broker, instrumentKey, symbol, lotSize, tag, bid, ask, buyPrice, modifiedPrice, funds,
+                    filledQuantity, soldBack, leftWorking, message, startedAt, finishedAt, steps, 0);
+        }
 
         /**
-         * Whether the canary left something at the broker that a person must deal with: a fill not (all) sold back, or
-         * the order possibly still working (a cancel that could not be confirmed, a place of unknown outcome).
+         * Whether the canary left something at the broker that a person must deal with: a fill not (all) sold back, the
+         * order possibly still working (a cancel that could not be confirmed, a place of unknown outcome), or the
+         * contract's position moved during the run with no fill of the canary's own (second review 16 Nov 2026: it may be
+         * the canary's fill on a broker whose book or trades are wrong, the very defect a canary looks for; never sold
+         * back, but the account's kill switch and the alert).
          */
         public boolean leftover() {
-            return leftWorking || (filledQuantity > 0 && !soldBack);
+            return leftWorking || (filledQuantity > 0 && !soldBack) || positionMoved != 0;
         }
     }
 
@@ -179,6 +191,8 @@ public final class Canary {
     private boolean placeUnknown;
     /** The broker took the place (it answered with an order id the gateway keeps by tag). */
     private boolean placeReturned;
+    /** The contract's position moved during the run without a fill of the canary's order (by this much). */
+    private long positionMoved;
     private final List<String> notes = new ArrayList<>();
 
     /**
@@ -242,7 +256,7 @@ public final class Canary {
         }
         Report report = new Report(result, broker.name(), contract.instrumentKey(), contract.symbol(), contract.lotSize(),
                 tag, bid, ask, buyPrice, modifiedPrice, funds, filled, soldBack, leftWorking, message, started,
-                clock.instant(), List.copyOf(steps));
+                clock.instant(), List.copyOf(steps), positionMoved);
         if (report.leftover()) {
             try {
                 journal.leftover(report);
@@ -367,6 +381,7 @@ public final class Canary {
                         + " trade(s), position " + netBefore + " -> " + net);
             }
             if (net != netBefore) {
+                positionMoved = net - netBefore;
                 // review 16 Nov 2026 (D3): the position moved but the canary's own order shows no fill and no trade: another
                 // order of the account traded the contract (a strategy, a hand trade). It was counted as the canary's
                 // fill and sold back, dumping a real position; now it is reported and left alone

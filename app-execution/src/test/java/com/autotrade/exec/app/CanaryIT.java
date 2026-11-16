@@ -268,6 +268,36 @@ class CanaryIT {
     }
 
     @Test
+    void aKillEngagedWhileTheCanaryHoldsEntriesOutlivesTheHold(@TempDir Path dir) throws Exception {
+        // second review 16 Nov 2026: the hold was an ACCOUNT switch, so an automatic kill engaged during the run (an order
+        // of unknown outcome, a Flatten) found it engaged and added nothing; the hold's release then lifted it in silence
+        BrokerAccount a = account(BrokerType.ZERODHA, V9, true);
+        CanaryController api = api(clock(10, 0), dir, (acct, limits) -> {
+            BrokerAdapter.Live real = live(acct, limits);
+            BrokerConnection guard = real.connection();
+            BrokerConnection hooked = (BrokerConnection) java.lang.reflect.Proxy.newProxyInstance(
+                    BrokerConnection.class.getClassLoader(), new Class<?>[] {BrokerConnection.class}, (p, m, args) -> {
+                        if (m.getName().equals("place")) {
+                            new KillSwitches(dataSource).engageAccount(acct, "ORDER_UNKNOWN: F12E1 (it)", "worker-it");
+                        }
+                        try {
+                            return m.invoke(guard, args);
+                        } catch (java.lang.reflect.InvocationTargetException e) {
+                            throw e.getCause();
+                        }
+                    });
+            return new BrokerAdapter.Live(hooked, real.description());
+        });
+        Map<String, Object> out = run(api, "kc-admin", a.id(), new CanaryController.Request(KEY, phrase(a)));
+
+        assertThat(out.get("result")).as(String.valueOf(out.get("message"))).isEqualTo("PASS");
+        assertThat(new KillSwitches(dataSource).engaged(a, "ma-cross", KEY)).as("the kill is still engaged")
+                .startsWith("ACCOUNT: ORDER_UNKNOWN");
+        assertThat(jdbc.queryForList("select reason from exec.kill_switch where broker_account_id = ? and released_at is "
+                + "null", String.class, a.id())).singleElement().asString().startsWith("ORDER_UNKNOWN");
+    }
+
+    @Test
     void noStrategyEntryCanStartOnTheAccountWhileTheCanaryRuns(@TempDir Path dir) throws Exception {
         // review 16 Nov 2026 (D3): a strategy's buy of the contract during the run was taken for the canary's fill and sold
         // back; now the account's switch holds new entries for the run (exits go on), released when it ends

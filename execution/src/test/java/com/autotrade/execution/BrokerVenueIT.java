@@ -822,6 +822,45 @@ class BrokerVenueIT {
     }
 
     @Test
+    void aCarryThatCannotBeReadNeverCutsOurStops() throws Exception {
+        // second review 16 Nov 2026: a failed positions read was "nothing carried"; with the owner's carried NRML lot sold
+        // by hand today, all products looked short of ours and the reconciler cut our stops (and alerted SPLIT_PRODUCT)
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        brokerFollower().run(s.broker(), s.group(), DAY);              // 2,600 MIS with its stops resting
+        com.autotrade.broker.BrokerOrder carriedSold = new com.autotrade.broker.BrokerOrder(null, "HANDNRML2", KEY, SYMBOL,
+                com.autotrade.broker.OrderSide.SELL, com.autotrade.broker.OrderType.LIMIT, 2600, 2600, 90, 90, 0,
+                com.autotrade.broker.OrderStatus.FILLED, "COMPLETE", null, Instant.now(), "NRML");
+        com.autotrade.broker.DailyCarry carry = new com.autotrade.broker.DailyCarry("TEST");
+        com.autotrade.broker.BrokerConnection unreadable = (com.autotrade.broker.BrokerConnection) java.lang.reflect.Proxy
+                .newProxyInstance(getClass().getClassLoader(), new Class<?>[] {com.autotrade.broker.BrokerConnection.class},
+                        (proxy, m, args) -> {
+                            if (m.getName().equals("orders")) {
+                                List<com.autotrade.broker.BrokerOrder> book = new java.util.ArrayList<>(gateway.orders());
+                                book.add(carriedSold);
+                                return book;
+                            }
+                            if (m.getName().equals("carriedIn")) {        // the positions read times out
+                                return carry.get(() -> {
+                                    throw new com.autotrade.broker.BrokerException(
+                                            com.autotrade.broker.BrokerException.Kind.RETRYABLE, "positions timed out");
+                                });
+                            }
+                            try {
+                                return m.invoke(gateway, args);
+                            } catch (java.lang.reflect.InvocationTargetException e) {
+                                throw e.getCause();
+                            }
+                        });
+        BrokerReconciler reconciler = new BrokerReconciler(dataSource, costs);
+        reconciler.check(s.broker(), unreadable);
+        assertThat(gateway.orders()).filteredOn(o -> o.clientTag() != null && o.clientTag().matches("F\\d+S.*"))
+                .hasSize(2).allSatisfy(o -> assertThat(o.status().isTerminal()).as("our stops stay").isFalse());
+        assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? and action = "
+                + "'SPLIT_PRODUCT'", Integer.class, s.broker().id())).isZero();
+    }
+
+    @Test
     void positionsThatLagAFillNeverCutAStop() throws Exception {
         // Kite's positions can lag its order book: a fresh entry not yet in them is no reason to cut its stop
         Setup s = setup(false);

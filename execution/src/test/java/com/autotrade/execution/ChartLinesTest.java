@@ -35,6 +35,9 @@ class ChartLinesTest {
                 .hasMessageStartingWith("the stop is 3 pts from the entry: at least 4 pts");
         assertThatThrownBy(() -> ChartLines.validate(new Lines("CE", 24_250, 24_200, 24_251, 2, 8), 24_230))
                 .hasMessageStartingWith("the target is 1 pts from the entry");
+        // second review: one buffer exactly (every entry tick already at the target): could only be voided
+        assertThatThrownBy(() -> ChartLines.validate(new Lines("CE", 24_250, 24_200, 24_252, 2, 8), 24_230))
+                .hasMessage("the target is 2 pts from the entry: more than 2 pts");
         assertThatThrownBy(() -> ChartLines.validate(CALL, 24_247.5))
                 .hasMessageStartingWith("the entry line is 2.5 pts from the index (24247.5): it would fire at once");
         assertThatThrownBy(() -> ChartLines.validate(new Lines("XX", 1, 1, 1, 2, 8), 1)).hasMessage("side: CE or PE");

@@ -65,7 +65,7 @@ function preview(draft: Draft, underlying: string, spot: number | undefined): { 
   if (![draft.entry, draft.stop, draft.target].every((v) => Number.isFinite(v) && v > 0)) return { problem: "entry, stop and target must be index prices" };
   if (!(s < e && e < t)) return { problem: draft.side === "CE" ? "a CE's stop must be below its entry and its target above it" : "a PE's stop must be above its entry and its target below it" };
   if (e - s < 2 * buf) return { problem: `the stop is ${nf(e - s)} pts from the entry: at least ${2 * buf}` };
-  if (t - e < buf) return { problem: `the target is ${nf(t - e)} pts from the entry: at least ${buf}` };
+  if (t - e <= buf) return { problem: `the target is ${nf(t - e)} pts from the entry: more than ${buf}` };
   if (spot == null || !(spot > 0)) return {};
   const x = d * spot;
   if (Math.abs(x - e) < 2 * buf) return { problem: `the entry is ${nf(Math.abs(x - e))} pts from the index (${nf(spot)}): it would fire at once` };
@@ -109,6 +109,8 @@ export function useChartDesk(underlying: string, enabled: boolean, replay = fals
     onSettled: async () => { await refresh(); setMoving(null); },
   });
   const canArm = orders.data?.canArm ?? false, canExit = orders.data?.canExit ?? false;
+  // review 16 Nov 2026: no engine, no move (each drag would be refused and snap back)
+  const engineUp = !(orders.data?.engine != null && !orders.data.engine.running);
   const mine = (orders.data?.orders ?? []).filter((o) => o.underlying === underlying);
   const working = mine.filter((o) => WORKING.includes(o.status));
 
@@ -122,9 +124,9 @@ export function useChartDesk(underlying: string, enabled: boolean, replay = fals
     const armed = o.status === "ARMED", open = o.status === "OPEN";
     const tag = `#${o.id} ${o.side}`;
     const at = (key: string, price: number) => (moving?.key === key ? moving.price : price);
-    lines.push({ key: `o:${o.id}:entry`, price: at(`o:${o.id}:entry`, o.entry), color: ENTRY, label: `${tag} ${armed ? "entry" : "entered"}`, dashed: armed, draggable: canArm && armed });
-    lines.push({ key: `o:${o.id}:stop`, price: at(`o:${o.id}:stop`, o.stop), color: STOP, label: `${tag} stop`, dashed: !open, draggable: canArm && (armed || open) });
-    lines.push({ key: `o:${o.id}:target`, price: at(`o:${o.id}:target`, o.target), color: TARGET, label: `${tag} target`, dashed: !open, draggable: canArm && (armed || open) });
+    lines.push({ key: `o:${o.id}:entry`, price: at(`o:${o.id}:entry`, o.entry), color: ENTRY, label: `${tag} ${armed ? "entry" : "entered"}`, dashed: armed, draggable: canArm && engineUp && armed });
+    lines.push({ key: `o:${o.id}:stop`, price: at(`o:${o.id}:stop`, o.stop), color: STOP, label: `${tag} stop`, dashed: !open, draggable: canArm && ((engineUp && armed) || open) });
+    lines.push({ key: `o:${o.id}:target`, price: at(`o:${o.id}:target`, o.target), color: TARGET, label: `${tag} target`, dashed: !open, draggable: canArm && ((engineUp && armed) || open) });
   }
   // finished orders stay on the chart as trade boxes (15 Nov 2026: their lines vanished once closed), from the arming
   // to the last event; an order that never entered shows its lines up to its void, expiry or cancel
@@ -201,7 +203,8 @@ export function ChartOrdersPanel({ desk, embedded = false }: { desk: ChartDesk; 
         {desk.engineDown && (
           <p className="text-xs font-semibold text-down">The chart-order engine is not running
             {desk.engineDown.lastSeen ? ` (last seen ${new Date(desk.engineDown.lastSeen).toLocaleTimeString("en-IN", { timeZone: "Asia/Kolkata", hour12: false })} IST)` : " today"}:
-            nothing can be armed or moved, and armed lines are not watched. It runs inside the trading session.</p>
+            nothing can be armed, armed lines are not watched, and an open position's chart stop and target are not
+            watched either (only its broker safety stop protects it: use Exit now). It runs inside the trading session.</p>
         )}
         {desk.replay && desk.canArm && !tool && !draft && (
           <p className="text-xs text-muted">Pause the replay to draw at leisure; a line counts from the next replayed tick. The
@@ -211,7 +214,7 @@ export function ChartOrdersPanel({ desk, embedded = false }: { desk: ChartDesk; 
         {draft && accountId != null && <Ticket key={desk.base} desk={desk} draft={draft} />}
         {move.error && <p className="text-sm text-down">Line not moved: {reason(move.error)}</p>}
         {orders.error && <ErrorNote error={orders.error} />}
-        <OrderList desk={desk} fold={embedded} />
+        <OrderList key={desk.base} desk={desk} fold={embedded} />
       </div>
     </section>
   );
@@ -276,7 +279,8 @@ function Ticket({ desk, draft }: { desk: ChartDesk; draft: Draft }) {
         past its line; the target at its line. Strike: the best ATM when it fires.
       </p>
       <div className="mt-2 flex gap-2">
-        <button type="button" disabled={arm.isPending || !!check.problem || !!desk.engineDown} onClick={() => arm.mutate(check.kind)}
+        <button type="button" disabled={arm.isPending || !!check.problem || !check.kind || !!desk.engineDown}
+          title={!check.kind && !check.problem ? "no quote yet: the entry's kind is not known" : undefined} onClick={() => arm.mutate(check.kind)}
           className="rounded bg-accent px-4 py-1.5 text-sm font-semibold text-white disabled:opacity-50">Arm</button>
         <button type="button" onClick={() => desk.setDraft(null)} className="rounded border border-line px-3 py-1.5 text-sm">Discard</button>
       </div>
@@ -284,6 +288,9 @@ function Ticket({ desk, draft }: { desk: ChartDesk; draft: Draft }) {
     </div>
   );
 }
+
+/** A result line of an exit that sold nothing or not all (the server's wording, FollowerSimulator / ManualOrders). */
+const SOLD_NOTHING = /\bnot (exited|flattened|sold)|^not |no manual|queued|not known|\b\d+ of \d+ sold/i;
 
 function statusTone(s: string) {
   return s === "OPEN" || s === "TRIGGERED" || s === "EXITING" ? "bg-warn/15 text-warn" : s === "ARMED" ? "bg-accent/15 text-accent"
@@ -325,7 +332,8 @@ function OrderList({ desk, fold = false }: { desk: ChartDesk; fold?: boolean }) 
                   <button type="button" className="rounded border border-line px-2 py-0.5 text-xs" onClick={() => act.mutate({ id: o.id, what: "cancel" })}>Cancel</button>
                 )}
                 {(o.status === "TRIGGERED" || o.status === "OPEN" || o.status === "EXITING") && desk.canExit && (
-                  <ConfirmButton label="Exit now" confirmLabel="Sell it now?" onConfirm={() => act.mutate({ id: o.id, what: "exit" })} />
+                  act.isPending ? <span className="text-xs text-muted">Exiting…</span>
+                    : <ConfirmButton label="Exit now" confirmLabel="Sell it now?" onConfirm={() => act.mutate({ id: o.id, what: "exit" })} />
                 )}
               </span>
             </div>
@@ -345,8 +353,8 @@ function OrderList({ desk, fold = false }: { desk: ChartDesk; fold?: boolean }) 
   return (
     <div className="space-y-2">
       {act.error && <p className="text-sm text-down">Not done: {reason(act.error)}</p>}
-      {outcome && (
-        <p className={`text-sm ${outcome.lines.some((l) => /^not |no manual|queued/i.test(l)) ? "text-down" : "text-muted"}`}>
+      {outcome && mine.some((o) => o.id === outcome.id && WORKING.includes(o.status)) && (
+        <p className={`text-sm ${outcome.lines.some((l) => SOLD_NOTHING.test(l)) ? "text-down" : "text-muted"}`}>
           #{outcome.id}: {outcome.lines.join(" · ")}</p>
       )}
       {fold ? <>

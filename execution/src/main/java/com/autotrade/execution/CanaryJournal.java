@@ -87,6 +87,10 @@ public final class CanaryJournal implements Canary.Journal {
         if (r.leftWorking()) {
             what.add("order " + r.tag() + " may still be working at the broker (or its outcome is unknown)");
         }
+        if (r.positionMoved() != 0) {
+            what.add("the position moved by " + r.positionMoved() + " during the run with no fill of " + r.tag()
+                    + " (its fill unseen, or another order of the account): NOT sold back, check it");
+        }
         return REASON + " " + String.join("; ", what) + " (" + r.instrumentKey() + "): check the broker and clear it by "
                 + "hand, then release the switch";
     }

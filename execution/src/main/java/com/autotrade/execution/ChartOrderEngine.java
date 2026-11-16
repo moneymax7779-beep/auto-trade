@@ -83,6 +83,10 @@ public final class ChartOrderEngine implements AutoCloseable {
     private final java.util.Set<Long> inFlight = ConcurrentHashMap.newKeySet();
     /** Order id → the time its exit may fire again (code review 15 Nov 2026: a failing exit was retried on every tick). */
     private final Map<Long, Instant> retryAfter = new ConcurrentHashMap<>();
+    /** An Exit now whose engine sale failed: when to try it again, and how many times it was tried (capped). */
+    private final Map<Long, Instant> traderExitRetry = new ConcurrentHashMap<>();
+    private final Map<Long, Integer> traderExitTries = new ConcurrentHashMap<>();
+    static final int TRADER_EXIT_TRIES = 20;
     private ExecutorService actions;
     private ScheduledExecutorService timer;
     private boolean inline;
@@ -313,6 +317,9 @@ public final class ChartOrderEngine implements AutoCloseable {
                 Long written = orders.intentByKey(key + ":" + o.accountId());
                 if (written == null) {
                     retryAfter.put(o.id(), at.plus(EXIT_RETRY));
+                    if ("TRADER_EXIT".equals(trigger)) {
+                        traderExitRetry.putIfAbsent(o.id(), at.plus(EXIT_RETRY));
+                    }
                     orders.transition(o.id(), version, "EXITING", "OPEN", "exit not written: " + why, Map.of());
                     orders.event(o.id(), "EXIT_NOT_WRITTEN", ACTOR, Double.isNaN(price) ? null : price,
                             Map.of("trigger", trigger, "reason", why));
@@ -382,6 +389,8 @@ public final class ChartOrderEngine implements AutoCloseable {
         next.values().forEach(list -> list.forEach(o -> live.add(o.id())));
         acted.keySet().retainAll(live);
         retryAfter.keySet().retainAll(live);
+        traderExitRetry.keySet().retainAll(live);
+        traderExitTries.keySet().retainAll(live);
         watched = Map.copyOf(next);
     }
 
@@ -476,10 +485,20 @@ public final class ChartOrderEngine implements AutoCloseable {
             // review 16 Nov 2026 (D9): the engine's own sale for an Exit now failed (not written, or refused): it went back
             // to OPEN and only its lines were watched, the trader's Exit forgotten. Tried again after the pause. Only after
             // a failed try of the engine's (its pause set): the web's Exit now runs its own sale
-            Instant retry = retryAfter.get(o.id());
+            // second review: its own schedule (a failed STOP left retryAfter set, and a later web Exit now was then sold
+            // by the engine too), the next try set before this one (a try that throws is tried again), capped
+            Instant retry = traderExitRetry.get(o.id());
             Instant now = clock.instant();
             if (retry != null && !now.isBefore(retry) && !inFlight.contains(o.id())) {
-                retryAfter.remove(o.id());
+                int tries = traderExitTries.merge(o.id(), 1, Integer::sum);
+                if (tries > TRADER_EXIT_TRIES) {
+                    traderExitRetry.remove(o.id());
+                    log.error("chart order #{}: Exit now not done after {} tries: its lines are watched, sell it by hand",
+                            o.id(), TRADER_EXIT_TRIES);
+                    orders.event(o.id(), "EXIT_GAVE_UP", ACTOR, null, Map.of("tries", TRADER_EXIT_TRIES));
+                    return;
+                }
+                traderExitRetry.put(o.id(), now.plus(EXIT_RETRY));
                 exit(o, "TRADER_EXIT", Double.NaN, now);
             }
             return;
@@ -509,6 +528,9 @@ public final class ChartOrderEngine implements AutoCloseable {
             String why = "exit not done: " + state + (intent.get("reject_reason") == null ? ""
                     : " (" + intent.get("reject_reason") + ")");
             retryAfter.put(o.id(), clock.instant().plus(EXIT_RETRY));
+            if ("TRADER_EXIT".equals(o.exitTrigger())) {
+                traderExitRetry.putIfAbsent(o.id(), clock.instant().plus(EXIT_RETRY));
+            }
             if (orders.transition(o.id(), o.version(), "EXITING", "OPEN", why, Map.of())) {
                 orders.event(o.id(), "EXIT_NOT_DONE", ACTOR, null, Map.of("reason", why));
             }
@@ -549,6 +571,11 @@ public final class ChartOrderEngine implements AutoCloseable {
     public void close() {
         if (timer != null) {
             timer.shutdownNow();
+        }
+        try {                                                     // second review: no heartbeat left for a closed engine
+            jdbc.update("delete from exec.chart_engine_beat where session_date = ?", java.sql.Date.valueOf(day));
+        } catch (RuntimeException e) {
+            log.warn("chart engine heartbeat not cleared: {}", e.getMessage());
         }
         if (actions != null) {
             actions.shutdown();

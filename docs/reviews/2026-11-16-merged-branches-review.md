@@ -51,3 +51,29 @@ PAPER-only enforcement of chart orders (arm, move, trigger); entry idempotency (
 Telegram sender checks, nonce, single-use confirm, 60 s expiry, restart handling, token never logged, off by default at
 three levels; egress fails closed; read/simulator configs can never place; canary authority (admin + typed phrase +
 per-account lock); order budgets never block exits; V38/V39 migrations don't conflict; per-broker square-off timing.
+
+## Second review (of the fixes above, 16 Nov 2026 night)
+
+Three fresh reviewers read the fix commits (8763c75…d5c2e2e) without the author's conclusions. What they found wrong in
+those fixes, and what was done:
+
+| # | Sev | Finding in the fixes | Fix | Test (fails on the earlier code) |
+|---|-----|----------------------|-----|------|
+| S1 | HIGH | D8 incomplete: a restart took max(update_id)+1 over every stored update, so after ids restarted lower every new command (/kill too) was confirmed unread for up to 6 days | V42 `telegram_poller.next_offset`, written with the bot at every poll; a restart goes on from it for the same bot. `REQUIRED_SCHEMA` 42 | `TelegramCommandsIT.afterAQuietWeekOrOnAnotherBot…` (now restarts after the low id, and on a third bot) |
+| S2 | HIGH | The canary's entry hold was an ACCOUNT switch: every automatic kill during the run (ORDER_UNKNOWN, Flatten, STOP_NOT_ARMED…) found it engaged and added nothing; the hold's release lifted it in silence | A hold's reason starts `HOLD: `; `engageAccount` never takes a hold for a kill, so a kill gets its own row; the hold is always released at the run's end | `CanaryIT.aKillEngagedWhileTheCanaryHoldsEntriesOutlivesTheHold` |
+| S3 | MED | A failed carry read was "nothing carried": in the D1 case the reconciler then cut our stop and alerted SPLIT_PRODUCT; every guarded sell re-read positions (5 s timeout) | A failed read throws RETRYABLE and is not read again for 30 s; the reconciler skips the split and net-short checks while unknown; the guard and the venue keep today's book; kept only from 09:15 | `BrokerVenueIT.aCarryThatCannotBeReadNeverCutsOurStops`, `DailyCarryTest` |
+| S4 | MED | The session's worker thread had no try/finally: a session ending by an exception left its chart engine (and its heartbeat) running beside the next; a failed start leaked the session timer | The worker catches the session's exception and runs every close; a failed start also stops the timer; a closed engine clears its heartbeat | `ChartOrdersIT.anOpenPositionsStop…` (heartbeat cleared); the worker part has no test |
+| S5 | MED | Moving an open position's stop was refused while the engine was down, keeping the old wider stop for the engine that starts again | Only a waiting order's move needs the engine; the UI warns that an open position's lines are unwatched (Exit now) and keeps them draggable | `ChartOrdersIT.anOpenPositionsStopIsMovedEvenWhileTheEngineIsDown…` |
+| S6 | MED | The Exit-now retry shared the STOP/TARGET retry time (a later web Exit now was sold by the engine too); it was removed before the try (a try that threw was never retried); no cap | Its own schedule, set by the engine's failed TRADER_EXIT only, set before each try, 20 tries then EXIT_GAVE_UP | existing `anExitNowWhoseSaleFailed…` |
+| S7 | MED | The canary's "position moved without our fill" was a FAIL but not a leftover (no kill switch, no alert) | `Report.positionMoved`; a leftover (never sold back) | `CanaryTest.anotherOrderFilling…` |
+| S8 | LOW–MED | A carried NRML short let us buy the contract but never exit it | The guard refuses a buy when the account is short of it across products | `LiveGuardTest.aShortCarriedOvernight…` |
+| S9 | LOW | A target exactly one buffer from the entry was accepted and could only be voided | Refused (more than one buffer), server and ticket | `ChartLinesTest` |
+| S10 | LOW | Refused-route kill and alert once per worker lifetime; unleased square-off counted non-OPEN rows and said "route refused" for any unleased account | Keyed by IST day; `status = 'OPEN'`, wording | — |
+| S11 | LOW | Telegram: commands on with a token added after the start (reader not running) raised nothing | Alarmed in market hours whatever the token | — |
+| U5–U10 | MED–LOW | UI: touch users could not drag lines at all (pan-y + the new cancel); several "nothing sold" exit lines showed grey; the LiveDay key let a draft survive into another replay session; stale Exit-now note; mismatched mode card; Arm with no kind shown; dragging armed lines with the engine down | A touch strip (touch-action none) along each draggable line; the y-axis held during a line drag; a wider "sold nothing" test; keyed by session; note dropped when the order leaves working, Exit now disabled while pending; the card closes on a mode change, "Not bought" in red; Arm needs a kind; armed lines not draggable with the engine down | tsc (no UI test harness) |
+
+Not fixed, reported: a Telegram update_id clash between two bots is still dropped as a repeat (needs a (bot, update_id)
+key; very unlikely); the web Exit now on a chart order still sells every manual position of its index
+(`ChartOrderController` → `manualExit`); a Kotak call racing the client's retire in the instant between the check and
+the send can still be UNKNOWN (looked up by tag); the signal-alongside thread on a failed session start.
+

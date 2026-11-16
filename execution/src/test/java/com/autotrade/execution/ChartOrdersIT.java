@@ -655,6 +655,31 @@ class ChartOrdersIT {
     }
 
     @Test
+    void anOpenPositionsStopIsMovedEvenWhileTheEngineIsDownAndAClosedEngineLeavesNoHeartbeat() {
+        // second review 16 Nov 2026: refusing it kept the old, wider stop for the engine that starts again (it reads its
+        // lines from the database); and a closed engine's heartbeat said "running" for 10 s more
+        Setup s = setup(TradeMode.PAPER);
+        try (ExecutionLoop loop = loop("worker-chart-17")) {
+            ChartOrders.Order o = orders().arm(s.account(), loop.manualGroup(s.account().id()),
+                    arm("CE", 23_170, 23_120, 23_260), "kc", DAY);
+            ChartOrderEngine engine = engine();
+            tick(engine, 23_173);
+            loop.tick(DAY, 20_000);
+            engine.sync();
+            assertThat(status(o.id())).isEqualTo("OPEN");
+            engine.close();
+            ChartOrders down = new ChartOrders(dataSource).withClock(MORNING);
+            assertThat(down.engine(DAY).lastSeen()).as("cleared on close").isNull();
+            ChartOrders.Order open = down.byId(o.id()).orElseThrow();
+            assertThat(down.move(s.account(), o.id(), open.version(), null, 23_125.0, null, "kc", DAY).stop())
+                    .as("a tighter stop, engine down").isEqualTo(23_125.0);
+            jdbc.update("update exec.position set status = 'CLOSED', quantity_open = 0, closed_at = now() where "
+                    + "broker_account_id = ?", s.account().id());              // the other tests' engines watch every order
+            engine().sync();
+        }
+    }
+
+    @Test
     void anOrderIsNotArmedAsAnotherKindThanTheTicketShowed() {
         // review 16 Nov 2026 (D7): the ticket said breakout from a quote seconds old; the index had run through the entry,
         // so the server armed a pullback (buy on the way back down): another trade than the one confirmed
