@@ -134,8 +134,16 @@ public final class KotakHttp implements AutoCloseable {
      * end (an order in flight is never cut off), no new call is taken, and its threads stop after. Never blocks.
      */
     public void retire() {
+        retired = true;
         client.shutdown();
     }
+
+    /**
+     * Retired (review 16 Nov 2026, D9): a call that starts after it is refused as not sent (RETRYABLE), never sent into
+     * the shut-down client, whose IOException an order call would have read as an outcome UNKNOWN (and a lookup by tag
+     * of an order that never left).
+     */
+    private volatile boolean retired;
 
     JsonNode get(String path, Call call) {
         return send(request(path).GET(), call);
@@ -214,6 +222,10 @@ public final class KotakHttp implements AutoCloseable {
     private JsonNode send(HttpRequest.Builder builder, Call call) {
         HttpRequest request = builder.build();
         String what = request.method() + " " + request.uri().getPath();
+        if (retired) {
+            throw new KotakException(Kind.RETRYABLE, what + ": not sent, this session's client was replaced by a newer "
+                    + "login's", 0, 0, false, null);
+        }
         HttpResponse<String> response;
         try {
             response = client.send(request, HttpResponse.BodyHandlers.ofString());

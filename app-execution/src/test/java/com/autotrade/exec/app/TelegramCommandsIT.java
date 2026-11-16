@@ -56,6 +56,9 @@ class TelegramCommandsIT {
     private static final List<Map.Entry<String, JsonNode>> calls = new ArrayList<>();
     private static final Deque<int[]> pollStatus = new ArrayDeque<>();
     private static final Deque<String> pollBodies = new ArrayDeque<>();
+    /** Each getUpdates' query string, in order. */
+    private static final List<String> pollQueries = new java.util.concurrent.CopyOnWriteArrayList<>();
+    private static Path botFile;
     private static volatile String webhook = "";
     private static long aliceTenant, aliceAccount, bobAccount, position, nextMessage = 500;
     private static TelegramCommands commands;
@@ -115,6 +118,7 @@ class TelegramCommandsIT {
             }
             switch (method) {
                 case "getUpdates" -> {
+                    pollQueries.add(String.valueOf(exchange.getRequestURI().getQuery()));
                     int[] s = pollStatus.poll();
                     status = s == null ? 200 : s[0];
                     String b = pollBodies.poll();
@@ -132,6 +136,7 @@ class TelegramCommandsIT {
         stub.start();
         Path dir = Files.createTempDirectory("tg");
         Path file = dir.resolve("bot.env");
+        botFile = file;
         Files.writeString(file, "TELEGRAM_BOT_TOKEN=T0K\nTELEGRAM_CHAT_ID=42\n");
         String api = "http://127.0.0.1:" + stub.getAddress().getPort();
         KiteLoginProperties kite = new KiteLoginProperties(null, null, null, null, null, file.toString());
@@ -342,6 +347,57 @@ class TelegramCommandsIT {
         assertThat(jdbc.queryForObject("select outcome from exec.telegram_update where update_id = ?", String.class, u))
                 .isEqualTo("START");
         assertThat(jdbc.queryForObject("select last_ok_at is not null from exec.telegram_poller", Boolean.class)).isTrue();
+    }
+
+    @Test
+    void afterAQuietWeekOrOnAnotherBotTheReaderReadsWithoutItsOffset() throws Exception {
+        // review 16 Nov 2026 (D8): Telegram picks the next update_id at random after a week without updates; one below our
+        // offset was confirmed without being returned (a /kill lost, the poller looking healthy). The same with another bot
+        Path saved = Files.createTempFile("bot", ".env");
+        Files.copy(botFile, saved, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+        try {
+            Files.writeString(botFile, "TELEGRAM_BOT_TOKEN=4242:AAA\nTELEGRAM_CHAT_ID=42\n");
+            gateway.prepare();
+            jdbc.update("update exec.telegram_update set received_at = now() - interval '7 days'");
+            long high = jdbc.queryForObject("select coalesce(max(update_id), 0) + 50 from exec.telegram_update", Long.class);
+            jdbc.update("insert into exec.telegram_update (update_id, received_at, kind, processed_at, outcome) values (?, "
+                    + "now() - interval '7 days', 'OTHER', now(), 'IT')", high);
+            gateway.prepare();                                            // offset high + 1, the newest 7 days old
+            pollQueries.clear();
+            ObjectNode low = message(STRANGER, STRANGER, "private", "/start LOWID234", 0);
+            low.put("update_id", 7);                                      // the random restart, below our offset
+            pollBodies.add("[" + low + "]");
+            assertThat(gateway.pollOnce(0)).isTrue();
+            assertThat(pollQueries.getFirst()).as("no offset after the quiet week").doesNotContain("offset=");
+            assertThat(jdbc.queryForObject("select outcome from exec.telegram_update where update_id = 7", String.class))
+                    .isEqualTo("START");
+            assertThat(gateway.pollOnce(0)).isTrue();
+            assertThat(pollQueries.get(1)).as("then from the new id").contains("offset=8&");
+
+            Files.writeString(botFile, "TELEGRAM_BOT_TOKEN=5353:BBB\nTELEGRAM_CHAT_ID=42\n");
+            assertThat(gateway.pollOnce(0)).isTrue();
+            assertThat(pollQueries.get(2)).as("another bot: its own first update").doesNotContain("offset=");
+            assertThat(jdbc.queryForObject("select bot_id from exec.telegram_poller", Long.class)).isEqualTo(5353L);
+        } finally {
+            Files.copy(saved, botFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            jdbc.update("update exec.telegram_update set received_at = now() where received_at < now() - interval '1 day'");
+            jdbc.update("delete from exec.telegram_update where update_id = 7");
+            gateway.prepare();
+        }
+    }
+
+    @Test
+    void commandsOnWithNoTokenRaiseTheAlarm() {
+        // review 16 Nov 2026 (D9): only a log line, so commands looked on while nothing read them
+        TelegramCommandProperties on = new TelegramCommandProperties(true, null, 60, 60, false);
+        TelegramCommands noBot = new TelegramCommands(dataSource, new Access(dataSource), null, new TelegramBot(() -> null,
+                "http://127.0.0.1:" + stub.getAddress().getPort()), on, Runnable::run);
+        TelegramGateway reader = new TelegramGateway(dataSource, noBot, on, notifier,
+                new TradingDays("../config/exchange/nse-bse-sessions.v3.yaml"),
+                new ExecutionProperties(null, "*", 0, null, 0, "it", null));
+        reader.start();
+        assertThat(jdbc.queryForList("select detail ->> 'kind' from exec.audit_log where action = 'TELEGRAM_POLL_ALARM'",
+                String.class)).contains("NO_TOKEN");
     }
 
     @Test

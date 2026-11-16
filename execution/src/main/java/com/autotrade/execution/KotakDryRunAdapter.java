@@ -398,6 +398,9 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
                 KotakConfig config = orders ? KotakConfig.live(key, uri, from) : KotakConfig.session(key, uri, from);
                 KotakHttp old = http;
                 http = new KotakHttp(config);
+                // review 16 Nov 2026 (D9): the session goes on before the gateway takes the client, never after (a call in
+                // between went out without a token or sid)
+                http.session(access.accessToken(), sid);
                 http.tap((call, body) -> {
                     java.util.function.BiConsumer<String, String> t = tap;
                     if (t != null) {

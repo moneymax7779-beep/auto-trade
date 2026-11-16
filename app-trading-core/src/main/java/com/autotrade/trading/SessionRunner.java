@@ -682,104 +682,114 @@ class SessionRunner implements ApplicationRunner {
             trading.indexTap(tick -> all.forEach(tap -> tap.accept(tick)));
         }
         com.autotrade.execution.ChartOrderEngine chartOrders = chartEngine;
-        if (signalSource) {
-            com.autotrade.account.AccountStore accounts = new com.autotrade.account.AccountStore(target);
-            long tenant = accounts.ensureTenant(signal.tenantName());
-            long owner = accounts.ensureUser(signal.ownerSubjectOr(), "owner");
-            accounts.ensureMembership(tenant, owner, "OWNER");
-            long signalAccount = accounts.ensureSignalSourceAccount(tenant, owner, account, baseRisk.startingCapital(),
-                    session, signal.riskFileOr());
-            long copyGroup = accounts.ensureCopyGroup(tenant, signal.copyGroupName(), signalAccount);
-            trading.publishSignals(new SignalRecorder(new com.autotrade.execution.SignalDecisionStore(target), copyGroup,
-                    baseRisk.startingCapital(), strategies.stream().map(StrategyFactory::id).toList()));
-            log.info("signal source: account {} (risk {}), copy group {} (id {})", account, signal.riskFileOr(),
-                    signal.copyGroupName(), copyGroup);
-        }
-        if (alongside) {
-            startSignalAlongside(signal, signalFeed, session, replay, t, features, history, strategies, costsFile,
-                    instruments, hashes);
-        }
-        current = trading;
+        // review 16 Nov 2026 (D9): the engine was started before the steps below; one that threw (the signal source, the
+        // snapshot run) left its sync thread running, and the retry started a second engine beside it
+        boolean workerStarted = false;
+        try {
+            if (signalSource) {
+                com.autotrade.account.AccountStore accounts = new com.autotrade.account.AccountStore(target);
+                long tenant = accounts.ensureTenant(signal.tenantName());
+                long owner = accounts.ensureUser(signal.ownerSubjectOr(), "owner");
+                accounts.ensureMembership(tenant, owner, "OWNER");
+                long signalAccount = accounts.ensureSignalSourceAccount(tenant, owner, account, baseRisk.startingCapital(),
+                        session, signal.riskFileOr());
+                long copyGroup = accounts.ensureCopyGroup(tenant, signal.copyGroupName(), signalAccount);
+                trading.publishSignals(new SignalRecorder(new com.autotrade.execution.SignalDecisionStore(target), copyGroup,
+                        baseRisk.startingCapital(), strategies.stream().map(StrategyFactory::id).toList()));
+                log.info("signal source: account {} (risk {}), copy group {} (id {})", account, signal.riskFileOr(),
+                        signal.copyGroupName(), copyGroup);
+            }
+            if (alongside) {
+                startSignalAlongside(signal, signalFeed, session, replay, t, features, history, strategies, costsFile,
+                        instruments, hashes);
+            }
+            current = trading;
 
-        ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor();
-        if (!replay) {
-            timer.scheduleAtFixedRate(safe(trading::heartbeat), 1, 1, TimeUnit.SECONDS);
-            timer.scheduleAtFixedRate(safe(() -> {
-                LocalTime now = ZonedDateTime.now(MarketTime.IST).toLocalTime();
-                if (!now.isBefore(features.marketOpen()) && now.isBefore(features.derivativesClose().plusMinutes(1))) {
-                    liveReference.poll();
-                }
-            }), 5, 30, TimeUnit.SECONDS);
-            LocalTime stopAfter = LocalTime.parse(t.stopAfter());
-            if (upstoxFeed != null) {
-                UpstoxFeed upstox = upstoxFeed;
-                // A silent Upstox feed in market hours fails the session; the scheduler restarts it on the tail.
+            ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor();
+            if (!replay) {
+                timer.scheduleAtFixedRate(safe(trading::heartbeat), 1, 1, TimeUnit.SECONDS);
                 timer.scheduleAtFixedRate(safe(() -> {
                     LocalTime now = ZonedDateTime.now(MarketTime.IST).toLocalTime();
-                    Instant last = upstox.lastEventTime();
-                    boolean marketHours = now.isAfter(LocalTime.of(9, 16)) && now.isBefore(LocalTime.of(15, 39));
-                    if (marketHours && (last == null || Duration.between(last, Instant.now()).toSeconds() > 60)) {
-                        upstoxFailed.add(session);
-                        upstox.fail("no market data for over 60 s (" + upstox.connection() + ")");
+                    if (!now.isBefore(features.marketOpen()) && now.isBefore(features.derivativesClose().plusMinutes(1))) {
+                        liveReference.poll();
                     }
-                }), 30, 15, TimeUnit.SECONDS);
-            }
-            timer.scheduleAtFixedRate(safe(() -> {
-                ZonedDateTime now = ZonedDateTime.now(MarketTime.IST);
-                if (!now.toLocalTime().isBefore(stopAfter) || now.toLocalDate().isAfter(session)) {
-                    trading.stop();
+                }), 5, 30, TimeUnit.SECONDS);
+                LocalTime stopAfter = LocalTime.parse(t.stopAfter());
+                if (upstoxFeed != null) {
+                    UpstoxFeed upstox = upstoxFeed;
+                    // A silent Upstox feed in market hours fails the session; the scheduler restarts it on the tail.
+                    timer.scheduleAtFixedRate(safe(() -> {
+                        LocalTime now = ZonedDateTime.now(MarketTime.IST).toLocalTime();
+                        Instant last = upstox.lastEventTime();
+                        boolean marketHours = now.isAfter(LocalTime.of(9, 16)) && now.isBefore(LocalTime.of(15, 39));
+                        if (marketHours && (last == null || Duration.between(last, Instant.now()).toSeconds() > 60)) {
+                            upstoxFailed.add(session);
+                            upstox.fail("no market data for over 60 s (" + upstox.connection() + ")");
+                        }
+                    }), 30, 15, TimeUnit.SECONDS);
                 }
-            }), 10, 10, TimeUnit.SECONDS);
-        }
-        boolean upstoxFeedUsed = upstoxFeed != null;
-        LiveCapture recorder = capture;
-        if (recorder != null) {
-            timer.scheduleAtFixedRate(safe(recorder::flush), 5, 5, TimeUnit.SECONDS);
-        }
-        Runs runs = new Runs(target);
-        Long snapshotRun = null;
-        SnapshotWriter snapshots = null;
-        if (!replay || t.storeReplaySnapshots()) {
-            // Live feature snapshots: the decision evidence, and IV history for later sessions. A replay's (opt-in) go
-            // under their own run kind, which nothing reading LIVE_FEATURES (IV history, chart levels) ever sees.
-            snapshotRun = runs.start(replay ? "REPLAY_FEATURES" : "LIVE_FEATURES", CodeVersion.current(), feed.name(), List.of(session),
-                    t.underlyings(), new tools.jackson.databind.json.JsonMapper().writeValueAsString(hashes));
-            snapshots = new SnapshotWriter(target, snapshotRun);
-            trading.recordSnapshots(snapshots);
-            replayControl.onPause(replay ? safe(snapshots::flush) : null);
-            timer.scheduleAtFixedRate(safe(snapshots::flush), 60, 60, TimeUnit.SECONDS);
-        }
-        SnapshotWriter snapshotWriter = snapshots;
-        Long snapshotRunId = snapshotRun;
-        Thread worker = Thread.ofPlatform().name("trading-session-" + session).start(() -> {
-            Map<String, Object> summary = trading.run();
-            context.getBeanProvider(LiveTicks.class).ifAvailable(LiveTicks::clear);   // its prices are history now
-            if (chartOrders != null) {
+                timer.scheduleAtFixedRate(safe(() -> {
+                    ZonedDateTime now = ZonedDateTime.now(MarketTime.IST);
+                    if (!now.toLocalTime().isBefore(stopAfter) || now.toLocalDate().isAfter(session)) {
+                        trading.stop();
+                    }
+                }), 10, 10, TimeUnit.SECONDS);
+            }
+            boolean upstoxFeedUsed = upstoxFeed != null;
+            LiveCapture recorder = capture;
+            if (recorder != null) {
+                timer.scheduleAtFixedRate(safe(recorder::flush), 5, 5, TimeUnit.SECONDS);
+            }
+            Runs runs = new Runs(target);
+            Long snapshotRun = null;
+            SnapshotWriter snapshots = null;
+            if (!replay || t.storeReplaySnapshots()) {
+                // Live feature snapshots: the decision evidence, and IV history for later sessions. A replay's (opt-in) go
+                // under their own run kind, which nothing reading LIVE_FEATURES (IV history, chart levels) ever sees.
+                snapshotRun = runs.start(replay ? "REPLAY_FEATURES" : "LIVE_FEATURES", CodeVersion.current(), feed.name(), List.of(session),
+                        t.underlyings(), new tools.jackson.databind.json.JsonMapper().writeValueAsString(hashes));
+                snapshots = new SnapshotWriter(target, snapshotRun);
+                trading.recordSnapshots(snapshots);
+                replayControl.onPause(replay ? safe(snapshots::flush) : null);
+                timer.scheduleAtFixedRate(safe(snapshots::flush), 60, 60, TimeUnit.SECONDS);
+            }
+            SnapshotWriter snapshotWriter = snapshots;
+            Long snapshotRunId = snapshotRun;
+            Thread worker = Thread.ofPlatform().name("trading-session-" + session).start(() -> {
+                Map<String, Object> summary = trading.run();
+                context.getBeanProvider(LiveTicks.class).ifAvailable(LiveTicks::clear);   // its prices are history now
+                if (chartOrders != null) {
+                    chartOrders.close();
+                }
+                if (recorder != null) {
+                    recorder.close();
+                }
+                if (snapshotWriter != null) {
+                    try {
+                        snapshotWriter.close();
+                        runs.finish(snapshotRunId, "{\"snapshots\": " + snapshotWriter.written() + "}");
+                    } catch (Exception e) {
+                        log.warn("live snapshot run not finalised: {}", e.getMessage());
+                    }
+                }
+                if (upstoxFeedUsed && "FAILED".equals(trading.status().get("status"))) {
+                    upstoxFailed.add(session);
+                }
+                timer.shutdownNow();
+                if (source != null) {
+                        source.close();                      // none for a bar replay
+                    }
+                log.info("session summary: {}", summary);
+            });
+            Running started = new Running(session, trading, worker, timer);
+            running = started;
+            workerStarted = true;
+            return started;
+        } finally {
+            if (!workerStarted && chartOrders != null) {
                 chartOrders.close();
             }
-            if (recorder != null) {
-                recorder.close();
-            }
-            if (snapshotWriter != null) {
-                try {
-                    snapshotWriter.close();
-                    runs.finish(snapshotRunId, "{\"snapshots\": " + snapshotWriter.written() + "}");
-                } catch (Exception e) {
-                    log.warn("live snapshot run not finalised: {}", e.getMessage());
-                }
-            }
-            if (upstoxFeedUsed && "FAILED".equals(trading.status().get("status"))) {
-                upstoxFailed.add(session);
-            }
-            timer.shutdownNow();
-            if (source != null) {
-                    source.close();                      // none for a bar replay
-                }
-            log.info("session summary: {}", summary);
-        });
-        Running started = new Running(session, trading, worker, timer);
-        running = started;
-        return started;
+        }
     }
 
     /**

@@ -554,6 +554,21 @@ public final class ExecutionLoop implements AutoCloseable {
         }                                                           // close() waits for every account
         java.util.Set<com.autotrade.account.BrokerType> open = java.util.EnumSet.noneOf(
                 com.autotrade.account.BrokerType.class);
+        // review 16 Nov 2026 (D9): a LIVE account holding positions that no worker leases (its route was refused: no
+        // turn, so no lease) was skipped in silence, and its broker dropped from the retries; now it is said at once (the
+        // EOD_SQUARE_OFF alert, once a day) and its broker stays pending, so a route that comes back is squared off
+        for (BrokerAccount stranded : unleasedLive(brokers)) {
+            int held = openPositions(stranded.id());
+            String line = "NOT squared off: no worker trades this account now (its LIVE route is refused); " + held
+                    + " position(s) open: close them in the broker's app";
+            lines.add(stranded.displayName() + ": " + line);
+            open.add(stranded.brokerType());
+            if (strandedSaid.add(day + ":" + stranded.id())) {
+                new KillSwitches(dataSource).audit(stranded, workerId, "EOD_SQUARE_OFF", Map.of("positions",
+                        List.of(line)));
+                log.error("account {} ({}): {}", stranded.id(), stranded.displayName(), line);
+            }
+        }
         for (Map.Entry<Long, java.util.concurrent.Future<List<String>>> run : runs.entrySet()) {
             try {
                 lines.addAll(run.getValue().get());
@@ -576,6 +591,29 @@ public final class ExecutionLoop implements AutoCloseable {
         }
         return lines;
     }
+
+    /**
+     * LIVE accounts of {@code brokers} holding open positions that neither this worker nor any other leases now (no lease
+     * heartbeat for {@link #LEASE_SILENT}): nothing would square them off.
+     */
+    private List<BrokerAccount> unleasedLive(java.util.Set<com.autotrade.account.BrokerType> brokers) {
+        List<BrokerAccount> out = new ArrayList<>();
+        for (Long id : jdbc.queryForList("select a.id from acct.broker_account a where a.trade_mode = 'LIVE' and exists "
+                + "(select 1 from exec.position p where p.broker_account_id = a.id and p.status <> 'CLOSED' and "
+                + "p.quantity_open > 0) and not exists (select 1 from exec.account_lease l where l.broker_account_id = a.id "
+                + "and l.heartbeat_at > now() - make_interval(secs => ?)) order by a.id", Long.class,
+                (double) LEASE_SILENT.toSeconds())) {
+            if (!leases.containsKey(id)) {
+                accounts.byId(id).filter(a -> brokers.contains(a.brokerType())).ifPresent(out::add);
+            }
+        }
+        return out;
+    }
+
+    /** How long another worker's lease may go without a heartbeat before its accounts count as nobody's. */
+    static final java.time.Duration LEASE_SILENT = java.time.Duration.ofMinutes(2);
+    /** The unleased LIVE accounts said at the square-off, once a day each. */
+    private final java.util.Set<String> strandedSaid = ConcurrentHashMap.newKeySet();
 
     /**
      * Exit one open position now (the trader's per-position Exit, 7 Nov 2026): like {@link #flatten} for that position

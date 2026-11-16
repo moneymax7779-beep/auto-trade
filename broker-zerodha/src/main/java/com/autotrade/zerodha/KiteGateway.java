@@ -297,6 +297,9 @@ public final class KiteGateway implements BrokerConnection {
         for (JsonNode o : readGet("/orders")) {
             orders.add(order(o));
         }
+        // review 16 Nov 2026 (D9): the day's budget is in memory, so a restart started its count from 0; every read of
+        // today's book (the LIVE guard reads it before each place) raises it to what Kite has seen, with no call added
+        budget.atLeast(orders.size());
         return orders;
     }
 

@@ -455,6 +455,39 @@ class ExecutionLoopIT {
     }
 
     @Test
+    void aLiveAccountThatNoWorkerTradesIsSaidAtTheSquareOffNeverSkipped() throws Exception {
+        // review 16 Nov 2026 (D9): the square-off walked this worker's leases only; a LIVE account whose route was refused
+        // takes no lease, so its open positions were skipped in silence and its broker dropped from the retries
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
+        Kite k = enteredKiteFollower("zed", today);
+        QuoteSource none = (d, u, t, at) -> Double.NaN;
+        try (ExecutionLoop loop = new ExecutionLoop(dataSource, "t-zed", "SET-zed", "worker-I", k.costs(), none, 1e9)) {
+            loop.tick(today, 20_000);
+            assertThat(positionState(k.follower())).isEqualTo("OPEN");
+        }
+        // now LIVE, and no worker trades it (a refused route takes no lease)
+        jdbc.update("update acct.broker_account set trade_mode = 'LIVE' where id = ?", k.follower());
+        jdbc.update("delete from exec.account_lease where broker_account_id = ?", k.follower());
+        String name = jdbc.queryForObject("select display_name from acct.broker_account where id = ?", String.class,
+                k.follower());
+        try {
+            try (ExecutionLoop other = new ExecutionLoop(dataSource, "t-zed", "SET-nobody", "worker-J", k.costs(), none,
+                    1e9)) {
+                assertThat(other.squareOff(today)).anySatisfy(line -> assertThat(line)
+                        .startsWith(name + ": NOT squared off").contains("1 position(s) open"));
+                other.squareOff(today);
+                assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? and action = "
+                        + "'EOD_SQUARE_OFF'", Integer.class, k.follower())).as("said once a day").isEqualTo(1);
+            }
+        } finally {
+            jdbc.update("update exec.position set status = 'CLOSED', quantity_open = 0, closed_at = now() where "
+                    + "broker_account_id = ?", k.follower());
+            jdbc.update("update acct.broker_account set trade_mode = 'DRY_RUN', enabled = false where id = ?",
+                    k.follower());                                        // out of the other tests' loops
+        }
+    }
+
+    @Test
     void theEndOfDaySquareOffIsTriedAgainUntilNothingIsOpen() throws Exception {
         // review 8 Nov 2026: the 15:20 square-off was one attempt; a stop cancel that failed left the position open
         // overnight with only a log line

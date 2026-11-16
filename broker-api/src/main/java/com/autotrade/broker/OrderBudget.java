@@ -112,6 +112,16 @@ public final class OrderBudget {
         }
     }
 
+    /**
+     * Raises today's count to at least {@code alreadyToday} (review 16 Nov 2026, D9): the budget lives in memory, so a
+     * restarted worker started the day's count from 0 below what the broker had already seen; a gateway raises it from
+     * today's order book before its first order of the day.
+     */
+    public synchronized void atLeast(int alreadyToday) {
+        rollDay();
+        today = Math.max(today, alreadyToday);
+    }
+
     /** Calls charged today (IST). */
     public synchronized int today() {
         rollDay();
