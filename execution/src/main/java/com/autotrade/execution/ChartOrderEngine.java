@@ -208,7 +208,7 @@ public final class ChartOrderEngine implements AutoCloseable {
     }
 
     /** A chart order's entry decision key; its intent's key is this + ":" + the account. */
-    static String enterKey(long orderId) {
+    public static String enterKey(long orderId) {
         return "CHART:" + orderId + ":ENTER";
     }
 

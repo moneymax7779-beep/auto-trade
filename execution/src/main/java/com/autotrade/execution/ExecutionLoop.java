@@ -737,6 +737,15 @@ public final class ExecutionLoop implements AutoCloseable {
      * turn first, so what filled of it is what is sold), audited POSITION_EXIT. The account keeps trading.
      */
     public List<String> manualExit(long accountId, String underlying, String actor, LocalDate day) throws Exception {
+        return manualExit(accountId, underlying, actor, day, null);
+    }
+
+    /**
+     * As {@link #manualExit}, of the one buy {@code entryIntent} and its position when given: a chart order's Exit now
+     * (second review 16 Nov 2026: it ran the index's whole manual EXIT, so a panel buy or position of the index went too).
+     */
+    public List<String> manualExit(long accountId, String underlying, String actor, LocalDate day, Long entryIntent)
+            throws Exception {
         BrokerAccount account = accounts.byId(accountId).orElseThrow(() -> new IllegalArgumentException("no account "
                 + accountId));
         if (account.role() == com.autotrade.account.AccountRole.SIGNAL_SOURCE) {
@@ -747,8 +756,8 @@ public final class ExecutionLoop implements AutoCloseable {
         try {
             return onLane(account, (epoch, borrowed) -> {
                 List<String> lines = new ArrayList<>();
-                lines.addAll(manual().cancelNotRun(account, u, actor));
-                List<Long> open = manual().openPositions(account.id(), u);
+                lines.addAll(manual().cancelNotRun(account, u, actor, entryIntent));
+                List<Long> open = manual().openPositions(account.id(), u, entryIntent);
                 if (open.isEmpty()) {
                     // code review 9 Nov 2026: no broker route is opened for nothing to sell (an idle workspace account
                     // has none by design, and a route that cannot open was a 500 instead of this answer)

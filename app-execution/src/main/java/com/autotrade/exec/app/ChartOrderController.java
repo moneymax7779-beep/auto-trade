@@ -137,7 +137,12 @@ class ChartOrderController {
                 return out;
             }
             ChartOrders.Order o = orders.byId(orderId).orElseThrow();
-            List<String> result = service.manualExit(a.id(), o.underlying(), user.subject());
+            // second review 16 Nov 2026: its own buy and position only (the index's whole manual EXIT sold a panel buy too)
+            Long entry = o.entryIntentId() != null ? o.entryIntentId()
+                    : orders.intentByKey(com.autotrade.execution.ChartOrderEngine.enterKey(o.id()) + ":" + a.id());
+            List<String> result = entry == null
+                    ? List.of("the buy is being written: it is sold as soon as it fills (Exit now is marked)")
+                    : service.manualExit(a.id(), o.underlying(), user.subject(), entry);
             Map<String, Object> out = ChartOrders.view(orders.exitRan(a, orderId, user.subject(), result));
             out.put("result", result);
             return out;

@@ -32,7 +32,7 @@ class ExecutionService implements DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(ExecutionService.class);
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
-    static final int REQUIRED_SCHEMA = 42;          // V42: Telegram reader's offset (V41: its bot, V40: chart heartbeat)
+    static final int REQUIRED_SCHEMA = 43;          // V43: Telegram updates per bot (V42: reader's offset, V41: its bot)
 
     private final DataSource dataSource;
     private final ExecutionProperties properties;
@@ -371,6 +371,11 @@ class ExecutionService implements DisposableBean {
 
     List<String> manualExit(long accountId, String underlying, String actor) throws Exception {
         return started().manualExit(accountId, underlying, actor, day());
+    }
+
+    /** A chart order's Exit now: its own buy and position only. */
+    List<String> manualExit(long accountId, String underlying, String actor, Long entryIntent) throws Exception {
+        return started().manualExit(accountId, underlying, actor, day(), entryIntent);
     }
 
     List<java.util.Map<String, Object>> manualToday(long accountId) {

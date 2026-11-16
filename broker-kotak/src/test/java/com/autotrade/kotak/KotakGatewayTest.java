@@ -68,6 +68,21 @@ class KotakGatewayTest {
     }
 
     @Test
+    void aRetireBetweenACallsCheckAndItsSendNeverShutsTheClientUnderIt() {
+        // third review 16 Nov 2026: the retire landed after the call's check, shut the client, and the place came back as
+        // an order of unknown outcome
+        http.beforeSend = what -> {
+            if (what.contains("/place")) {                                // the order call itself, not its book read
+                http.beforeSend = w -> { };
+                http.retire();                                            // exactly in the window
+            }
+        };
+        gateway.place(buy("F2E1", 65, 90.0));                             // sent on the client still open
+        assertThat(sim.orderCount()).isEqualTo(1);
+        assertThatThrownBy(() -> gateway.cancel("F2E1")).hasMessageContaining("not sent");   // retired after it
+    }
+
+    @Test
     void aCallOnARetiredClientIsNotSentNeverUnknown() {
         // review 16 Nov 2026 (D9): a caller holding the old client when a new login swapped it got an IOException from the
         // shut-down client, read as an order of unknown outcome

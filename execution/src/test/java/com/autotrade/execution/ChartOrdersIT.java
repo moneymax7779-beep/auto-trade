@@ -680,6 +680,28 @@ class ChartOrdersIT {
     }
 
     @Test
+    void aChartOrdersExitNowSellsItsOwnPositionOnly() throws Exception {
+        // second review 16 Nov 2026: the web's Exit now on a chart order ran the index's whole manual EXIT
+        Setup s = setup(TradeMode.PAPER);
+        try (ExecutionLoop loop = loop("worker-chart-18")) {
+            ChartOrders.Order o = orders().arm(s.account(), loop.manualGroup(s.account().id()),
+                    arm("CE", 23_170, 23_120, 23_260), "kc", DAY);
+            ChartOrderEngine engine = engine();
+            tick(engine, 23_173);
+            loop.tick(DAY, 20_000);
+            engine.sync();
+            long entry = orders().byId(o.id()).orElseThrow().entryIntentId();
+            assertThat(loop.manualExit(s.account().id(), "NIFTY", "kc", DAY, entry + 1_000_000))
+                    .as("another buy's exit").singleElement().asString().startsWith("no manual NIFTY position");
+            assertThat(position(s.account()).get("status")).isEqualTo("OPEN");
+            assertThat(loop.manualExit(s.account().id(), "NIFTY", "kc", DAY, entry)).isNotEmpty();
+            loop.tick(DAY, 20_000);
+            engine.sync();
+            assertThat(position(s.account()).get("status")).isEqualTo("CLOSED");
+        }
+    }
+
+    @Test
     void anOrderIsNotArmedAsAnotherKindThanTheTicketShowed() {
         // review 16 Nov 2026 (D7): the ticket said breakout from a quote seconds old; the index had run through the entry,
         // so the server armed a pullback (buy on the way back down): another trade than the one confirmed

@@ -72,8 +72,14 @@ those fixes, and what was done:
 | S11 | LOW | Telegram: commands on with a token added after the start (reader not running) raised nothing | Alarmed in market hours whatever the token | — |
 | U5–U10 | MED–LOW | UI: touch users could not drag lines at all (pan-y + the new cancel); several "nothing sold" exit lines showed grey; the LiveDay key let a draft survive into another replay session; stale Exit-now note; mismatched mode card; Arm with no kind shown; dragging armed lines with the engine down | A touch strip (touch-action none) along each draggable line; the y-axis held during a line drag; a wider "sold nothing" test; keyed by session; note dropped when the order leaves working, Exit now disabled while pending; the card closes on a mode change, "Not bought" in red; Arm needs a kind; armed lines not draggable with the engine down | tsc (no UI test harness) |
 
-Not fixed, reported: a Telegram update_id clash between two bots is still dropped as a repeat (needs a (bot, update_id)
-key; very unlikely); the web Exit now on a chart order still sells every manual position of its index
-(`ChartOrderController` → `manualExit`); a Kotak call racing the client's retire in the instant between the check and
-the send can still be UNKNOWN (looked up by tag); the signal-alongside thread on a failed session start.
+### The remaining smaller items (fixed after the second review)
+
+| # | Finding | Fix | Test (fails on the earlier code) |
+|---|---------|-----|------|
+| R1 | A Telegram update whose id another bot had used was dropped as a repeat (update_id is unique per bot only) | V43: updates and the commands they start are keyed by (bot_id, update_id); earlier rows bot 0. `REQUIRED_SCHEMA` 43 | `TelegramCommandsIT.afterAQuietWeekOrOnAnotherBot…` (the new bot's id 7 handled) |
+| R2 | The web's Exit now on a chart order ran the index's whole manual EXIT (a panel buy or position of the index went too) | `manualExit(…, entryIntent)`: the order's own buy (cancelled if not run) and its position only; a buy not yet written is left to the engine (Exit now is marked) | `ChartOrdersIT.aChartOrdersExitNowSellsItsOwnPositionOnly` |
+| R3 | A Kotak call between its "retired?" check and its send could find the client shut under it (UNKNOWN) | In-flight count: either the call sees it retired (not sent) or the retire sees the call and the last call out shuts the client | `KotakGatewayTest.aRetireBetweenACallsCheckAndItsSendNeverShutsTheClientUnderIt` |
+| R4 | A failed session start left the signal source alongside reading a feed nothing would fill | Its feed is ended, so its run returns and its own finally stops its timer | none (needs a whole trading session) |
+
+Still open from the whole review: D10 (egress needs host networking, infra).
 
