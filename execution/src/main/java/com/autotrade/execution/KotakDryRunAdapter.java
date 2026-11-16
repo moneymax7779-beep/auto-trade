@@ -525,8 +525,11 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
             if (!orders) {
                 throw refused("onUpdate");
             }
-            listeners.add(listener);
+            // under the lock that builds the gateway: added outside it, a gateway built in between (the warm-up thread's
+            // first session call) was handed the listener from the list and then again here, so every report reached it
+            // twice (MultiBrokerLiveIT's Kotak race, 16 Nov 2026)
             synchronized (this) {
+                listeners.add(listener);
                 if (gateway != null) {
                     gateway.onUpdate(listener);
                 }

@@ -224,6 +224,63 @@ class MultiBrokerLiveIT {
         }
     }
 
+    /**
+     * The race behind the Kotak case's 1-in-3 failure (16 Nov 2026): {@link #live} starts the scrip-master warm-up on its
+     * own thread, and that thread's first session call builds the gateway and hands it every listener added so far. A
+     * listener added at that moment (put in the list, then the gateway checked under the lock) was handed to the gateway
+     * twice, so every order report reached it twice: the same FILLED, with its fill quantity, delivered two times. Here the
+     * warm-up is held inside the session call while {@code onUpdate} runs, every time.
+     */
+    @Test
+    void kotakListenerAddedWhileTheWarmUpBuildsTheGatewayHearsEachReportOnce() throws Exception {
+        BrokerAccount account = liveAccount(BrokerType.KOTAK_NEO, "UCC3");
+        try (KotakSimulator kotak = new KotakSimulator(0, "member-key", 1_500)) {
+            kotak.list(new KotakSimulator.Listing(47168, "nse_fo", "NIFTY26X1023100PE", "NIFTY", DAY.plusDays(2), 23100,
+                    "PE", LOT, 0.05));
+            kotak.quote(KEY, 99.5, 6500, 100.0, 6500, 99.8);
+            KotakSimulator.Session first = kotak.login();
+            BrokerSessions.Access access = new BrokerSessions.Access("member-key", first.token(), Map.of(
+                    KotakDryRunAdapter.SID, first.sid(), KotakDryRunAdapter.BASE_URL, kotak.baseUri().toString()));
+            java.util.concurrent.CountDownLatch warmUpInside = new java.util.concurrent.CountDownLatch(1);
+            java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+            BrokerSessions sessions = a -> {
+                if (Thread.currentThread().getName().startsWith("kotak-live-warmup-")) {
+                    warmUpInside.countDown();                   // the warm-up holds the session's lock from here
+                    try {
+                        release.await();
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+                return Optional.of(access);
+            };
+            KotakDryRunAdapter adapter = new KotakDryRunAdapter(dataSource, 1e9, sessions, kotak::book,
+                    ReadLiveProbe.Settings.OFF, loopbackFor(account));
+            BrokerAdapter.Live live = adapter.live(account, ONE_LOT);
+            assertThat(live.isRefused()).as(live.description()).isFalse();
+            assertThat(warmUpInside.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+
+            List<OrderUpdate> updates = new java.util.concurrent.CopyOnWriteArrayList<>();
+            Thread adding = Thread.ofPlatform().start(() -> live.connection().onUpdate(updates::add));
+            long until = System.nanoTime() + 10_000_000_000L;
+            while (adding.getState() != Thread.State.BLOCKED && adding.isAlive() && System.nanoTime() < until) {
+                Thread.onSpinWait();                            // onUpdate waits for the session's lock
+            }
+            assertThat(adding.getState()).isEqualTo(Thread.State.BLOCKED);
+            release.countDown();                                // the warm-up builds the gateway, then onUpdate goes on
+            adding.join(10_000);
+            assertThat(adding.isAlive()).isFalse();
+
+            live.connection().place(buy("F3E1", LOT));
+            assertThat(live.connection().poll()).isEqualTo(1);
+            assertThat(updates).singleElement().satisfies(u -> {
+                assertThat(u.clientOrderId()).isEqualTo("F3E1");
+                assertThat(u.status()).isEqualTo(OrderStatus.FILLED);
+                assertThat(u.lastFillQuantity()).isEqualTo(LOT);
+            });
+        }
+    }
+
     // ------------------------------------------------------------------ Upstox
 
     @Test

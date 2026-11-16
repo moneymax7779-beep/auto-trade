@@ -434,8 +434,8 @@ public final class ZerodhaDryRunAdapter implements BrokerAdapter {
             if (!orders) {
                 throw new IllegalStateException("onUpdate not offered: reads only");
             }
-            listeners.add(listener);
-            synchronized (this) {
+            synchronized (this) {                       // with the gateway's build: never handed to it twice (as Kotak's)
+                listeners.add(listener);
                 if (gateway != null) {
                     gateway.onUpdate(listener);
                 }
