@@ -580,6 +580,64 @@ class BrokerVenueIT {
     }
 
     @Test
+    void aReleasedReconciliationDifferenceIsNotEngagedAgainUntilItChanges() throws Exception {
+        // 16 Nov 2026 on ZERODHA-1: a manual MIS buy in Kite; each Release was undone by the next check seconds later
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        brokerFollower().run(s.broker(), s.group(), DAY);
+        sim.quote(KEY, 100, 1_000_000, 100, 1_000_000, 100);
+        gateway.place(new OrderRequest("MANUALR1", 3000047168L, KEY, SYMBOL, "NSE_FO", OrderSide.BUY, OrderType.LIMIT, 65,
+                100.2, 0, "MANUALR1"));
+        BrokerReconciler reconciler = new BrokerReconciler(dataSource, costs);
+        KillSwitches kills = new KillSwitches(dataSource);
+        reconciler.check(s.broker(), gateway);
+        reconciler.check(s.broker(), gateway);
+        assertThat(kills.engaged(s.broker(), "opening-drive", KEY)).contains("ours 2600, broker 2665");
+        long id = accountSwitch(kills, s.broker());
+        assertThat(kills.release(id, s.broker().tenantId(), "satyacp99")).isTrue();
+
+        for (int i = 0; i < 3; i++) {
+            assertThat(reconciler.check(s.broker(), gateway).matched()).as("still a difference").isFalse();
+        }
+        assertThat(kills.engaged(s.broker(), "opening-drive", KEY)).as("released: the same difference").isNull();
+        BrokerReconciler restarted = new BrokerReconciler(dataSource, costs);
+        restarted.check(s.broker(), gateway);
+        assertThat(restarted.check(s.broker(), gateway).matched()).isFalse();
+        assertThat(kills.engaged(s.broker(), "opening-drive", KEY)).as("a restart remembers the release").isNull();
+        assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? and action = "
+                + "'RECONCILIATION_ACCEPTED'", Integer.class, s.broker().id())).as("audited once per reconciler").isEqualTo(2);
+
+        // another hand buy: the quantities change, so the switch engages again
+        gateway.place(new OrderRequest("MANUALR2", 3000047168L, KEY, SYMBOL, "NSE_FO", OrderSide.BUY, OrderType.LIMIT, 65,
+                100.2, 0, "MANUALR2"));
+        reconciler.check(s.broker(), gateway);
+        reconciler.check(s.broker(), gateway);
+        assertThat(kills.engaged(s.broker(), "opening-drive", KEY)).contains("ours 2600, broker 2730");
+    }
+
+    @Test
+    void aReconciliationSwitchReleasedByTheReconcilerItselfAcceptsNothing() throws Exception {
+        Setup s = setup(false);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        brokerFollower().run(s.broker(), s.group(), DAY);
+        sim.quote(KEY, 100, 1_000_000, 100, 1_000_000, 100);
+        gateway.place(new OrderRequest("MANUALQ1", 3000047168L, KEY, SYMBOL, "NSE_FO", OrderSide.BUY, OrderType.LIMIT, 65,
+                100.2, 0, "MANUALQ1"));
+        BrokerReconciler reconciler = new BrokerReconciler(dataSource, costs);
+        KillSwitches kills = new KillSwitches(dataSource);
+        reconciler.check(s.broker(), gateway);
+        reconciler.check(s.broker(), gateway);
+        kills.release(accountSwitch(kills, s.broker()), s.broker().tenantId(), "reconciler");
+        reconciler.check(s.broker(), gateway);
+        assertThat(kills.engaged(s.broker(), "opening-drive", KEY)).startsWith("ACCOUNT: RECONCILIATION");
+    }
+
+    private static long accountSwitch(KillSwitches kills, com.autotrade.account.BrokerAccount account) {
+        return kills.list(null).stream().filter(k -> "ACCOUNT".equals(k.scope()) && account.id() == k.accountId())
+                .findFirst().orElseThrow().id();
+    }
+
+    @Test
     void theSameReconciliationDifferenceEveryCheckWritesOneKillRow() throws Exception {
         // 6 Nov 2026: the same difference every 30 s wrote 1,076 audit rows (each one an alert)
         Setup s = setup(false);

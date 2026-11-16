@@ -51,7 +51,12 @@ public final class ManualOrders {
     public static final double STOP_PCT = 25;
     public static final List<String> UNDERLYINGS = List.of("NIFTY", "SENSEX");
     static final LocalTime FIRST_BUY = LocalTime.of(9, 15);
-    static final LocalTime LAST_BUY = FollowerSimulator.LIVE_LAST_ENTRY;
+    /**
+     * The manual desk's own last buy (and a chart order's latest "valid until"). Main 16 Nov 2026 moved the LIVE last
+     * entry into each broker's rules (BrokerRules: ZERODHA 15:10, Kotak Neo and Groww 15:05), and FollowerSimulator
+     * refuses every LIVE entry after its account's broker time, manual ones included; this check only answers early.
+     */
+    static final LocalTime LAST_BUY = LocalTime.of(15, 10);
     /** A quote older than this does not count (the capture may have stopped). */
     static final Duration QUOTE_MAX_AGE = Duration.ofSeconds(30);
     static final Duration SPOT_MAX_AGE = Duration.ofSeconds(60);

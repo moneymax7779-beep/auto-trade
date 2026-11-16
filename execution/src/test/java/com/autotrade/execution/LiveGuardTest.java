@@ -92,13 +92,50 @@ class LiveGuardTest {
     }
 
     @Test
+    void handNrmlOrdersNeitherTakeAContractSlotNorMakeAnMisSellSafe() {
+        // validation 16 Nov 2026: ZERODHA-1's hand trades are NRML; the guard counted them as MIS holdings
+        book.add(order(null, CE, OrderSide.BUY, OrderStatus.FILLED, LOT, LOT, "NRML"));      // hand NRML long
+        book.add(order(null, PE, OrderSide.BUY, OrderStatus.FILLED, LOT, LOT, "NRML"));
+        book.add(order(null, "NSE_FO|47170", OrderSide.BUY, OrderStatus.OPEN, LOT, 0, "NRML"));
+        assertThatThrownBy(() -> guard.place(sell("F7S1", CE, LOT))).hasMessageContaining("never short");  // no MIS short
+        guard.place(buy("F8", "NSE_FO|47171", LOT));                                     // slots are ours only
+        assertThat(sent).hasSize(1);
+        book.add(order("F9", CE, OrderSide.BUY, OrderStatus.FILLED, LOT, LOT, "MIS"));
+        guard.place(sell("F9S1", CE, LOT));                                              // our own MIS buy: held
+        assertThat(sent).hasSize(2);
+    }
+
+    @Test
+    void aSellThatWouldLeaveTheAccountNetShortAcrossProductsIsRefused() {
+        // review 16 Nov 2026: our MIS long sold by hand as NRML; our MIS stop selling too would leave an NRML short
+        book.add(order("F5", CE, OrderSide.BUY, OrderStatus.FILLED, LOT, LOT, "MIS"));
+        book.add(order(null, CE, OrderSide.SELL, OrderStatus.FILLED, LOT, LOT, "NRML"));
+        assertThatThrownBy(() -> guard.place(sell("F5S1", CE, LOT))).isInstanceOf(LiveGuard.Refusal.class)
+                .hasMessageContaining("across products");
+        assertThat(LiveGuard.holds(book, CE, "MIS")).isZero();
+        assertThat(sent).isEmpty();
+    }
+
+    @Test
+    void anOrderOfUnknownProductIsCounted() {
+        book.add(order(null, CE, OrderSide.BUY, OrderStatus.FILLED, LOT, LOT, null));
+        guard.place(sell("F1S1", CE, LOT));
+        assertThat(sent).hasSize(1);
+    }
+
+    @Test
     void aGuardRefusalIsToldApartFromTheBrokers() {
         assertThatThrownBy(() -> guard.place(sell("F9S1", CE, LOT))).isInstanceOf(LiveGuard.Refusal.class);
     }
 
     private static BrokerOrder order(String tag, String key, OrderSide side, OrderStatus status, long quantity, long filled) {
-        return new BrokerOrder(tag, "B" + key + side + quantity, key, "SYM", side, OrderType.LIMIT, quantity, filled, 100,
-                100, 0, status, status.name(), null, Instant.now());
+        return order(tag, key, side, status, quantity, filled, "MIS");
+    }
+
+    private static BrokerOrder order(String tag, String key, OrderSide side, OrderStatus status, long quantity, long filled,
+                                     String product) {
+        return new BrokerOrder(tag, "B" + key + side + quantity + product, key, "SYM", side, OrderType.LIMIT, quantity,
+                filled, 100, 100, 0, status, status.name(), null, Instant.now(), product);
     }
 
     private static OrderRequest buy(String tag, String key, long quantity) {
@@ -129,6 +166,11 @@ class LiveGuardTest {
         @Override
         public String name() {
             return "TEST";
+        }
+
+        @Override
+        public String product() {
+            return "MIS";
         }
 
         @Override

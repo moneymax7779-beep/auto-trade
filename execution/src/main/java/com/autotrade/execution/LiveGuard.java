@@ -50,6 +50,7 @@ public final class LiveGuard implements BrokerConnection {
     @Override
     public void place(OrderRequest r) {
         List<BrokerOrder> book = book(r.clientOrderId());
+        String product = broker.product();
         if (book.stream().anyMatch(o -> r.clientOrderId().equals(o.clientTag()))) {
             return;                 // code review 3 Nov 2026: this tag is already at the broker (a place that timed out
         }                           // and showed up late, a restart): never a second order with the same tag
@@ -60,7 +61,10 @@ public final class LiveGuard implements BrokerConnection {
             checkBuyQuantity(r.instrumentKey(), r.quantity());
             Set<String> held = new HashSet<>();
             for (BrokerOrder o : book) {                       // derivatives only: a share bought by hand is no contract
-                if (derivative(o.instrumentKey()) && (held(book, o.instrumentKey()) > 0
+                if (!o.ofProduct(product)) {
+                    continue;                                  // 16 Nov 2026: a hand NRML trade takes no MIS slot
+                }
+                if (derivative(o.instrumentKey()) && (held(book, o.instrumentKey(), product) > 0
                         || (o.side() == OrderSide.BUY && !o.status().isTerminal()))) {
                     held.add(o.instrumentKey());
                 }
@@ -69,10 +73,10 @@ public final class LiveGuard implements BrokerConnection {
                 throw refused("max " + limits.maxOpenPositions() + " contracts held or being bought: " + held);
             }
         } else {
-            long free = held(book, r.instrumentKey()) - workingSells(book, r.instrumentKey(), r.clientOrderId());
+            long free = free(book, r.instrumentKey(), r.clientOrderId(), product);
             if (r.quantity() > free) {
                 throw refused("sell " + r.quantity() + " of " + r.symbol() + " but only " + Math.max(0, free)
-                        + " is held and not already being sold: never short");
+                        + " is held and not already being sold (in our product and across products): never short");
             }
         }
         broker.place(r);
@@ -81,13 +85,13 @@ public final class LiveGuard implements BrokerConnection {
     @Override
     public void modify(String clientOrderId, long quantity, double limitPrice, double triggerPrice) {
         List<BrokerOrder> book = book(clientOrderId);
+        String product = broker.product();
         BrokerOrder o = book.stream().filter(b -> clientOrderId.equals(b.clientTag())).findFirst().orElse(null);
         if (o != null && quantity > o.quantity()) {                     // a lower quantity only reduces risk
             if (o.side() == OrderSide.BUY) {
                 checkBuyQuantity(o.instrumentKey(), quantity);
             } else {
-                long free = held(book, o.instrumentKey()) - workingSells(book, o.instrumentKey(), clientOrderId)
-                        + o.filledQuantity();
+                long free = free(book, o.instrumentKey(), clientOrderId, product) + o.filledQuantity();
                 if (quantity > free) {
                     throw refused("modify " + clientOrderId + " to sell " + quantity + " but only " + Math.max(0, free)
                             + " is held: never short");
@@ -124,22 +128,44 @@ public final class LiveGuard implements BrokerConnection {
         }
     }
 
-    /** Filled buys less filled sells of a contract in today's book. */
-    static long held(List<BrokerOrder> book, String instrumentKey) {
+    /**
+     * Filled buys less filled sells of a contract in today's book, counting only orders of {@code product} (null: all).
+     * 16 Nov 2026: the broker keeps MIS and NRML as separate positions, so an NRML buy by hand does not make an MIS sell
+     * safe (it would be an MIS short), and does not count as a contract we hold.
+     */
+    static long held(List<BrokerOrder> book, String instrumentKey, String product) {
         long held = 0;
         for (BrokerOrder o : book) {
-            if (instrumentKey.equals(o.instrumentKey())) {
+            if (instrumentKey.equals(o.instrumentKey()) && o.ofProduct(product)) {
                 held += o.side() == OrderSide.BUY ? o.filledQuantity() : -o.filledQuantity();
             }
         }
         return held;
     }
 
-    /** What working sells of a contract (other than {@code except}) could still sell. */
-    static long workingSells(List<BrokerOrder> book, String instrumentKey, String except) {
+    /**
+     * What a sell of a contract may still sell: what is held less what other working sells (than {@code except}) could
+     * sell, in our product (an NRML long does not cover an MIS sell) and across all products (16 Nov 2026: a hand NRML
+     * sell of our MIS position leaves the account net flat; our MIS stop then selling too would leave an NRML short
+     * nobody manages), whichever is less.
+     */
+    static long free(List<BrokerOrder> book, String instrumentKey, String except, String product) {
+        long ours = held(book, instrumentKey, product) - workingSells(book, instrumentKey, except, product);
+        long all = held(book, instrumentKey, null) - workingSells(book, instrumentKey, except, null);
+        return Math.min(ours, all);
+    }
+
+    /** What is held of a contract in our product and across all products, whichever is less. */
+    static long holds(List<BrokerOrder> book, String instrumentKey, String product) {
+        return Math.min(held(book, instrumentKey, product), held(book, instrumentKey, null));
+    }
+
+    /** What working sells of a contract (other than {@code except}, of {@code product}; null: all) could still sell. */
+    static long workingSells(List<BrokerOrder> book, String instrumentKey, String except, String product) {
         long working = 0;
         for (BrokerOrder o : book) {
-            if (instrumentKey.equals(o.instrumentKey()) && o.side() == OrderSide.SELL && !o.status().isTerminal()
+            if (instrumentKey.equals(o.instrumentKey()) && o.ofProduct(product) && o.side() == OrderSide.SELL
+                    && !o.status().isTerminal()
                     && !Objects.equals(o.clientTag(), except)) {               // a hand-placed order has no tag
                 working += o.quantity() - o.filledQuantity();
             }
@@ -174,6 +200,11 @@ public final class LiveGuard implements BrokerConnection {
     @Override
     public String name() {
         return broker.name();
+    }
+
+    @Override
+    public String product() {
+        return broker.product();
     }
 
     @Override

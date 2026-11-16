@@ -58,6 +58,7 @@ class ManualOrdersIT {
     private static final String V3 = "../config/risk/follower-risk.v3.yaml";
     private static final String V7 = "../config/risk/follower-risk.v7.yaml";
     private static final String V8 = "../config/risk/follower-risk.v8.yaml";
+    private static final BrokerRules RULES = BrokerRules.load(Path.of("..", "config", "brokers", "broker-rules.v1.yaml"));
     private static final int LOT = 65;
     private static final double[] STRIKES = {23050, 23100, 23150, 23200, 23250};
     private static final double SPOT = 23140;          // ATM 23150; 23100 and 23200 either side
@@ -228,7 +229,8 @@ class ManualOrdersIT {
         BrokerConnections.Route route = registry.route(account, risk);
         assertThat(route.venue()).as(route.description()).isNotNull();
         BrokerVenue venue = new BrokerVenue(dataSource, route.connection(), risk.orders().fast(), (k, u) -> 1755L, o -> { });
-        return new FollowerSimulator(dataSource, costs, risk, venue, null).withClock(MORNING);
+        // main 16 Nov 2026: no LIVE entry without the broker's trading-day rules (ZERODHA's last LIVE entry 15:10)
+        return new FollowerSimulator(dataSource, costs, risk, venue, null).withBrokerRules(RULES).withClock(MORNING);
     }
 
     private static String intentState(long intent) {

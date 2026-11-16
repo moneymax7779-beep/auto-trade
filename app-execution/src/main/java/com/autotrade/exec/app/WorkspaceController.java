@@ -59,8 +59,6 @@ import com.autotrade.execution.TradingDay;
 @RestController
 class WorkspaceController {
 
-    /** The brokers this build can trade LIVE (an order adapter with a LIVE route: BrokerConnections). */
-    static final Set<BrokerType> LIVE_BROKERS = com.autotrade.execution.LiveBrokers.LIVE;
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     private static final DateTimeFormatter HHMM = DateTimeFormatter.ofPattern("HH:mm");
     private static final double MAX_LIMIT = 100_000_000;                 // Rs 10 Cr: a typo guard, not a policy
@@ -76,8 +74,25 @@ class WorkspaceController {
     private final TradingDay tradingDay;
     private final KillSwitches kills;
     private final TelegramNotifier telegram;
+    /**
+     * The brokers this worker can trade LIVE (configured, and an order adapter with a LIVE route: BrokerConnections;
+     * 16 Nov 2026, A2: it was a constant).
+     */
+    private final com.autotrade.execution.LiveBrokers liveBrokers;
+    private final com.autotrade.execution.AccountEgress egress;
 
-    WorkspaceController(Access access, DataSource dataSource, TransactionTemplate tx, TelegramNotifier telegram) {
+    /** Tests: no egress addresses (the static-IP gate's default brokers still need one). */
+    WorkspaceController(Access access, DataSource dataSource, TransactionTemplate tx, TelegramNotifier telegram,
+                        com.autotrade.execution.LiveBrokers liveBrokers) {
+        this(access, dataSource, tx, telegram, liveBrokers, com.autotrade.execution.AccountEgress.NONE);
+    }
+
+    /** {@code egress}: the static-IP LIVE gate (production gaps B2, 16 Nov 2026). */
+    @org.springframework.beans.factory.annotation.Autowired      // two constructors: Spring must be told which
+    WorkspaceController(Access access, DataSource dataSource, TransactionTemplate tx, TelegramNotifier telegram,
+                        com.autotrade.execution.LiveBrokers liveBrokers, com.autotrade.execution.AccountEgress egress) {
+        this.liveBrokers = liveBrokers;
+        this.egress = egress == null ? com.autotrade.execution.AccountEgress.NONE : egress;
         this.access = access;
         this.accounts = new AccountStore(dataSource);
         this.jdbc = new JdbcTemplate(dataSource);
@@ -204,8 +219,12 @@ class WorkspaceController {
         if (a.brokerType() == BrokerType.PAPER) {
             return a.displayName() + " is a paper account: connect a broker to trade LIVE";
         }
-        if (!LIVE_BROKERS.contains(a.brokerType())) {
+        if (!liveBrokers.live(a.brokerType())) {
             return a.brokerType() + " has no LIVE order adapter yet: it trades PAPER only";
+        }
+        String staticIp = egress.liveRefusal(a);                        // production gaps B2, 16 Nov 2026
+        if (staticIp != null) {
+            return staticIp + ": it trades PAPER only";
         }
         if (!a.enabled()) {
             return a.displayName() + " is disabled";
@@ -285,7 +304,9 @@ class WorkspaceController {
         if (body.on()) {
             require(a.displayName().equals(body.confirm()), "type the account's name (" + a.displayName() + ") to confirm");
             require(a.role().name().equals("FOLLOWER_TRADE") && a.enabled(), a.displayName() + " is not an enabled follower");
-            require(LIVE_BROKERS.contains(a.brokerType()), a.brokerType() + " has no LIVE order adapter yet");
+            require(liveBrokers.live(a.brokerType()), a.brokerType() + " has no LIVE order adapter yet");
+            String staticIp = egress.liveRefusal(a);                    // production gaps B2, 16 Nov 2026
+            require(staticIp == null, "LIVE refused: " + staticIp);
             Map<String, Object> row = jdbc.queryForMap("select external_broker_user_id, credential_profile_id from "
                     + "acct.broker_account where id = ?", id);
             require(row.get("external_broker_user_id") != null && row.get("credential_profile_id") != null,
@@ -404,7 +425,7 @@ class WorkspaceController {
             b.put("sessionUntil", row.get("session_until") == null ? null
                     : ((Timestamp) row.get("session_until")).toInstant().toString());
             b.put("enabled", a.enabled());
-            b.put("liveCapable", LIVE_BROKERS.contains(a.brokerType()));
+            b.put("liveCapable", liveBrokers.live(a.brokerType()));
             b.put("liveEligible", a.liveTradingEnabled());
             b.put("paperTwinId", twin);
             b.put("allocation", a.allocatedCapital());
@@ -490,7 +511,7 @@ class WorkspaceController {
 
     /** What trades LIVE on the account: the owner's choice within its risk file's list (V32, user 9 Nov 2026). */
     private List<String> liveStrategies(BrokerAccount a) {
-        if (!LIVE_BROKERS.contains(a.brokerType())) {
+        if (!liveBrokers.live(a.brokerType())) {
             return List.of();
         }
         FollowerRisk risk;

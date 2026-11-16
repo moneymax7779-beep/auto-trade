@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 import com.autotrade.broker.BrokerException.Kind;
 import com.autotrade.broker.BrokerException;
 import com.autotrade.broker.BrokerOrder;
+import com.autotrade.broker.OrderBudget;
 import com.autotrade.broker.OrderRequest;
 import com.autotrade.broker.OrderSide;
 import com.autotrade.broker.OrderStatus;
@@ -59,6 +60,24 @@ class KiteGatewayTest {
     private static OrderRequest buy(String tag, long quantity, double limit) {
         return new OrderRequest(tag, 3000047168L, KEY, "NIFTY 23100 PE 20 OCT 26", "NSE_FO", OrderSide.BUY, OrderType.LIMIT,
                 quantity, limit, 0, tag);
+    }
+
+    @Test
+    void theOrderBudgetRefusesBuysPastTheDayButNeverTheExitAndCountsEveryCall() throws Exception {
+        // review 16 Nov 2026: the budget wiring itself (a day cap of 2 here; Kite's real cap is 4,500)
+        KiteInstruments instruments = KiteInstruments.load(http);
+        OrderBudget budget = new OrderBudget(2, java.time.Clock.systemUTC());
+        KiteGateway capped = new KiteGateway(KiteConfig.simulator(sim.baseUri()), http, instruments, budget);
+        capped.place(buy("F70E1", 65, 100.2));
+        capped.place(buy("F71E1", 65, 100.2));
+        int places = sim.requests("place");
+        assertThatThrownBy(() -> capped.place(buy("F72E1", 65, 100.2)))
+                .isInstanceOfSatisfying(OrderBudget.Exceeded.class, e -> assertThat(e.kind()).isEqualTo(Kind.TERMINAL));
+        assertThat(sim.requests("place")).as("nothing sent").isEqualTo(places);
+        capped.place(new OrderRequest("F70X1", 3000047168L, KEY, "N", "NSE_FO", OrderSide.SELL, OrderType.LIMIT, 65, 90,
+                0, "F70X1"));                                                  // an exit always goes
+        assertThat(sim.requests("place")).isEqualTo(places + 1);
+        assertThat(budget.today()).isEqualTo(3);
     }
 
     @Test

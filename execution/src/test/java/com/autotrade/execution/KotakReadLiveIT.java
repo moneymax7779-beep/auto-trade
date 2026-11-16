@@ -321,7 +321,9 @@ class KotakReadLiveIT {
 
     @Test
     void aKotakAccountSwitchedLiveGetsNoLiveRouteAndNothingIsSent() {
-        assertThat(LiveBrokers.live(BrokerType.KOTAK_NEO)).as("Kotak is not in the LIVE set").isFalse();
+        assertThat(LiveBrokers.of("ZERODHA,KOTAK_NEO", java.util.List.of(new ZerodhaDryRunAdapter(dataSource, 1e9),
+                new KotakDryRunAdapter(dataSource, 1e9))).live(BrokerType.KOTAK_NEO))
+                .as("Kotak is configured LIVE here, but its adapter offers no LIVE connection").isFalse();
         AccountStore accounts = new AccountStore(dataSource);
         long tenant = accounts.ensureTenant("owner");
         long owner = accounts.ensureUser("kc-owner", "owner");
@@ -342,7 +344,8 @@ class KotakReadLiveIT {
             BrokerConnections.Route route = registry.route(live, v7);
             assertThat(route.venue()).isNull();
             assertThat(route.connection()).isNull();
-            assertThat(route.description()).isEqualTo("LIVE refused: no LIVE adapter for KOTAK_NEO");
+            assertThat(route.description()).as("16 Nov 2026: its LIVE connection exists but is unreachable")
+                    .isEqualTo("LIVE refused: KOTAK_NEO is not a LIVE broker yet");
         }
         assertThat(kotak.requests()).as("nothing reached Kotak").isZero();
     }

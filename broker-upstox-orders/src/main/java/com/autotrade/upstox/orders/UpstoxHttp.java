@@ -96,7 +96,8 @@ public final class UpstoxHttp implements AutoCloseable {
 
     public UpstoxHttp(UpstoxConfig config) {
         this.config = config;
-        this.client = HttpClient.newBuilder().connectTimeout(config.timeout()).build();
+        // production gaps B1 (16 Nov 2026): from the account's egress address when it has one; else the default client
+        this.client = com.autotrade.broker.Egress.client(config.timeout(), config.egress());
     }
 
     /** Ends the client's connections and threads (a closed route). */

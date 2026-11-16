@@ -12,7 +12,9 @@ import com.autotrade.broker.BrokerConnection;
  * broker gets its connection. A new broker is one more adapter: its gateway (a {@link BrokerConnection}), its
  * instrument mapping, and a local simulator for DRY_RUN; the venue, stops, recovery, reconciliation, kill switches and
  * limits are shared. A LIVE connection (a real session, the registered static IP, the user's own switch) exists only for
- * an adapter that offers one (this build: Zerodha) and is always behind a {@link LiveGuard}.
+ * an adapter that offers one and is always behind a {@link LiveGuard}. This build: Zerodha (the pilot) and, built and
+ * tested against their simulators but not reachable until their broker joins {@link LiveBrokers} (production gaps C1,
+ * 16 Nov 2026), Kotak Neo, Upstox and Groww.
  */
 public interface BrokerAdapter {
 
@@ -55,20 +57,55 @@ public interface BrokerAdapter {
     BrokerType broker();
 
     /**
+     * The product code every order of ours through this adapter carries (Kite MIS, Kotak MIS, Upstox I, Groww MIS);
+     * the worker checks it against its broker's rules at start ({@link BrokerRules#requireProducts}).
+     */
+    String product();
+
+    /**
+     * Whether {@link #live} can return a connection (16 Nov 2026: what {@link LiveBrokers} requires besides the
+     * configuration). An adapter that implements {@code live} says so here as well.
+     */
+    default boolean offersLive() {
+        return false;
+    }
+
+    /**
      * Opens the DRY_RUN connection of an account: orders always go to the adapter's simulator, never to a real broker;
      * {@code rules} say where its book comes from ({@link OrderRules#brokerMarket()}: the broker's own read API).
      */
     DryRun dryRun(BrokerAccount account, OrderRules rules) throws IOException;
 
-    /** A LIVE connection to the real broker (already behind its {@link LiveGuard}) and what it is. */
+    /**
+     * A LIVE connection to the real broker (already behind its {@link LiveGuard}) and what it is; or, with no connection,
+     * why the adapter refused one ({@link #refused}: the static-IP gate, a denied broker user).
+     */
     record Live(BrokerConnection connection, String description) {
+
+        /** No connection: {@code why} is shown on the account's route and the LIVE switch (16 Nov 2026). */
+        public static Live refused(String why) {
+            return new Live(null, why);
+        }
+
+        public boolean isRefused() {
+            return connection == null;
+        }
     }
 
     /**
      * Opens the LIVE connection of an account (the registry has checked the account's LIVE switch and its risk file's
-     * {@code live} limits); null when this adapter has no LIVE connection.
+     * {@code live} limits); null when this adapter has no LIVE connection, {@link Live#refused} when it has one but not
+     * for this account.
      */
     default Live live(BrokerAccount account, FollowerRisk.LiveLimits limits) {
+        return null;
+    }
+
+    /**
+     * Why none of the account's routes may open here, or null (production gaps B1, 16 Nov 2026: its egress address is
+     * configured but not on this host, so no call of it may go out, and none from the default route either).
+     */
+    default String egressRefusal(BrokerAccount account) {
         return null;
     }
 }

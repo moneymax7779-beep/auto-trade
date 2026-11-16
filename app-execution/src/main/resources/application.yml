@@ -12,7 +12,12 @@ spring:
     username: ${AUTOTRADE_DB_USER:autotrade}
     password: ${AUTOTRADE_DB_PASSWORD:autotrade}
     hikari:
-      maximum-pool-size: 13           # one held connection per leased account + the loop's own + SignalWakeup's LISTEN
+      # one held connection per leased account + the loop's own + SignalWakeup's LISTEN + lanes/logins/alerts.
+      # Validation 16 Nov 2026: 13 starved every lane past ~10 active followers; 32 with execution 32 + core 6 + tools 8
+      # stays well under Postgres's max_connections 100 (raise both together)
+      maximum-pool-size: ${AUTOTRADE_EXEC_DB_POOL:32}
+      minimum-idle: 4                 # grown on demand: Hikari would otherwise open all 32 at start (Keycloak, the
+                                      # replay trading-core and tracker workers share this Postgres's 100)
       pool-name: execution
   flyway:
     enabled: false
@@ -37,12 +42,17 @@ autotrade:
     copy-group: LIVE-SET
     poll-ms: 1000
     wake-on-signal: true            # a stored signal decision runs the tick at once (Postgres LISTEN); the poll is the fallback
-    costs-file: config/costs/india-index-options-costs.v2.yaml
+    # Each broker's product, last LIVE entry, end-of-day square-off (at least 5 min before the broker's own) and costs
+    # file (16 Nov 2026, A1/A3; replaced costs-file and square-off-cron). A change is a new version of the file.
+    broker-rules-file: config/brokers/broker-rules.v1.yaml
+    # The brokers an account may be switched LIVE on (A2), comma-separated; a broker is LIVE only when its adapter also
+    # offers a LIVE connection. Adding one needs its READ_LIVE sessions, canary and the user's go-ahead first.
+    live-brokers: ${AUTOTRADE_LIVE_BROKERS:ZERODHA}
     # Holidays for the 08:30 login links and the 09:10 login board. Keep equal to trading-core's
     # autotrade.trading.exchange-file: a new exchange file version is changed in both places.
     exchange-file: config/exchange/nse-bse-sessions.v3.yaml
     broker-funds: 1000000000         # DRY_RUN in L1: simulated broker funds (L2 reads the broker)
-    # READ_LIVE probe (code review 8 Nov 2026): a Kotak / Upstox / Groww DRY_RUN route on dry_run_market BROKER reads the
+    # READ_LIVE probe (code review 8 Nov 2026; Zerodha too from 16 Nov 2026): a broker's DRY_RUN route on dry_run_market BROKER reads the
     # real session's orders, trades and positions at its open and every `every` (ISO-8601; blank = off), audits a
     # READ_LIVE_PROBE row per account, and saves the answers redacted (no token, sid or keys) under `dir` (blank = none)
     # as material for contract tests. Reads only; a failure never affects trading.
@@ -52,6 +62,27 @@ autotrade:
       # Idle accounts (a DAILY_SWITCH member's real account on a PAPER day) that keep a READ_LIVE probe while they have
       # today's login: account ids, comma-separated; blank = none. Reads only, never an order (user 8 Nov 2026).
       accounts: ${AUTOTRADE_READ_LIVE_PROBE_ACCOUNTS:}
+    # Per-account egress (multi-broker production gaps B1/B2, 16 Nov 2026): since 1 Apr 2026 an algo order must come from
+    # the static IP registered for that client. `accounts`: account-id=IP literal pairs, comma-separated (IPv4 or IPv6,
+    # never a host name), e.g. "21=10.20.0.21,15=10.20.0.22"; every broker call of such an account (reads, orders,
+    # instrument files, the daily login) leaves from that address. An address not on this host refuses the account's
+    # routes and logins (never the default route); an account without an entry keeps the default route (ZERODHA-1).
+    # `required-brokers`: a LIVE connection of these brokers needs the account's verified address (Zerodha's pilot runs
+    # from the shared NAT, so it is not listed). Assigning the addresses on the host is infra (E0/E2), not this setting.
+    egress:
+      accounts: ${AUTOTRADE_EGRESS_ACCOUNTS:}
+      required-brokers: ${AUTOTRADE_EGRESS_REQUIRED_BROKERS:KOTAK_NEO,UPSTOX,GROWW}
+    # READ_LIVE recorder (16 Nov 2026, D2): for these account ids (comma-separated; blank = none), each distinct answer of
+    # the account's READ_LIVE route (its real session's reads: book, trades, positions, funds) is saved once per endpoint
+    # and IST day, redacted (credentials, the holder's identity, contact, PAN and bank fields), under
+    # <brokers.store-dir>/read-live/<broker>/<yyyy-MM-dd>/<endpoint>-<seq>.json with an index.jsonl, capped per day
+    # (2 MB a body, 40 files an endpoint, 400 files and 100 MB in all). The account needs a READ_LIVE route or probe.
+    read-live-record:
+      accounts: ${AUTOTRADE_READ_LIVE_RECORD_ACCOUNTS:}
+    # The morning canary (16 Nov 2026, D1): POST /api/execution/accounts/{id}/canary, platform admin only, never scheduled.
+    # Its JSON reports go here (blank = <brokers.store-dir>/canary).
+    canary:
+      dir: ${AUTOTRADE_CANARY_DIR:}
     # The daily Kite login (live L3, user go-ahead 24 Oct 2026): the app's key and secret as files in secrets-dir (read
     # only; the credential profile names them file:<name>), the day's access token per account in sessions-dir (owner
     # only), the 08:30 IST login link by Telegram to public-base-url/api/execution/accounts/{id}/kite/login.
@@ -78,4 +109,5 @@ autotrade:
   brokers:
     upstox:
       denied-api-keys: ${AUTOTRADE_UPSTOX_DENIED_API_KEYS:}
-      denied-user-ids: ${AUTOTRADE_UPSTOX_DENIED_USER_IDS:BM6462}
+      # validation 16 Nov 2026: BM6462 (zt-tiger-v2's Upstox user) is always denied; the variable adds to it
+      denied-user-ids: BM6462,${AUTOTRADE_UPSTOX_DENIED_USER_IDS:}

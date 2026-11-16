@@ -25,6 +25,14 @@ public interface BrokerConnection extends BrokerGateway, AutoCloseable {
     /** Pulls the order book and emits updates for what changed; returns the number emitted. */
     int poll();
 
+    /**
+     * The product code our orders are placed with on this connection (as the broker's book shows it, e.g. Kite "MIS"),
+     * or null when not known. Checks that count what is held read only orders of this product (16 Nov 2026).
+     */
+    default String product() {
+        return null;
+    }
+
     /** Our order with this tag in today's book, if the broker has it. */
     default java.util.Optional<BrokerOrder> orderByTag(String clientTag) {
         return orders().stream().filter(o -> clientTag.equals(o.clientTag())).findFirst();

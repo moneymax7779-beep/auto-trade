@@ -88,7 +88,7 @@ class UpstoxSessionSourceIT {
         long profile = jdbc.queryForObject("insert into acct.broker_credential_profile (tenant_id, broker_type, name, "
                 + "api_key_ref, api_secret_ref) values (?, 'UPSTOX', 'Member app', ?, ?) returning id", Long.class, tenant,
                 keyRef, secretRef);
-        jdbc.update("update acct.broker_account set credential_profile_id = ?, external_broker_user_id = 'BM6462' "
+        jdbc.update("update acct.broker_account set credential_profile_id = ?, external_broker_user_id = 'UX1234' "
                 + "where id = ?", profile, u);
         jdbc.update("update acct.broker_account set credential_profile_id = ?, external_broker_user_id = 'ZZ0001' "
                 + "where id = ?", profile, o);
@@ -114,23 +114,23 @@ class UpstoxSessionSourceIT {
     void theDaysUpstoxSessionIsTheMembersOwnTokenFileAndTheAppsKey() {
         UpstoxSessionSource source = new UpstoxSessionSource(dataSource, secrets);
         assertThat(source.access(upstox)).as("no login today").isEmpty();
-        tokenFile(upstox.id(), upstox.id(), "BM6462", Instant.now().plusSeconds(3600));
+        tokenFile(upstox.id(), upstox.id(), "UX1234", Instant.now().plusSeconds(3600));
         assertThat(source.access(upstox)).hasValueSatisfying(a -> {
             assertThat(a.apiKey()).isEqualTo("member-upstox-api-key");
             assertThat(a.accessToken()).isEqualTo("member-access-token");
             assertThat(a.extra()).isEmpty();
             assertThat(a.toString()).doesNotContain("member-access-token");
         });
-        tokenFile(unlinked.id(), unlinked.id(), "BM6462", Instant.now().plusSeconds(3600));
+        tokenFile(unlinked.id(), unlinked.id(), "UX1234", Instant.now().plusSeconds(3600));
         assertThat(source.access(unlinked)).as("no broker app linked: no session").isEmpty();
-        tokenFile(otherClient.id(), otherClient.id(), "BM6462", Instant.now().plusSeconds(3600));
+        tokenFile(otherClient.id(), otherClient.id(), "UX1234", Instant.now().plusSeconds(3600));
         assertThat(source.access(otherClient)).as("the file's Upstox client is not the one pinned on the account")
                 .isEmpty();
-        tokenFile(upstox.id(), otherClient.id(), "BM6462", Instant.now().plusSeconds(3600));
+        tokenFile(upstox.id(), otherClient.id(), "UX1234", Instant.now().plusSeconds(3600));
         assertThat(source.access(upstox)).as("a file naming another account is never used").isEmpty();
         assertThat(source.access(kotak)).as("another broker's account").isEmpty();
         secrets.writeToken("kite", upstox.id(), "{\"accessToken\":\"kite-token\"}");
-        tokenFile(upstox.id(), upstox.id(), "BM6462", Instant.now().minusSeconds(1));
+        tokenFile(upstox.id(), upstox.id(), "UX1234", Instant.now().minusSeconds(1));
         assertThat(source.access(upstox)).as("expired (03:30 IST), and another broker's file is not read").isEmpty();
         secrets.deleteToken(upstox.id());
         assertThat(source.access(upstox)).isEmpty();
@@ -142,18 +142,28 @@ class UpstoxSessionSourceIT {
     /** Review 8 Nov 2026: zt-tiger-v2's Upstox user or app key is never a session here, whatever the file says. */
     @Test
     void ztTigersUpstoxUserOrAppIsNoSession() {
-        tokenFile(upstox.id(), upstox.id(), "BM6462", Instant.now().plusSeconds(3600));
+        tokenFile(upstox.id(), upstox.id(), "UX1234", Instant.now().plusSeconds(3600));
         assertThat(new UpstoxSessionSource(dataSource, secrets).access(upstox)).as("not denied: a session").isPresent();
-        assertThat(new UpstoxSessionSource(dataSource, secrets, new UpstoxDenyList(List.of(), List.of("bm6462")))
-                .access(upstox)).as("zt's Upstox user").isEmpty();
+        assertThat(new UpstoxSessionSource(dataSource, secrets, new UpstoxDenyList(List.of(), List.of("ux1234")))
+                .access(upstox)).as("a denied Upstox user").isEmpty();
         assertThat(new UpstoxSessionSource(dataSource, secrets, new UpstoxDenyList(List.of("MEMBER-UPSTOX-API-KEY"),
                 null)).access(upstox)).as("zt's Upstox app key").isEmpty();
-        secrets.deleteToken(upstox.id());
+        // 16 Nov 2026: zt-tiger-v2's own user BM6462 is denied whatever the configured list says (even none)
+        jdbc.update("update acct.broker_account set external_broker_user_id = 'BM6462' where id = ?", upstox.id());
+        try {
+            BrokerAccount zt = new com.autotrade.account.AccountStore(dataSource).byId(upstox.id()).orElseThrow();
+            tokenFile(zt.id(), zt.id(), "BM6462", Instant.now().plusSeconds(3600));
+            assertThat(new UpstoxSessionSource(dataSource, secrets, UpstoxDenyList.NONE).access(zt))
+                    .as("zt's Upstox user, nothing configured").isEmpty();
+        } finally {
+            jdbc.update("update acct.broker_account set external_broker_user_id = 'UX1234' where id = ?", upstox.id());
+            secrets.deleteToken(upstox.id());
+        }
     }
 
     @Test
     void theWorkersSessionsDispatchByBrokerAndUpstoxHasNoLiveConnection() {
-        tokenFile(upstox.id(), upstox.id(), "BM6462", Instant.now().plusSeconds(3600));
+        tokenFile(upstox.id(), upstox.id(), "UX1234", Instant.now().plusSeconds(3600));
         BrokerSessions kite = a -> Optional.of(new BrokerSessions.Access("kite-key", "kite-token"));
         BrokerSessions neo = a -> Optional.of(new BrokerSessions.Access("neo-key", "neo-token"));
         BrokerSessionRouter router = new BrokerSessionRouter(Map.of(BrokerType.ZERODHA, kite, BrokerType.KOTAK_NEO, neo,
@@ -167,7 +177,7 @@ class UpstoxSessionSourceIT {
                 com.autotrade.groww.GrowwConfig.at(local), com.autotrade.execution.ReadLiveProbe.Settings.OFF);
         assertThat(adapters).extracting(BrokerAdapter::broker).containsExactly(BrokerType.ZERODHA, BrokerType.KOTAK_NEO,
                 BrokerType.UPSTOX, BrokerType.GROWW);
-        assertThat(adapters.get(2).live(upstox, null)).isNull();
-        assertThat(LiveBrokers.LIVE).containsExactly(BrokerType.ZERODHA);
+        assertThat(adapters.get(2).live(upstox, null).isRefused()).as("no egress address: the static-IP gate").isTrue();
+        assertThat(LiveBrokers.of(LiveBrokers.DEFAULT, adapters).live()).containsExactly(BrokerType.ZERODHA);
     }
 }

@@ -65,6 +65,12 @@ public final class ReadLiveConnection implements BrokerConnection {
         return simulator.name();
     }
 
+    /** Our orders and the book the checks read are the simulator's. */
+    @Override
+    public String product() {
+        return simulator.product();
+    }
+
     @Override
     public BrokerCapabilities capabilities() {
         return simulator.capabilities();
@@ -152,6 +158,11 @@ public final class ReadLiveConnection implements BrokerConnection {
             @Override
             public String name() {
                 return c.name();
+            }
+
+            @Override
+            public String product() {
+                return c.product();
             }
 
             @Override

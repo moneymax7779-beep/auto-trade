@@ -31,6 +31,7 @@ import com.autotrade.broker.OrderStatus;
 import com.autotrade.broker.OrderType;
 import com.autotrade.broker.OrderUpdate;
 import com.autotrade.broker.Quote;
+import com.autotrade.broker.OrderBudget;
 import com.autotrade.broker.RateLimiter;
 
 import tools.jackson.databind.JsonNode;
@@ -43,7 +44,8 @@ import tools.jackson.databind.node.ObjectNode;
  *       DAY, our tag in {@code tag} (Upstox allows 40 characters; ours are at most 20 alphanumerics), the contract's
  *       {@code instrument_token} (= our key), quantity in units and a whole number of lots, prices on the contract's
  *       tick (a buy rounded up, a sell down), {@code is_amo} and {@code slice} false. MARKET and SL-M are never sent.
- *       In this build order calls to Upstox's own host are refused outright: orders only ever reach a simulator.</li>
+ *       Order calls through a read config are refused outright, whatever its host: only a simulator's config and the
+ *       LIVE config ({@link UpstoxConfig#live}, production gaps C1, 16 Nov 2026) send them.</li>
  *   <li><b>Idempotent place</b>: a tag already placed by this gateway is ignored. Upstox does not refuse a repeated tag
  *       (it groups orders; UNCONFIRMED either way), so a place whose outcome is unknown (timeout, dropped connection,
  *       5xx, an answer without Upstox's envelope) is never sent again: the order is looked up by tag after
@@ -92,11 +94,53 @@ public final class UpstoxGateway implements BrokerConnection {
      */
     public UpstoxGateway(UpstoxConfig config, UpstoxHttp http, UpstoxInstruments instruments,
                          Function<String, Quote> quotes) {
+        this(config, http, instruments, quotes, null);
+    }
+
+    /**
+     * @param upstoxUser the Upstox user (UCC) the session belongs to: a LIVE config whose orders reach Upstox must name
+     *                   one, and shares that user's order budget ({@link #budgetFor}); null for any other config
+     */
+    public UpstoxGateway(UpstoxConfig config, UpstoxHttp http, UpstoxInstruments instruments,
+                         Function<String, Quote> quotes, String upstoxUser) {
         this.config = config;
         this.http = http;
         this.instruments = instruments;
         this.quotes = quotes;
         this.limiter = new RateLimiter(config.maxOrdersPerSecond());
+        this.budget = budgetFor(config, upstoxUser);
+    }
+
+    /**
+     * Validation 16 Nov 2026: Upstox counts orders per user per API (10 a second, 500 a minute, 2,000 in 30 minutes):
+     * our caps sit below. Production gaps C2 (16 Nov 2026): one budget per Upstox user, shared by every LIVE gateway of
+     * that user (a rebuilt route or a second account of the same user does not restart it), as Kite's per API key.
+     */
+    static final int ORDERS_PER_MINUTE = 450, ORDERS_PER_30_MIN = 1_800;
+    private final OrderBudget budget;
+
+    /**
+     * The order budget of a config: a LIVE config whose orders reach Upstox shares the user's ({@code upstoxUser},
+     * required); any other config (a simulator, LIVE against a simulator, a read config that never sends) gets its own,
+     * so the static map holds only real users.
+     */
+    static OrderBudget budgetFor(UpstoxConfig config, String upstoxUser) {
+        OrderBudget.Window[] windows = {new OrderBudget.Window(java.time.Duration.ofMinutes(1), ORDERS_PER_MINUTE),
+                new OrderBudget.Window(java.time.Duration.ofMinutes(30), ORDERS_PER_30_MIN)};
+        if (config.isLive() && config.ordersReachUpstox()) {
+            if (upstoxUser == null || upstoxUser.isBlank()) {
+                throw new IllegalArgumentException("a LIVE Upstox gateway must name its Upstox user (its order budget)");
+            }
+            return OrderBudget.shared("UPSTOX:" + upstoxUser.trim().toUpperCase(Locale.ROOT), Integer.MAX_VALUE,
+                    windows);
+        }
+        return new OrderBudget(Integer.MAX_VALUE, java.time.Clock.systemUTC(), windows);
+    }
+
+    /** The product our orders carry (the config's), so product-aware checks skip a hand order of another product. */
+    @Override
+    public String product() {
+        return config.product();
     }
 
     @Override
@@ -119,14 +163,14 @@ public final class UpstoxGateway implements BrokerConnection {
     // ------------------------------------------------------------------ orders
 
     /**
-     * This build sends no order to Upstox itself (DRY_RUN only; LIVE needs READ_LIVE, the static IP and the canary): an
-     * order call is allowed only on a config made by {@link UpstoxConfig#simulator} (review 8 Nov 2026: a marker, not the
-     * host, so a read config pointed anywhere can never send one).
+     * An order call is allowed only on a config made by {@link UpstoxConfig#simulator} or as LIVE
+     * ({@link UpstoxConfig#live}, behind the LIVE guard; production gaps C1, 16 Nov 2026). Review 8 Nov 2026: a marker,
+     * not the host, so a read config pointed anywhere can never send one.
      */
     private void refuseRealOrders(String call) {
         if (!config.ordersAllowed()) {
-            throw new BrokerException(Kind.TERMINAL, call + " refused: this build has no LIVE Upstox connection (orders "
-                    + "go only to a simulator)");
+            throw new BrokerException(Kind.TERMINAL, call + " refused: a read-only Upstox configuration has no LIVE Upstox "
+                    + "connection (orders go only to a simulator or through UpstoxConfig.live)");
         }
     }
 
@@ -162,7 +206,9 @@ public final class UpstoxGateway implements BrokerConnection {
         body.put("trigger_price", stop ? price(r.triggerPrice(), c.tickSize(), null) : BigDecimal.ZERO);
         body.put("is_amo", false);
         body.put("slice", false);
-        for (int attempt = 1; ; attempt++) {
+        budget.charge(r.side() == OrderSide.BUY, "place " + tag);
+        JsonNode placedIds = null;
+        for (int attempt = 1; placedIds == null; attempt++) {
             try {
                 limiter.acquire();
                 JsonNode answer = http.send("POST", UpstoxHttp.PLACE, body);
@@ -172,12 +218,8 @@ public final class UpstoxGateway implements BrokerConnection {
                     throw new UpstoxException(Kind.UNKNOWN, "place " + tag + ": Upstox answered success without an order "
                             + "id", 200, "", true, null);
                 }
-                if (ids.size() > 1) {
-                    log.warn("place {}: Upstox returned {} order ids (slice is off); the first is tracked", tag,
-                            ids.size());
-                }
                 brokerIdByTag.put(tag, id);
-                return;
+                placedIds = ids;
             } catch (BrokerException e) {
                 if (e.kind() == Kind.RETRYABLE && !mayHaveReached(e) && attempt < 3) {
                     sleep(200L * attempt);                              // 429 or refused connection: not at the broker
@@ -208,6 +250,13 @@ public final class UpstoxGateway implements BrokerConnection {
                 }
                 throw e;
             }
+        }
+        if (placedIds.size() > 1) {
+            // validation 16 Nov 2026: slice is off, so one order was expected; several orders now carry this tag and only
+            // the first would be followed: reported UNKNOWN (outside the look-up above, which would find one and call it
+            // done) so the account is reconciled; never placed again
+            throw new BrokerException(Kind.UNKNOWN, "place " + tag + ": Upstox returned " + placedIds.size()
+                    + " order ids " + placedIds + " for one order (slice is off): reconcile");
         }
     }
 
@@ -260,7 +309,8 @@ public final class UpstoxGateway implements BrokerConnection {
         if (quantity > 0) {
             body.put("quantity", (int) quantity);
         }
-        body.put("disclosed_quantity", 0);
+        // validation 16 Nov 2026: disclosed_quantity is not sent (Upstox: if sent it must be non-zero, UDAPI1039)
+        budget.charge(order.side() == OrderSide.BUY, "modify " + clientOrderId);
         limiter.acquire();
         http.send("PUT", UpstoxHttp.MODIFY, body);
     }
@@ -272,6 +322,7 @@ public final class UpstoxGateway implements BrokerConnection {
         if (id == null || id.isEmpty()) {
             id = known(clientOrderId).brokerOrderId();
         }
+        budget.count();
         limiter.acquire();
         http.delete(UpstoxHttp.CANCEL + "?" + UpstoxHttp.query("order_id", id));
     }
@@ -444,7 +495,10 @@ public final class UpstoxGateway implements BrokerConnection {
         int emitted = 0;
         for (BrokerOrder now : orders()) {
             BrokerOrder before = lastSeen.put(now.brokerOrderId(), now);
-            if (before != null && before.status() == now.status() && before.filledQuantity() == now.filledQuantity()) {
+            if (before != null && before.status() == now.status() && before.filledQuantity() == now.filledQuantity()
+                    && java.util.Objects.equals(before.clientTag(), now.clientTag())) {
+                // validation 16 Nov 2026: a tag that shows up after the first row (Upstox's examples show tag null early)
+                // is emitted, so our order is found by its tag
                 continue;
             }
             if (before != null && now.filledQuantity() < before.filledQuantity()) {
@@ -510,7 +564,8 @@ public final class UpstoxGateway implements BrokerConnection {
                 UpstoxHttp.whole(o.path("quantity")), filled, UpstoxHttp.number(o.path("average_price"), 0),
                 UpstoxHttp.number(o.path("price"), 0), UpstoxHttp.number(o.path("trigger_price"), 0), status(raw, filled),
                 raw, reason.isEmpty() || reason.equalsIgnoreCase("null") ? null : reason,
-                updated != null ? updated : UpstoxHttp.time(o.path("order_timestamp").asString("")));
+                updated != null ? updated : UpstoxHttp.time(o.path("order_timestamp").asString("")),
+                o.path("product").asString(""));
     }
 
     /** BUY or SELL; a missing or unrecognised side is null (never read as a buy), for the READ_LIVE probe to flag. */
