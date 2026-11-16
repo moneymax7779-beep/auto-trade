@@ -19,11 +19,18 @@ class StatusController {
     private final ExecutionService service;
     private final ExecutionProperties properties;
     private final Access access;
+    private final TelegramGateway telegram;              // null in tests
 
     StatusController(ExecutionService service, ExecutionProperties properties, Access access) {
+        this(service, properties, access, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    StatusController(ExecutionService service, ExecutionProperties properties, Access access, TelegramGateway telegram) {
         this.service = service;
         this.properties = properties;
         this.access = access;
+        this.telegram = telegram;
     }
 
     @GetMapping("/api/execution/status")
@@ -37,6 +44,9 @@ class StatusController {
         out.put("lastTick", last == null ? null : last.toString());
         // the watchdog's signal: no finished tick for 10 poll intervals (or none yet)
         out.put("stale", last == null || age * 1000 > 10 * properties.pollMs());
+        if (telegram != null) {
+            out.put("telegram", telegram.health(subject == null));     // the command bot's reader (16 Nov 2026)
+        }
         if (subject == null) {
             out.put("accounts", service.status());
         } else {
