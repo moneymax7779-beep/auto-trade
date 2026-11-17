@@ -26,6 +26,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
 
 import com.autotrade.account.AccountStore;
+import com.autotrade.execution.FanOut;
 import com.autotrade.account.BrokerType;
 import com.autotrade.account.EquityMode;
 import com.autotrade.account.TradeMode;
@@ -362,6 +363,74 @@ class TelegramCommandsIT {
         } finally {
             jdbc.update("update exec.position set status = 'CLOSED', quantity_open = 0 where id = ?", two);
         }
+    }
+
+    /** 17 Nov 2026 (plan C1-C5): /orders, /pnl, /login, /kill STRATEGY, /flattenall and /unlink. */
+    @Test
+    void readsLoginStrategyKillFlattenAllAndUnlink() {
+        AccountStore accounts = new AccountStore(dataSource);
+        long intent = jdbc.queryForObject("select entry_trade_intent_id from exec.position where id = ?", Long.class, position);
+        jdbc.update("insert into exec.order_execution (tenant_id, trade_intent_id, broker_account_id, broker_type, role, "
+                + "client_tag, attempt_no, order_side, order_type, quantity_requested, quantity_filled, average_fill_price, "
+                + "status) values (?, ?, ?, 'ZERODHA', 'ENTRY', 'tg-orders-1', 1, 'BUY', 'LIMIT', 75, 75, 58.2, 'FILLED')",
+                aliceTenant, intent, aliceAccount);
+        long alice = jdbc.queryForObject("select id from acct.app_user where external_subject = 'kc-alice'", Long.class);
+        long group = accounts.ensureCopyGroup(aliceTenant, "SET-tg-kill", accounts.ensureSignalSourceAccount(aliceTenant,
+                alice, "SIG-tg-kill", 500_000, LocalDate.now(), "config/risk/signal-source.v2.yaml"));
+        new FanOut(dataSource).subscribe(group, aliceAccount, List.of("oi-burst-cross"), 1.0);
+        jdbc.update("update acct.broker_account set enabled = true where id = ?", aliceAccount);
+        try {
+            // reads: her orders and today's result; Bob has none
+            assertThat(deliver(message(ALICE_CHAT, ALICE_CHAT, "private", "/orders", 0))).isEqualTo("ORDERS");
+            assertThat(lastSent()).contains("ALICE-1 ENTRY BUY 75/75 NIFTY 24200 CE FILLED @58.20");
+            assertThat(deliver(message(BOB_CHAT, BOB_CHAT, "private", "/orders", 0))).isEqualTo("ORDERS");
+            assertThat(lastSent()).isEqualTo("No orders today.");
+            assertThat(deliver(message(ALICE_CHAT, ALICE_CHAT, "private", "/pnl", 0))).isEqualTo("PNL");
+            assertThat(lastSent()).contains("ALICE-1 (DRY_RUN): booked").contains("(1 open)").contains("All:");
+            assertThat(deliver(message(BOB_CHAT, BOB_CHAT, "private", "/pnl", 0))).isEqualTo("PNL");
+            assertThat(lastSent()).isEqualTo("Nothing traded today.");
+
+            // login: her Zerodha account has no session today; the VIEWER acts for nothing
+            assertThat(deliver(message(ALICE_CHAT, ALICE_CHAT, "private", "/login", 0))).isEqualTo("LOGIN");
+            assertThat(lastSent()).contains("Needs today's login").contains("ALICE-1 (ZERODHA)")
+                    .contains("/api/execution/accounts/" + aliceAccount + "/kite/login");
+            assertThat(deliver(message(VIEWER_CHAT, VIEWER_CHAT, "private", "/login", 0))).isEqualTo("LOGIN");
+            assertThat(lastSent()).startsWith("Every broker account");
+
+            // a strategy of her workspace stops there, after the card; an unknown one is refused
+            assertThat(deliver(message(ALICE_CHAT, ALICE_CHAT, "private", "/kill no-such-thing", 0))).isEqualTo("NO_ACCOUNT");
+            long id = card("/kill oi-burst-cross");
+            assertThat(lastCall("sendMessage").path("text").asString()).contains("KILL strategy oi-burst-cross");
+            String nonce = jdbc.queryForObject("select nonce from exec.telegram_command where id = ?", String.class, id);
+            assertThat(deliver(callback(ALICE_CHAT, ALICE_CHAT, "c:" + id + ":" + nonce))).isEqualTo("CONFIRMED T" + id);
+            assertThat(jdbc.queryForObject("select count(*) from exec.kill_switch where scope = 'STRATEGY' and strategy_id = "
+                    + "'oi-burst-cross' and tenant_id = ? and released_at is null", Integer.class, aliceTenant)).isEqualTo(1);
+
+            // /flattenall is the platform admin's
+            assertThat(deliver(message(ALICE_CHAT, ALICE_CHAT, "private", "/flattenall", 0))).isEqualTo("FORBIDDEN");
+            jdbc.update("update acct.tenant_membership set role = 'ADMIN' where tenant_id = ? and app_user_id = ?",
+                    aliceTenant, alice);
+            actions.clear();
+            long all = card("/flattenall");
+            assertThat(lastCall("sendMessage").path("text").asString()).contains("FLATTEN ALL").contains("ALICE-1 (DRY_RUN)");
+            String n2 = jdbc.queryForObject("select nonce from exec.telegram_command where id = ?", String.class, all);
+            deliver(callback(ALICE_CHAT, ALICE_CHAT, "c:" + all + ":" + n2));
+            assertThat(actions).contains("flatten " + aliceAccount + " telegram:kc-alice");
+        } finally {
+            jdbc.update("update acct.tenant_membership set role = 'OWNER' where tenant_id = ? and app_user_id = ?",
+                    aliceTenant, alice);
+            jdbc.update("update exec.kill_switch set released_at = now(), released_by = 'it' where released_at is null");
+            jdbc.update("update acct.strategy_subscription set enabled = false where copy_group_id = ?", group);
+            jdbc.update("delete from exec.order_execution where client_tag = 'tg-orders-1'");
+        }
+
+        // /unlink: that chat runs nothing any more
+        long carol = accounts.ensureUser("kc-carol", "carol");
+        accounts.ensureMembership(aliceTenant, carol, "VIEWER");
+        jdbc.update("update acct.app_user set telegram_chat_id = '777001' where id = ?", carol);
+        assertThat(deliver(message(777001, 777001, "private", "/unlink", 0))).isEqualTo("UNLINKED_BY_USER");
+        assertThat(jdbc.queryForObject("select telegram_chat_id from acct.app_user where id = ?", String.class, carol)).isNull();
+        assertThat(deliver(message(777001, 777001, "private", "/status", 0))).isEqualTo("UNLINKED");
     }
 
     @Test
