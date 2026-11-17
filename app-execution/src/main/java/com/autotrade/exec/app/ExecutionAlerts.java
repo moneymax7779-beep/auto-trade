@@ -115,7 +115,8 @@ class ExecutionAlerts {
                 + "case when t.trading_control = 'DAILY_SWITCH' then t.id end member_tenant "
                 + "from exec.order_execution e join acct.broker_account a on a.id = e.broker_account_id "
                 + "join acct.tenant t on t.id = a.tenant_id left join exec.position p on p.entry_trade_intent_id = e.trade_intent_id and p.broker_account_id = "
-                + "e.broker_account_id where e.id > ? and a.trade_mode = 'LIVE' and e.status in ('FILLED', 'REJECTED') "
+                + "e.broker_account_id where e.id > ? and a.trade_mode = 'LIVE' and e.status = 'REJECTED' "
+                // 17 Nov 2026: fills are said per position by PositionAlerts (BUY / SELL / SOLD), rejections here
                 // review 8 Nov 2026: a stop our own guard refused was never sent (the stop's state is alerted elsewhere)
                 + "and not (e.role = 'STOP' and e.status = 'REJECTED' and coalesce(e.raw_error, '') like 'LIVE guard:%') "
                 + "and (e.updated_at at time zone 'Asia/Kolkata')::date = (now() at time zone 'Asia/Kolkata')::date "

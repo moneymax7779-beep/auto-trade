@@ -142,6 +142,11 @@ class TelegramCommands {
         return bot;
     }
 
+    /** Whether taps on this bot's buttons are read (the commands are on). */
+    boolean acceptsButtons() {
+        return props.commands();
+    }
+
     /**
      * At the worker's start: a card still waiting can no longer be trusted to match what is on screen (EXPIRED), and a
      * command confirmed but not finished is never run again (FAILED): an exit may already have gone out. Its person is
@@ -479,6 +484,21 @@ class TelegramCommands {
         return "PICK";
     }
 
+    /** A Book button of a level alert (PositionAlerts): the Exit card for that many lots of it (0: all of it). */
+    private String bookFromAlert(long updateId, Caller c, long positionId, int lots) {
+        Map<String, Object> p = openPosition(c, positionId);
+        if (p == null) {
+            return reply(c, "Position " + positionId + " is not open (or not yours to exit).", "NO_POSITION");
+        }
+        Long quantity = null;
+        long lot = lotSize(positionId), open = ((Number) p.get("quantity_open")).longValue();
+        if (lots > 0 && lot > 0 && lots * lot < open) {
+            quantity = lots * lot;
+        }
+        return card(updateId, c, "EXIT", ((Number) p.get("tenant_id")).longValue(),
+                accounts.byId(((Number) p.get("broker_account_id")).longValue()).orElseThrow(), positionId, quantity);
+    }
+
     /** Whether a strategy is one the workspace's accounts take (an enabled subscription). */
     private boolean strategyIn(long tenant, String strategy) {
         return strategy.matches("[a-z0-9][a-z0-9-]{0,63}") && Boolean.TRUE.equals(jdbc.queryForObject("select exists "
@@ -755,6 +775,10 @@ class TelegramCommands {
             if (data.length == 3 && data[0].equals("p")) {
                 bot.answer(id, "");
                 return pick(updateId, caller, data[1], Long.parseLong(data[2]));
+            }
+            if (data.length == 3 && data[0].equals("b")) {           // a level alert's Book half / Book all (0 = all)
+                bot.answer(id, "");
+                return bookFromAlert(updateId, caller, Long.parseLong(data[1]), Integer.parseInt(data[2]));
             }
             if (data.length == 3 && data[0].equals("s")) {           // /kill STRATEGY: the workspace picked
                 bot.answer(id, "");
