@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 // Every menu page of the owner's view (autotrade.auth.mode=none) and the member-only pages. A page passes when, after
 // its data has loaded, the document is no wider than the phone (nothing scrolls sideways; wide tables scroll inside
 // themselves), the bottom tab bar is on screen with thumb-sized targets, and the desktop top menu is hidden.
-const PAGES = ["/live", "/index/NIFTY", "/index/SENSEX", "/sessions", "/performance", "/research", "/replay", "/accounts",
+const PAGES = ["/home", "/positions", "/ledger", "/live", "/index/NIFTY", "/index/SENSEX", "/sessions", "/performance", "/research", "/replay", "/accounts",
   "/household", "/config", "/today", "/brokers", "/settings"];
 
 for (const path of PAGES) {
@@ -39,7 +39,7 @@ test("More opens every other menu item", async ({ page }) => {
   await page.getByRole("button", { name: "More" }).click();
   const sheet = page.getByRole("dialog", { name: "More" });
   await expect(sheet).toBeVisible();
-  for (const label of ["SENSEX", "Sessions", "Research", "Replay", "Family", "Config"]) {
+  for (const label of ["Overview", "SENSEX", "Sessions", "Research", "Replay", "Accounts", "Family", "Config"]) {
     await expect(sheet.getByRole("link", { name: label, exact: true })).toBeVisible();
   }
   await sheet.getByRole("link", { name: "Sessions", exact: true }).click();

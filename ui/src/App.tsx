@@ -37,6 +37,13 @@ const SessionDetailPage = page(() => import("./pages/SessionsPage"), "SessionDet
 const SessionsPage = page(() => import("./pages/SessionsPage"), "SessionsPage");
 const SettingsPage = page(() => import("./pages/SettingsPage"), "SettingsPage");
 const TodayPage = page(() => import("./pages/TodayPage"), "TodayPage");
+// mobile phase 1: the phone's trading screens (also reachable on the desktop by their address)
+const HomeScreen = page(() => import("./mobile/HomeScreen"), "HomeScreen");
+const PositionsScreen = page(() => import("./mobile/PositionsScreen"), "PositionsScreen");
+const LedgerScreen = page(() => import("./mobile/LedgerScreen"), "LedgerScreen");
+
+/** Below the md breakpoint "/" opens the phone's Home instead of the desktop's first page. */
+const phone = () => typeof window !== "undefined" && window.matchMedia?.("(max-width: 767px)").matches;
 
 const NAV: readonly NavItem[] = [
   ["/live", "Overview"],
@@ -70,8 +77,9 @@ const MEMBER_NAV: readonly NavItem[] = [
 ];
 
 /** The phone's bottom tabs (mobile phase 0); every other menu item is under More. "/index" covers the three charts. */
-const TABS: readonly NavItem[] = [["/live", "Overview"], ["/index/NIFTY", "Chart"], ["/accounts", "Accounts"], ["/performance", "Results"]];
-const MEMBER_TABS: readonly NavItem[] = [["/today", "Today"], ["/index/NIFTY", "Chart"], ["/accounts", "Accounts"], ["/brokers", "Brokers"]];
+// Phase 1: Home, Positions, Chart, Ledger for everyone; the rest of each menu (Overview, Accounts, Today, Brokers...) under More.
+const TABS: readonly NavItem[] = [["/home", "Home"], ["/positions", "Positions"], ["/index/NIFTY", "Chart"], ["/ledger", "Ledger"]];
+const MEMBER_TABS = TABS;
 
 export function App() {
   const me = useQuery({ queryKey: ["me"], queryFn: () => get<Me>("/api/me"), staleTime: 60_000 });
@@ -107,7 +115,10 @@ export function App() {
         <Suspense fallback={<p className="text-sm text-muted">Loading…</p>}>
         {member ? (
           <Routes>
-            <Route path="/" element={<Navigate to="/index/NIFTY" replace />} />
+            <Route path="/" element={<Navigate to={phone() ? "/home" : "/index/NIFTY"} replace />} />
+            <Route path="/home" element={<HomeScreen />} />
+            <Route path="/positions" element={<PositionsScreen />} />
+            <Route path="/ledger" element={<LedgerScreen />} />
             <Route path="/live" element={<Navigate to="/index/NIFTY" replace />} />
             <Route path="/index/:underlying" element={<IndexPage />} />
             <Route path="/today" element={<TodayPage />} />
@@ -117,7 +128,10 @@ export function App() {
           </Routes>
         ) : (
         <Routes>
-          <Route path="/" element={<LivePage />} />
+          <Route path="/" element={phone() ? <Navigate to="/home" replace /> : <LivePage />} />
+          <Route path="/home" element={<HomeScreen />} />
+          <Route path="/positions" element={<PositionsScreen />} />
+          <Route path="/ledger" element={<LedgerScreen />} />
           <Route path="/live" element={<LivePage />} />
           <Route path="/index/:underlying" element={<IndexPage />} />
           <Route path="/sessions" element={<SessionsPage />} />
