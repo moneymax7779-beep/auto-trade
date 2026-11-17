@@ -209,7 +209,8 @@ class TelegramCommandsIT {
     @Test
     void readsAreForEveryMemberAndShowTheirOwnOnly() {
         assertThat(deliver(message(VIEWER_CHAT, VIEWER_CHAT, "private", "/positions", 0))).isEqualTo("POSITIONS");
-        assertThat(lastSent()).contains("#" + position).contains("ALICE-1").contains("NIFTY 24200 CE").contains("qty 75");
+        assertThat(lastSent()).contains("#" + position).contains("ALICE-1").contains("NIFTY 24200 CE").contains("qty 75")
+                .contains("no recent quote");                     // 17 Nov 2026: each position's bid, P&L and warnings
         assertThat(deliver(message(BOB_CHAT, BOB_CHAT, "private", "/positions", 0))).isEqualTo("POSITIONS");
         assertThat(lastSent()).isEqualTo("No open positions.");
         assertThat(deliver(message(ALICE_CHAT, ALICE_CHAT, "private", "/status", 0))).isEqualTo("STATUS");

@@ -44,6 +44,9 @@ export interface OpenView {
   actions?: ReactNode;
   /** warnings across the card (not managed by its strategy, a late join) */
   flags?: ReactNode;
+  /** rupees per index point and its index */
+  perPoint?: number | null;
+  underlying?: string;
 }
 
 export interface ClosedView {
@@ -60,6 +63,10 @@ export interface ClosedView {
   charges: number;
   net: number;
   pct: number | null;
+  best?: number;
+  worst?: number;
+  missed?: number;
+  saved?: number;
 }
 
 interface TotalView {
@@ -126,7 +133,7 @@ export function LiveBookPanel({ accountId, hideEmpty }: { accountId: number; hid
   const open: OpenView[] = b.open.map((p) => ({
     key: p.id, strategy: p.strategy, symbol: p.symbol, quantity: p.quantity, lotSize: p.lotSize, entry: p.entry,
     opened: p.opened, bid: p.bid, quoteAt: p.quoteAt ?? null, best: p.best, stop: p.stop, pnl: p.pnl ?? null,
-    pnlPct: p.pnlPct ?? null,
+    pnlPct: p.pnlPct ?? null, perPoint: p.perPoint ?? null, underlying: p.underlying,
     stopNote: paper ? "paper: exits on the strategy's signal, your Exit or the square-off"
       : p.stop == null ? "no stop on record"
       : p.stopWorking ? <>stop resting at the broker{p.bid != null ? <> · {px(p.bid - p.stop)} pts below the bid · {money(p.atRisk ?? null, false)} at risk</> : null}</>
@@ -142,13 +149,17 @@ export function LiveBookPanel({ accountId, hideEmpty }: { accountId: number; hid
   }));
   const closed: ClosedView[] = b.closed.map((c) => ({ key: c.id, strategy: c.strategy, symbol: c.symbol, quantity: c.quantity,
     lotSize: c.lotSize, entry: c.entry, exit: c.exit, exitReason: c.exitReason, opened: c.opened, closed: c.closed,
-    charges: c.charges, net: c.net, pct: c.pct }));
+    charges: c.charges, net: c.net, pct: c.pct, best: c.bestBid, worst: c.worstBid, missed: c.missed, saved: c.saved }));
   const since = `Since ${paper ? "start" : "LIVE"}${b.summary.sinceLiveFrom ? ` (${dayLabel(b.summary.sinceLiveFrom)})` : ""}, net`;
   const totals: TotalView[] = [
     { label: "Open P&L", value: money(b.summary.openPnl), cls: tone(b.summary.openPnl) },
     { label: "Realised today", value: money(b.summary.realisedToday), cls: tone(b.summary.realisedToday) },
     ...(paper ? [] : [{ label: "At risk to stops", value: money(b.summary.atRisk, false) }]),
     { label: since, value: money(b.summary.sinceLiveNet), cls: tone(b.summary.sinceLiveNet), sub: `${b.summary.sinceLiveTrades} closed trades` },
+    ...(b.summary.perPoint && Object.keys(b.summary.perPoint).length > 0 ? [{
+      label: "Exposure per index point",
+      value: Object.entries(b.summary.perPoint).map(([u, v]) => `${money(v)} ${u}`).join(" · "),
+      sub: "delta × quantity: what 1 point up does to the open P&L" }] : []),
   ];
   return (
     <PositionsPanel title={<>{paper ? "Paper positions" : "Auto-trade positions"} · {b.account}</>} badge={paper ? "PAPER" : "LIVE"}
@@ -479,6 +490,7 @@ function OpenCard({ p }: { p: OpenView }) {
             <div className="text-xs text-muted">Entry → bid</div>
             <div className="num text-lg font-bold">{px(p.entry)} → {px(p.bid)}</div>
             <div className="text-xs text-muted">{money(p.entry * p.quantity, false)} paid{p.quoteAt ? ` · ${hhmm(p.quoteAt)}` : p.bid == null ? " · no recent quote" : ""}</div>
+            {p.perPoint != null && <div className="text-xs text-muted">≈ {money(p.perPoint)} per {p.underlying ?? "index"} point</div>}
           </div>
           <Rail p={p} />
         </>
@@ -540,7 +552,9 @@ const REASONS: Record<string, string> = { STOP: "stop", MANUAL: "sold by hand", 
   EARLY_FAIL_15: "15-min early exit" };
 
 function ClosedTable({ rows, showDay }: { rows: ClosedView[]; showDay: boolean }) {
-  const heads = ["Day", "Contract", "Strategy", "Lots · qty", "Entry → exit", "Exit", "In → out", "P&L %", "Charges", "Net"];
+  const ranged = rows.some((r) => r.best != null);
+  const heads = ["Day", "Contract", "Strategy", "Lots · qty", "Entry → exit", "Exit", "In → out", "Best · worst held", "P&L %", "Charges", "Net"]
+    .filter((h) => ranged || h !== "Best · worst held");
   const left = new Set(["Day", "Contract", "Strategy", "Exit", "In → out"]);
   return (
     <div className="overflow-x-auto">
@@ -561,6 +575,10 @@ function ClosedTable({ rows, showDay }: { rows: ClosedView[]; showDay: boolean }
                 <td className="num px-3 py-2.5 text-right">{px(r.entry)} → {px(r.exit)}</td>
                 <td className="px-3 py-2.5"><Tag>{REASONS[r.exitReason ?? ""] ?? r.exitReason?.toLowerCase().replace(/_/g, " ") ?? "–"}</Tag></td>
                 <td className="num px-3 py-2.5 text-muted">{hhmm(r.opened)} → {hhmm(r.closed)} · {held(r.opened, r.closed)}</td>
+                {ranged && <td className="num px-3 py-2.5 text-right">{r.best != null ? <>
+                  {px(r.best)} · {px(r.worst)}
+                  {r.missed != null && r.missed > 0 ? <div className="text-xs text-muted">left {money(r.missed, false)} vs best</div> : null}
+                </> : <span className="text-muted">–</span>}</td>}
                 <td className={`num px-3 py-2.5 text-right ${tone(r.pct)}`}>{r.pct != null ? `${r.pct > 0 ? "+" : ""}${r.pct.toFixed(1)} %` : "–"}</td>
                 <td className="num px-3 py-2.5 text-right text-muted">{r.charges.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                 <td className={`num px-3 py-2.5 text-right font-semibold ${tone(r.net)}`}>{money(r.net)}</td>

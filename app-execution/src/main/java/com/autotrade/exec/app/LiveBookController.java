@@ -49,7 +49,17 @@ class LiveBookController {
     static final int EXIT_SETTLE_SEC = 120;
     private static final java.time.Duration EXIT_SETTLE = java.time.Duration.ofSeconds(EXIT_SETTLE_SEC);
     /** An entry intent made this long after its signal is a late join. */
-    private static final java.time.Duration LATE_JOIN = java.time.Duration.ofSeconds(60);
+    static final int LATE_JOIN_SEC = 60;
+    private static final java.time.Duration LATE_JOIN = java.time.Duration.ofSeconds(LATE_JOIN_SEC);
+    /**
+     * The strategy's own exit of the position's contract after its entry's signal (an EXIT closes the whole position), as
+     * a select column over {@code p} (exec.position) and {@code d0} (the entry's signal_decision).
+     */
+    static final String STRATEGY_EXIT_AT = "(select min(d.decided_at) from exec.signal_decision d where d0.id is not null "
+            + "and d.copy_group_id = d0.copy_group_id and d.session_date = d0.session_date and d.strategy_id = p.strategy_id "
+            + "and d.instrument_token = p.instrument_token and d.action = 'EXIT' and d.decided_at >= d0.decided_at)";
+    /** Best and worst bid while a closed position was held, per position (they never change once it is closed). */
+    private final java.util.Map<Long, Double[]> heldRange = new java.util.concurrent.ConcurrentHashMap<>();
 
     /** The best bid since entry per open position, extended by each poll from where the last one stopped. */
     private record Best(double max, Timestamp upTo) {
@@ -99,12 +109,7 @@ class LiveBookController {
                 + "(select o.status from exec.order_execution o where o.broker_account_id = p.broker_account_id "
                 + "and o.trade_intent_id = p.entry_trade_intent_id and o.role = 'STOP' and o.trigger_price > 0 "
                 + "order by o.id desc limit 1) stop_status, "
-                + "i.created_at intent_at, d0.decided_at signal_at, "
-                // the strategy's own exit of this contract after the entry's signal (an EXIT closes the whole position)
-                + "(select min(d.decided_at) from exec.signal_decision d where d0.id is not null "
-                + "and d.copy_group_id = d0.copy_group_id and d.session_date = d0.session_date and d.strategy_id = p.strategy_id "
-                + "and d.instrument_token = p.instrument_token and d.action = 'EXIT' and d.decided_at >= d0.decided_at) "
-                + "strategy_exit_at "
+                + "i.created_at intent_at, d0.decided_at signal_at, " + STRATEGY_EXIT_AT + " strategy_exit_at "
                 + "from exec.position p join exec.trade_intent i on i.id = p.entry_trade_intent_id "
                 + "left join exec.trade_batch b0 on b0.id = i.trade_batch_id "
                 + "left join exec.signal_decision d0 on d0.id = b0.signal_decision_id "
@@ -124,6 +129,7 @@ class LiveBookController {
         List<Map<String, Object>> open = new ArrayList<>();
         List<Map<String, Object>> closed = new ArrayList<>();
         double openPnl = 0, atRisk = 0, realisedToday = 0, bookedOnOpen = 0;
+        Map<String, Double> perPointBy = new java.util.TreeMap<>();
         for (Map<String, Object> r : rows) {
             double entry = num(r.get("average_entry"));
             long bought = ((Number) r.get("bought")).longValue();
@@ -149,6 +155,11 @@ class LiveBookController {
                 out.put("stopStatus", r.get("stop_status"));
                 out.put("stopWorking", working);
                 Double bid = (Double) q.get("bid");
+                if (q.get("delta") != null) {                  // rupees per index point (17 Nov 2026, phase 3)
+                    double perPoint = (Double) q.get("delta") * qty;
+                    out.put("perPoint", round(perPoint));
+                    perPointBy.merge((String) r.get("underlying"), perPoint, Double::sum);
+                }
                 if (bid != null) {
                     double pnl = (bid - entry) * qty;
                     out.put("pnl", round(pnl));
@@ -196,6 +207,17 @@ class LiveBookController {
                 out.put("charges", round(charges));
                 out.put("net", round(gross - charges));
                 out.put("pct", bought > 0 && entry > 0 ? round(100 * gross / (bought * entry)) : null);
+                Double[] range = closedAt == null ? null : heldRange(((Number) r.get("id")).longValue(),
+                        ((Number) r.get("instrument_token")).longValue(), (Timestamp) r.get("opened_at"), closedAt);
+                if (range != null && range[0] != null) {
+                    out.put("bestBid", range[0]);
+                    out.put("worstBid", range[1]);
+                    Double exit = (Double) out.get("exit");
+                    if (exit != null && bought > 0) {
+                        out.put("missed", round(Math.max(0, range[0] - exit) * bought));   // left on the table vs the best bid
+                        out.put("saved", round(Math.max(0, exit - range[1]) * bought));    // kept vs the worst bid
+                    }
+                }
                 if (closedAt != null && closedAt.toInstant().atZone(IST).toLocalDate().equals(today)) {
                     realisedToday += gross - charges;
                 }
@@ -217,6 +239,9 @@ class LiveBookController {
         summary.put("atRisk", round(atRisk));
         summary.put("realisedToday", round(realisedToday));
         summary.put("bookedOnOpen", round(bookedOnOpen));               // partial sales of still-open positions, today
+        Map<String, Object> perPoint = new LinkedHashMap<>();
+        perPointBy.forEach((u, v) -> perPoint.put(u, round(v)));
+        summary.put("perPoint", perPoint);                              // rupees per index point, by index
         summary.put("sinceLiveNet", round(num(since.get("net"))));
         summary.put("sinceLiveTrades", ((Number) since.get("trades")).intValue());
         summary.put("sinceLiveFrom", since.get("first") == null ? null
@@ -409,10 +434,29 @@ class LiveBookController {
         return hint;
     }
 
+    /**
+     * The best and worst bid of the contract while the position was held (captured option ticks, time-bounded); computed
+     * once per closed position. {null, null} when no tick was captured then.
+     */
+    private Double[] heldRange(long position, long token, Timestamp opened, Timestamp closed) {
+        Double[] kept = heldRange.get(position);
+        if (kept != null) {
+            return kept;
+        }
+        Map<String, Object> m = jdbc.queryForMap("select max(bid_px[1]) hi, min(bid_px[1]) lo from md.option_tick "
+                + "where instrument_token = ? and recv_ts between ? and ? and bid_px[1] > 0", token, opened, closed);
+        Double[] range = {m.get("hi") == null ? null : num(m.get("hi")), m.get("lo") == null ? null : num(m.get("lo"))};
+        if (heldRange.size() > 5_000) {
+            heldRange.clear();                                  // a bound, not a policy: they are cheap to compute again
+        }
+        heldRange.put(position, range);
+        return range;
+    }
+
     /** The newest captured quote of the contract (if recent) and the best bid since the entry (extended incrementally). */
     private Map<String, Object> quote(long position, long token, Timestamp since) {
         Map<String, Object> q = new LinkedHashMap<>();
-        List<Map<String, Object>> last = jdbc.queryForList("select bid_px[1] bid, ask_px[1] ask, ltp, recv_ts from md.option_tick "
+        List<Map<String, Object>> last = jdbc.queryForList("select bid_px[1] bid, ask_px[1] ask, ltp, delta, recv_ts from md.option_tick "
                 + "where instrument_token = ? and recv_ts > now() - make_interval(mins => ?) and bid_px[1] > 0 "
                 + "order by recv_ts desc limit 1", token, QUOTE_MAX_AGE_MIN);
         if (!last.isEmpty()) {
@@ -421,6 +465,7 @@ class LiveBookController {
             q.put("ask", num(l.get("ask")));
             q.put("ltp", l.get("ltp") == null ? null : num(l.get("ltp")));
             q.put("quoteAt", ist((Timestamp) l.get("recv_ts")));
+            q.put("delta", l.get("delta") == null ? null : num(l.get("delta")));
         } else {
             q.put("bid", null);
         }

@@ -635,7 +635,9 @@ export interface LiveBook {
   /** engaged switches that stop the account's entries, oldest first */
   killSwitches: { id: number; text: string; releasable: boolean }[];
   summary: { openPnl: number; atRisk: number; realisedToday: number; sinceLiveNet: number; sinceLiveTrades: number;
-    sinceLiveFrom: string | null; bookedOnOpen?: number };
+    sinceLiveFrom: string | null; bookedOnOpen?: number;
+    /** rupees per index point of the open positions (delta x quantity), by index */
+    perPoint?: Record<string, number> };
   open: LiveOpenPosition[];
   closed: LiveClosedPosition[];
   /** PAPER: a paper account's book (its PAPER entries); LIVE: a broker account's LIVE entries */
@@ -684,6 +686,8 @@ export interface LiveOpenPosition extends LiveBookRow {
   lateJoin?: { signalAt: string; joinedAt: string };
   /** net already booked by partial exits of this still-open position */
   bookedSoFar?: number;
+  /** rupees per index point (delta x quantity) at the newest quote */
+  perPoint?: number;
 }
 
 /** What an Exit of part or all of one open position would do now (GET .../positions/{id}/exit-preview). */
@@ -718,6 +722,11 @@ export interface ExitPreview {
 }
 
 export interface LiveClosedPosition extends LiveBookRow {
+  /** best and worst captured bid while it was held; missed: left vs the best, saved: kept vs the worst (rupees) */
+  bestBid?: number;
+  worstBid?: number;
+  missed?: number;
+  saved?: number;
   exit: number | null;
   exitReason: string | null;
   closed: string;
