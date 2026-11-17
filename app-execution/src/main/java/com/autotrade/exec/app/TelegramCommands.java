@@ -89,6 +89,19 @@ class TelegramCommands {
     private final Executor runner;
     private final SecureRandom random = new SecureRandom();
     private final Map<String, Instant> throttled = new java.util.concurrent.ConcurrentHashMap<>();
+    /** The web's address for /login links (null: the paths only). */
+    private String publicBaseUrl;
+    /** The longest list a read sends (Telegram's message limit). */
+    static final int MAX_LIST = 15;
+    /** Today's start (IST midnight) as a timestamptz expression. */
+    private static final String IST_DAY_START = "(date_trunc('day', now() at time zone 'Asia/Kolkata') at time zone 'Asia/Kolkata')";
+
+    /** The web's public address (autotrade.execution.kite.public-base-url), for /login's links. */
+    @Autowired(required = false)
+    void publicBaseUrl(KiteLoginProperties kite) {
+        String url = kite == null ? null : kite.publicBaseUrl();
+        this.publicBaseUrl = url == null || url.isBlank() ? null : url.replaceAll("/+$", "");
+    }
 
     @Autowired
     TelegramCommands(DataSource dataSource, Access access, ExecutionService service, TelegramNotifier notifier,
@@ -205,9 +218,14 @@ class TelegramCommands {
             case "/whoami" -> reply(caller, whoami(caller), "WHOAMI");
             case "/status" -> reply(caller, status(caller), "STATUS");
             case "/positions" -> reply(caller, positions(caller), "POSITIONS");
+            case "/orders" -> reply(caller, orders(caller), "ORDERS");
+            case "/pnl" -> reply(caller, pnl(caller), "PNL");
+            case "/login" -> reply(caller, login(caller), "LOGIN");
+            case "/unlink" -> unlink(caller);
             case "/kill" -> kill(updateId, caller, arg);
             case "/killall" -> killAll(updateId, caller);
             case "/flatten" -> flatten(updateId, caller, arg);
+            case "/flattenall" -> flattenAll(updateId, caller);
             case "/exit" -> exit(updateId, caller, arg);
             default -> reply(caller, help(), "HELP");
         };
@@ -257,10 +275,15 @@ class TelegramCommands {
                 auto-trade bot
                 /status   accounts, mode, session, kill switches
                 /positions   open positions
+                /orders   today's orders
+                /pnl   today's result per account (booked + open at the bid)
+                /login   accounts that still need today's broker login, with the link
                 /exit [ID [LOTS]]   sell one open position now (pick it), or LOTS of it
                 /flatten [ACCOUNT]   kill switch on + sell every open position
-                /kill [ACCOUNT]   stop new entries (no account: your whole workspace). Exits continue; nothing is sold
+                /kill [ACCOUNT | STRATEGY]   stop new entries (nothing named: your whole workspace). Exits continue; nothing is sold
                 /killall   platform admin: stop every LIVE account
+                /flattenall   platform admin: kill switch on + sell every open position of every account
+                /unlink   this chat stops being yours (link again from the web)
                 /whoami
 
                 Every action asks you to confirm. No answer within 10 s means it was not received: use the web or the \
@@ -314,13 +337,126 @@ class TelegramCommands {
         return out.toString().trim();
     }
 
+    /** Today's orders of every account the caller sees, newest first (17 Nov 2026, plan C2). */
+    private String orders(Caller c) {
+        Long[] tenants = c.user().tenants().toArray(Long[]::new);
+        List<Map<String, Object>> rows = jdbc.queryForList("select to_char(e.created_at at time zone 'Asia/Kolkata', "
+                + "'HH24:MI:SS') at, a.display_name, e.role, e.order_side, e.quantity_filled, e.quantity_requested, coalesce(i.symbol, (select p.symbol from "
+                + "exec.position p where p.entry_trade_intent_id = i.id limit 1), 'contract ' || i.instrument_token) symbol, "
+                + "e.status, coalesce(e.average_fill_price, e.limit_price, e.trigger_price) px from exec.order_execution e "
+                + "join exec.trade_intent i on i.id = e.trade_intent_id join acct.broker_account a on a.id = e.broker_account_id "
+                + "where e.tenant_id = any(?) and e.created_at >= " + IST_DAY_START + " order by e.id desc limit ?", tenants, MAX_LIST + 1);
+        if (rows.isEmpty()) {
+            return "No orders today.";
+        }
+        StringBuilder out = new StringBuilder();
+        for (Map<String, Object> r : rows.subList(0, Math.min(MAX_LIST, rows.size()))) {
+            out.append(r.get("at")).append(' ').append(r.get("display_name")).append(' ').append(r.get("role")).append(' ')
+                    .append(r.get("order_side")).append(' ').append(r.get("quantity_filled")).append('/')
+                    .append(r.get("quantity_requested")).append(' ').append(r.get("symbol")).append(' ')
+                    .append(r.get("status")).append(r.get("px") == null ? "" : " @" + round(r.get("px"))).append('\n');
+        }
+        if (rows.size() > MAX_LIST) {
+            out.append("(the newest ").append(MAX_LIST).append("; the web has all)");
+        }
+        return out.toString().trim();
+    }
+
+    /** Today's result per account the caller sees: booked (closed today, partial sales) + open at the bid (plan C2). */
+    private String pnl(Caller c) {
+        StringBuilder out = new StringBuilder();
+        double total = 0;
+        for (long tenant : c.user().tenants()) {
+            for (Map<String, Object> a : jdbc.queryForList("select a.id, a.display_name, a.trade_mode, a.broker_type, "
+                    + "coalesce(sum(p.realised_gross - coalesce(p.charges, 0)) filter (where p.realised_gross is not null "
+                    + "and coalesce(p.closed_at, p.opened_at) >= " + IST_DAY_START + "), 0)::float8 booked, count(p.id) filter (where p.status <> 'CLOSED') open, "
+                    + "count(p.id) filter (where p.opened_at >= " + IST_DAY_START + " or p.status <> 'CLOSED') today from acct.broker_account a left join exec.position p "
+                    + "on p.broker_account_id = a.id where a.tenant_id = ? and a.account_role = 'FOLLOWER_TRADE' "
+                    + "group by a.id order by a.display_name", tenant)) {
+                if (((Number) a.get("today")).intValue() == 0) {
+                    continue;                                   // nothing traded today
+                }
+                double booked = ((Number) a.get("booked")).doubleValue(), open = 0;
+                for (Long id : jdbc.queryForList("select id from exec.position where broker_account_id = ? and status "
+                        + "<> 'CLOSED' order by id", Long.class, a.get("id"))) {
+                    Object pnl = facts.of(id).get("pnl");
+                    open += pnl == null ? 0 : ((Number) pnl).doubleValue();
+                }
+                total += booked + open;
+                out.append(a.get("display_name")).append(" (").append("PAPER".equals(a.get("broker_type")) ? "PAPER"
+                        : a.get("trade_mode")).append("): booked ").append(rupees(booked)).append(" · open ")
+                        .append(rupees(open)).append(" at the bid (").append(a.get("open")).append(" open) = ")
+                        .append(rupees(booked + open)).append('\n');
+            }
+        }
+        return out.isEmpty() ? "Nothing traded today." : out.append("All: ").append(rupees(total)).toString();
+    }
+
+    /** The accounts the caller may act for that still need today's broker login, each with its link (plan C3). */
+    private String login(Caller c) {
+        StringBuilder out = new StringBuilder();
+        for (long tenant : c.user().tenants()) {
+            if (!c.user().mayAct(tenant)) {
+                continue;
+            }
+            for (Map<String, Object> a : jdbc.queryForList("select a.id, a.display_name, a.broker_type from "
+                    + "acct.broker_account a where a.tenant_id = ? and a.broker_type <> 'PAPER' and a.enabled "
+                    + "and a.account_role = 'FOLLOWER_TRADE' and not exists (select 1 from acct.broker_session s where "
+                    + "s.broker_account_id = a.id and s.status = 'ACTIVE' and s.expires_at > now()) order by a.display_name",
+                    tenant)) {
+                String broker = (String) a.get("broker_type");
+                String path = switch (broker) {
+                    case "ZERODHA" -> "/api/execution/accounts/" + a.get("id") + "/kite/login";
+                    case "UPSTOX" -> "/api/execution/accounts/" + a.get("id") + "/upstox/login";
+                    default -> "/brokers";                      // Kotak (TOTP) and Groww (token) log in on the web page
+                };
+                out.append(a.get("display_name")).append(" (").append(broker).append("): ")
+                        .append(publicBaseUrl == null ? "on the web (" + path + ")" : publicBaseUrl + path).append('\n');
+            }
+        }
+        return out.isEmpty() ? "Every broker account you trade is logged in for today."
+                : "Needs today's login:\n" + out.toString().trim();
+    }
+
+    /** This chat stops being the caller's (plan C1): no command from it runs any more; the web links it again. */
+    private String unlink(Caller c) {
+        jdbc.update("update acct.app_user set telegram_chat_id = null where id = ?", c.appUserId());
+        for (long tenant : c.user().tenants()) {
+            kills.audit(tenant, null, c.actor(), "TELEGRAM_UNLINKED", Map.of("chat", c.chat()));
+        }
+        bot.send(c.chat(), "Unlinked: this chat runs nothing any more. Link it again from the web (Settings).", null);
+        return "UNLINKED_BY_USER";
+    }
+
+    private static String rupees(double v) {
+        long r = Math.round(v);
+        return (r < 0 ? "-" : r > 0 ? "+" : "") + "Rs " + String.format(Locale.ROOT, "%,d", Math.abs(r));
+    }
+
     // ---------------------------------------------------------------------------------------------------- writes
 
     private String kill(long updateId, Caller c, String arg) {
         if (!arg.isEmpty()) {
             List<BrokerAccount> named = accountsNamed(c, arg);
             if (named.isEmpty()) {
-                return reply(c, "No account \"" + arg + "\" you may stop. /status lists yours.", "NO_ACCOUNT");
+                // 17 Nov 2026 (plan C4): a strategy of the caller's workspaces stops in that workspace
+                String strategy = arg.trim().toLowerCase(Locale.ROOT);
+                List<Long> where = c.user().tenants().stream().filter(c.user()::emergency)
+                        .filter(t -> strategyIn(t, strategy)).toList();
+                if (where.size() == 1) {
+                    return card(updateId, c, "KILL_STRATEGY", where.getFirst(), null, null, null, strategy);
+                }
+                if (where.size() > 1) {
+                    List<List<TelegramBot.Button>> rows = new ArrayList<>();
+                    for (long t : where.subList(0, Math.min(MAX_BUTTONS, where.size()))) {
+                        rows.add(List.of(new TelegramBot.Button("Stop " + strategy + " in " + tenantName(t),
+                                "s:" + t + ":" + strategy)));
+                    }
+                    bot.send(c.chat(), "In which workspace?", rows);
+                    return "PICK";
+                }
+                return reply(c, "No account or strategy \"" + arg + "\" you may stop. /status lists your accounts.",
+                        "NO_ACCOUNT");
             }
             if (named.size() > 1) {
                 return pickAccount(c, named, "Stop ", "p:ka:");
@@ -341,6 +477,20 @@ class TelegramCommands {
         }
         bot.send(c.chat(), "Whose workspace? (or /kill ACCOUNT)", rows);
         return "PICK";
+    }
+
+    /** Whether a strategy is one the workspace's accounts take (an enabled subscription). */
+    private boolean strategyIn(long tenant, String strategy) {
+        return strategy.matches("[a-z0-9][a-z0-9-]{0,63}") && Boolean.TRUE.equals(jdbc.queryForObject("select exists "
+                + "(select 1 from acct.strategy_subscription s join acct.broker_account a on a.id = s.broker_account_id "
+                + "where a.tenant_id = ? and s.strategy_id = ? and s.enabled)", Boolean.class, tenant, strategy));
+    }
+
+    private String flattenAll(long updateId, Caller c) {
+        if (!c.user().admin()) {
+            return reply(c, "/flattenall needs the platform admin.", "FORBIDDEN");
+        }
+        return card(updateId, c, "FLATTEN_ALL", null, null, null);
     }
 
     private String killAll(long updateId, Caller c) {
@@ -432,6 +582,15 @@ class TelegramCommands {
     /** {@code quantity}: an EXIT of part of the position (whole lots); null: all of it. */
     private String card(long updateId, Caller c, String verb, Long tenant, BrokerAccount account, Long positionId,
                         Long quantity) {
+        return card(updateId, c, verb, tenant, account, positionId, quantity, null);
+    }
+
+    /** {@code strategy}: the strategy a KILL_STRATEGY stops. */
+    private String card(long updateId, Caller c, String verb, Long tenant, BrokerAccount account, Long positionId,
+                        Long quantity, String strategy) {
+        if (verb.equals("KILL_STRATEGY") && (tenant == null || !strategyIn(tenant, strategy))) {
+            return reply(c, "No strategy \"" + strategy + "\" in that workspace.", "NO_STRATEGY");
+        }
         String refused = refusal(c, verb, tenant, account, positionId);
         if (refused != null) {
             return reply(c, refused, "FORBIDDEN");
@@ -439,11 +598,11 @@ class TelegramCommands {
         String nonce = nonce();
         Long botId = bot.botId();
         long id = jdbc.queryForObject("insert into exec.telegram_command (bot_id, update_id, app_user_id, chat_id, tenant_id, "
-                        + "verb, broker_account_id, position_id, trade_mode, nonce, quantity) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                        + "returning id", Long.class, botId == null ? 0 : botId, updateId, c.appUserId(), Long.parseLong(c.chat()), tenant, verb,
-                account == null ? null : account.id(), positionId,
-                account == null ? null : account.tradeMode().name(), nonce, quantity);
-        String text = "T" + id + " " + describe(verb, tenant, account, positionId, quantity) + "\n\nConfirm within "
+                        + "verb, broker_account_id, position_id, trade_mode, nonce, quantity, strategy_id) values (?, ?, ?, ?, ?, ?, ?, ?, "
+                        + "?, ?, ?, ?) returning id", Long.class, botId == null ? 0 : botId, updateId, c.appUserId(),
+                Long.parseLong(c.chat()), tenant, verb, account == null ? null : account.id(), positionId,
+                account == null ? null : account.tradeMode().name(), nonce, quantity, strategy);
+        String text = "T" + id + " " + describe(verb, tenant, account, positionId, quantity, strategy) + "\n\nConfirm within "
                 + props.confirmSeconds() + " s.";
         Long message = bot.send(c.chat(), text, List.of(
                 List.of(new TelegramBot.Button(confirmLabel(verb, account), "c:" + id + ":" + nonce)),
@@ -457,13 +616,38 @@ class TelegramCommands {
         return "CARD T" + id;
     }
 
+    /**
+     * /flattenall (plan C5, platform admin): every account with an open position gets its kill switch, then is flattened;
+     * a LIVE account is only stopped while selling on LIVE over Telegram is off.
+     */
+    private List<String> flattenEverything(Caller c, String reason) throws Exception {
+        List<String> lines = new ArrayList<>();
+        for (Long id : jdbc.queryForList("select distinct broker_account_id from exec.position where status <> 'CLOSED' "
+                + "order by 1", Long.class)) {
+            BrokerAccount a = accounts.byId(id).orElse(null);
+            if (a == null || a.role() != com.autotrade.account.AccountRole.FOLLOWER_TRADE) {
+                continue;
+            }
+            kills.engageAccount(a, "FLATTEN ALL by " + c.actor() + ": " + reason, c.actor());
+            if (a.tradeMode() == TradeMode.LIVE && !props.liveExits()) {
+                lines.add(a.displayName() + ": LIVE, stopped only (exit it on the web or in the broker's app)");
+                continue;
+            }
+            for (String line : actions.flatten(a.id(), c.actor(), reason)) {
+                lines.add(a.displayName() + ": " + line);
+            }
+        }
+        return lines;
+    }
+
     /** Why this person may not do this now, or null. The web's rules ({@link Access.User}). */
     private String refusal(Caller c, String verb, Long tenant, BrokerAccount account, Long positionId) {
         Access.User u = c.user();
         return switch (verb) {
             case "KILL_GLOBAL" -> u.admin() ? null : "/killall needs the platform admin.";
-            case "KILL_TENANT" -> tenant != null && u.sees(tenant) && u.emergency(tenant) ? null
+            case "KILL_TENANT", "KILL_STRATEGY" -> tenant != null && u.sees(tenant) && u.emergency(tenant) ? null
                     : "Your role there is read-only.";
+            case "FLATTEN_ALL" -> u.admin() ? null : "/flattenall needs the platform admin.";
             case "KILL_ACCOUNT", "FLATTEN", "EXIT" -> {
                 if (account == null || !u.sees(account.tenantId())) {
                     yield "No such account of yours.";
@@ -486,8 +670,26 @@ class TelegramCommands {
         };
     }
 
-    private String describe(String verb, Long tenant, BrokerAccount a, Long positionId, Long quantity) {
+    private String describe(String verb, Long tenant, BrokerAccount a, Long positionId, Long quantity, String strategy) {
         return switch (verb) {
+            case "KILL_STRATEGY" -> "KILL strategy " + strategy + " in workspace " + tenantName(tenant) + ".\nNo new entries of "
+                    + strategy + " on any of its accounts. Exits continue; nothing is sold. Release on the web only.";
+            case "FLATTEN_ALL" -> {
+                StringBuilder s = new StringBuilder("FLATTEN ALL: on every account with an open position, its kill switch "
+                        + "on, broker stops cancelled, every position auto-trade opened sold now:");
+                List<Map<String, Object>> open = jdbc.queryForList("select a.display_name, a.trade_mode, count(*) n from "
+                        + "exec.position p join acct.broker_account a on a.id = p.broker_account_id where p.status <> 'CLOSED' "
+                        + "group by a.id order by a.display_name");
+                open.forEach(r -> s.append("\n  ").append(r.get("display_name")).append(" (").append(r.get("trade_mode"))
+                        .append("): ").append(r.get("n")).append(" open"));
+                if (open.isEmpty()) {
+                    s.append(" none open now.");
+                }
+                if (!props.liveExits()) {
+                    s.append("\nLIVE accounts are only stopped (selling on LIVE over Telegram is off): exit them on the web.");
+                }
+                yield s.append("\nSold at the market's bid: the spread is a cost. Release the switches on the web.").toString();
+            }
             case "KILL_GLOBAL" -> "KILL ALL LIVE ACCOUNTS (GLOBAL_LIVE).\nNew entries stop on every LIVE account. Exits "
                     + "continue; nothing is sold. Release on the web only.";
             case "KILL_TENANT" -> "KILL workspace " + tenantName(tenant) + " (" + tenantOpen(tenant) + " open position(s)).\n"
@@ -531,6 +733,8 @@ class TelegramCommands {
             case "KILL_GLOBAL" -> "Confirm: kill all LIVE";
             case "KILL_TENANT", "KILL_ACCOUNT" -> "Confirm kill" + live;
             case "FLATTEN" -> "Confirm flatten" + live;
+            case "FLATTEN_ALL" -> "Confirm: flatten ALL";
+            case "KILL_STRATEGY" -> "Confirm kill";
             case "EXIT" -> "Confirm exit" + live;
             default -> "Confirm";
         };
@@ -551,6 +755,10 @@ class TelegramCommands {
             if (data.length == 3 && data[0].equals("p")) {
                 bot.answer(id, "");
                 return pick(updateId, caller, data[1], Long.parseLong(data[2]));
+            }
+            if (data.length == 3 && data[0].equals("s")) {           // /kill STRATEGY: the workspace picked
+                bot.answer(id, "");
+                return card(updateId, caller, "KILL_STRATEGY", Long.parseLong(data[1]), null, null, null, data[2]);
             }
             if (data.length == 3 && (data[0].equals("c") || data[0].equals("x"))) {
                 return decide(caller, id, data[0].equals("c"), Long.parseLong(data[1]), data[2]);
@@ -589,7 +797,8 @@ class TelegramCommands {
                         + "confirmed_at = case when ? then now() end, done_at = case when ? then null else now() end "
                         + "where id = ? and nonce = ? and app_user_id = ? and chat_id = ? and status = 'PENDING' "
                         + "and created_at > now() - make_interval(secs => ?) "
-                        + "returning id, verb, tenant_id, broker_account_id, position_id, card_message_id, trade_mode, quantity",
+                        + "returning id, verb, tenant_id, broker_account_id, position_id, card_message_id, trade_mode, quantity, "
+                        + "strategy_id",
                 confirm ? "CONFIRMED" : "CANCELLED", confirm, confirm, commandId, nonce, c.appUserId(),
                 Long.parseLong(c.chat()), props.confirmSeconds());
         if (rows.isEmpty()) {
@@ -640,6 +849,7 @@ class TelegramCommands {
         Long accountId = cmd.get("broker_account_id") == null ? null : ((Number) cmd.get("broker_account_id")).longValue();
         Long positionId = cmd.get("position_id") == null ? null : ((Number) cmd.get("position_id")).longValue();
         Long quantity = cmd.get("quantity") == null ? null : ((Number) cmd.get("quantity")).longValue();
+        String strategy = (String) cmd.get("strategy_id");
         String cardMode = (String) cmd.get("trade_mode");
         String status;
         String result;
@@ -664,6 +874,9 @@ class TelegramCommands {
                             c.actor()) + " engaged on " + tenantName(tenant) + "; open positions: " + tenantOpen(tenant));
                     case "KILL_ACCOUNT" -> List.of("switch #" + kills.engage(a.tenantId(), "ACCOUNT", a.id(), null, null,
                             reason, c.actor()) + " engaged on " + a.displayName() + "; open positions: " + openCount(a.id()));
+                    case "KILL_STRATEGY" -> List.of("switch #" + kills.engage(tenant, "STRATEGY", null, strategy, null,
+                            reason, c.actor()) + " engaged: " + strategy + " takes no new entries in " + tenantName(tenant));
+                    case "FLATTEN_ALL" -> flattenEverything(c, reason);
                     case "FLATTEN" -> {
                         // review 16 Nov 2026: the switch first, here (idempotent), so entries stop even when the worker
                         // has not started and the flatten itself can do nothing yet
