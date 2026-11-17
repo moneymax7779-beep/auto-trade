@@ -67,6 +67,8 @@ abstract class SetupStrategy implements Strategy {
     private final double quietIvPercentileMin;
     private final double quietBreadthMinAgree;
     private final boolean skipExpiringIndex;
+    /** A-435 (sbr-v5): no new entry from this time when the traded index expires today (null = off). */
+    private final LocalTime lastNewEntry0dte;
     private final double premiumStopPct;
     /** A-283: a premium target sold on the quote that reaches it (the order manager's bracket); NaN = none. */
     private final double premiumTargetPct;
@@ -82,6 +84,10 @@ abstract class SetupStrategy implements Strategy {
     private final double trailActivationPct;
     private final double trailGivebackPct;
     private double trailPeak = Double.NaN;
+
+    /** A-407: the structure stop's minimum distance from the entry spot in ATR3m (NaN = off) and its grace in minutes. */
+    private final double stopMinAtr;
+    private final int stopGraceMin;
 
     /** Minute closes, newest last (the snapshot spot each minute). */
     protected final ArrayDeque<Double> closes = new ArrayDeque<>();
@@ -106,7 +112,11 @@ abstract class SetupStrategy implements Strategy {
         this.profitLockArmPct = config.has("exits.profit_lock_arm_pct") ? config.getDouble("exits.profit_lock_arm_pct") : Double.NaN;
         this.profitLockFloorPct = config.has("exits.profit_lock_floor_pct") ? config.getDouble("exits.profit_lock_floor_pct") : Double.NaN;
         this.skipExpiringIndex = config.getBoolean("scope.skip_expiring_index");
+        this.lastNewEntry0dte = config.has("scope.last_new_entry_0dte") ? config.getTime("scope.last_new_entry_0dte") : null;
         this.premiumStopPct = config.getDouble("exits.premium_stop_pct");
+        // A-407: a structure stop at least stop_min_atr x ATR3m from the entry spot, and no STOP in the first stop_grace_min
+        this.stopMinAtr = config.has("exits.stop_min_atr") ? config.getDouble("exits.stop_min_atr") : Double.NaN;
+        this.stopGraceMin = config.has("exits.stop_grace_min") ? config.getInt("exits.stop_grace_min") : 0;
         this.premiumTargetPct = config.has("exits.premium_target_pct") ? config.getDouble("exits.premium_target_pct") : Double.NaN;
         this.strikeOffset = config.getInt("position.strike_offset");
         this.vwapTrail3m = config.has("exits.vwap_trail_3m") && config.getBoolean("exits.vwap_trail_3m");
@@ -157,6 +167,11 @@ abstract class SetupStrategy implements Strategy {
         boolean expiringIndex = skipExpiringIndex && s.regime().dteTradingDays() == 0;
         boolean window = !time.isBefore(entryFrom) && time.isBefore(lastNewEntry);
         Map<String, Boolean> c = new LinkedHashMap<>();
+        if (lastNewEntry0dte != null && s.regime().dteTradingDays() == 0) {      // A-435: late 0DTE entries cut
+            boolean early = time.isBefore(lastNewEntry0dte);
+            c.put("expiry_window", early);
+            window = window && early;
+        }
         c.put("not_expiring_index", !expiringIndex);
         c.put("window", window);
         Entry entry = evaluate(s, time, window && !expiringIndex && !position.open() && Double.isFinite(spot), c);
@@ -225,9 +240,10 @@ abstract class SetupStrategy implements Strategy {
             beMinute = null;
             beLastBid = Double.NaN;
             if (entry != null) {
-                orders.add(new OrderIntent(OrderIntent.Action.ENTER, entry.side(), 1, Stage.CONFIRMED, entry.reason(),
-                        premiumStopPct, strikeOffset(entry, s), premiumTargetPct, Double.NaN));
-                plan = entry;
+                orders.add(new OrderIntent(OrderIntent.Action.ENTER, entry.side(), entryLots(entry), Stage.CONFIRMED, entry.reason(),
+                        premiumStopPct, strikeOffset(entry, s), premiumTargetPct, Double.NaN)
+                        .withStopPoints(stopPoints(entry, spot)));
+                plan = widenStop(entry, spot, s.structure().atr3m());
                 enteredAt = now;
             }
         }
@@ -237,6 +253,16 @@ abstract class SetupStrategy implements Strategy {
                 expiringIndex ? "EXPIRING_INDEX" : "SETUP", null),
                 new SideView(OptionSide.CE, ce, Double.NaN, Double.NaN, Double.NaN, lastConditions),
                 new SideView(OptionSide.PE, pe, Double.NaN, Double.NaN, Double.NaN, lastConditions), List.copyOf(orders));
+    }
+
+    /** A-407: the entry with its stop moved out to at least {@code stop_min_atr} ATR3m from the entry spot (off: unchanged). */
+    Entry widenStop(Entry entry, double spot, double atr) {
+        if (Double.isNaN(stopMinAtr) || !(atr > 0) || !Double.isFinite(spot) || !Double.isFinite(entry.stop())) {
+            return entry;
+        }
+        double floor = entry.side() == OptionSide.CE ? spot - stopMinAtr * atr : spot + stopMinAtr * atr;
+        double stop = entry.side() == OptionSide.CE ? Math.min(entry.stop(), floor) : Math.max(entry.stop(), floor);
+        return new Entry(entry.side(), stop, entry.target(), entry.reason());
     }
 
     /** A-091: the peak trail's exit reason, or null (off, not armed, or the bid still within the giveback). */
@@ -252,6 +278,22 @@ abstract class SetupStrategy implements Strategy {
         }
         trailPeak = Math.max(trailPeak, position.bid());
         return position.bid() <= trailPeak * (1 - trailGivebackPct / 100.0) ? "TRAIL_" + Math.round(trailGivebackPct) : null;
+    }
+
+    /**
+     * A-400: the entry's lots in units of the file's {@code position.intended_lots} (the budget is sized as lots /
+     * intended_lots); 1 by default, so every family with intended_lots 1 buys its full budget as before.
+     */
+    protected int entryLots(Entry entry) {
+        return 1;
+    }
+
+    /**
+     * A-410: the index points from spot to the entry's stop, passed with the ENTER so a risk file with
+     * {@code sizing.delta_risk_per_trade} can size from it; NaN (the default) = not passed, as before.
+     */
+    protected double stopPoints(Entry entry, double spot) {
+        return Double.NaN;
     }
 
     /** The entry's strike in strikes from ATM (the file's {@code position.strike_offset}; A-283 overrides it). */
@@ -280,7 +322,9 @@ abstract class SetupStrategy implements Strategy {
         if (useTarget && Double.isFinite(plan.target()) && sign * (spot - plan.target()) >= 0) {
             return "TARGET";
         }
-        if (Double.isFinite(plan.stop()) && sign * (spot - plan.stop()) < 0) {
+        boolean inGrace = stopGraceMin > 0 && enteredAt != null
+                && Duration.between(enteredAt, now).toMinutes() <= stopGraceMin;          // A-407: closes t0+1 .. t0+grace
+        if (!inGrace && Double.isFinite(plan.stop()) && sign * (spot - plan.stop()) < 0) {
             return "STOP";
         }
         if (vwapTrail3m && threeMinuteClose(time) && Double.isFinite(vwap) && sign * (spot - vwap) < 0) {

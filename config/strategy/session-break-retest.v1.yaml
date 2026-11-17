@@ -1,0 +1,34 @@
+# sbr-v1 Session Break-Retest (A-426 S2F0 / A-428, 15 Nov 2026, user: "think about breakouts ... if the level crossed and
+# sustained ... find a best strategy"): a decisive five-minute break of an srb-v3 line, then a retest that holds, ridden
+# with the break to the close. Values are those registered in A-426 before any result (.local/a426/brk.py). Research only:
+# passes the tick days in simulation, FAILS on the 2024-26 bars.
+version: sbr-v1
+strategy: session-break-retest
+status: UNCALIBRATED
+source: "user-request-2026-11-15 (A-426 / A-428)"
+
+scope:
+  entry_from: "10:00"
+  last_new_entry: "14:31"              # exclusive: a five-minute close at 14:30 may still enter
+  flat_by: "15:15"
+  time_stop_min: 0
+  skip_expiring_index: false
+
+setup:
+  first_hour_end: "10:15"
+  line_tol_em: 0.10
+  strong_touches: 3
+  break_buffer_em: 0.03                # the break: a five-minute close 0.03 x EM beyond; the stop: 0.03 x EM back across
+  retest_band_em: 0.05                 # the retest bar comes back within 0.05 x EM of the line
+  retest_min: 30                       # within 30 minutes of the break
+  hold_bars: 2                         # a break is followed for at least two five-minute closes
+  max_entries_per_day: 2
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM; the class buys one strike in the money when expiry is <= 1 day away
+
+exits:
+  premium_stop_pct: 90
+  use_target: false                    # no target: the LINE_STOP or flat_by

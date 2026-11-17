@@ -109,6 +109,12 @@ public final class TradingSession {
     private final Supplier<Instant> clock;
     private final KillSwitch killSwitch;
     private final RiskEngine risk;
+    private java.util.Set<String> lowPriority = java.util.Set.of();   // A-475: risk file priority.low
+    private double lowPriorityKeepFreePct;
+    private boolean lowPriorityPreempt;                                 // A-476: risk file priority.low_preempt
+    /** A-476: an entry refused for capital whose way is being cleared by closing low-priority positions. */
+    private record Preempted(Slot slot, Decision decision, OrderIntent intent, Set<String> cleared, Instant until) {}
+    private final Map<String, Preempted> preempted = new HashMap<>();   // strategy|underlying -> the entry to retry
     private PaperBroker broker;
     private OrderManager oms;
     private static final LocalTime OPTIONS_CLOSE = LocalTime.of(15, 30);
@@ -304,6 +310,129 @@ public final class TradingSession {
     }
 
     /**
+     * Risk file {@code priority} (A-475): the strategies in {@code low} enter only while, after the entry, at least
+     * {@code keepFreePct} % of the capital is still free, so the other strategies keep the first claim on it. Empty = off.
+     */
+    void lowPriority(java.util.Collection<String> strategyIds, double keepFreePct) {
+        lowPriority(strategyIds, keepFreePct, false);
+    }
+
+    /**
+     * As {@link #lowPriority(java.util.Collection, double)}; with {@code preempt} (A-476) an entry of any other strategy
+     * refused for capital closes low-priority positions (largest first) until the shortfall is covered, and is tried
+     * again once they are closed (within {@link #PREEMPT_WAIT}); nothing is closed when they could not cover it.
+     */
+    void lowPriority(java.util.Collection<String> strategyIds, double keepFreePct, boolean preempt) {
+        this.lowPriority = strategyIds == null ? java.util.Set.of() : java.util.Set.copyOf(strategyIds);
+        this.lowPriorityKeepFreePct = keepFreePct;
+        this.lowPriorityPreempt = preempt;
+    }
+
+    private static final Duration PREEMPT_WAIT = Duration.ofSeconds(60);
+    private static final java.util.regex.Pattern CAPITAL_REFUSAL =
+            java.util.regex.Pattern.compile("capital: premium (\\d+) \\+ in use (\\d+) over (\\d+)");
+
+    private boolean isLowPriority(String strategyId) {
+        String base = strategyId.contains("@") ? strategyId.substring(0, strategyId.indexOf('@')) : strategyId;
+        return lowPriority.contains(base);
+    }
+
+    /**
+     * A-476: after {@code strategyId}'s entry was refused with {@code reason}, closes low-priority positions to make room
+     * when that is a capital refusal they can cover; true when it closed something (the entry is then retried).
+     */
+    private boolean preemptFor(Slot slot, String underlying, Decision decision, OrderIntent intent, String reason,
+                               LocalTime time) {
+        String strategyId = slot.factory().id();
+        if (!lowPriorityPreempt || reason == null || isLowPriority(strategyId)) {
+            return false;
+        }
+        var m = CAPITAL_REFUSAL.matcher(reason);
+        if (!m.find()) {
+            return false;
+        }
+        double shortfall = Double.parseDouble(m.group(1)) + Double.parseDouble(m.group(2)) - Double.parseDouble(m.group(3));
+        List<ManagedPosition> low = new ArrayList<>();
+        for (ManagedPosition p : oms.livePositions()) {
+            if (isLowPriority(p.strategy()) && p.state() != ManagedPosition.State.CANCELLING_FOR_EXIT
+                    && p.state() != ManagedPosition.State.EXITING && p.state() != ManagedPosition.State.CLOSED) {
+                low.add(p);
+            }
+        }
+        low.sort((a, b) -> Double.compare(b.averageCost() * b.quantity(), a.averageCost() * a.quantity()));
+        double available = 0;
+        for (ManagedPosition p : low) {
+            available += p.averageCost() * p.quantity();
+        }
+        if (low.isEmpty() || available < shortfall) {
+            return false;
+        }
+        Set<String> cleared = new java.util.HashSet<>();
+        double freed = 0;
+        for (ManagedPosition p : low) {
+            if (freed >= shortfall) {
+                break;
+            }
+            freed += p.averageCost() * p.quantity();
+            cleared.add(p.strategy() + "|" + p.underlying());
+            oms.exit(p.strategy(), p.underlying(), "PREEMPTED");
+            log.info("{} {} {} PREEMPTED (low priority): closed to make room for {} {} ENTER {} (short {})", time,
+                    p.underlying(), p.strategy(), strategyId, underlying, intent.side(), Math.round(shortfall));
+        }
+        preempted.put(strategyId + "|" + underlying, new Preempted(slot, decision, intent, cleared,
+                clock.get().plus(PREEMPT_WAIT)));
+        return true;
+    }
+
+    /** A-476: retries, on {@code underlying}'s snapshot, the entries whose low-priority positions are now closed. */
+    private void retryPreempted(String underlying, FeatureSnapshot snapshot, MarketContext market, boolean stale,
+                                LocalTime time) {
+        if (preempted.isEmpty()) {
+            return;
+        }
+        for (var it = preempted.entrySet().iterator(); it.hasNext(); ) {
+            var e = it.next();
+            Preempted p = e.getValue();
+            String strategyId = p.slot().factory().id();
+            if (!e.getKey().endsWith("|" + underlying)) {
+                continue;
+            }
+            if (clock.get().isAfter(p.until()) || oms.view(strategyId, underlying).open()) {
+                it.remove();
+                continue;
+            }
+            boolean waiting = false;
+            for (ManagedPosition q : oms.livePositions()) {
+                if (p.cleared().contains(q.strategy() + "|" + q.underlying())) {
+                    waiting = true;
+                    break;
+                }
+            }
+            if (waiting) {
+                continue;
+            }
+            it.remove();
+            log.info("{} {} {} ENTER {} retried after the pre-emption", time, underlying, strategyId, p.intent().side());
+            act(p.slot(), underlying, snapshot, p.decision(), p.intent(), market, stale, time);
+            return;      // act may have changed the map
+        }
+    }
+
+    /** The refusal of a low-priority entry costing {@code cost} (A-475), or null when allowed or off. */
+    String lowPriorityRefusal(String strategyId, double cost) {
+        String base = strategyId.contains("@") ? strategyId.substring(0, strategyId.indexOf('@')) : strategyId;
+        if (!lowPriority.contains(base)) {
+            return null;
+        }
+        double capital = risk.limits().capital();
+        double freeAfter = capital - oms.premiumInUse(null) - cost;
+        double keep = capital * lowPriorityKeepFreePct / 100.0;
+        return freeAfter >= keep ? null : String.format(
+                "low priority: %.0f free after this entry, below the %.0f (%.0f %%) kept for the other strategies",
+                freeAfter, keep, lowPriorityKeepFreePct);
+    }
+
+    /**
      * Live execution L1: makes this session a signal source whose approved entries and adds, and every position close,
      * are recorded as exec.signal_decision rows. Only the signal-source session has one; PAPER-1 never does.
      */
@@ -392,6 +521,9 @@ public final class TradingSession {
         // Live: never open or add from a stale snapshot (e.g. while the feed catches up on the morning).
         boolean stale = settings.mode() == Mode.PAPER_LIVE
                 && Duration.between(snapshot.time(), Instant.now()).compareTo(MAX_DECISION_AGE) > 0;
+        if (!squareOff && !strategiesOff) {
+            retryPreempted(underlying, snapshot, market, stale, time);                 // A-476
+        }
         for (Slot slot : strategies.get(underlying)) {
             String strategyId = slot.factory().id();
             Decision decision = slot.strategy().decide(snapshot, oms.view(strategyId, underlying));
@@ -505,6 +637,13 @@ public final class TradingSession {
                         contract.get().lotSize(), ask);
                 sizings.put(strategyId + "|" + underlying, sizing);
                 int lots = sizing.lots(intent.lots());
+                String lowPriorityRefusal = lowPriorityRefusal(strategyId, lots * (double) contract.get().lotSize() * ask);
+                if (lowPriorityRefusal != null) {                     // A-475: the other strategies come first
+                    rejected(strategyId, underlying, "ENTER " + intent.side(), lowPriorityRefusal);
+                    candidate(strategyId, underlying, snapshot, decision, intent, false, lowPriorityRefusal);
+                    log.info("{} {} {} ENTER {} REJECTED: {}", time, underlying, strategyId, intent.side(), lowPriorityRefusal);
+                    return;
+                }
                 RiskDecision result = oms.enter(strategyId, underlying, intent.side(), contract.get(), lots,
                         intent.stage().name(), market, stopPct);
                 // risk v16 (A-101): refused by the daily loss limit, an A-grade entry releases the switch (once a day)
@@ -517,6 +656,9 @@ public final class TradingSession {
                     oms.bracket(strategyId, underlying, intent.targetPct(), stopPct);   // A-283: premium target on quotes
                 }
                 logDecision(strategyId, underlying, intent, lots, result, contract.get());
+                if (!result.approved()) {
+                    preemptFor(slot, underlying, decision, intent, result.reason(), time);     // A-476
+                }
                 candidate(strategyId, underlying, snapshot, decision, intent, result.approved(), result.reason());
                 if (signals != null && result.approved()) {
                     // the lots published are those the order book allows (risk v12 participation), the follower's ceiling

@@ -1,0 +1,37 @@
+# sbr-v2 Session Break-Retest (A-429 X2 / A-430, 15 Nov 2026, user: "Yes, build and replay"): sbr-v1 plus the exit at a
+# rejection of the next level (A-429 X2). Entries exactly as sbr-v1 (A-426 S2F0). Values registered in A-429 before any result.
+# (.local/a429/exits.py). Research only: better than sbr-v1 on the tick days in simulation; FAILS on the 2024-26 bars.
+version: sbr-v2
+strategy: session-break-retest
+status: UNCALIBRATED
+source: "user-request-2026-11-15 (A-429 / A-430)"
+
+scope:
+  entry_from: "10:00"
+  last_new_entry: "14:31"              # exclusive: a five-minute close at 14:30 may still enter
+  flat_by: "15:15"
+  time_stop_min: 0
+  skip_expiring_index: false
+
+setup:
+  first_hour_end: "10:15"
+  line_tol_em: 0.10
+  strong_touches: 3
+  break_buffer_em: 0.03                # the break: a five-minute close 0.03 x EM beyond; the stop: 0.03 x EM back across
+  retest_band_em: 0.05                 # the retest bar comes back within 0.05 x EM of the line
+  retest_min: 30                       # within 30 minutes of the break
+  hold_bars: 2                         # a break is followed for at least two five-minute closes
+  max_entries_per_day: 2
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM; the class buys one strike in the money when expiry is <= 1 day away
+
+exits:
+  premium_stop_pct: 90
+  use_target: false                    # no target: the LINE_STOP or flat_by
+  level_exit: true                     # A-429 X2: exit on a rejection of the next level
+  level_min_em: 0.15                   # the target level: the nearest level at entry >= 0.15 x EM beyond the entry close
+  level_band_em: 0.05                  # armed once a minute comes within 0.05 x EM of it
+  level_reject_em: 0.10                # then exit on a five-minute close 0.10 x EM back from the best extreme since

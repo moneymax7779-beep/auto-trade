@@ -643,6 +643,15 @@ class SessionRunner implements ApplicationRunner {
                 risk, CostModel.from(costsFile), FillModel.from(costsFile, t.fillModel()),
                 instruments, hashes, CodeVersion.current());
         TradingSession trading = new TradingSession(settings, feed, new TradeStore(target));
+        if (riskFile.has("priority.low")) {                  // A-475: low-priority strategies use spare capital only
+            List<String> low = riskFile.get("priority.low") instanceof List<?> l ? l.stream().map(String::valueOf).toList()
+                    : List.of(String.valueOf(riskFile.get("priority.low")));
+            double keep = riskFile.has("priority.low_keep_free_pct") ? riskFile.getDouble("priority.low_keep_free_pct") : 0;
+            boolean preempt = riskFile.has("priority.low_preempt") && riskFile.getBoolean("priority.low_preempt");
+            trading.lowPriority(low, keep, preempt);                 // A-476: preempt closes them for a refused entry
+            log.info("low-priority strategies {}: an entry must leave {} % of the capital free; pre-empted for others: {}",
+                    low, keep, preempt);
+        }
         if (!replay) {
             trading.strategySwitch(com.autotrade.execution.LiveStrategies.offReader(target, OFF_READ_EVERY));   // V35
         }

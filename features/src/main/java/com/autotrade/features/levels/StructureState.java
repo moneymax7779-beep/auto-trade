@@ -84,12 +84,15 @@ public final class StructureState {
     private final java.time.LocalDate previousSessionDate;
     private double prevOrHigh = Double.NaN;
     private double pwh = Double.NaN, pwl = Double.NaN, pmh = Double.NaN, pml = Double.NaN;   // v12 period levels
+    private java.util.List<Double> historyLevels = java.util.List.of();                     // A-439
     private double prevOrLow = Double.NaN;
     private int prevSessionMinutes;
     // features v8: the trailing box (the box_minutes bars before the latest closed bar)
     private double boxHigh = Double.NaN;
     private double boxLow = Double.NaN;
     private double lastMinuteClose = Double.NaN;
+    private double lastMinuteHigh = Double.NaN;   // A-416
+    private double lastMinuteLow = Double.NaN;
     // features v9: the tested zone over zone_minutes bars before the latest
     private final Deque<Bar> zoneBars = new ArrayDeque<>();
     private double zoneLow = Double.NaN;
@@ -298,6 +301,8 @@ public final class StructureState {
         }
         previousOneMinuteClose = bar.close();
         lastMinuteClose = bar.close();                       // every features file (A-287 review: was only with a box)
+        lastMinuteHigh = bar.high();                         // A-416
+        lastMinuteLow = bar.low();
         int box = config.boxMinutes();
         if (box > 0) {
             // the box excludes this bar: the bars before it, so a close beyond it is a break
@@ -626,7 +631,14 @@ public final class StructureState {
                 Double.isFinite(dayLow) ? dayLow : Double.NaN,
                 prevOrHigh, prevOrLow, prevSessionMinutes, boxHigh, boxLow, lastMinuteClose,
                 zoneLow, zoneLowTouches, zoneHigh, zoneHighTouches,
-                pwh, pwl, pmh, pml, distance(pwh, atr), distance(pwl, atr), distance(pmh, atr), distance(pml, atr));
+                pwh, pwl, pmh, pml, distance(pwh, atr), distance(pwl, atr), distance(pmh, atr), distance(pml, atr),
+                last == null ? Double.NaN : last.open(), last == null ? Double.NaN : last.high(),
+                last == null ? Double.NaN : last.low(), lastMinuteHigh, lastMinuteLow, historyLevels);
+    }
+
+    /** A-439: the older levels known at 09:15 (HistoryLevels). */
+    public void historyLevels(java.util.List<Double> levels) {
+        historyLevels = java.util.List.copyOf(levels);
     }
 
     /** Features v12 (A-090): the previous week's and previous month's high and low (NaN = unknown). */

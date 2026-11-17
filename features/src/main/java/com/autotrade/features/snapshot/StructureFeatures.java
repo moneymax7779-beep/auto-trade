@@ -78,5 +78,14 @@ public record StructureFeatures(
         double distPwhAtr,
         double distPwlAtr,
         double distPmhAtr,
-        double distPmlAtr) {
+        double distPmlAtr,
+        /** A-410: open / high / low of the last completed 3-minute bar (lastBarClose is its close); NaN before one. */
+        double lastBarOpen,
+        double lastBarHigh,
+        double lastBarLow,
+        /** A-416: high / low of the last completed one-minute bar (lastMinuteClose is its close); NaN before one. */
+        double lastMinuteHigh,
+        double lastMinuteLow,
+        /** A-439 (features structure.history_levels): HistoryLevels at 09:15; empty when off. */
+        java.util.List<Double> historyLevels) {
 }

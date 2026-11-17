@@ -1,0 +1,40 @@
+# Session break-retest v6: sbr-v5 + A-401's 15-minute ATM +- 3 OI flow gate at entry + hold past the next level while that flow supports (ledger A-437, user 2026-11-15). Research only; judged against sbr-v5 on the 32 tick days.
+version: sbr-v6
+strategy: session-break-retest
+status: UNCALIBRATED
+source: "user-request-2026-11-15 (A-437)"
+
+scope:
+  entry_from: "10:00"
+  last_new_entry: "14:31"              # exclusive: a five-minute close at 14:30 may still enter
+  last_new_entry_0dte: "14:00"         # A-435: exclusive; 0DTE = the traded index expires today
+  flat_by: "15:15"
+  time_stop_min: 0
+  skip_expiring_index: false
+
+setup:
+  first_hour_end: "10:15"
+  line_tol_em: 0.10
+  strong_touches: 3
+  break_buffer_em: 0.03                # the break: a five-minute close 0.03 x EM beyond; the stop: 0.03 x EM back across
+  retest_band_em: 0.05                 # the retest bar comes back within 0.05 x EM of the line
+  retest_min: 30                       # within 30 minutes of the break
+  hold_bars: 2                         # a break is followed for at least two five-minute closes
+  max_entries_per_day: 2
+  oi_gate: 0.015                       # A-437: CE skipped when the 15-min ATM+-3 flow <= -1.5 % and the index has not fallen > 10 pts (PE mirrored)
+  oi_gate_points: 10                   # NIFTY points over the same 15 minutes (SENSEX / 3.25)
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM; the class buys one strike in the money when expiry is <= 1 day away
+
+exits:
+  premium_stop_pct: 90
+  use_target: false                    # no target: the LINE_STOP or flat_by
+  level_exit: true                     # A-429 X2: exit on a rejection of the next level
+  level_min_em: 0.15                   # the target level: the nearest level at entry >= 0.15 x EM beyond the entry close
+  level_band_em: 0.05                  # armed once a minute comes within 0.05 x EM of it
+  level_reject_em: 0.10                # then exit on a five-minute close 0.10 x EM back from the best extreme since
+  reclaim_exit: pre_entry              # A-431 X4a: a level between the line and the entry close; a five-minute close a buffer back across it exits
+  oi_hold: 0.015                       # A-437: at a LEVEL_REJECT, hold on to the next level while the flow is >= +1.5 % (CE) / <= -1.5 % (PE)
