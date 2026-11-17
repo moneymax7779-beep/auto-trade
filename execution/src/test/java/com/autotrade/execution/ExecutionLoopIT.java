@@ -675,4 +675,53 @@ class ExecutionLoopIT {
             jdbc.update("update acct.copy_group set enabled = false where id = ?", k.group());
         }
     }
+
+    /** 17 Nov 2026: a partial Exit sells whole lots and keeps the rest open; more than is open sells what is open. */
+    @Test
+    void thePartialExitSellsWholeLotsAndKeepsTheRestOpen() throws Exception {
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
+        AccountStore accounts = new AccountStore(dataSource);
+        CostModel costs = CostModel.from(ThresholdConfig.load(Path.of("..", "config", "costs",
+                "india-index-options-costs.v2.yaml")));
+        long tenant = accounts.ensureTenant("t-pia");
+        long user = accounts.ensureUser("kc-pia", "pia");
+        accounts.ensureMembership(tenant, user, "OWNER");
+        long signal = accounts.ensureSignalSourceAccount(tenant, user, "SIG-pia", 500_000, today,
+                "config/risk/signal-source.v2.yaml");
+        long group = accounts.ensureCopyGroup(tenant, "SET-pia", signal);
+        long paper = accounts.ensureFollowerAccount(tenant, user, "PIA-PAPER", BrokerType.PAPER, TradeMode.PAPER, 500_000,
+                EquityMode.FIXED, today, "../config/risk/follower-risk.v3.yaml", 100);
+        new FanOut(dataSource).subscribe(group, paper, List.of("opening-drive"), 1.0);
+        jdbc.update("update acct.strategy_subscription set enabled_at = now() - interval '1 hour' where copy_group_id = ?",
+                group);
+        new SignalDecisionStore(dataSource).insert(new SignalDecision(group, 9401, today, Instant.now().minusSeconds(120),
+                "opening-drive", 2, "NIFTY", SignalDecision.Action.ENTER, "PE", null, "CONFIRMED", "IT", 3000047169L,
+                "NSE_FO|47169", "NIFTY 23150 PE", 65, 100, 130_000, 500_000, 20, "PIA:enter",
+                Map.of("strategy_lots", 1.0, "intended_lots", 1.0, "stop_pct", 25.0)));
+        QuoteSource none = (d, u, t, at) -> Double.NaN;
+        try (ExecutionLoop loop = new ExecutionLoop(dataSource, "t-pia", "SET-pia", "worker-P2", costs, none, 1e9)) {
+            loop.tick(today, 20_000);
+            Map<String, Object> pos = jdbc.queryForMap("select id, quantity_open from exec.position where broker_account_id = ? "
+                    + "and status = 'OPEN'", paper);
+            long id = ((Number) pos.get("id")).longValue(), held = ((Number) pos.get("quantity_open")).longValue();
+            assertThat(held).isGreaterThan(130);
+
+            assertThatThrownBy(() -> loop.exitPosition(paper, id, "kc-pia", today, 100L))
+                    .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("whole number of lots");
+            assertThat(loop.exitPosition(paper, id, "kc-pia", today, 130L)).singleElement().asString()
+                    .contains("130 of " + held + " sold").contains((held - 130) + " stay open");
+            assertThat(jdbc.queryForObject("select status || ':' || quantity_open || ':' || (realised_gross is not null) "
+                    + "from exec.position where id = ?", String.class, id)).isEqualTo("OPEN:" + (held - 130) + ":true");
+            assertThat(jdbc.queryForObject("select detail->>'quantity' from exec.audit_log where broker_account_id = ? "
+                    + "and action = 'POSITION_EXIT'", String.class, paper)).isEqualTo("130");
+
+            // asking for more than is open sells what is open
+            assertThat(loop.exitPosition(paper, id, "kc-pia", today, held * 10)).singleElement().asString()
+                    .contains((held - 130) + " sold");
+            assertThat(jdbc.queryForObject("select status || ':' || exit_reason || ':' || quantity_open from exec.position "
+                    + "where id = ?", String.class, id)).isEqualTo("CLOSED:TRADER_EXIT:0");
+        } finally {
+            jdbc.update("update acct.copy_group set enabled = false where id = ?", group);
+        }
+    }
 }

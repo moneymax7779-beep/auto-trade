@@ -226,10 +226,24 @@ class AccountsController {
                 f.reason() == null ? "manual" : f.reason(), LocalDate.now(IST)));
     }
 
-    record PositionExit(String confirm) {
+    /**
+     * {@code quantity}: whole lots to sell, the rest stays open (null: all); {@code key}: the click's own id, so a repeated
+     * request (a double click, a retry after a timeout) returns the first one's result and sells nothing more.
+     */
+    record PositionExit(String confirm, Long quantity, String key) {
     }
 
-    /** The trader's per-position Exit (7 Nov 2026): sells that one position now, the account keeps trading. */
+    /** An exit already asked for with a key: its result (or the failure) for every repeat within {@link #EXIT_KEY_TTL}. */
+    private record KeyedExit(java.time.Instant at, java.util.concurrent.CompletableFuture<Map<String, Object>> result) {
+    }
+
+    static final java.time.Duration EXIT_KEY_TTL = java.time.Duration.ofMinutes(15);
+    private final Map<String, KeyedExit> exitsByKey = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * The trader's per-position Exit (7 Nov 2026): sells that one position now, or part of it (17 Nov 2026, whole lots),
+     * the account keeps trading.
+     */
     @PostMapping("/api/execution/accounts/{id}/positions/{positionId}/exit")
     Map<String, Object> exitPosition(@RequestHeader(value = Access.HEADER, required = false) String subject,
                                      @PathVariable long id, @PathVariable long positionId, @RequestBody PositionExit e)
@@ -237,9 +251,44 @@ class AccountsController {
         Access.User user = access.user(subject);
         Access.require("EXIT".equals(e.confirm()), "confirm with \"EXIT\"");
         BrokerAccount a = own(user, id, true);
+        if (e.quantity() != null && e.quantity() <= 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "quantity must be above 0");
+        }
+        if (e.key() == null || e.key().isBlank()) {
+            return exitNow(a, positionId, user, e.quantity());
+        }
+        if (e.key().length() > 100) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "key: at most 100 characters");
+        }
+        java.time.Instant now = java.time.Instant.now();
+        exitsByKey.values().removeIf(k -> k.at().isBefore(now.minus(EXIT_KEY_TTL)));
+        String k = a.id() + ":" + positionId + ":" + e.key();
+        KeyedExit mine = new KeyedExit(now, new java.util.concurrent.CompletableFuture<>());
+        KeyedExit first = exitsByKey.putIfAbsent(k, mine);
+        if (first != null) {
+            try {
+                Map<String, Object> earlier = new java.util.LinkedHashMap<>(first.result().get(2, java.util.concurrent.TimeUnit.MINUTES));
+                earlier.put("repeat", true);                      // the same click again: nothing more was sold
+                return earlier;
+            } catch (java.util.concurrent.ExecutionException ex) {
+                throw ex.getCause() instanceof ResponseStatusException r ? r
+                        : new ResponseStatusException(HttpStatus.CONFLICT, String.valueOf(ex.getCause().getMessage()));
+            }
+        }
+        try {
+            Map<String, Object> result = exitNow(a, positionId, user, e.quantity());
+            mine.result().complete(result);
+            return result;
+        } catch (Exception ex) {
+            mine.result().completeExceptionally(ex);
+            throw ex;
+        }
+    }
+
+    private Map<String, Object> exitNow(BrokerAccount a, long positionId, Access.User user, Long quantity) throws Exception {
         try {
             return Map.of("account", a.displayName(), "result", service.exitPosition(a.id(), positionId, user.subject(),
-                    LocalDate.now(IST)));
+                    LocalDate.now(IST), quantity));
         } catch (IllegalArgumentException ex) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, ex.getMessage());
         }

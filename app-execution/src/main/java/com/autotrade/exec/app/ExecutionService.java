@@ -344,11 +344,16 @@ class ExecutionService implements DisposableBean {
     }
 
     List<String> exitPosition(long accountId, long positionId, String actor, LocalDate day) throws Exception {
+        return exitPosition(accountId, positionId, actor, day, null);
+    }
+
+    /** {@code quantity}: whole lots of the position to sell, the rest stays open; null: all of it. */
+    List<String> exitPosition(long accountId, long positionId, String actor, LocalDate day, Long quantity) throws Exception {
         ExecutionLoop current = loop;
         if (current == null) {
             return List.of("the worker has not started");
         }
-        return current.exitPosition(accountId, positionId, actor, day);
+        return current.exitPosition(accountId, positionId, actor, day, quantity);
     }
 
     String bookManualExit(long accountId, long positionId, double price, java.time.Instant at, String actor,

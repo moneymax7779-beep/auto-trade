@@ -165,6 +165,18 @@ class LiveBookIT {
         assertThat(summary).containsEntry("openPnl", 1127.75).containsEntry("atRisk", 5885.75)
                 .containsEntry("realisedToday", 0.0).containsEntry("sinceLiveNet", -2663.51).containsEntry("sinceLiveTrades", 1);
 
+        // 17 Nov 2026 (phase 2): the exit preview prices the sale at the captured bid; a 30 s old quote asks for typing EXIT
+        long openId = ((Number) open.getFirst().get("id")).longValue();
+        Map<String, Object> preview = api.exitPreview("local-owner", account, openId, null);
+        assertThat(preview).containsEntry("mode", "LIVE").containsEntry("quantity", 65L).containsEntry("lots", 1L)
+                .containsEntry("remaining", 0L).containsEntry("bid", 163.70).containsEntry("price", 163.70)
+                .containsEntry("priceFrom", "bid").containsEntry("bidQuantity", 650L).containsEntry("orders", 1L)
+                .containsEntry("gross", 1127.75).containsEntry("typeToConfirm", true);
+        assertThat((List<String>) preview.get("warnings")).singleElement().asString().contains("s old");
+        assertThatThrownBy(() -> api.exitPreview("local-owner", account, openId, 30L)).isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("400");
+        assertThatThrownBy(() -> api.exitPreview("kc-nobody", account, openId, null)).isInstanceOf(ResponseStatusException.class);
+
         // a stop being cancelled no longer protects the position: not working, nothing counted at risk
         jdbc.update("update exec.order_execution set status = 'CANCEL_PENDING' where role = 'STOP' and trade_intent_id = ?", live);
         Map<String, Object> cancelling = ((List<Map<String, Object>>) api.liveBook("local-owner", account, 7).get("open")).getFirst();
@@ -245,5 +257,13 @@ class LiveBookIT {
         assertThat((Map<String, Object>) s.get("lateJoin")).containsKeys("signalAt", "joinedAt");
         Map<String, Object> m = open.stream().filter(p -> p != s).findFirst().orElseThrow();
         assertThat(m).doesNotContainKeys("strategyExitedAt", "lateJoin");
+
+        // its preview: no quote captured, so the signal's price; paper never asks for typing
+        Map<String, Object> preview = new LiveBookController(new Access(dataSource), dataSource)
+                .exitPreview("kc-paper", twin, ((Number) s.get("id")).longValue(), null);
+        assertThat(preview).containsEntry("mode", "PAPER").containsEntry("quantity", 65L).containsEntry("price", 64.25)
+                .containsEntry("priceFrom", "signal").containsEntry("orders", 1L).containsEntry("typeToConfirm", false)
+                .doesNotContainKeys("charges", "rest");
+        assertThat((List<String>) preview.get("warnings")).singleElement().asString().contains("no quote");
     }
 }

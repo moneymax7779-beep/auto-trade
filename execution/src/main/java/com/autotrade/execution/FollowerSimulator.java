@@ -1335,6 +1335,18 @@ public final class FollowerSimulator {
      */
     public List<String> flatten(BrokerAccount account, LocalDate date, java.util.function.ToDoubleFunction<Map<String, Object>> price,
                                 String reason, Long onlyPosition) {
+        return flatten(account, date, price, reason, onlyPosition, null);
+    }
+
+    /**
+     * {@code quantity} (17 Nov 2026, the trader's partial Exit): with {@code onlyPosition}, sell this many of it (whole lots,
+     * at most what is open); the rest stays open and its broker stop is placed again for it. Null: all of it.
+     */
+    public List<String> flatten(BrokerAccount account, LocalDate date, java.util.function.ToDoubleFunction<Map<String, Object>> price,
+                                String reason, Long onlyPosition, Long quantity) {
+        if (quantity != null && (onlyPosition == null || quantity <= 0)) {
+            throw new IllegalArgumentException("a quantity needs one position and must be above 0");
+        }
         Day day = new Day(account, date);
         List<String> lines = new ArrayList<>();
         for (Map<String, Object> pos : jdbc.queryForList("select p.id, p.entry_trade_intent_id, p.strategy_id, p.underlying, "
@@ -1354,6 +1366,10 @@ public final class FollowerSimulator {
             Long brokerHolds = venue.brokerHolds(account, InstrumentKeys.normalize((String) pos.get("instrument_key"),
                     ((Number) pos.get("instrument_token")).longValue()));
             long held = ((Number) pos.get("quantity_open")).longValue();
+            int lotSize = ((Number) pos.get("lot_size")).intValue();
+            if (quantity != null && (lotSize <= 0 || quantity % lotSize != 0)) {
+                throw new IllegalArgumentException(quantity + " is not a whole number of lots of " + lotSize);
+            }
             if (brokerHolds != null && brokerHolds < held) {
                 // review 8 Nov 2026: sold by hand in Kite: the guard would refuse the sell; the stop stays as it is
                 lines.add(symbol + ": NOT flattened, the broker holds " + brokerHolds + " of our " + held
@@ -1373,6 +1389,7 @@ public final class FollowerSimulator {
                 lines.add(symbol + ": the broker stop had sold it");
                 continue;
             }
+            long sell = quantity == null ? open : Math.min(open, quantity);
             long intent = ((Number) pos.get("entry_trade_intent_id")).longValue();
             int attempt = jdbc.queryForObject("select coalesce(max(attempt_no), 0) + 1 from exec.order_execution "
                     + "where trade_intent_id = ? and role = 'EMERGENCY_EXIT'", Integer.class, intent);
@@ -1380,21 +1397,25 @@ public final class FollowerSimulator {
             FollowerVenue.Fill fill = venue.execute(new FollowerVenue.OrderSpec(account, intent,
                     (String) pos.get("execution_mode"), "EMERGENCY_EXIT", "SELL", (String) pos.get("underlying"), token,
                     InstrumentKeys.normalize((String) pos.get("instrument_key"), token), symbol,
-                    ((Number) pos.get("lot_size")).intValue(), open, price.applyAsDouble(pos), java.time.Instant.now(),
+                    lotSize, sell, price.applyAsDouble(pos), java.time.Instant.now(),
                     attempt, leaseEpoch));
             if (fill.quantity() > 0) {
                 book(day, positionId, fill.parts(), fill.at(), reason);
             }
             if (fill.quantity() < open) {
                 protect(day, null, positionId, symbol);
-                lines.add(symbol + ": " + fill.quantity() + " of " + open + " sold (" + fill.code() + " " + fill.reason()
-                        + "); the rest keeps its broker stop");
+                lines.add(fill.quantity() == sell && sell < open
+                        ? symbol + ": " + sell + " of " + open + " sold at " + String.format(java.util.Locale.ROOT, "%.2f",
+                                fill.price()) + "; " + (open - sell) + " stay open"
+                        : symbol + ": " + fill.quantity() + " of " + sell + " sold (" + fill.code() + " " + fill.reason()
+                                + "); the rest keeps its broker stop");
             } else {
                 lines.add(symbol + ": " + open + " sold at " + String.format(java.util.Locale.ROOT, "%.2f", fill.price()));
             }
         }
-        kills.audit(account, "flatten", onlyPosition == null ? "FLATTEN" : "POSITION_EXIT", Map.of("reason", reason,
-                "positions", lines));
+        kills.audit(account, "flatten", onlyPosition == null ? "FLATTEN" : "POSITION_EXIT", quantity == null
+                ? Map.of("reason", reason, "positions", lines)
+                : Map.of("reason", reason, "positions", lines, "quantity", quantity));
         return lines;
     }
 
