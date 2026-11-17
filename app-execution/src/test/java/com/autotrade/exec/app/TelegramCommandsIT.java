@@ -360,6 +360,12 @@ class TelegramCommandsIT {
             long all = card("/exit " + two + " 2");                      // as many lots as are open: all of it
             assertThat(jdbc.queryForObject("select quantity from exec.telegram_command where id = ?", Long.class, all)).isNull();
             assertThat(lastCall("sendMessage").path("text").asString()).contains("all of it is sold now");
+
+            // a level alert's Book half button (b:POSITION:LOTS) opens the same card for that many lots
+            assertThat(deliver(callback(ALICE_CHAT, ALICE_CHAT, "b:" + two + ":1"))).startsWith("CARD T");
+            assertThat(jdbc.queryForObject("select quantity from exec.telegram_command order by id desc limit 1", Long.class))
+                    .isEqualTo(75L);
+            assertThat(deliver(callback(BOB_CHAT, BOB_CHAT, "b:" + two + ":0"))).as("not his").isEqualTo("NO_POSITION");
         } finally {
             jdbc.update("update exec.position set status = 'CLOSED', quantity_open = 0 where id = ?", two);
         }
