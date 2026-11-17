@@ -67,8 +67,21 @@ final class OiBurstCross extends SetupStrategy {
     private final boolean counterBurstByTime;
     private final boolean skipFreshBuildup;
     private final double skipGapPct;
-    /** A-471/A-472: no PE (CE) entry when the dealer-gamma proxy gexShare is above this (NaN = off). */
+    /**
+     * A-437 obc-v25: skip the burst when a known level (day open, opening range, prior day high / low / close, prior week and
+     * month high / low) is within this x EM of the spot, either side; EM = day open x first VIX / 100 / sqrt(252). NaN = off.
+     */
+    private final double levelClearEm;
+    private double firstVix = Double.NaN;
+    /**
+     * A-465 obc-v26: before chase_veto_until, skip a burst when the index has already moved more than this x EM (day open x
+     * first VIX / 100 / sqrt(252)) with it since the open and the futures OI is above its first value of the session (fresh
+     * buildup behind a move already made: a chase). NaN = off.
+     */
+    private final double chaseVetoEm;
+    /** A-471: no PE (CE) entry when the dealer-gamma proxy gexShare is above this (NaN = off). */
     private final double gexVetoPe, gexVetoCe;
+    private final LocalTime chaseVetoUntil;
     private int vetoedBurst = -1000;
     private int heldSide;
     private final int burstMemoryMin;
@@ -115,8 +128,11 @@ final class OiBurstCross extends SetupStrategy {
         counterBurstByTime = c.has("exits.counter_burst_by_time") && c.getBoolean("exits.counter_burst_by_time");
         skipFreshBuildup = c.has("setup.skip_fresh_buildup") && c.getBoolean("setup.skip_fresh_buildup");
         skipGapPct = c.has("setup.skip_gap_continuation_pct") ? c.getDouble("setup.skip_gap_continuation_pct") : Double.NaN;
+        levelClearEm = c.has("setup.level_clear_em") ? c.getDouble("setup.level_clear_em") : Double.NaN;
+        chaseVetoEm = c.has("setup.chase_veto_em") ? c.getDouble("setup.chase_veto_em") : Double.NaN;
         gexVetoPe = c.has("setup.gex_veto_pe") ? c.getDouble("setup.gex_veto_pe") : Double.NaN;
         gexVetoCe = c.has("setup.gex_veto_ce") ? c.getDouble("setup.gex_veto_ce") : Double.NaN;
+        chaseVetoUntil = c.has("setup.chase_veto_until") ? c.getTime("setup.chase_veto_until") : LocalTime.of(9, 45);
         burstMemoryMin = c.has("setup.burst_memory_min") ? c.getInt("setup.burst_memory_min") : 0;
         atrStopMult = c.has("exits.atr_stop_mult") ? c.getDouble("exits.atr_stop_mult") : Double.NaN;
         trailArmAtr = c.has("exits.trail_arm_atr") ? c.getDouble("exits.trail_arm_atr") : Double.NaN;
@@ -146,6 +162,9 @@ final class OiBurstCross extends SetupStrategy {
         OptionsFeatures o = s.options();
         double spot = s.spot();
         int minute = time.getHour() * 60 + time.getMinute();
+        if (Double.isNaN(firstVix) && s.volatility() != null && Double.isFinite(s.volatility().vix())) {
+            firstVix = s.volatility().vix();                  // A-437: as sbr's EM
+        }
         if (!Double.isFinite(spot) || minute == lastMinute) {
             return null;                                      // one update per minute
         }
@@ -234,8 +253,34 @@ final class OiBurstCross extends SetupStrategy {
                 return null;
             }
         }
+        if (Double.isFinite(levelClearEm)) {                 // A-437 obc-v25: not sitting on a level
+            double em = st.dayOpen() * firstVix / 100 / Math.sqrt(252);
+            boolean near = false;
+            if (Double.isFinite(em)) {
+                for (double y : new double[] {st.dayOpen(), st.orHigh(), st.orLow(), st.pdh(), st.pdl(), st.prevClose(),
+                        st.pwh(), st.pwl(), st.pmh(), st.pml()}) {
+                    near |= Double.isFinite(y) && Math.abs(spot - y) < levelClearEm * em;
+                }
+            }
+            c.put("level_clear", !near);
+            if (near) {
+                vetoedBurst = burstStart;
+                return null;
+            }
+        }
+        if (Double.isFinite(chaseVetoEm) && time.isBefore(chaseVetoUntil)) {      // A-465 obc-v26
+            double em = st.dayOpen() * firstVix / 100 / Math.sqrt(252);
+            double move = crossed * (spot - st.dayOpen()) / em;
+            double oiDay = s.futures() == null ? Double.NaN : s.futures().oiChangeDay();
+            boolean chase = Double.isFinite(move) && move > chaseVetoEm && Double.isFinite(oiDay) && oiDay > 0;
+            c.put("chase_veto", chase);
+            if (chase) {
+                vetoedBurst = burstStart;
+                return null;
+            }
+        }
         double gexLimit = crossed > 0 ? gexVetoCe : gexVetoPe;
-        if (Double.isFinite(gexLimit)) {                     // A-471/A-472: long dealer gamma absorbs the burst
+        if (Double.isFinite(gexLimit)) {                     // A-471: long dealer gamma absorbs the burst
             double gex = s.options() == null ? Double.NaN : s.options().gexShare();
             boolean veto = Double.isFinite(gex) && gex > gexLimit;
             c.put("gex_veto", veto);

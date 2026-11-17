@@ -1,0 +1,41 @@
+# Session break-retest v19 (ledger A-452): sbr-v13 with half size when the ATM IV fell over the last 3 minutes at the entry. Research only.
+version: sbr-v19
+strategy: session-break-retest
+status: UNCALIBRATED
+source: "user-request-2026-11-15 (A-452)"
+
+scope:
+  entry_from: "09:30"                 # A-440: entries from the complete 15-minute opening range (v11: "10:00")
+  last_new_entry: "14:31"              # exclusive: a five-minute close at 14:30 may still enter
+  last_new_entry_0dte: "14:00"         # A-435: exclusive; 0DTE = the traded index expires today
+  flat_by: "15:15"
+  time_stop_min: 0
+  skip_expiring_index: false
+
+setup:
+  first_hour_end: "10:15"
+  line_tol_em: 0.10
+  strong_touches: 3
+  break_buffer_em: 0.03                # the break: a five-minute close 0.03 x EM beyond; the stop: 0.03 x EM back across
+  retest_band_em: 0.05                 # the retest bar comes back within 0.05 x EM of the line
+  retest_min: 30                       # within 30 minutes of the break
+  hold_bars: 2                         # a break is followed for at least two five-minute closes
+  max_entries_per_day: 2
+  or_lines: true                       # A-440: the 15-minute ORH / ORL are fixed tradeable lines from 09:30
+  extra_levels: true                   # A-439: + prior ORH / ORL, 2-day high / low, 2-day ORH / ORL, 12 months high / low (features history_levels)
+  zone_min_touches: 3                  # A-439: + the chart's tested zones with 3+ touches at entry
+
+position:
+  premium_budget: 250000
+  intended_lots: 2                     # A-452: full size = 2 lots of the budget, crowded = 1
+  weak_iv_half: true                   # A-452: half size when the ATM IV fell over the last 3 minutes at the entry
+  strike_offset: 0                     # ATM; the class buys one strike in the money when expiry is <= 1 day away
+
+exits:
+  premium_stop_pct: 90
+  use_target: false                    # no target: the LINE_STOP or flat_by
+  level_exit: true                     # A-429 X2: exit on a rejection of the next level
+  level_min_em: 0.15                   # the target level: the nearest level at entry >= 0.15 x EM beyond the entry close
+  level_band_em: 0.05                  # armed once a minute comes within 0.05 x EM of it
+  level_reject_em: 0.10                # then exit on a five-minute close 0.10 x EM back from the best extreme since
+  reclaim_exit: pre_entry              # A-431 X4a: a level between the line and the entry close; a five-minute close a buffer back across it exits

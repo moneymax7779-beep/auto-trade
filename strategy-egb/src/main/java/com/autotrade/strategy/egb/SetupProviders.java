@@ -149,4 +149,11 @@ public final class SetupProviders {
             return "expiry-level-straddle";
         }
     }
+
+    public static final class SessionBreakRetestProvider extends Base {   // A-428
+        @Override
+        public String strategyKey() {
+            return "session-break-retest";
+        }
+    }
 }

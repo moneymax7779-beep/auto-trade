@@ -116,6 +116,10 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
             structure.periodLevels(PeriodLevels.of(session, earlier != null && ext.volatilityHistorySessions() >= PERIOD_SESSIONS
                     ? earlier : history.spotMinuteBars(underlying, session, PERIOD_SESSIONS)));
         }
+        if (config.historyLevels()) {                                    // A-439: 2-day, 2-day OR, 12 months
+            structure.historyLevels(com.autotrade.features.levels.HistoryLevels.of(session,
+                    history.spotMinuteBars(underlying, session, com.autotrade.features.levels.HistoryLevels.SESSIONS)));
+        }
         this.volatility = ext == null ? null : new VolatilityState(config, underlying, session, history, earlier);
         this.cas = ext == null ? null : new CasState(ext, session,
                 history.reference().auctionTurnover(underlying, session, ext.auctionHistorySessions()),
