@@ -57,7 +57,10 @@ autotrade:
     strategy-files:
       # ebs-v2 removed 2026-10-23 (A-171, user: "remove ebs from live"): out of sample on Oct 2024-Dec 2025 (A-168) 42 trades
       # -Rs 4,16,679, PF 0.80 (+Rs 3.52L / -Rs 7.69L by half). Its file and code stay; it returns only through a new registered test.
-      - config/strategy/early-confirm-runner.v11.yaml      # ecr-v11 = v8 (expiry days only) with no limit on campaigns per side (user, 2026-10-01)
+      # ecr-v11 removed 2026-11-18 (A-480, user 17 Nov: "keep ecr out of the live list, deploy tomorrow evening"): on the
+      # 34 own-capture tick days ecr-v11 took 6 trades, 0 wins, -Rs 2.76L (A-363: PF 0.03, its tweaks v8/v12-v15 FAIL); the
+      # live six without it made +Rs 78.48L vs +Rs 77.61L, worst day -1.26L vs -1.53L, max drawdown -1.91L vs -2.38L, 7 loss
+      # days vs 8 (H1 -1.74L: one 1 Oct capital-timing knock-on on etr's size; H2 +2.60L). In-sample. Its file and code stay.
       # odb-v3 removed 2026-10-24 (A-184 PASS, user: "yes remove odb from live and keep it in shadow"): on the 27 tick days the
       # live set without it made +Rs 39.02L vs +Rs 36.16L, win 58 % vs 53 %, better in both halves; odb-v3 alone -Rs 32K (PF 0.91,
       # 10 of 16 trades failed within 3 minutes) and its 14 Oct losses tripped the kill switch that refused mac's 12:54 puts.
