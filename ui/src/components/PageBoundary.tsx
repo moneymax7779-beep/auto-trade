@@ -1,4 +1,5 @@
-import { Component, type ReactNode } from "react";
+import { Component, type ErrorInfo, type ReactNode } from "react";
+import { reportError } from "../errors";
 
 /**
  * Mobile phase 4 (17 Nov 2026): a page that fails to load or render (offline and its code not cached, a deploy in
@@ -10,6 +11,12 @@ export class PageBoundary extends Component<{ children: ReactNode }, { error: Er
 
   static getDerivedStateFromError(error: Error) {
     return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    if (typeof navigator === "undefined" || navigator.onLine !== false) {          // offline is not a bug to report
+      reportError("page", Object.assign(new Error(error.message), { stack: `${error.stack ?? ""}\n${info.componentStack ?? ""}` }));
+    }
   }
 
   render() {

@@ -109,10 +109,19 @@ export function Freshness({ at }: { at: number }) {
     {age > 30 ? `not updated since ${time}` : `as of ${time}`}</span>;
 }
 
+/**
+ * The service is down or out of reach: a 502/503/504 (get() writes "502 reason for path", postJson "502: reason") or a
+ * fetch that never reached the server (offline). Review 17 Nov: the check missed get()'s format and showed raw text.
+ */
+export function serviceDown(error: unknown): boolean {
+  if (!error) return false;
+  const text = error instanceof Error ? error.message : String(error);
+  return /^50[234]\b/.test(text) || /Failed to fetch|NetworkError|Load failed/i.test(text);
+}
+
 export function ErrorLine({ error }: { error: unknown }) {
   if (!error) return null;
   const text = error instanceof Error ? error.message : String(error);
-  const down = /^50[234]:/.test(text);
   return <p className="rounded-lg border border-down/40 bg-down/5 px-3 py-2 text-sm text-down">
-    {down ? "The trading service is not answering. Positions are not shown until it is back." : text}</p>;
+    {serviceDown(error) ? "The trading service is not answering. Accounts and positions show again when it is back." : text}</p>;
 }

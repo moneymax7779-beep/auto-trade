@@ -40,7 +40,7 @@ class SecurityConfigTest {
     @EnableWebMvc
     @EnableWebSecurity
     @EnableConfigurationProperties(AuthProperties.class)
-    @Import({SecurityConfig.class, MeController.class, Controls.class})
+    @Import({SecurityConfig.class, MeController.class, Controls.class, ClientErrorController.class})
     static class App {
     }
 
@@ -167,6 +167,16 @@ class SecurityConfigTest {
                     .andExpect(header().string("Location", "/oauth2/authorization/keycloak"));
             mvc.perform(get("/icons/../api/me")).andExpect(status().is4xxClientError());
             mvc.perform(post("/sw.js")).andExpect(status().isUnauthorized());
+        }
+
+        @Test
+        void aSignedInMemberMayReportTheirPagesErrorsAndNobodyElse(WebApplicationContext context) throws Exception {
+            MockMvc mvc = mvc(context);
+            String body = "{\"kind\":\"error\",\"message\":\"boom\",\"url\":\"/home\"}";
+            mvc.perform(post("/api/client-errors").contentType("application/json").content(body))
+                    .andExpect(status().isUnauthorized());
+            mvc.perform(post("/api/client-errors").contentType("application/json").content(body).with(user("member")))
+                    .andExpect(status().isNoContent());
         }
 
         @Test

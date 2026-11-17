@@ -4,6 +4,9 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router";
 import { App } from "./App";
 import "./index.css";
+import { watchErrors } from "./errors";
+
+watchErrors();
 
 // Per-user logins (autotrade.auth.mode=oidc): when the sign-in has ended, trading-core answers an API call with 401 and
 // X-Autotrade-Sign-In. Reload the page: the page request goes to the Keycloak sign-in and comes back to this page.

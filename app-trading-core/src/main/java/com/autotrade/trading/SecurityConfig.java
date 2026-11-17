@@ -81,7 +81,8 @@ class SecurityConfig {
      * What a signed-in user without the operator role reaches (29 Oct 2026, family members): who they are, and the
      * execution API, which scopes every call to their tenants.
      */
-    static final String[] MEMBER_APIS = {"/api/me", "/api/execution", "/api/execution/**"};
+    static final String[] MEMBER_APIS = {"/api/me", "/api/execution", "/api/execution/**",
+            "/api/client-errors"};   // mobile phase 5: everyone signed in may report their own page's errors
 
     /**
      * And, read-only, what the NIFTY / SENSEX / BANKNIFTY chart pages read for a member: the live status (trimmed to the

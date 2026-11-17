@@ -21,6 +21,13 @@
 
 :root { color-scheme: light; }
 
+/* Mobile phase 5 (17 Nov 2026, WCAG AA): on a phone the up / down / warn colours carry the P&L, the LIVE and PAPER
+   badges and the warnings as text, and the desktop shades read at 2.1-3.8 : 1 on white. Below md they are the 700 shades
+   (green-700, red-700, amber-800: 5.0-7.1 : 1, also on their own 15 % tints). The desktop keeps its colours (they fail the same check: a separate decision). */
+@media (max-width: 767px) {
+  :root { --color-up: #15803d; --color-down: #b91c1c; --color-warn: #92400e; }
+}
+
 html, body, #root { height: 100%; }
 /* mobile phase 0: no font inflation on phone rotation, no grey flash on tap */
 html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }

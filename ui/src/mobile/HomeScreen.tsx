@@ -3,7 +3,7 @@ import { type ReactNode, useRef, useState } from "react";
 import { Link } from "react-router";
 import { brokerLoginUrl, get, postJson, type ExecutionAccount, type KillSwitch, type Status } from "../api";
 import { pushSupported, usePush } from "./NotificationsScreen";
-import { activeAccounts, Big, Card, ErrorLine, Freshness, istTime, ModeBadge, Sheet, signed, tone, useAccess,
+import { activeAccounts, Big, Card, ErrorLine, Freshness, serviceDown, istTime, ModeBadge, Sheet, signed, tone, useAccess,
   useAccounts } from "./common";
 
 /** GET /api/execution/login-board: every account the caller sees with its broker login state today. */
@@ -45,7 +45,8 @@ export function HomeScreen() {
         <h1 className="text-xl font-semibold">Today</h1>
         <Freshness at={accounts.dataUpdatedAt} />
       </div>
-      <ErrorLine error={accounts.error} />
+      {/* one line for the whole service being down (review 17 Nov: it showed once per request, in raw text) */}
+      <ErrorLine error={accounts.error ?? (serviceDown(board.error) ? board.error : null)} />
 
       <Card>
         <div className="mb-1 flex items-center justify-between">
@@ -54,11 +55,15 @@ export function HomeScreen() {
         </div>
         <ul className="flex flex-col gap-2 text-sm">
           {/* a member's trimmed status, or another shape, must never take Home down (review 17 Nov) */}
-          {typeof status.data?.status === "string" && (
+          {typeof status.data?.status === "string" && (status.data.status === "NO_SESSION" ? (
+            // no session outside market hours is normal, not a warning (review 17 Nov: it read "Trading session no_session")
+            <Check ok={null} text="No trading session now"
+              note={status.data.schedule?.nextStart ? `next starts ${startsAt(status.data.schedule.nextStart)}` : null} />
+          ) : (
             <Check ok={status.data.feed != null && (status.data.feedLagSeconds ?? 0) < 60}
-              text={status.data.feed ? `Market data ${String(status.data.feed).toLowerCase()}` : `Trading session ${status.data.status.toLowerCase()}`}
+              text={status.data.feed ? `Market data ${String(status.data.feed).toLowerCase()}` : `Trading session ${status.data.status.toLowerCase().replace(/_/g, " ")}`}
               note={status.data.feedLagSeconds != null ? `${Math.round(status.data.feedLagSeconds)} s behind` : status.data.date} />
-          )}
+          ))}
           {logins.map((r) => {
             const url = brokerLoginUrl(r.broker, r.accountId);
             return (
@@ -82,9 +87,11 @@ export function HomeScreen() {
               action={<Link className="min-h-11 rounded-lg border border-line px-3 py-2.5 text-sm" to="/notifications">Turn on</Link>} />
           )}
         </ul>
-        <ErrorLine error={board.error} />
+        {!serviceDown(board.error) && <ErrorLine error={board.error} />}
       </Card>
 
+      {/* not without the accounts: "₹0 · 0 open" would read as a flat day (review 17 Nov) */}
+      {accounts.data && (
       <Card>
         <div className="flex items-baseline justify-between">
           <span className="text-xs text-muted">Day P&amp;L (closed, after charges)</span>
@@ -112,6 +119,7 @@ export function HomeScreen() {
         </ul>
         {open > 0 && <Link to="/positions" className="mt-2 block text-sm font-semibold text-sky-700">See {open} open position{open === 1 ? "" : "s"} →</Link>}
       </Card>
+      )}
 
       {spots.length > 0 && (
         <Card>
@@ -135,16 +143,29 @@ export function HomeScreen() {
   );
 }
 
-function Check({ ok, text, note, action }: { ok: boolean; text: string; note?: string | null; action?: ReactNode }) {
+/** ok: done (✓), false: needs doing (!), null: nothing to do now (·). */
+function Check({ ok, text, note, action }: { ok: boolean | null; text: string; note?: string | null; action?: ReactNode }) {
   return (
     <li className="flex items-center gap-2">
-      <span aria-hidden="true" className={`grid h-6 w-6 shrink-0 place-items-center rounded-full text-xs font-bold ${ok
-        ? "bg-up/15 text-up" : "bg-warn/20 text-warn"}`}>{ok ? "✓" : "!"}</span>
-      <span className="min-w-0 flex-1"><span className={ok ? "" : "font-semibold"}>{text}</span>
+      <span aria-hidden="true" className={`grid h-6 w-6 shrink-0 place-items-center rounded-full text-xs font-bold ${ok === null
+        ? "bg-panel-2 text-muted" : ok ? "bg-up/15 text-up" : "bg-warn/20 text-warn"}`}>{ok === null ? "·" : ok ? "✓" : "!"}</span>
+      <span className="min-w-0 flex-1"><span className={ok === false ? "font-semibold" : ""}>{text}</span>
         {note && <span className="block truncate text-xs text-muted">{note}</span>}</span>
       {action}
     </li>
   );
+}
+
+/** "09:00 tomorrow" / "09:00 Tue 18 Nov" (IST) from the scheduler's next start. */
+function startsAt(iso: string): string {
+  const d = new Date(iso.replace(/\[.*\]$/, ""));
+  if (Number.isNaN(d.getTime())) return iso;
+  const ist = (x: Date) => x.toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+  const time = d.toLocaleTimeString("en-IN", { hour12: false, timeZone: "Asia/Kolkata", hour: "2-digit", minute: "2-digit" });
+  const tomorrow = ist(new Date(Date.now() + 86_400_000));
+  if (ist(d) === ist(new Date())) return `${time} today`;
+  if (ist(d) === tomorrow) return `${time} tomorrow`;
+  return `${time} ${d.toLocaleDateString("en-IN", { timeZone: "Asia/Kolkata", weekday: "short", day: "2-digit", month: "short" })}`;
 }
 
 /** One spot per index from the session's strategies ("NIFTY · ecr-v11" keys hold the same spot), with its time. */
