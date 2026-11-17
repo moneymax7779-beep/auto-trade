@@ -228,4 +228,38 @@ class ExecutionApiIT {
         assertThat(api.exitPosition("kc-alice", aliceAccount, 1, new AccountsController.PositionExit("EXIT", 65L, "click-2")))
                 .doesNotContainKey("repeat");
     }
+
+    /**
+     * 17 Nov 2026 review: a refusal (4xx: nothing sold) frees the click's key, so the same click retried runs again; an
+     * outcome that is not known (any other failure) keeps the key answered, so a retry never sells a second time.
+     */
+    @Test
+    void aRefusedExitRunsAgainOnTheSameKeyAnUnknownOutcomeNever() throws Exception {
+        java.util.concurrent.atomic.AtomicInteger runs = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicReference<String> next = new java.util.concurrent.atomic.AtomicReference<>("refuse");
+        AccountsController stub = new AccountsController(new Access(dataSource), dataSource, null)
+                .withExitRunner((account, position, actor, day, quantity) -> {
+                    runs.incrementAndGet();
+                    return switch (next.get()) {
+                        case "refuse" -> throw new IllegalArgumentException("position " + position + " is not open");
+                        case "boom" -> throw new IllegalStateException("broker timeout");
+                        default -> List.of("NIFTY: 65 sold at 31.10");
+                    };
+                });
+        AccountsController.PositionExit click = new AccountsController.PositionExit("EXIT", null, "same-click");
+        assertThat(code(() -> stub.exitPosition("kc-alice", aliceAccount, 7, click))).isEqualTo(409);
+        next.set("sell");
+        assertThat(stub.exitPosition("kc-alice", aliceAccount, 7, click)).as("the refused click, retried, runs again")
+                .containsEntry("result", List.of("NIFTY: 65 sold at 31.10")).doesNotContainKey("repeat");
+        assertThat(stub.exitPosition("kc-alice", aliceAccount, 7, click)).containsEntry("repeat", true);
+        assertThat(runs).hasValue(2);
+
+        next.set("boom");
+        AccountsController.PositionExit unknown = new AccountsController.PositionExit("EXIT", null, "unknown-click");
+        assertThatThrownBy(() -> stub.exitPosition("kc-alice", aliceAccount, 8, unknown)).isInstanceOf(IllegalStateException.class);
+        next.set("sell");
+        assertThat(code(() -> stub.exitPosition("kc-alice", aliceAccount, 8, unknown))).as("may have sold: not run again")
+                .isEqualTo(409);
+        assertThat(runs).hasValue(3);
+    }
 }
