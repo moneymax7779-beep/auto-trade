@@ -157,6 +157,19 @@ class SecurityConfigTest {
         }
 
         @Test
+        void theInstalledAppsFilesLoadWithoutASignInAndNothingElseDoes(WebApplicationContext context) throws Exception {
+            MockMvc mvc = mvc(context);
+            for (String file : List.of("/manifest.json", "/sw.js", "/icons/icon-192.png")) {
+                int code = mvc.perform(get(file)).andReturn().getResponse().getStatus();
+                assertThat(code).as(file + ": no handler in this test, but not sent to sign in").isEqualTo(404);
+            }
+            mvc.perform(get("/home").accept("text/html")).andExpect(status().isFound())
+                    .andExpect(header().string("Location", "/oauth2/authorization/keycloak"));
+            mvc.perform(get("/icons/../api/me")).andExpect(status().is4xxClientError());
+            mvc.perform(post("/sw.js")).andExpect(status().isUnauthorized());
+        }
+
+        @Test
         void healthIsOpen(WebApplicationContext context) throws Exception {
             int code = mvc(context).perform(get("/actuator/health")).andReturn().getResponse().getStatus();
             assertThat(code).as("no handler in this test, but not sent to sign in").isEqualTo(404);

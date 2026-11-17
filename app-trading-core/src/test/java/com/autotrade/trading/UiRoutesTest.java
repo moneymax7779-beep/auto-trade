@@ -22,7 +22,10 @@ class UiRoutesTest {
 
     @Test
     void everyClientRouteIsForwardedToIndexHtml() throws Exception {
-        String app = Files.readString(Path.of("..", "ui", "src", "App.tsx"));
+        // the module directory under Maven, the repository root in an IDE
+        Path file = Files.exists(Path.of("..", "ui", "src", "App.tsx")) ? Path.of("..", "ui", "src", "App.tsx")
+                : Path.of("ui", "src", "App.tsx");
+        String app = Files.readString(file);
         Set<String> client = new TreeSet<>();
         Matcher m = Pattern.compile("<Route path=\"([^\"]+)\"").matcher(app);
         while (m.find()) {

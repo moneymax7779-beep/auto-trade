@@ -51,3 +51,32 @@ Keycloak already requires a 12+ character password, an authenticator code (TOTP)
 4. `sudo nginx -t && sudo systemctl reload nginx`; check signed out → Keycloak page, no basic-auth prompt.
 
 Rollback: restore the `.bak` file and the startup-script metadata, reload nginx.
+
+## Phone notifications (web push, mobile phase 4)
+
+Off by default: nothing is sent and no key exists until `autotrade.execution.push.enabled` is on.
+
+1. Needs the real domain first (decision 1): a phone's push subscription is bound to the site's address.
+2. VM `.env`: `AUTOTRADE_EXECUTION_PUSH_ENABLED=true` (and optionally `AUTOTRADE_EXECUTION_PUSH_SUBJECT=mailto:<you>`;
+   default: the site's public address), passed to the execution service in `docker-compose.gcp.yml`, then recreate it.
+3. The first use makes the server's VAPID key pair (`acct.push_vapid`, V47). Each person turns notifications on under
+   More → Notifications; on an iPhone only after Add to Home Screen (Safari → Share → Add to Home Screen).
+4. Check: More → Notifications → Send a test reaches the phone; the 08:30 Kite login reminder arrives the next morning.
+
+Rollback: the flag off (nothing is sent); `delete from acct.push_subscription` forgets every phone.
+
+## Passkeys (Face ID / fingerprint sign-in, mobile phase 4)
+
+Keycloak configuration, done by the user in the admin console (SSH tunnel, http://localhost:8188/auth/admin/, realm
+`autotrade`); nothing in the app changes. Needs the real domain first: a passkey is bound to the domain it was made on.
+
+1. Authentication → Policies → Webauthn Passwordless Policy: Relying Party name `auto-trade`, User verification
+   requirement `required`, Resident key `Yes` (a passkey), and the Relying Party ID = the domain (e.g. `app.<domain>`).
+2. Authentication → Required actions: enable "Webauthn Register Passwordless" (not default).
+3. Authentication → Flows: duplicate "browser" as "browser-passkeys"; in its forms subflow add "WebAuthn Passwordless
+   Authenticator" as ALTERNATIVE next to the password form (keep "OTP Form" CONDITIONAL after the password), then
+   Bind flow → Browser flow.
+4. Each person: Account console (`/auth/realms/autotrade/account`) → Signing in → Passkey → Set up, on their phone.
+5. Check: sign out, sign in on the phone with the passkey; the password + authenticator code still works as fallback.
+
+Rollback: bind the original "browser" flow again.

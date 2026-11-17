@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { type ReactNode, useEffect } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import { get, type ExecMe, type ExecutionAccount } from "../api";
 
 /**
@@ -96,8 +96,14 @@ export function Sheet({ title, onClose, children }: { title: string; onClose: ()
 
 /** "updated 10:07:32" from a query's last success; amber after 30 s, so a stale number never reads as live. */
 export function Freshness({ at }: { at: number }) {
+  // its own clock (review 17 Nov): a hung request re-renders nothing, so the age must move by itself to turn amber
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = window.setInterval(() => setNow(Date.now()), 5_000);
+    return () => window.clearInterval(t);
+  }, []);
   if (!at) return null;
-  const age = (Date.now() - at) / 1000;
+  const age = (Math.max(now, at) - at) / 1000;
   const time = new Date(at).toLocaleTimeString("en-IN", { hour12: false, timeZone: "Asia/Kolkata" });
   return <span className={`text-[11px] ${age > 30 ? "font-semibold text-warn" : "text-muted"}`}>
     {age > 30 ? `not updated since ${time}` : `as of ${time}`}</span>;

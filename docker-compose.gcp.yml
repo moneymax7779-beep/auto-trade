@@ -39,6 +39,9 @@ services:
       AUTOTRADE_EXECUTION_KEYCLOAK_URL: http://keycloak:8180/auth
       AUTOTRADE_EXECUTION_KEYCLOAK_CLIENT_SECRET: ${AUTOTRADE_EXECUTION_KEYCLOAK_CLIENT_SECRET:-}
       AUTOTRADE_EXECUTION_BROKERS_EGRESS_IPS: ${AUTOTRADE_BROKER_EGRESS_IPS:-}
+      # mobile phase 4: web push to installed phones, off unless the root-only .env says true (runbook mobile-front-door)
+      AUTOTRADE_EXECUTION_PUSH_ENABLED: ${AUTOTRADE_EXECUTION_PUSH_ENABLED:-false}
+      AUTOTRADE_EXECUTION_PUSH_SUBJECT: ${AUTOTRADE_EXECUTION_PUSH_SUBJECT:-}
       # Telegram commands (16 Nov 2026, docs/runbooks/telegram-commands.md): off unless the root-only .env turns them on,
       # and only after bot.env holds this deployment's own bot (Telegram lets one reader use a bot).
       AUTOTRADE_TELEGRAM_COMMANDS: ${AUTOTRADE_TELEGRAM_COMMANDS:-false}

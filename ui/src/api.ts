@@ -491,6 +491,13 @@ export interface SupportGrant {
 
 export interface LoginResult { ok: boolean; account: string | null; message: string }
 
+/** Where a broker's daily login starts in the browser (Zerodha, Upstox); null: the others log in on the Brokers page. */
+export function brokerLoginUrl(broker: string, accountId: number): string | null {
+  if (broker === "ZERODHA") return `/api/execution/accounts/${accountId}/kite/login`;
+  if (broker === "UPSTOX") return `/api/execution/accounts/${accountId}/upstox/login`;
+  return null;
+}
+
 export const BROKER_NAMES: Record<string, string> = {
   PAPER: "Paper", ZERODHA: "Zerodha", UPSTOX: "Upstox", KOTAK_NEO: "Kotak Neo", GROWW: "Groww",
 };

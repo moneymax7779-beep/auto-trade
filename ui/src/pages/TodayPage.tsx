@@ -1,7 +1,7 @@
 import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link } from "react-router";
-import { BROKER_NAMES, get, postJson, type LoginResult, type WorkspaceBroker, type WorkspaceToday } from "../api";
+import { BROKER_NAMES, get, postJson, type LoginResult, type WorkspaceBroker, type WorkspaceToday, brokerLoginUrl } from "../api";
 import { bookHasToday, bookQuery, LiveBookPanel } from "../components/LiveBookPanel";
 import { ErrorNote, Loading, Panel, Pnl, Stat, Table } from "../components/ui";
 import { SupportBanner, useWorkspace } from "../workspace";
@@ -17,9 +17,7 @@ const time = (iso: string | null | undefined) =>
 
 /** The URL that starts a broker's login in the browser (Zerodha, Upstox); null for the others. */
 export function loginUrl(b: WorkspaceBroker): string | null {
-  if (b.broker === "ZERODHA") return `/api/execution/accounts/${b.id}/kite/login`;
-  if (b.broker === "UPSTOX") return `/api/execution/accounts/${b.id}/upstox/login`;
-  return null;
+  return brokerLoginUrl(b.broker, b.id);
 }
 
 export function loggedIn(b: WorkspaceBroker): boolean {

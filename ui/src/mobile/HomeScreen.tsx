@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useRef, useState } from "react";
 import { Link } from "react-router";
-import { get, postJson, type ExecutionAccount, type KillSwitch, type Status } from "../api";
+import { brokerLoginUrl, get, postJson, type ExecutionAccount, type KillSwitch, type Status } from "../api";
+import { pushSupported, usePush } from "./NotificationsScreen";
 import { activeAccounts, Big, Card, ErrorLine, Freshness, istTime, ModeBadge, Sheet, signed, tone, useAccess,
   useAccounts } from "./common";
 
@@ -11,13 +12,6 @@ interface LoginBoard {
   tradingDay: boolean;
   accounts: { accountId: number; tenant: string; account: string; broker: string; mode: string; connection: string | null;
     sessionUntil: string | null; strategies: string[]; ready: boolean }[];
-}
-
-/** Where a broker's daily login starts in the browser (as on Today); the others log in on the Brokers page. */
-export function brokerLoginUrl(broker: string, accountId: number): string | null {
-  if (broker === "ZERODHA") return `/api/execution/accounts/${accountId}/kite/login`;
-  if (broker === "UPSTOX") return `/api/execution/accounts/${accountId}/upstox/login`;
-  return null;
 }
 
 /**
@@ -36,6 +30,7 @@ export function HomeScreen() {
   const status = useQuery({ queryKey: ["status-home"], queryFn: () => get<Status>("/api/status"), refetchInterval: 10_000,
     retry: false });
   const [stopping, setStopping] = useState(false);
+  const push = usePush();
 
   const shown = activeAccounts(accounts.data);
   const stopped = new Set((switches.data ?? []).filter((k) => k.scope === "ACCOUNT").map((k) => k.accountId));
@@ -58,9 +53,10 @@ export function HomeScreen() {
           {board.data && !board.data.tradingDay && <span className="text-xs text-muted">market closed today</span>}
         </div>
         <ul className="flex flex-col gap-2 text-sm">
-          {status.data && (
+          {/* a member's trimmed status, or another shape, must never take Home down (review 17 Nov) */}
+          {typeof status.data?.status === "string" && (
             <Check ok={status.data.feed != null && (status.data.feedLagSeconds ?? 0) < 60}
-              text={status.data.feed ? `Market data ${status.data.feed.toLowerCase()}` : `Trading session ${status.data.status.toLowerCase()}`}
+              text={status.data.feed ? `Market data ${String(status.data.feed).toLowerCase()}` : `Trading session ${status.data.status.toLowerCase()}`}
               note={status.data.feedLagSeconds != null ? `${Math.round(status.data.feedLagSeconds)} s behind` : status.data.date} />
           )}
           {logins.map((r) => {
@@ -81,6 +77,10 @@ export function HomeScreen() {
             return a && <Check key={`k${id}`} ok={false} text={`${a.name}: new entries stopped`} note={k?.reason ?? ""} />;
           })}
           {board.data && logins.length === 0 && <li className="text-muted">No broker accounts: PAPER only.</li>}
+          {push.state.data?.enabled && pushSupported() && push.here === null && push.permission !== "denied" && (
+            <Check ok={false} text="Notifications off on this phone" note="login reminder, LIVE trades, stops"
+              action={<Link className="min-h-11 rounded-lg border border-line px-3 py-2.5 text-sm" to="/notifications">Turn on</Link>} />
+          )}
         </ul>
         <ErrorLine error={board.error} />
       </Card>
@@ -102,7 +102,7 @@ export function HomeScreen() {
               <span className={`num shrink-0 ${tone(a.today?.net)}`}>{signed(a.today?.net ?? 0)}</span>
             </li>
           ))}
-          {status.data?.dayPnl != null && (
+          {typeof status.data?.dayPnl === "number" && (
             <li className="flex items-center justify-between gap-2 py-2">
               <span className="min-w-0"><span className="flex items-center gap-2"><span className="truncate">{status.data.account ?? "PAPER-1"}</span>
                 <ModeBadge mode="PAPER" /></span><span className="text-xs text-muted">strategy session · not in the total</span></span>

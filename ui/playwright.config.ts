@@ -7,6 +7,7 @@ export default defineConfig({
   testDir: "e2e",
   outputDir: "e2e-out/results",
   timeout: 60_000,
+  globalTimeout: 20 * 60_000,   // a hung run (e.g. the dev server restarting) fails instead of waiting forever
   workers: 2,
   reporter: [["list"]],
   use: { baseURL: process.env.UI_BASE ?? "http://127.0.0.1:5174", channel: "chrome", trace: "off" },

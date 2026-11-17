@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 import { Link, useSearchParams } from "react-router";
-import { BROKER_NAMES, get, postJson, type BrokerApps, type LoginResult, type WorkspaceBroker, type WorkspaceToday } from "../api";
+import { BROKER_NAMES, brokerLoginUrl, get, postJson, type BrokerApps, type LoginResult, type WorkspaceBroker, type WorkspaceToday } from "../api";
 import { loggedIn } from "../pages/TodayPage";
 import { useWorkspace } from "../workspace";
 import { Big, Card, ErrorLine, istTime } from "./common";
@@ -43,7 +43,8 @@ export function BrokerWizard() {
   const apps = useQuery({ queryKey: ["ws-apps", tenant], enabled: tenant != null, refetchInterval: 15_000,
     queryFn: () => get<BrokerApps>(`/api/execution/workspaces/${tenant}/broker-apps`) });
   const accountId = params.get("account") ? Number(params.get("account")) : null;
-  const step = Math.max(0, Math.min(4, Number(params.get("step") ?? (accountId ? 1 : 0))));
+  const asked = Number(params.get("step") ?? (accountId ? 1 : 0));
+  const step = Number.isInteger(asked) ? Math.max(0, Math.min(4, asked)) : accountId ? 1 : 0;   // a bad ?step= starts over
   const go = (next: number, account = accountId) => setParams(account == null ? { step: String(next) }
     : { account: String(account), step: String(next) });
   const b = today.data?.brokers.find((x) => x.id === accountId);
@@ -212,8 +213,7 @@ function LoginStep({ b, onNext, onBack }: { b: WorkspaceBroker; onNext: () => vo
     onSettled: () => { setTotp(""); setMpin(""); },
   });
   const done = loggedIn(b);
-  const url = b.broker === "ZERODHA" ? `/api/execution/accounts/${b.id}/kite/login`
-    : b.broker === "UPSTOX" ? `/api/execution/accounts/${b.id}/upstox/login` : null;
+  const url = brokerLoginUrl(b.broker, b.id);
   return (
     <Card>
       <h2 className="mb-2 font-semibold">Test the login</h2>

@@ -55,6 +55,13 @@ class TelegramNotifier {
     private final String api;
     private final boolean storedUpdates;             // the gateway owns the bot's updates: /start messages from the table
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
+    /** Mobile phase 4: every alert also goes to the same people's installed apps (nothing while push is off). */
+    private WebPushSender push;
+
+    @Autowired(required = false)
+    void webPush(WebPushSender push) {
+        this.push = push;
+    }
 
     TelegramNotifier(KiteLoginProperties props) {
         this(props, null, "https://api.telegram.org");
@@ -97,6 +104,9 @@ class TelegramNotifier {
 
     /** To the platform admin's chat. */
     void send(String text) {
+        if (push != null) {
+            push.toAdmins(WebPushSender.Message.of(text));
+        }
         Map<String, String> settings = settings();
         String chat = settings.get("TELEGRAM_CHAT_ID");
         if (settings.get("TELEGRAM_BOT_TOKEN") == null || chat == null) {
@@ -106,10 +116,18 @@ class TelegramNotifier {
         deliver(settings.get("TELEGRAM_BOT_TOKEN"), chat, text);
     }
 
-    /** To one person's linked chat; false when they have none (or the bot is not set up). */
+    /** To one person's linked chat; false when they have none (or the bot is not set up). Also to their phones. */
     boolean sendToUser(long appUserId, String text) {
+        return sendToUser(appUserId, text, true);
+    }
+
+    /** {@code alsoPush} false: a message about the Telegram chat itself (review 17 Nov), meaningless on a phone. */
+    boolean sendToUser(long appUserId, String text, boolean alsoPush) {
         if (jdbc == null) {
             return false;
+        }
+        if (alsoPush && push != null) {
+            push.toUser(appUserId, WebPushSender.Message.of(text));
         }
         String chat = jdbc.queryForList("select telegram_chat_id from acct.app_user where id = ? and status = 'ACTIVE' "
                 + "and telegram_chat_id is not null", String.class, appUserId).stream().findFirst().orElse(null);

@@ -187,3 +187,44 @@ test("Ledger: days with the broker match, weeks, a day's trades, CSV", async ({ 
   expect(file.suggestedFilename()).toBe("ledger-ZERODHA-1-2026-10-30-to-2026-11-17.csv");
   await fits(page);
 });
+
+test("Positions: Exit waits for the preview (no risky sale before its warnings are known)", async ({ page }) => {
+  await mock(page);
+  await page.route("**/api/execution/accounts/1/positions/87/exit-preview*", async (route) => {
+    await new Promise((r) => setTimeout(r, 1_500));
+    await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ positionId: 87, symbol: "x",
+      mode: "LIVE", open: 390, lotSize: 65, quantity: 390, lots: 6, remaining: 0, entry: 147.25, price: 141.6, priceFrom: "bid",
+      gross: -2200, net: -2240, orders: 1, how: "x", warnings: ["Spread 6 %"], typeToConfirm: false }) });
+  });
+  await page.goto("/positions");
+  await page.getByRole("button", { name: "Exit…" }).click();
+  const sheet = page.getByRole("dialog", { name: /Exit NIFTY 24650 CE/ });
+  await expect(sheet.getByText("Getting the price…")).toBeVisible();
+  await expect(sheet.getByRole("button", { name: /^Exit all/ })).toBeDisabled();
+  await expect(sheet.getByText("Spread 6 %")).toBeVisible();
+  await expect(sheet.getByRole("button", { name: /^Exit all/ })).toBeDisabled();     // now it needs EXIT typed
+});
+
+test("Positions: after an unknown outcome the lots are locked and Retry resends the same key", async ({ page }) => {
+  const m = await mock(page);
+  let calls = 0;
+  await page.route("**/api/execution/accounts/1/positions/87/exit", async (route) => {
+    m.posts.push({ url: "/exit", body: route.request().postDataJSON() });
+    calls++;
+    await route.fulfill(calls === 1 ? { status: 502, contentType: "text/plain", body: "bad gateway" }
+      : { status: 200, contentType: "application/json", body: JSON.stringify({ result: ["sold 390"], repeat: true }) });
+  });
+  await page.goto("/positions");
+  await page.getByRole("button", { name: "Exit…" }).click();
+  const sheet = page.getByRole("dialog", { name: /Exit NIFTY 24650 CE/ });
+  await sheet.getByRole("button", { name: /^Exit all/ }).click();
+  await expect(sheet.getByText(/The broker may have sold already/)).toBeVisible();
+  await sheet.getByRole("button", { name: "Half" }).click();                          // locked: still all 6
+  await expect(sheet.getByText("390 qty (6 lots)")).toBeVisible();
+  await sheet.getByRole("button", { name: "Retry the same exit" }).click();
+  await expect(sheet.getByText("Already sent: sold 390")).toBeVisible();
+  const keys = m.posts.filter((x) => x.url === "/exit").map((x) => (x.body as { key: string; quantity: unknown }));
+  expect(keys).toHaveLength(2);
+  expect(keys[1].key).toBe(keys[0].key);
+  expect(keys[1].quantity).toBeNull();
+});

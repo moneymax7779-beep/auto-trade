@@ -126,6 +126,9 @@ function ExitSheet({ accountId, p, mode, onClose }: { accountId: number; p: Live
   const [typed, setTyped] = useState("");
   const [key, setKey] = useState(newKey);
   const [done, setDone] = useState<string | null>(null);
+  // review 17 Nov: after a failure whose outcome is unknown (5xx, timeout: the broker may have sold) the sheet keeps its
+  // key and its lots, so the only next step is the same request again, which the server answers with the first result
+  const [unknown, setUnknown] = useState(false);
   // a second tap before React re-renders the button as disabled still fires: block it here (the server's key would
   // answer it with the first result, but nothing should be sent twice; review 17 Nov)
   const sending = useRef(false);
@@ -138,14 +141,19 @@ function ExitSheet({ accountId, p, mode, onClose }: { accountId: number; p: Live
     mutationFn: () => postJson<{ result: string[]; repeat?: boolean }>(`${base}/exit`, { confirm: "EXIT", quantity: qty ?? null, key }),
     onSuccess: (r) => setDone((r.repeat ? "Already sent: " : "") + r.result.join(" · ")),
     // a refusal (4xx) sold nothing: the next tap is a new attempt; anything else may have sold, so it keeps its key
-    onError: (e) => { if (/^4\d\d:/.test((e as Error).message)) setKey(newKey()); },
+    onError: (e) => { if (/^4\d\d:/.test((e as Error).message)) setKey(newKey()); else setUnknown(true); },
     onSettled: () => { sending.current = false; client.invalidateQueries({ queryKey: ["live-book", accountId] }); },
   });
   const send = () => { if (sending.current) return; sending.current = true; exit.mutate(); };
   const pv = preview.data;
   const mustType = preview.error != null || (pv != null && (pv.typeToConfirm || pv.warnings.length > 0));
-  const ready = !exit.isPending && (!mustType || typed.trim().toUpperCase() === "EXIT");
-  const choose = (n: number) => { setLots(Math.max(1, Math.min(allLots, n))); setTyped(""); exit.reset(); setKey(newKey()); };
+  // review 17 Nov: not before the preview has answered (or failed), or a risky sale would skip its typed EXIT
+  const previewed = pv != null || preview.error != null;
+  const ready = !exit.isPending && (previewed || unknown) && (!mustType || typed.trim().toUpperCase() === "EXIT");
+  const choose = (n: number) => {
+    if (unknown) return;                                           // the first sale may have gone through
+    setLots(Math.max(1, Math.min(allLots, n))); setTyped(""); exit.reset(); setKey(newKey());
+  };
   return (
     <Sheet title={`Exit ${p.symbol}`} onClose={onClose}>
       {done ? (
@@ -184,8 +192,11 @@ function ExitSheet({ accountId, p, mode, onClose }: { accountId: number; p: Live
               autoCapitalize="characters" autoCorrect="off" value={typed} onChange={(e) => setTyped(e.target.value)} aria-label="Type EXIT to confirm" />
           )}
           {exit.error && <p className="text-sm text-down">{(exit.error as Error).message}</p>}
+          {unknown && <p className="text-sm font-semibold text-warn">The broker may have sold already. Check Positions before
+            anything else: Retry sends the same request, and the server answers it with the first one's result.</p>}
+          {!previewed && !unknown && <p className="text-xs text-muted">Getting the price…</p>}
           <Big kind="danger" disabled={!ready} onClick={send}>
-            {exit.isPending ? "Sending…" : `Exit ${all ? "all" : lots} ${all && pv ? `(${pv.lots} lot${pv.lots === 1 ? "" : "s"})` : `lot${lots === 1 ? "" : "s"}`}`}</Big>
+            {exit.isPending ? "Sending…" : unknown ? "Retry the same exit" : `Exit ${all ? "all" : lots} ${all && pv ? `(${pv.lots} lot${pv.lots === 1 ? "" : "s"})` : `lot${lots === 1 ? "" : "s"}`}`}</Big>
           <Big onClick={onClose}>Cancel</Big>
         </div>
       )}

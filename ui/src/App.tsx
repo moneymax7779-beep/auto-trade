@@ -1,8 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { type ComponentType, lazy, Suspense } from "react";
-import { Navigate, NavLink, Route, Routes } from "react-router";
+import { Navigate, NavLink, Route, Routes, useLocation } from "react-router";
 import { get } from "./api";
 import { MobileNav, type NavItem } from "./components/MobileNav";
+import { AppUpdate } from "./components/AppUpdate";
+import { PageBoundary } from "./components/PageBoundary";
 import { WorkspaceProvider, WorkspaceSwitcher } from "./workspace";
 
 // Mobile phase 0 (17 Nov 2026): each page is its own chunk, so a phone downloads only the page it opens. A deploy
@@ -17,7 +19,8 @@ const page = <K extends string>(load: () => Promise<Record<K, ComponentType>>, n
     } catch {
       last = Date.now();   // no storage: never reload, show the error
     }
-    if (Date.now() - last > 60_000) {
+    // offline the chunk is simply not reachable: a reload would only blank the screen (the page boundary says so)
+    if (navigator.onLine !== false && Date.now() - last > 60_000) {
       window.location.reload();
       return new Promise<never>(() => undefined);   // the page is reloading; render nothing meanwhile
     }
@@ -43,6 +46,7 @@ const PositionsScreen = page(() => import("./mobile/PositionsScreen"), "Position
 const LedgerScreen = page(() => import("./mobile/LedgerScreen"), "LedgerScreen");
 const BrokerWizard = page(() => import("./mobile/BrokerWizard"), "BrokerWizard");
 const StrategiesScreen = page(() => import("./mobile/StrategiesScreen"), "StrategiesScreen");
+const NotificationsScreen = page(() => import("./mobile/NotificationsScreen"), "NotificationsScreen");
 
 /** Below the md breakpoint "/" opens the phone's Home instead of the desktop's first page. */
 const phone = () => typeof window !== "undefined" && window.matchMedia?.("(max-width: 767px)").matches;
@@ -83,11 +87,13 @@ const MEMBER_NAV: readonly NavItem[] = [
 const TABS: readonly NavItem[] = [["/home", "Home"], ["/positions", "Positions"], ["/index/NIFTY", "Chart"], ["/ledger", "Ledger"]];
 const MEMBER_TABS = TABS;
 /** In the phone's More sheet only (phase 3): the desktop keeps these switches on Accounts. */
-const PHONE_MORE: readonly NavItem[] = [["/strategies", "Strategies"]];
+const PHONE_MORE: readonly NavItem[] = [["/strategies", "Strategies"], ["/notifications", "Notifications"]];
 
 export function App() {
   const me = useQuery({ queryKey: ["me"], queryFn: () => get<Me>("/api/me"), staleTime: 60_000 });
-  if (me.isLoading) return null;
+  const location = useLocation();
+  // offline, React Query pauses the call (it never fails): show the shell then, and let each page say it is offline
+  if (me.isPending && me.fetchStatus !== "paused") return null;
   // fails closed: if /api/me cannot be read, the member's menu (the server refuses the rest anyway)
   const member = !me.data || (me.data.mode === "oidc" && !me.data.operator);
   const nav = member ? MEMBER_NAV : NAV;
@@ -116,6 +122,7 @@ export function App() {
         </div>
       </header>
       <main className="mx-auto max-w-7xl pb-[calc(5rem+env(safe-area-inset-bottom))] pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-4 md:pb-4">
+        <PageBoundary key={location.pathname}>
         <Suspense fallback={<p className="text-sm text-muted">Loading…</p>}>
         {member ? (
           <Routes>
@@ -124,6 +131,7 @@ export function App() {
             <Route path="/positions" element={<PositionsScreen />} />
             <Route path="/ledger" element={<LedgerScreen />} />
             <Route path="/strategies" element={<StrategiesScreen />} />
+            <Route path="/notifications" element={<NotificationsScreen />} />
             <Route path="/live" element={<Navigate to="/index/NIFTY" replace />} />
             <Route path="/index/:underlying" element={<IndexPage />} />
             <Route path="/today" element={<TodayPage />} />
@@ -139,6 +147,7 @@ export function App() {
           <Route path="/positions" element={<PositionsScreen />} />
           <Route path="/ledger" element={<LedgerScreen />} />
           <Route path="/strategies" element={<StrategiesScreen />} />
+          <Route path="/notifications" element={<NotificationsScreen />} />
           <Route path="/live" element={<LivePage />} />
           <Route path="/index/:underlying" element={<IndexPage />} />
           <Route path="/sessions" element={<SessionsPage />} />
@@ -157,7 +166,9 @@ export function App() {
         </Routes>
         )}
         </Suspense>
+        </PageBoundary>
       </main>
+      <AppUpdate />
       <MobileNav tabs={member ? MEMBER_TABS : TABS} nav={nav} more={PHONE_MORE} extra={<><WorkspaceSwitcher /><SignedIn /></>} />
     </div>
     </WorkspaceProvider>

@@ -92,6 +92,9 @@ class SecurityConfig {
      * session's last decisions and refusals (the Overview and the index pages' panels until then) are the operator's
      * again, with a session's decisions and orders, research, replay, config and every POST.
      */
+    /** Mobile phase 4: what an installed app's browser loads before (and without) a sign-in. */
+    static final String[] PWA_FILES = {"/manifest.json", "/sw.js", "/icons/*"};
+
     static final String[] MEMBER_CHART_GETS = {"/api/status", "/api/sessions", "/api/sessions/*/positions", "/api/surges",
             "/api/live/ticks", "/api/oi-tape/days"};
 
@@ -116,6 +119,9 @@ class SecurityConfig {
                 .authorizeHttpRequests(a -> a
                         .requestMatchers("/actuator/health", "/actuator/health/**", "/login/**", "/oauth2/**", "/error")
                         .permitAll()
+                        // mobile phase 4: the browser fetches these without the session (manifest, worker, icons): static,
+                        // nothing about anyone; the worker itself passes every /api/** call through to this chain
+                        .requestMatchers(HttpMethod.GET, PWA_FILES).permitAll()
                         .requestMatchers(HttpMethod.POST, OPERATOR_POSTS).hasAuthority(auth.operatorAuthority())
                         .requestMatchers(MEMBER_APIS).authenticated()
                         .requestMatchers(HttpMethod.GET, MEMBER_CHART_GETS).authenticated()

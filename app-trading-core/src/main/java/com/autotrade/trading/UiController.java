@@ -9,7 +9,7 @@ class UiController {
 
     @GetMapping({"/", "/live", "/index/{underlying}", "/strategies", "/sessions", "/sessions/{id}", "/performance", "/research", "/research/{id}",
         "/replay", "/config", "/accounts", "/today", "/brokers", "/settings", "/household",   // trader workspaces, 7 Nov 2026
-        "/home", "/positions", "/ledger", "/brokers/add"})   // mobile phases 1-2, 17 Nov 2026 (UiRoutesTest keeps this in step)
+        "/home", "/positions", "/ledger", "/brokers/add", "/notifications"})   // mobile phases 1-2, 17 Nov 2026 (UiRoutesTest keeps this in step)
     String index() {
         return "forward:/index.html";
     }

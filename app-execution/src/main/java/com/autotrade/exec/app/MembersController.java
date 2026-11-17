@@ -380,7 +380,7 @@ class MembersController {
                     audit.audit(tenant, null, user.subject(), "TELEGRAM_LINKED", Map.of("username", user.subject()));
                 }
                 telegram.sendToUser(user.id(), "auto-trade: this chat now gets " + user.subject() + "'s login links and "
-                        + "alerts.");
+                        + "alerts.", false);
                 return Map.of("linked", true);
             }
         }
