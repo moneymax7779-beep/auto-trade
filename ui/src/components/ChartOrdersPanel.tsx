@@ -211,10 +211,13 @@ export function ChartOrdersPanel({ desk, embedded = false }: { desk: ChartDesk; 
             strike is the ATM of the replay's latest minute when the entry fires.</p>
         )}
         {tool && <p className="text-accent">Click the chart at your {tool} entry level (click Draw Buy {tool} again to stop).</p>}
-        {draft && accountId != null && <Ticket key={desk.base} desk={desk} draft={draft} />}
+        {/* 17 Nov 2026 bug: the ticket and the order list shared one key (desk.base); React then could not tell the two
+            siblings apart and left a stale copy of the ticket on every refresh (2 s orders, 10 s quote), so tickets piled
+            up under Draw Buy CE. Each sibling has its own key (still one per account, so a switch starts afresh). */}
+        {draft && accountId != null && <Ticket key={`ticket:${desk.base}`} desk={desk} draft={draft} />}
         {move.error && <p className="text-sm text-down">Line not moved: {reason(move.error)}</p>}
         {orders.error && <ErrorNote error={orders.error} />}
-        <OrderList key={desk.base} desk={desk} fold={embedded} />
+        <OrderList key={`orders:${desk.base}`} desk={desk} fold={embedded} />
       </div>
     </section>
   );
