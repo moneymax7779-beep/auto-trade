@@ -15,7 +15,9 @@ function matches(tab: string, path: string): boolean {
  * four tabs and More. More opens a sheet with every other menu item plus the workspace switcher and the sign-out, so
  * nothing the desktop menu offers is lost on a phone. Hidden from md up, where the top menu shows.
  */
-export function MobileNav({ tabs, nav, extra }: { tabs: readonly NavItem[]; nav: readonly NavItem[]; extra?: ReactNode }) {
+export function MobileNav({ tabs, nav, more = [], extra }: { tabs: readonly NavItem[]; nav: readonly NavItem[];
+  /** phone-only entries for the More sheet (pages the desktop menu does not list) */
+  more?: readonly NavItem[]; extra?: ReactNode }) {
   const location = useLocation();
   const pathname = location.pathname === "/" && tabs.length > 0 ? tabs[0][0] : location.pathname;   // "/" is the first tab
   const [open, setOpen] = useState(false);
@@ -26,7 +28,7 @@ export function MobileNav({ tabs, nav, extra }: { tabs: readonly NavItem[]; nav:
     window.addEventListener("keydown", close);
     return () => window.removeEventListener("keydown", close);
   }, [open]);
-  const rest = nav.filter(([to]) => !tabs.some(([t]) => matches(t, to)) || (to.startsWith("/index/") && to !== "/index/NIFTY"));
+  const rest = [...more, ...nav.filter(([to]) => !tabs.some(([t]) => matches(t, to)) || (to.startsWith("/index/") && to !== "/index/NIFTY"))];
   const moreActive = !tabs.some(([t]) => matches(t, pathname));
   const tab = (active: boolean) =>
     // sky-700 on white is 5.9:1; the accent blue (#60a5fa) is 2.5:1, too pale for a label (review 17 Nov)

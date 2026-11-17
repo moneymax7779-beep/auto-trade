@@ -1,3 +1,4 @@
+import { PhoneFold } from "./PhoneFold";
 import { Fragment, useEffect, useId, useMemo, useRef, useState, type PointerEvent, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { get, type SessionStructure } from "../api";
@@ -262,12 +263,16 @@ function UnderlyingSurgesPanel({ date, data: polled, live, until, sessionId, fil
       right={<span className="text-xs text-muted num">{data.surges.length} surges · {count("bullish")} bullish · {count("bearish")} bearish · {count("mixed")} mixed</span>}
     >
       {!data.historyAvailable && <p className="mb-2 text-xs text-warn">No futures volume history for the previous sessions (zt-tiger-v2 or own capture), so surges cannot be ranked.</p>}
+      {/* mobile phase 3: on a phone the filters and layer toggles fold behind one button so the chart is on the first
+          screen; their state stays here, so folding loses nothing */}
+      <div className="mb-2"><PhoneFold label="Chart settings: levels, layers, surge filters">
       <Toolbar filters={filters} onFilters={onFilters} data={data} />
       <div className="mb-2 flex flex-wrap items-center gap-3">
         <LevelTogglesBar toggles={toggles} onChange={setToggles} />
         <StructureTogglesBar toggles={structureToggles} onChange={setStructureToggles} stops={sessionId != null} />
       </div>
       <HitRate surges={data.surges} />
+      </PhoneFold></div>
       {data.underlying === "SENSEX" && (
         <p className="mb-2 text-xs text-warn">SENSEX futures trade thinly (hundreds to a few thousand contracts a minute), so its surges rest on small volumes.</p>
       )}

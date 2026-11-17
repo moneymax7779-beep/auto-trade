@@ -5,6 +5,7 @@ import {
   type WorkerStatus,
 } from "../api";
 import { ErrorNote, Loading, Panel, Stat, Table } from "../components/ui";
+import { planGlobal, STATES, type StrategyState } from "../components/strategySwitch";
 import { AccountDetailPanel, AddAccountPanel } from "./AccountManagement";
 import { describeAudit } from "../components/auditText";
 
@@ -157,9 +158,6 @@ function GroupHeading({ name, daily, accounts }: { name: string; daily: boolean;
   );
 }
 
-type StrategyState = "OFF" | "PAPER" | "LIVE";
-const STATES: StrategyState[] = ["OFF", "PAPER", "LIVE"];
-const sameSet = (a: string[], b: string[]) => [...a].sort().join() === [...b].sort().join();
 
 /**
  * The owner's switch per strategy for every account (user, 9 Nov 2026: "as admin ... select or deselect the live
@@ -187,28 +185,9 @@ function GlobalLivePanel({ onDone }: { onDone: (text: string, ok: boolean) => vo
   if (q.error) return <ErrorNote error={q.error} />;
   if (!q.data) return null;
   const g = q.data;
-  const running = g.running ?? [];
-  const offNow = g.off ?? [];
-  const names = [...new Set([...running, ...g.available, ...offNow])].sort();
+  // the switch's plan is shared with the phone's Strategies screen (components/strategySwitch.ts, mobile phase 3)
+  const { names, running, saved, state, changed, body, toLive, fromLive, toOff, backOn, liveAccounts } = planGlobal(g, picked);
   if (names.length === 0) return null;
-  // not set: what the accounts trade now by their defaults (the union), so the switches start where things are
-  const liveNow = g.global ?? [...new Set(g.accounts.filter((a) => a.source === "DEFAULT").flatMap((a) => a.effective))];
-  const saved = (s: string): StrategyState => offNow.includes(s) ? "OFF" : liveNow.includes(s) ? "LIVE" : "PAPER";
-  const state = (s: string): StrategyState => picked?.[s] ?? saved(s);
-  const offNext = names.filter((s) => state(s) === "OFF");
-  const liveNext = names.filter((s) => state(s) === "LIVE");
-  const offChanged = !sameSet(offNext, offNow);
-  // OFF takes a strategy out of the LIVE list on the server, so a newly OFF one is not a LIVE change by itself. With no
-  // global list (each account on its risk-file default) the LIVE list is always sent, so what the switches show is what
-  // trades: otherwise a default strategy switched Off and back to Paper would trade LIVE again on those accounts.
-  const liveChanged = !sameSet(liveNext, liveNow.filter((s) => !offNext.includes(s)))
-    || (g.global == null && offChanged);
-  const changed = offChanged || liveChanged;
-  const toLive = liveNext.filter((s) => saved(s) !== "LIVE");
-  const fromLive = names.filter((s) => saved(s) === "LIVE" && state(s) !== "LIVE");
-  const toOff = offNext.filter((s) => !offNow.includes(s));
-  const backOn = offNow.filter((s) => !offNext.includes(s));
-  const liveAccounts = g.accounts.filter((a) => a.mode === "LIVE" && a.source !== "ACCOUNT").map((a) => a.account);
   const set = (s: string, to: StrategyState) => setPicked((p) => ({ ...(p ?? {}), [s]: to }));
   const own = g.accounts.filter((a) => a.source === "ACCOUNT");
   const tone = (st: StrategyState) => st === "LIVE" ? "bg-down text-white" : st === "PAPER" ? "bg-accent text-white"
@@ -250,8 +229,7 @@ function GlobalLivePanel({ onDone }: { onDone: (text: string, ok: boolean) => vo
       {g.canEdit && (
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <button className="rounded bg-accent px-3 py-1 text-sm font-semibold text-white disabled:opacity-40"
-            disabled={!changed || save.isPending} onClick={() => save.mutate({
-              ...(liveChanged ? { strategies: liveNext } : {}), ...(offChanged ? { off: offNext } : {}) })}>
+            disabled={!changed || save.isPending} onClick={() => save.mutate(body)}>
             {save.isPending ? "Saving…" : "Save for all accounts"}</button>
           {picked != null && <button className="rounded border border-line px-3 py-1 text-sm hover:bg-panel-2"
             disabled={save.isPending} onClick={() => setPicked(null)}>Undo</button>}

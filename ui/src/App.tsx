@@ -42,6 +42,7 @@ const HomeScreen = page(() => import("./mobile/HomeScreen"), "HomeScreen");
 const PositionsScreen = page(() => import("./mobile/PositionsScreen"), "PositionsScreen");
 const LedgerScreen = page(() => import("./mobile/LedgerScreen"), "LedgerScreen");
 const BrokerWizard = page(() => import("./mobile/BrokerWizard"), "BrokerWizard");
+const StrategiesScreen = page(() => import("./mobile/StrategiesScreen"), "StrategiesScreen");
 
 /** Below the md breakpoint "/" opens the phone's Home instead of the desktop's first page. */
 const phone = () => typeof window !== "undefined" && window.matchMedia?.("(max-width: 767px)").matches;
@@ -81,6 +82,8 @@ const MEMBER_NAV: readonly NavItem[] = [
 // Phase 1: Home, Positions, Chart, Ledger for everyone; the rest of each menu (Overview, Accounts, Today, Brokers...) under More.
 const TABS: readonly NavItem[] = [["/home", "Home"], ["/positions", "Positions"], ["/index/NIFTY", "Chart"], ["/ledger", "Ledger"]];
 const MEMBER_TABS = TABS;
+/** In the phone's More sheet only (phase 3): the desktop keeps these switches on Accounts. */
+const PHONE_MORE: readonly NavItem[] = [["/strategies", "Strategies"]];
 
 export function App() {
   const me = useQuery({ queryKey: ["me"], queryFn: () => get<Me>("/api/me"), staleTime: 60_000 });
@@ -120,6 +123,7 @@ export function App() {
             <Route path="/home" element={<HomeScreen />} />
             <Route path="/positions" element={<PositionsScreen />} />
             <Route path="/ledger" element={<LedgerScreen />} />
+            <Route path="/strategies" element={<StrategiesScreen />} />
             <Route path="/live" element={<Navigate to="/index/NIFTY" replace />} />
             <Route path="/index/:underlying" element={<IndexPage />} />
             <Route path="/today" element={<TodayPage />} />
@@ -134,6 +138,7 @@ export function App() {
           <Route path="/home" element={<HomeScreen />} />
           <Route path="/positions" element={<PositionsScreen />} />
           <Route path="/ledger" element={<LedgerScreen />} />
+          <Route path="/strategies" element={<StrategiesScreen />} />
           <Route path="/live" element={<LivePage />} />
           <Route path="/index/:underlying" element={<IndexPage />} />
           <Route path="/sessions" element={<SessionsPage />} />
@@ -153,7 +158,7 @@ export function App() {
         )}
         </Suspense>
       </main>
-      <MobileNav tabs={member ? MEMBER_TABS : TABS} nav={nav} extra={<><WorkspaceSwitcher /><SignedIn /></>} />
+      <MobileNav tabs={member ? MEMBER_TABS : TABS} nav={nav} more={PHONE_MORE} extra={<><WorkspaceSwitcher /><SignedIn /></>} />
     </div>
     </WorkspaceProvider>
   );

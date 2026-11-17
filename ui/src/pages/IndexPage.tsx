@@ -14,6 +14,7 @@ import { OiTapePanel, type TapeTrade } from "../components/OiTapePanel";
 import { ErrorNote, Loading, Panel, Pnl } from "../components/ui";
 import { ReplayControls } from "../components/TradeInspector";
 import { ChartOrdersPanel, useChartDesk } from "../components/ChartOrdersPanel";
+import { PhoneFold } from "../components/PhoneFold";
 
 export const INDICES = ["NIFTY", "SENSEX", "BANKNIFTY"] as const;
 /** Indices recorded for context only (charts, volume, PCR); no strategy trades them. */
@@ -126,13 +127,18 @@ function LiveDay({ underlying, s, nav, inspect }: { underlying: string; s: Statu
         <MarketCard title={underlying} spot={market.spot} time={market.time} state={market.state}
           volatility={market.volatility} cas={market.cas} />
       )}
-      {s.date && <DayContextCard date={s.date} underlying={underlying} live until={until} />}
-      <SurgePanel live date={s.date} underlying={underlying} nav={nav} until={until} sessionId={inspect ? s.session : undefined}
+      {/* on a phone the chart comes before the day's context cards (mobile phase 3) */}
+      <div className="flex flex-col gap-4">
+      <div className="order-2 md:order-1">{s.date && <DayContextCard date={s.date} underlying={underlying} live until={until} />}</div>
+      <div className="order-1 md:order-2"><SurgePanel live date={s.date} underlying={underlying} nav={nav} until={until} sessionId={inspect ? s.session : undefined}
         drawing={tradable ? desk.drawing : undefined} desk={tradable ? <ChartOrdersPanel desk={desk} embedded /> : undefined}
-        trades={chartTrades([...open, ...closed].filter((p) => p.opened).map((p) => liveAsStored(p, s.date!)), underlying, null, strategyShort, noSpot)} />
+        trades={chartTrades([...open, ...closed].filter((p) => p.opened).map((p) => liveAsStored(p, s.date!)), underlying, null, strategyShort, noSpot)} /></div>
+      </div>
+      <PhoneFold label="OI tape and strikes">
       {s.date && <OiTapePanel underlying={underlying} date={s.date} live until={until}
         trades={[...open, ...closed].filter((p) => p.opened).map((p): TapeTrade => ({ label: `${p.strategy ?? ""} ${p.side}`, opened: p.opened!, closed: p.closed, net: p.net }))} />}
-      <PcrPanel underlying={underlying} live />
+      </PhoneFold>
+      <PhoneFold label="PCR"><PcrPanel underlying={underlying} live /></PhoneFold>
       {entries.length > 0 && (
         <Panel title={`Strategies on ${underlying}`}>
           <StrategyMatrix underlyings={[underlying]} positions={open}
@@ -168,11 +174,13 @@ function PastDay({ underlying, day, sessionId, nav, inspect }: { underlying: str
           title={<>{underlying} <span className="ml-1 text-xs font-normal text-muted">{day} at close ·{" "}
             <Link to={`/sessions/${sessionId}`} className="hover:underline">session #{sessionId}</Link></span></>} />
       )}
-      <DayContextCard date={day} underlying={underlying} />
-      <SurgePanel date={day} underlying={underlying} nav={nav} sessionId={inspect ? sessionId : undefined} trades={chartTrades(trades, underlying, null, strategyShort, noSpot)} />
-      <OiTapePanel underlying={underlying} date={day}
-        trades={trades.map((p): TapeTrade => ({ label: `${p.strategy_id ?? ""} ${p.option_side}`, opened: p.opened_at, closed: p.closed_at, net: p.net }))} />
-      <PcrPanel underlying={underlying} date={day} />
+      <div className="flex flex-col gap-4">
+      <div className="order-2 md:order-1"><DayContextCard date={day} underlying={underlying} /></div>
+      <div className="order-1 md:order-2"><SurgePanel date={day} underlying={underlying} nav={nav} sessionId={inspect ? sessionId : undefined} trades={chartTrades(trades, underlying, null, strategyShort, noSpot)} /></div>
+      </div>
+      <PhoneFold label="OI tape and strikes"><OiTapePanel underlying={underlying} date={day}
+        trades={trades.map((p): TapeTrade => ({ label: `${p.strategy_id ?? ""} ${p.option_side}`, opened: p.opened_at, closed: p.closed_at, net: p.net }))} /></PhoneFold>
+      <PhoneFold label="PCR"><PcrPanel underlying={underlying} date={day} /></PhoneFold>
       {rows.length > 0 && (
         <Panel title={`How each strategy ended on ${underlying}`}>
           <StrategyMatrix underlyings={[underlying]} cells={rows.map((x) => ({ strategy: x.strategy_id, underlying, time: x.t,
