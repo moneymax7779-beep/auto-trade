@@ -11,6 +11,8 @@ import { ErrorNote } from "./ui";
  * - {@link LiveBooks}: every LIVE account the user can see, auto-trade's own positions only (never the broker's other
  *   holdings); nothing renders while no account is LIVE.
  * - {@link PaperPositions}: the running PAPER session's positions (PAPER-1).
+ * - {@link LiveBookPanel} on the Today page (17 Nov 2026): a workspace's paper twins and LIVE accounts, with Exit on paper
+ *   too, and a warning on a position its strategy no longer manages or that was bought late.
  */
 
 // ------------------------------------------------------------------------------------------------- shared view model
@@ -40,6 +42,8 @@ export interface OpenView {
   legs?: { side: string; entry: number; bid: number | null; pnl: number | null }[];
   /** under the card: what the trader can do with it (LIVE: Exit, book a hand exit) */
   actions?: ReactNode;
+  /** warnings across the card (not managed by its strategy, a late join) */
+  flags?: ReactNode;
 }
 
 export interface ClosedView {
@@ -104,35 +108,54 @@ export function LiveBooks() {
   return <>{live.map((a) => <LiveBookPanel key={a.id} accountId={a.id} />)}</>;
 }
 
-function LiveBookPanel({ accountId }: { accountId: number }) {
-  const book = useQuery({ queryKey: ["live-book", accountId],
-    queryFn: () => get<LiveBook>(`/api/execution/accounts/${accountId}/live-book?days=7`), refetchInterval: 5_000 });
+/** The query the book panels and the Today page's totals share (one request per account and poll). */
+export const bookQuery = (accountId: number) => ({ queryKey: ["live-book", accountId],
+  queryFn: () => get<LiveBook>(`/api/execution/accounts/${accountId}/live-book?days=7`), refetchInterval: 5_000 });
+
+/** Whether a book has anything for today: an open position or a trade closed today. */
+export const bookHasToday = (b: LiveBook) => b.open.length > 0 || b.closed.some((c) => c.closed.startsWith(istToday()));
+
+/** One account's positions; {@code hideEmpty}: nothing when it has no open position and no trade today. */
+export function LiveBookPanel({ accountId, hideEmpty }: { accountId: number; hideEmpty?: boolean }) {
+  const book = useQuery(bookQuery(accountId));
   if (book.error) return <ErrorNote error={book.error} />;
   if (!book.data) return null;
   const b = book.data;
+  if (hideEmpty && !bookHasToday(b)) return null;
+  const paper = b.bookMode === "PAPER";
   const open: OpenView[] = b.open.map((p) => ({
     key: p.id, strategy: p.strategy, symbol: p.symbol, quantity: p.quantity, lotSize: p.lotSize, entry: p.entry,
     opened: p.opened, bid: p.bid, quoteAt: p.quoteAt ?? null, best: p.best, stop: p.stop, pnl: p.pnl ?? null,
     pnlPct: p.pnlPct ?? null,
-    stopNote: p.stop == null ? "no stop on record"
+    stopNote: paper ? "paper: exits on the strategy's signal, your Exit or the square-off"
+      : p.stop == null ? "no stop on record"
       : p.stopWorking ? <>stop resting at the broker{p.bid != null ? <> · {px(p.bid - p.stop)} pts below the bid · {money(p.atRisk ?? null, false)} at risk</> : null}</>
       : <span className="text-down">stop {p.stopStatus?.toLowerCase() ?? "not working"} at the broker</span>,
-    actions: b.canAct ? <PositionActions accountId={accountId} p={p} /> : undefined,
+    actions: b.canAct || b.canStop ? <PositionActions accountId={accountId} p={p} paper={paper} /> : undefined,
+    flags: p.strategyExitedAt || p.lateJoin ? (
+      <div className="space-y-0.5 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 md:col-span-4">
+        {p.strategyExitedAt && <div><b>Not managed by its strategy:</b> {p.strategy} exited this contract at {p.strategyExitedAt.slice(11, 19)}.
+          Nothing will close it except your Exit{b.squareOff ? ` or the ${b.squareOff} square-off` : " or the square-off"}.</div>}
+        {p.lateJoin && <div><b>Late join:</b> signal at {p.lateJoin.signalAt.slice(11, 19)}, bought at {p.lateJoin.joinedAt.slice(11, 19)} at
+          the signal's price.</div>}
+      </div>) : undefined,
   }));
   const closed: ClosedView[] = b.closed.map((c) => ({ key: c.id, strategy: c.strategy, symbol: c.symbol, quantity: c.quantity,
     lotSize: c.lotSize, entry: c.entry, exit: c.exit, exitReason: c.exitReason, opened: c.opened, closed: c.closed,
     charges: c.charges, net: c.net, pct: c.pct }));
+  const since = `Since ${paper ? "start" : "LIVE"}${b.summary.sinceLiveFrom ? ` (${dayLabel(b.summary.sinceLiveFrom)})` : ""}, net`;
   const totals: TotalView[] = [
     { label: "Open P&L", value: money(b.summary.openPnl), cls: tone(b.summary.openPnl) },
     { label: "Realised today", value: money(b.summary.realisedToday), cls: tone(b.summary.realisedToday) },
-    { label: "At risk to stops", value: money(b.summary.atRisk, false) },
-    { label: `Since LIVE${b.summary.sinceLiveFrom ? ` (${dayLabel(b.summary.sinceLiveFrom)})` : ""}, net`,
-      value: money(b.summary.sinceLiveNet), cls: tone(b.summary.sinceLiveNet), sub: `${b.summary.sinceLiveTrades} closed trades` },
+    ...(paper ? [] : [{ label: "At risk to stops", value: money(b.summary.atRisk, false) }]),
+    { label: since, value: money(b.summary.sinceLiveNet), cls: tone(b.summary.sinceLiveNet), sub: `${b.summary.sinceLiveTrades} closed trades` },
   ];
   return (
-    <PositionsPanel title={<>Auto-trade positions · {b.account}</>} badge="LIVE" note="only trades auto-trade placed"
+    <PositionsPanel title={<>{paper ? "Paper positions" : "Auto-trade positions"} · {b.account}</>} badge={paper ? "PAPER" : "LIVE"}
+      note={paper ? "paper money: no broker order" : "only trades auto-trade placed"}
       banner={b.killSwitches.length > 0 ? <KillBanner accountId={accountId} kills={b.killSwitches} /> : null}
-      totals={totals} open={open} closed={closed} weekly footnote="prices from the own capture · refreshed every 5 s · P&L at the bid" />
+      totals={totals} open={open} closed={closed} weekly
+      footnote={`prices from the own capture · refreshed every 5 s · P&L at the bid${b.squareOff ? ` · square-off ${b.squareOff}` : ""}`} />
   );
 }
 
@@ -172,7 +195,7 @@ const istNow = () => new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 
  * - Book hand exit: it was sold outside the app (in Kite): our record closes as MANUAL at the price and time the trader
  *   enters; nothing is sent to the broker. Opened by itself when the reconciler found the broker holds none of it.
  */
-function PositionActions({ accountId, p }: { accountId: number; p: LiveOpenPosition }) {
+function PositionActions({ accountId, p, paper }: { accountId: number; p: LiveOpenPosition; paper?: boolean }) {
   const client = useQueryClient();
   const hint = p.notAtBroker;
   const [mode, setMode] = useState<"idle" | "exit" | "hand">(hint ? "hand" : "idle");
@@ -209,14 +232,16 @@ function PositionActions({ accountId, p }: { accountId: number; p: LiveOpenPosit
       {mode === "idle" && (
         <div className="flex flex-wrap items-center gap-2">
           {!hint && <button className={`${btn} border-rose-400 text-rose-700 hover:bg-rose-50`} onClick={() => { exit.reset(); setMode("exit"); }}>Exit</button>}
-          <button className={`${btn} border-line text-muted hover:text-text`} onClick={() => { hand.reset(); setMode("hand"); }}>
-            Sold it in Kite? Book the exit</button>
+          {!paper && <button className={`${btn} border-line text-muted hover:text-text`} onClick={() => { hand.reset(); setMode("hand"); }}>
+            Sold it in Kite? Book the exit</button>}
           {done && <span className="text-sm text-muted">{done}</span>}
         </div>
       )}
       {mode === "exit" && (
         <div className="flex flex-wrap items-center gap-2 rounded-md border border-rose-300 bg-rose-50 px-3 py-2 text-sm">
-          <span>Sell <b>{lotsText(p.quantity, p.lotSize)}</b> of <b>{contract(p.symbol).name}</b> now at the broker{p.bid != null ? <> (bid {px(p.bid)})</> : null}? Its stop comes off first.</span>
+          {paper
+            ? <span>Sell <b>{lotsText(p.quantity, p.lotSize)}</b> of <b>{contract(p.symbol).name}</b> now in paper at the captured bid{p.bid != null ? <> ({px(p.bid)}, about {money((p.bid - p.entry) * p.quantity)} before charges)</> : null}? No broker order is sent; the strategy keeps trading.</span>
+            : <span>Sell <b>{lotsText(p.quantity, p.lotSize)}</b> of <b>{contract(p.symbol).name}</b> now at the broker{p.bid != null ? <> (bid {px(p.bid)})</> : null}? Its stop comes off first.</span>}
           <button className={`${btn} border-rose-500 bg-rose-600 text-white hover:bg-rose-700`} disabled={exit.isPending}
             onClick={() => exit.mutate()}>{exit.isPending ? "Selling…" : "Confirm exit"}</button>
           <button className={`${btn} border-line bg-white`} disabled={exit.isPending} onClick={() => setMode("idle")}>Cancel</button>
@@ -414,6 +439,7 @@ function OpenCard({ p }: { p: OpenView }) {
         <div className={`num text-xl font-bold ${tone(p.pnl)}`}>{p.pnl != null ? money(p.pnl) : <span className="text-base font-normal text-muted">no price</span>}</div>
         <div className={`text-xs ${tone(p.pnl)}`}>{p.pnlPct != null ? `${p.pnlPct > 0 ? "+" : ""}${p.pnlPct.toFixed(1)} %` : ""}</div>
       </div>
+      {p.flags}
       {p.actions}
     </div>
   );

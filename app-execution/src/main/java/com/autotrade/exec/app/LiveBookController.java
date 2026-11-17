@@ -28,6 +28,12 @@ import com.autotrade.account.BrokerAccount;
  * captured quote (md.option_tick, bid-based P&amp;L), best bid since entry and the resting stop; closed ones of the last
  * {@code days} with the exit price implied by the realised P&amp;L. Only positions whose entry was a LIVE intent count, so a
  * DRY_RUN rehearsal on the same account is not mixed into real money. Read-only.
+ * <p>
+ * 17 Nov 2026 (workspace positions, phase 1): a PAPER account (a broker account's paper twin) has the same book of its
+ * PAPER entries ({@code bookMode}), so a member sees and exits paper positions on the Today page. Each open position also
+ * says when the strategy no longer manages it ({@code strategyExitedAt}: the strategy exited that contract at least
+ * {@link #EXIT_SETTLE} ago and this position is still open) and when it was a late join ({@code lateJoin}: bought more
+ * than {@link #LATE_JOIN} after its signal, at the signal's price); the book carries the account's square-off time.
  */
 @RestController
 class LiveBookController {
@@ -37,6 +43,11 @@ class LiveBookController {
     static final int QUOTE_MAX_AGE_MIN = 10;
     /** A stop protects the position only in these states (CREATED is not sent yet; CANCEL_PENDING / UNKNOWN may not hold). */
     private static final List<String> STOP_WORKING = List.of("SUBMITTED", "ACKNOWLEDGED", "OPEN", "PARTIALLY_FILLED");
+    /** A strategy EXIT this old with the position still open is not a working exit (they fill or retry within a minute). */
+    static final int EXIT_SETTLE_SEC = 120;
+    private static final java.time.Duration EXIT_SETTLE = java.time.Duration.ofSeconds(EXIT_SETTLE_SEC);
+    /** An entry intent made this long after its signal is a late join. */
+    private static final java.time.Duration LATE_JOIN = java.time.Duration.ofSeconds(60);
 
     /** The best bid since entry per open position, extended by each poll from where the last one stopped. */
     private record Best(double max, Timestamp upTo) {
@@ -47,11 +58,19 @@ class LiveBookController {
     private final Access access;
     private final AccountStore accounts;
     private final JdbcTemplate jdbc;
+    /** Each broker's square-off (null in tests without the rules file). */
+    private final com.autotrade.execution.BrokerRules rules;
 
     LiveBookController(Access access, DataSource dataSource) {
+        this(access, dataSource, null);
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    LiveBookController(Access access, DataSource dataSource, com.autotrade.execution.BrokerRules rules) {
         this.access = access;
         this.accounts = new AccountStore(dataSource);
         this.jdbc = new JdbcTemplate(dataSource);
+        this.rules = rules;
     }
 
     @GetMapping("/api/execution/accounts/{id}/live-book")
@@ -61,6 +80,8 @@ class LiveBookController {
         BrokerAccount a = accounts.byId(id).filter(x -> user.sees(x.tenantId()))
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "no such account"));
         int window = Math.max(1, Math.min(days, 366));
+        // a paper account's book is its PAPER entries; a broker account's is its LIVE ones (never a DRY_RUN rehearsal)
+        String bookMode = a.brokerType() == com.autotrade.account.BrokerType.PAPER ? "PAPER" : "LIVE";
         List<Map<String, Object>> rows = jdbc.queryForList("select p.id, p.strategy_id, p.underlying, p.option_side, p.symbol, "
                 + "p.instrument_key, p.instrument_token, p.entry_trade_intent_id, p.quantity_open, p.average_entry, p.opened_at, p.closed_at, p.exit_reason, p.realised_gross, "
                 + "p.charges, p.status, "
@@ -75,11 +96,19 @@ class LiveBookController {
                 + "order by o.id desc limit 1) stop_trigger, "
                 + "(select o.status from exec.order_execution o where o.broker_account_id = p.broker_account_id "
                 + "and o.trade_intent_id = p.entry_trade_intent_id and o.role = 'STOP' and o.trigger_price > 0 "
-                + "order by o.id desc limit 1) stop_status "
+                + "order by o.id desc limit 1) stop_status, "
+                + "i.created_at intent_at, d0.decided_at signal_at, "
+                // the strategy's own exit of this contract after the entry's signal (an EXIT closes the whole position)
+                + "(select min(d.decided_at) from exec.signal_decision d where d0.id is not null "
+                + "and d.copy_group_id = d0.copy_group_id and d.session_date = d0.session_date and d.strategy_id = p.strategy_id "
+                + "and d.instrument_token = p.instrument_token and d.action = 'EXIT' and d.decided_at >= d0.decided_at) "
+                + "strategy_exit_at "
                 + "from exec.position p join exec.trade_intent i on i.id = p.entry_trade_intent_id "
-                + "where p.broker_account_id = ? and i.execution_mode = 'LIVE' "
+                + "left join exec.trade_batch b0 on b0.id = i.trade_batch_id "
+                + "left join exec.signal_decision d0 on d0.id = b0.signal_decision_id "
+                + "where p.broker_account_id = ? and i.execution_mode = ? "
                 + "and (p.status <> 'CLOSED' or p.closed_at > now() - make_interval(days => ?)) order by p.opened_at desc",
-                id, window);
+                id, bookMode, window);
 
         // the scopes that stop this account's entries (KillSwitches): every LIVE account, this account, a strategy of its tenant
         List<Map<String, Object>> killRows = jdbc.queryForList("select id, scope, tenant_id, engaged_at, case scope when "
@@ -129,6 +158,15 @@ class LiveBookController {
                         atRisk += risk;
                     }
                 }
+                Timestamp exitAt = (Timestamp) r.get("strategy_exit_at");
+                if (exitAt != null && exitAt.toInstant().isBefore(java.time.Instant.now().minus(EXIT_SETTLE))) {
+                    out.put("strategyExitedAt", ist(exitAt));
+                }
+                Timestamp intentAt = (Timestamp) r.get("intent_at"), signalAt = (Timestamp) r.get("signal_at");
+                if (intentAt != null && signalAt != null
+                        && intentAt.toInstant().isAfter(signalAt.toInstant().plus(LATE_JOIN))) {
+                    out.put("lateJoin", Map.of("signalAt", ist(signalAt), "joinedAt", ist(intentAt)));
+                }
                 Map<String, Object> hint = handSaleHint(r, killRows);
                 if (hint != null) {
                     out.put("notAtBroker", hint);
@@ -156,7 +194,7 @@ class LiveBookController {
         }
         Map<String, Object> since = jdbc.queryForMap("select count(*) trades, coalesce(sum(p.realised_gross - coalesce(p.charges, 0)), 0) "
                 + "net, min(p.opened_at) first from exec.position p join exec.trade_intent i on i.id = p.entry_trade_intent_id "
-                + "where p.broker_account_id = ? and i.execution_mode = 'LIVE' and p.status = 'CLOSED'", id);
+                + "where p.broker_account_id = ? and i.execution_mode = ? and p.status = 'CLOSED'", id, bookMode);
         List<Map<String, Object>> kills = new ArrayList<>();
         for (Map<String, Object> k : killRows) {
             Long tenant = k.get("tenant_id") == null ? null : ((Number) k.get("tenant_id")).longValue();
@@ -176,6 +214,9 @@ class LiveBookController {
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("account", a.displayName());
         out.put("mode", a.tradeMode().name());
+        out.put("bookMode", bookMode);
+        com.autotrade.execution.BrokerRules.Rule rule = rules == null ? null : rules.rule(a.brokerType());
+        out.put("squareOff", rule == null || rule.squareOff() == null ? null : rule.squareOff().toString());
         out.put("canAct", user.mayAct(a.tenantId()));
         out.put("canStop", user.emergency(a.tenantId()));     // SUPPORT: Exit and Flatten without a grant (V29)
         out.put("killSwitches", kills);
