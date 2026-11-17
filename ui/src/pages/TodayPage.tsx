@@ -1,7 +1,8 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { Link } from "react-router";
 import { BROKER_NAMES, get, postJson, type LoginResult, type WorkspaceBroker, type WorkspaceToday } from "../api";
+import { bookHasToday, bookQuery, LiveBookPanel } from "../components/LiveBookPanel";
 import { ErrorNote, Loading, Panel, Pnl, Stat, Table } from "../components/ui";
 import { SupportBanner, useWorkspace } from "../workspace";
 
@@ -58,6 +59,12 @@ function TodayFor({ tenant }: { tenant: number }) {
     onSuccess: (_d, v) => done(v.ok),
     onError: fail,
   });
+  // the workspace's books (17 Nov 2026): each broker's paper twin (a paper account itself), and each LIVE-capable broker
+  const bookIds = (today.data?.brokers ?? []).flatMap((b) => [
+    ...(b.broker === "PAPER" ? [b.id] : b.paperTwinId != null ? [b.paperTwinId] : []),
+    ...(b.broker !== "PAPER" && b.liveCapable ? [b.id] : []),
+  ]);
+  const books = useQueries({ queries: bookIds.map((id) => bookQuery(id)) });
   const groww = useMutation({
     mutationFn: (id: number) => postJson<LoginResult>(`/api/execution/accounts/${id}/groww/login`, {}),
     onSuccess: (r) => (r.ok ? done(r.message) : setMessage({ ok: false, text: r.message })),
@@ -72,6 +79,11 @@ function TodayFor({ tenant }: { tenant: number }) {
     return <Panel title={t.name}><p className="text-sm text-muted">This workspace trades each account in its own mode.</p></Panel>;
   }
   const chosen = t.brokers.find((b) => b.id === s.brokerAccountId);
+  const loaded = books.map((q) => q.data).filter((b): b is NonNullable<typeof b> => b != null);
+  const openOf = (mode: "PAPER" | "LIVE") => loaded.filter((b) => (b.bookMode ?? "LIVE") === mode)
+    .reduce((a, b) => ({ pnl: a.pnl + b.summary.openPnl, n: a.n + b.open.length }), { pnl: 0, n: 0 });
+  const paperOpen = openOf("PAPER"), liveOpen = openOf("LIVE");
+  const shownBooks = bookIds.filter((_, i) => { const d = books[i]?.data; return d != null && bookHasToday(d); });
   const live = s.trading === "LIVE";
   const tenantKill = t.killSwitches.find((k) => k.scope === "TENANT");
   const liveBlock = !chosen ? "choose a broker first"
@@ -97,9 +109,14 @@ function TodayFor({ tenant }: { tenant: number }) {
           <Stat label="Broker" value={s.broker ?? "Off"} />
           <Stat label={live ? "LIVE since" : "Mode"} value={live ? time(s.since) : s.trading === "OFF" ? "no trading" : "PAPER"}
             tone={live ? "down" : "warn"} />
-          <Stat label="Paper today" value={<Pnl value={t.totals.paperNet} />} />
-          <Stat label="Live today" value={<Pnl value={t.totals.liveNet} />} />
+          <Stat label="Paper today" value={<Pnl value={t.totals.paperNet + paperOpen.pnl} />} />
+          <Stat label="Live today" value={<Pnl value={t.totals.liveNet + liveOpen.pnl} />} />
         </div>
+        <p className="mt-2 text-xs text-muted">
+          Paper: booked <Pnl value={t.totals.paperNet} /> · open <Pnl value={paperOpen.pnl} /> at the bid · {paperOpen.n} open.
+          {" "}Live: booked <Pnl value={t.totals.liveNet} /> · open <Pnl value={liveOpen.pnl} /> · {liveOpen.n} open.
+          {paperOpen.n + liveOpen.n > 0 && <> <a className="underline" href="#positions">See positions</a>.</>}
+        </p>
         {s.mode === "LIVE" && s.trading !== "LIVE" && (
           <p className="mt-3 text-sm text-warn">Switched LIVE, but entries go to PAPER now (no session, or the account cannot
             trade LIVE at the moment). Log in again.</p>
@@ -107,6 +124,13 @@ function TodayFor({ tenant }: { tenant: number }) {
         <p className="mt-3 text-xs text-muted">Every day starts PAPER. LIVE needs a login and your switch, and only signals after
           the switch go to the broker. Open positions stay where they were opened and exit there.</p>
       </Panel>
+
+      <div id="positions" className="space-y-4">
+        {shownBooks.map((id) => <LiveBookPanel key={id} accountId={id} hideEmpty />)}
+        {shownBooks.length === 0 && loaded.length === bookIds.length && (
+          <Panel title="Positions"><p className="text-sm text-muted">No position open and no trade today.</p></Panel>
+        )}
+      </div>
 
       <Panel title="Broker for today">
         <div className="space-y-2">

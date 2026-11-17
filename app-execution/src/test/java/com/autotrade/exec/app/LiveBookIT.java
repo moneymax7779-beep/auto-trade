@@ -190,4 +190,60 @@ class LiveBookIT {
         assertThatThrownBy(() -> api.liveBook("kc-other", account, 7)).isInstanceOf(ResponseStatusException.class)
                 .hasMessageContaining("404");
     }
+
+    /**
+     * 17 Nov 2026: a paper twin's book is its PAPER entries; an open position the strategy already exited (more than two
+     * minutes ago) says so, and one bought long after its signal is a late join. A managed, on-time one says neither.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void aPaperAccountsBookShowsItsPaperPositionsAndFlagsStrayAndLateOnes() {
+        AccountStore accounts = new AccountStore(dataSource);
+        long tenant = accounts.ensureTenant("family-paper");
+        long member = accounts.ensureUser("kc-paper", "paper");
+        accounts.ensureMembership(tenant, member, "OWNER");
+        long twin = accounts.ensureFollowerAccount(tenant, member, "Kotak paper", BrokerType.PAPER, TradeMode.PAPER,
+                50_000, EquityMode.FIXED, LocalDate.now(), "config/risk/follower-risk.v7.yaml", 0);
+        long signal = accounts.ensureSignalSourceAccount(tenant, member, "SIG-P", 500_000, LocalDate.now(),
+                "config/risk/signal-source.v2.yaml");
+        long group = accounts.ensureCopyGroup(tenant, "G-P", signal);
+        new FanOut(dataSource).subscribe(group, twin, List.of("oi-burst-cross"), 1.0);
+        jdbc.update("update acct.strategy_subscription set enabled_at = now() - interval '3 hours' where copy_group_id = ?", group);
+        long session = jdbc.queryForObject("insert into trade.session (account, mode, session_date, feed, strategy_id, "
+                + "strategy_hash, configs, code_version, status) values ('SIG-P', 'PAPER_LIVE', current_date, 'it', 'live-set', "
+                + "'sha256:it', '{}'::jsonb, 'it', 'DONE') returning id", Long.class);
+        long stray = TOKEN + 7, managed = TOKEN + 8;
+        java.util.function.BiFunction<Long, Object[], Long> decide = (token, at) -> {
+            new SignalDecisionStore(dataSource).insert(new SignalDecision(group, session, LocalDate.now(), (Instant) at[0],
+                    "oi-burst-cross", 2, "NIFTY", (SignalDecision.Action) at[1], "CE", null, "CONFIRMED", "IT", token,
+                    "NSE_FO|" + token, "NIFTY 25350 CE 17 NOV 26", 65, 64.25, 9_500, 500_000, 0,
+                    "P:" + token + ":" + at[1], Map.of()));
+            new FanOut(dataSource).fanOut(group, LocalDate.now());
+            return jdbc.queryForObject("select id from exec.trade_intent where broker_account_id = ? order by id desc limit 1",
+                    Long.class, twin);
+        };
+        Instant entryAt = Instant.now().minusSeconds(3900);
+        long strayIntent = decide.apply(stray, new Object[] {entryAt, SignalDecision.Action.ENTER});
+        decide.apply(stray, new Object[] {entryAt.plusSeconds(900), SignalDecision.Action.EXIT});
+        // the twin bought it an hour after its signal (the first-switch bug), at the signal's price
+        jdbc.update("update exec.trade_intent set created_at = now() - interval '10 minutes' where id = ?", strayIntent);
+        long managedIntent = decide.apply(managed, new Object[] {Instant.now(), SignalDecision.Action.ENTER});
+        for (Object[] p : new Object[][] {{strayIntent, stray}, {managedIntent, managed}}) {
+            jdbc.update("insert into exec.position (tenant_id, broker_account_id, entry_trade_intent_id, strategy_id, underlying, "
+                    + "option_side, instrument_token, instrument_key, symbol, quantity_open, average_entry, opened_at, status) "
+                    + "values (?, ?, ?, 'oi-burst-cross', 'NIFTY', 'CE', ?, ?, 'NIFTY 25350 CE 17 NOV 26', 65, 64.25, "
+                    + "now() - interval '10 minutes', 'OPEN')", tenant, twin, p[0], p[1], "NSE_FO|" + p[1]);
+        }
+
+        Map<String, Object> book = new LiveBookController(new Access(dataSource), dataSource).liveBook("kc-paper", twin, 7);
+        assertThat(book).containsEntry("bookMode", "PAPER").containsEntry("canAct", true).containsEntry("squareOff", null);
+        List<Map<String, Object>> open = (List<Map<String, Object>>) book.get("open");
+        assertThat(open).hasSize(2);
+        Map<String, Object> s = open.stream().filter(p -> p.get("id").equals(jdbc.queryForObject(
+                "select id from exec.position where entry_trade_intent_id = ?", Long.class, strayIntent))).findFirst().orElseThrow();
+        assertThat((String) s.get("strategyExitedAt")).isNotNull();
+        assertThat((Map<String, Object>) s.get("lateJoin")).containsKeys("signalAt", "joinedAt");
+        Map<String, Object> m = open.stream().filter(p -> p != s).findFirst().orElseThrow();
+        assertThat(m).doesNotContainKeys("strategyExitedAt", "lateJoin");
+    }
 }

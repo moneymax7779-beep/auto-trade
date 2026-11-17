@@ -638,6 +638,12 @@ export interface LiveBook {
     sinceLiveFrom: string | null };
   open: LiveOpenPosition[];
   closed: LiveClosedPosition[];
+  /** PAPER: a paper account's book (its PAPER entries); LIVE: a broker account's LIVE entries */
+  bookMode?: "LIVE" | "PAPER";
+  /** the account's end-of-day square-off, "HH:MM" (IST) */
+  squareOff?: string | null;
+  /** SUPPORT may exit without a grant */
+  canStop?: boolean;
 }
 
 interface LiveBookRow {
@@ -672,6 +678,10 @@ export interface LiveOpenPosition extends LiveBookRow {
    * (IST, its stop's cancel or a minute before the kill, to the kill) and the captured bids in it.
    */
   notAtBroker?: { from: string; to: string; bidLow: number | null; bidHigh: number | null; bidFirst: number | null };
+  /** the strategy exited this contract at this IST time and the position is still open: nothing will exit it but you or the square-off */
+  strategyExitedAt?: string;
+  /** bought long after its signal (IST times), at the signal's price */
+  lateJoin?: { signalAt: string; joinedAt: string };
 }
 
 export interface LiveClosedPosition extends LiveBookRow {
