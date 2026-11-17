@@ -427,4 +427,42 @@ class TradingDayIT {
                 .containsExactly("early-confirm-runner:true", "ma-cross:false");
         assertThat(accounts.ensurePaperTwin(w.real())).isEqualTo(w.twin());               // once
     }
+
+    /**
+     * 17 Nov 2026 (family-satyatrader): the workspace's first switch, at 10:24, moved its default broker from an account
+     * with no strategies to one with them; the as-of target of the 09:21 entries (no event before them: the default as
+     * it is now) became the new twin, and the next fan-out bought them an hour late at the 09:21 price, one of them
+     * already exited by the strategy at 09:36. An entry whose batch predates a switch gets no intent after it.
+     */
+    @Test
+    void aFirstSwitchNeverHandsEarlierEntriesToTheNewBroker() {
+        LocalDate today = TradingDay.today();
+        Workspace w = workspace("ravi", today, false);
+        AccountStore accounts = new AccountStore(dataSource);
+        long upstox = accounts.createFollowerAccount(w.tenant(), w.member(), "ravi Upstox", BrokerType.UPSTOX,
+                TradeMode.PAPER, 30_000, EquityMode.FIXED, today, "../config/risk/follower-risk.v7.yaml", 0);
+        accounts.ensurePaperTwin(upstox);
+        jdbc.update("update acct.tenant set default_broker_account_id = ? where id = ?", upstox, w.tenant());
+        assertThat(jdbc.queryForObject("select count(*) from acct.trading_day_event where tenant_id = ?", Integer.class,
+                w.tenant())).isZero();
+        FanOut fanOut = new FanOut(dataSource);
+        decide(w, today, Instant.now().minusSeconds(60), SignalDecision.Action.ENTER);
+        decide(w, today, Instant.now().minusSeconds(30), SignalDecision.Action.EXIT);
+        fanOut.fanOut(w.group(), today);
+        assertThat(intents(w, "ENTER")).as("the default broker subscribes to nothing").isEmpty();
+        assertThat(intents(w, "EXIT")).containsExactlyInAnyOrder("REAL:PAPER", "TWIN:PAPER");
+
+        // the member's first switch, as WorkspaceController.broker does it: the event and the new default
+        new TradingDay(dataSource).append(w.tenant(), w.real(), TradingDay.Mode.PAPER, "BROKER", w.member());
+        jdbc.update("update acct.tenant set default_broker_account_id = ? where id = ?", w.real(), w.tenant());
+        assertThat(jdbc.queryForObject("select acct.entry_target(?, now() - interval '60 seconds')", Long.class,
+                w.tenant())).as("the as-of target moved with the default").isEqualTo(w.twin());
+        assertThat(fanOut.fanOut(w.group(), today)).isZero();
+        assertThat(intents(w, "ENTER")).isEmpty();
+
+        // an entry after the switch goes to the new broker's twin
+        decide(w, today, Instant.now().plusMillis(5), SignalDecision.Action.ENTER);
+        assertThat(fanOut.fanOut(w.group(), today)).isEqualTo(1);
+        assertThat(intents(w, "ENTER")).containsExactly("TWIN:PAPER");
+    }
 }

@@ -22,8 +22,12 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * <b>DAILY_SWITCH workspaces</b> (trader workspaces, V29, {@link TradingDay}): an ENTER goes to one account only, the
  * workspace's entry target as of the decision's own time ({@code acct.entry_target}: the chosen broker's real account on
  * a LIVE day with a session, else its paper twin, none when Off), and at most one ENTER intent is ever made for the
- * workspace's batch, so a switch landing between two ticks cannot send the same entry to both. ADD and EXIT go to every
- * subscribed account as above (an account holding nothing skips them).
+ * workspace's batch, so a switch landing between two ticks cannot send the same entry to both. An ENTER whose batch was
+ * made before a switch of the workspace gets no intent after it (17 Nov 2026): before a workspace's first switch the
+ * target is its default broker as it is now, so the first switch would otherwise hand the day's earlier entries, which
+ * had no account, to the new broker hours late at their old price. A switch between a batch and its intent in the same
+ * fan-out drops that one entry. ADD and EXIT go to every subscribed account as above (an account holding nothing skips
+ * them).
  * <p>
  * <b>Manual orders</b> ({@link ManualOrders#STRATEGY}, 9 Nov 2026): never fanned out; followers do not copy a trader's
  * BUY CE / BUY PE.
@@ -79,7 +83,11 @@ public final class FanOut {
                 // a DAILY_SWITCH workspace's entry: its target as of the decision, once per batch
                 + "and (tn.trading_control <> 'DAILY_SWITCH' or d.action <> 'ENTER' "
                 + "or (a.id = acct.entry_target(b.tenant_id, d.decided_at) and not exists (select 1 from exec.trade_intent x "
-                + "where x.trade_batch_id = b.id and x.action = 'ENTER'))) "
+                + "where x.trade_batch_id = b.id and x.action = 'ENTER') "
+                // ... and never one made late by a switch after its batch (17 Nov 2026: a first switch re-pointed the
+                // as-of target of earlier decisions, which had no account until then, to the new broker's twin)
+                + "and not exists (select 1 from acct.trading_day_event e where e.tenant_id = b.tenant_id "
+                + "and e.changed_at > b.created_at))) "
                 + "order by d.decided_at, d.priority, d.id, a.id "                 // intent ids in decision order
                 + "on conflict (tenant_id, broker_account_id, idempotency_key) do nothing", copyGroupId, date);
         jdbc.update("update exec.trade_batch b set status = 'FANNED_OUT' from exec.signal_decision d "
