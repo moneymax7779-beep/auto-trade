@@ -26,6 +26,7 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 import org.testcontainers.utility.DockerImageName;
 
 import com.autotrade.account.AccountStore;
+import com.autotrade.execution.FanOut;
 import com.autotrade.account.BrokerType;
 import com.autotrade.account.EquityMode;
 import com.autotrade.account.TradeMode;
@@ -150,8 +151,8 @@ class TelegramCommandsIT {
             }
 
             @Override
-            public List<String> exitPosition(long accountId, long positionId, String actor) {
-                actions.add("exit " + accountId + " " + positionId + " " + actor);
+            public List<String> exitPosition(long accountId, long positionId, String actor, Long quantity) {
+                actions.add("exit " + accountId + " " + positionId + " " + actor + (quantity == null ? "" : " qty " + quantity));
                 return List.of("sold #" + positionId);
             }
 
@@ -315,6 +316,127 @@ class TelegramCommandsIT {
                 card.path("reply_markup").path("inline_keyboard").get(0).get(0).path("callback_data").asString()));
         assertThat(actions).containsExactly("exit " + aliceAccount + " " + position + " telegram:kc-alice");
         assertThat(lastCall("editMessageText").path("text").asString()).contains("EXIT DONE").contains("sold #" + position);
+    }
+
+    /** 17 Nov 2026: /exit ID LOTS sells whole lots of a position (stored on the card); as many lots as are open is all. */
+    @Test
+    void exitWithLotsSellsPartOfThePosition() {
+        AccountStore accounts = new AccountStore(dataSource);
+        long owner = jdbc.queryForObject("select id from acct.app_user where external_subject = 'kc-alice'", Long.class);
+        long signal = accounts.ensureSignalSourceAccount(aliceTenant, owner, "SIG-tg-lots", 500_000, LocalDate.now(),
+                "config/risk/signal-source.v2.yaml");
+        long group = accounts.ensureCopyGroup(aliceTenant, "SET-tg-lots", signal);
+        long decision = jdbc.queryForObject("insert into exec.signal_decision (copy_group_id, signal_session_id, session_date, "
+                + "decided_at, strategy_id, priority, underlying, action, option_side, reason, instrument_token, symbol, "
+                + "lot_size, reference_price, premium_budget, reference_capital, lots, idempotency_key) values (?, 1, "
+                + "current_date, now(), 'ma-cross', 0, 'NIFTY', 'ENTER', 'CE', 'IT', 78, 'NIFTY 24300 CE', 75, 50, 10000, "
+                + "500000, 2, 'tg-lots') returning id", Long.class, group);
+        long batch = jdbc.queryForObject("insert into exec.trade_batch (tenant_id, copy_group_id, signal_decision_id, source, "
+                + "idempotency_key, status) values (?, ?, ?, 'SIGNAL', 'SIG:tg-lots', 'DONE') returning id", Long.class,
+                aliceTenant, group, decision);
+        long intent = jdbc.queryForObject("insert into exec.trade_intent (tenant_id, trade_batch_id, broker_account_id, "
+                + "broker_type, execution_mode, strategy_id, priority, underlying, action, option_side, state, "
+                + "idempotency_key) values (?, ?, ?, 'ZERODHA', 'DRY_RUN', 'ma-cross', 1, 'NIFTY', 'ENTER', 'CE', "
+                + "'EXECUTED', 'tg-lots') returning id", Long.class, aliceTenant, batch, aliceAccount);
+        long two = jdbc.queryForObject("insert into exec.position (tenant_id, broker_account_id, entry_trade_intent_id, "
+                + "strategy_id, underlying, option_side, instrument_token, symbol, quantity_open, average_entry, opened_at, "
+                + "status) values (?, ?, ?, 'ma-cross', 'NIFTY', 'CE', 78, 'NIFTY 24300 CE', 150, 50, now(), 'OPEN') "
+                + "returning id", Long.class, aliceTenant, aliceAccount, intent);
+        try {
+            assertThat(deliver(message(ALICE_CHAT, ALICE_CHAT, "private", "/exit " + two + " x", 0))).isEqualTo("BAD_LOTS");
+            assertThat(deliver(message(ALICE_CHAT, ALICE_CHAT, "private", "/exit " + position + " 1", 0)))
+                    .as("no lot size known (a manual batch)").isEqualTo("BAD_LOTS");
+
+            long id = card("/exit " + two + " 1");
+            JsonNode card = lastCall("sendMessage");
+            assertThat(card.path("text").asString()).contains("1 lot(s), 75 of 150 are sold now").contains("the rest stays open");
+            assertThat(jdbc.queryForObject("select quantity from exec.telegram_command where id = ?", Long.class, id))
+                    .isEqualTo(75L);
+            deliver(callback(ALICE_CHAT, ALICE_CHAT,
+                    card.path("reply_markup").path("inline_keyboard").get(0).get(0).path("callback_data").asString()));
+            assertThat(actions).containsExactly("exit " + aliceAccount + " " + two + " telegram:kc-alice qty 75");
+
+            actions.clear();
+            long all = card("/exit " + two + " 2");                      // as many lots as are open: all of it
+            assertThat(jdbc.queryForObject("select quantity from exec.telegram_command where id = ?", Long.class, all)).isNull();
+            assertThat(lastCall("sendMessage").path("text").asString()).contains("all of it is sold now");
+
+            // a level alert's Book half button (b:POSITION:LOTS) opens the same card for that many lots
+            assertThat(deliver(callback(ALICE_CHAT, ALICE_CHAT, "b:" + two + ":1"))).startsWith("CARD T");
+            assertThat(jdbc.queryForObject("select quantity from exec.telegram_command order by id desc limit 1", Long.class))
+                    .isEqualTo(75L);
+            assertThat(deliver(callback(BOB_CHAT, BOB_CHAT, "b:" + two + ":0"))).as("not his").isEqualTo("NO_POSITION");
+        } finally {
+            jdbc.update("update exec.position set status = 'CLOSED', quantity_open = 0 where id = ?", two);
+        }
+    }
+
+    /** 17 Nov 2026 (plan C1-C5): /orders, /pnl, /login, /kill STRATEGY, /flattenall and /unlink. */
+    @Test
+    void readsLoginStrategyKillFlattenAllAndUnlink() {
+        AccountStore accounts = new AccountStore(dataSource);
+        long intent = jdbc.queryForObject("select entry_trade_intent_id from exec.position where id = ?", Long.class, position);
+        jdbc.update("insert into exec.order_execution (tenant_id, trade_intent_id, broker_account_id, broker_type, role, "
+                + "client_tag, attempt_no, order_side, order_type, quantity_requested, quantity_filled, average_fill_price, "
+                + "status) values (?, ?, ?, 'ZERODHA', 'ENTRY', 'tg-orders-1', 1, 'BUY', 'LIMIT', 75, 75, 58.2, 'FILLED')",
+                aliceTenant, intent, aliceAccount);
+        long alice = jdbc.queryForObject("select id from acct.app_user where external_subject = 'kc-alice'", Long.class);
+        long group = accounts.ensureCopyGroup(aliceTenant, "SET-tg-kill", accounts.ensureSignalSourceAccount(aliceTenant,
+                alice, "SIG-tg-kill", 500_000, LocalDate.now(), "config/risk/signal-source.v2.yaml"));
+        new FanOut(dataSource).subscribe(group, aliceAccount, List.of("oi-burst-cross"), 1.0);
+        jdbc.update("update acct.broker_account set enabled = true where id = ?", aliceAccount);
+        try {
+            // reads: her orders and today's result; Bob has none
+            assertThat(deliver(message(ALICE_CHAT, ALICE_CHAT, "private", "/orders", 0))).isEqualTo("ORDERS");
+            assertThat(lastSent()).contains("ALICE-1 ENTRY BUY 75/75 NIFTY 24200 CE FILLED @58.20");
+            assertThat(deliver(message(BOB_CHAT, BOB_CHAT, "private", "/orders", 0))).isEqualTo("ORDERS");
+            assertThat(lastSent()).isEqualTo("No orders today.");
+            assertThat(deliver(message(ALICE_CHAT, ALICE_CHAT, "private", "/pnl", 0))).isEqualTo("PNL");
+            assertThat(lastSent()).contains("ALICE-1 (DRY_RUN): booked").contains("(1 open)").contains("All:");
+            assertThat(deliver(message(BOB_CHAT, BOB_CHAT, "private", "/pnl", 0))).isEqualTo("PNL");
+            assertThat(lastSent()).isEqualTo("Nothing traded today.");
+
+            // login: her Zerodha account has no session today; the VIEWER acts for nothing
+            assertThat(deliver(message(ALICE_CHAT, ALICE_CHAT, "private", "/login", 0))).isEqualTo("LOGIN");
+            assertThat(lastSent()).contains("Needs today's login").contains("ALICE-1 (ZERODHA)")
+                    .contains("/api/execution/accounts/" + aliceAccount + "/kite/login");
+            assertThat(deliver(message(VIEWER_CHAT, VIEWER_CHAT, "private", "/login", 0))).isEqualTo("LOGIN");
+            assertThat(lastSent()).startsWith("Every broker account");
+
+            // a strategy of her workspace stops there, after the card; an unknown one is refused
+            assertThat(deliver(message(ALICE_CHAT, ALICE_CHAT, "private", "/kill no-such-thing", 0))).isEqualTo("NO_ACCOUNT");
+            long id = card("/kill oi-burst-cross");
+            assertThat(lastCall("sendMessage").path("text").asString()).contains("KILL strategy oi-burst-cross");
+            String nonce = jdbc.queryForObject("select nonce from exec.telegram_command where id = ?", String.class, id);
+            assertThat(deliver(callback(ALICE_CHAT, ALICE_CHAT, "c:" + id + ":" + nonce))).isEqualTo("CONFIRMED T" + id);
+            assertThat(jdbc.queryForObject("select count(*) from exec.kill_switch where scope = 'STRATEGY' and strategy_id = "
+                    + "'oi-burst-cross' and tenant_id = ? and released_at is null", Integer.class, aliceTenant)).isEqualTo(1);
+
+            // /flattenall is the platform admin's
+            assertThat(deliver(message(ALICE_CHAT, ALICE_CHAT, "private", "/flattenall", 0))).isEqualTo("FORBIDDEN");
+            jdbc.update("update acct.tenant_membership set role = 'ADMIN' where tenant_id = ? and app_user_id = ?",
+                    aliceTenant, alice);
+            actions.clear();
+            long all = card("/flattenall");
+            assertThat(lastCall("sendMessage").path("text").asString()).contains("FLATTEN ALL").contains("ALICE-1 (DRY_RUN)");
+            String n2 = jdbc.queryForObject("select nonce from exec.telegram_command where id = ?", String.class, all);
+            deliver(callback(ALICE_CHAT, ALICE_CHAT, "c:" + all + ":" + n2));
+            assertThat(actions).contains("flatten " + aliceAccount + " telegram:kc-alice");
+        } finally {
+            jdbc.update("update acct.tenant_membership set role = 'OWNER' where tenant_id = ? and app_user_id = ?",
+                    aliceTenant, alice);
+            jdbc.update("update exec.kill_switch set released_at = now(), released_by = 'it' where released_at is null");
+            jdbc.update("update acct.strategy_subscription set enabled = false where copy_group_id = ?", group);
+            jdbc.update("delete from exec.order_execution where client_tag = 'tg-orders-1'");
+        }
+
+        // /unlink: that chat runs nothing any more
+        long carol = accounts.ensureUser("kc-carol", "carol");
+        accounts.ensureMembership(aliceTenant, carol, "VIEWER");
+        jdbc.update("update acct.app_user set telegram_chat_id = '777001' where id = ?", carol);
+        assertThat(deliver(message(777001, 777001, "private", "/unlink", 0))).isEqualTo("UNLINKED_BY_USER");
+        assertThat(jdbc.queryForObject("select telegram_chat_id from acct.app_user where id = ?", String.class, carol)).isNull();
+        assertThat(deliver(message(777001, 777001, "private", "/status", 0))).isEqualTo("UNLINKED");
     }
 
     @Test

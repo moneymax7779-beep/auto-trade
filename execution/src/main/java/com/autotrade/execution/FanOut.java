@@ -63,13 +63,8 @@ public final class FanOut {
                 + "where d.copy_group_id = ? and d.session_date = ? and d.strategy_id <> '" + ManualOrders.STRATEGY + "' "
                 + "on conflict (tenant_id, idempotency_key) do nothing", copyGroupId, date);
         // one intent per subscribed, eligible follower
-        int created = jdbc.update("insert into exec.trade_intent (tenant_id, trade_batch_id, broker_account_id, broker_type, "
-                + "execution_mode, strategy_id, priority, underlying, action, option_side, instrument_token, symbol, state, "
-                + "idempotency_key) "
-                + "select b.tenant_id, b.id, a.id, a.broker_type, coalesce(s.mode_override, a.trade_mode), d.strategy_id, "
-                + "d.priority, d.underlying, d.action, d.option_side, d.instrument_token, d.symbol, 'CREATED', "
-                + "d.idempotency_key || ':' || a.id "
-                + "from exec.trade_batch b join exec.signal_decision d on d.id = b.signal_decision_id "
+        // the accounts that may take a decision of the group's day (the switch rules of a DAILY_SWITCH entry come after)
+        String eligible = "from exec.trade_batch b join exec.signal_decision d on d.id = b.signal_decision_id "
                 + "join acct.tenant tn on tn.id = b.tenant_id "
                 + "join acct.strategy_subscription s on s.copy_group_id = d.copy_group_id and s.strategy_id = d.strategy_id "
                 + "and s.enabled join acct.broker_account a on a.id = s.broker_account_id "
@@ -79,17 +74,33 @@ public final class FanOut {
                 + "and a.tenant_id = b.tenant_id "
                 + "and (coalesce(s.mode_override, a.trade_mode) <> 'LIVE' or a.live_trading_enabled) "
                 + "and (d.action = 'EXIT' or s.enabled_at <= d.decided_at "
-                + "or (s.enabled_at at time zone 'Asia/Kolkata')::date > d.session_date) "
-                // a DAILY_SWITCH workspace's entry: its target as of the decision, once per batch
-                + "and (tn.trading_control <> 'DAILY_SWITCH' or d.action <> 'ENTER' "
-                + "or (a.id = acct.entry_target(b.tenant_id, d.decided_at) and not exists (select 1 from exec.trade_intent x "
-                + "where x.trade_batch_id = b.id and x.action = 'ENTER') "
-                // ... and never one made late by a switch after its batch (17 Nov 2026: a first switch re-pointed the
-                // as-of target of earlier decisions, which had no account until then, to the new broker's twin)
-                + "and not exists (select 1 from acct.trading_day_event e where e.tenant_id = b.tenant_id "
-                + "and e.changed_at > b.created_at))) "
+                + "or (s.enabled_at at time zone 'Asia/Kolkata')::date > d.session_date) ";
+        // a DAILY_SWITCH workspace's entry: its target as of the decision, once per batch
+        String target = "a.id = acct.entry_target(b.tenant_id, d.decided_at) and not exists (select 1 from exec.trade_intent x "
+                + "where x.trade_batch_id = b.id and x.action = 'ENTER') ";
+        // ... and never one made late by a switch after its batch (17 Nov 2026: a first switch re-pointed the as-of target
+        // of earlier decisions, which had no account until then, to the new broker's twin)
+        String switchedAfter = "exists (select 1 from acct.trading_day_event e where e.tenant_id = b.tenant_id "
+                + "and e.changed_at > b.created_at)";
+        int created = jdbc.update("insert into exec.trade_intent (tenant_id, trade_batch_id, broker_account_id, broker_type, "
+                + "execution_mode, strategy_id, priority, underlying, action, option_side, instrument_token, symbol, state, "
+                + "idempotency_key) "
+                + "select b.tenant_id, b.id, a.id, a.broker_type, coalesce(s.mode_override, a.trade_mode), d.strategy_id, "
+                + "d.priority, d.underlying, d.action, d.option_side, d.instrument_token, d.symbol, 'CREATED', "
+                + "d.idempotency_key || ':' || a.id " + eligible
+                + "and (tn.trading_control <> 'DAILY_SWITCH' or d.action <> 'ENTER' or (" + target + "and not " + switchedAfter
+                + ")) "
                 + "order by d.decided_at, d.priority, d.id, a.id "                 // intent ids in decision order
                 + "on conflict (tenant_id, broker_account_id, idempotency_key) do nothing", copyGroupId, date);
+        // an entry the switch rule held back is said once (review 17 Nov 2026: it was dropped in silence)
+        jdbc.update("insert into exec.audit_log (tenant_id, broker_account_id, actor, action, detail) "
+                + "select distinct on (b.id) b.tenant_id, a.id, 'fan-out', 'ENTRY_DROPPED_SWITCH', jsonb_build_object("
+                + "'batch', b.id, 'decision', d.id, 'strategy', d.strategy_id, 'symbol', d.symbol, 'decidedAt', d.decided_at, "
+                + "'reason', 'the day''s broker or mode changed after this signal: no entry is made late') " + eligible
+                + "and tn.trading_control = 'DAILY_SWITCH' and d.action = 'ENTER' and " + target + "and " + switchedAfter + " "
+                + "and not exists (select 1 from exec.audit_log l where l.tenant_id = b.tenant_id "
+                + "and l.action = 'ENTRY_DROPPED_SWITCH' and l.detail->>'batch' = b.id::text) order by b.id, a.id",
+                copyGroupId, date);
         jdbc.update("update exec.trade_batch b set status = 'FANNED_OUT' from exec.signal_decision d "
                 + "where d.id = b.signal_decision_id and d.copy_group_id = ? and d.session_date = ? and b.status = 'CREATED'",
                 copyGroupId, date);

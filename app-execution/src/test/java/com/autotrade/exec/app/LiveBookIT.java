@@ -220,6 +220,18 @@ class LiveBookIT {
         accounts.ensureMembership(other, accounts.ensureUser("kc-other", "other"), "OWNER");
         assertThatThrownBy(() -> api.liveBook("kc-other", account, 7)).isInstanceOf(ResponseStatusException.class)
                 .hasMessageContaining("404");
+
+        // 17 Nov 2026: quotes are read through the contract (ref.instrument -> the contract index), not by token alone:
+        // a tick of the same contract under another token is the newest quote; an unknown key falls back to the token
+        jdbc.update("insert into md.option_tick (manifest_id, session_date, underlying, recv_ts, src_seq, instrument_token, "
+                + "symbol, expiry, strike, option_type, ltp, bid_px, bid_qty, bid_orders, ask_px, ask_qty, ask_orders, "
+                + "analytics_complete, depth_complete) values (1, current_date, 'NIFTY', now() - interval '2 seconds', 2, ?, "
+                + "'NIFTY 24650 CE 09 NOV 26', date '2026-11-09', 24650, 'CE', 171, '{171}', '{650}', '{3}', '{171.05}', "
+                + "'{650}', '{3}', false, true)", TOKEN + 1);
+        ContractQuotes quotes = new ContractQuotes(jdbc);
+        assertThat(quotes.latest("NSE_FO|40009", "NIFTY", TOKEN, 10)).containsEntry("bid", 171.0);
+        assertThat(quotes.latest("NSE_FO|99999", "NIFTY", TOKEN, 10)).as("not in ref.instrument: by token")
+                .containsEntry("bid", 163.70);
     }
 
     /**

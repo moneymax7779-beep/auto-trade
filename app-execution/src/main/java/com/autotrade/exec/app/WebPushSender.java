@@ -25,7 +25,8 @@ import tools.jackson.databind.json.JsonMapper;
 
 /**
  * Web push to the installed app (mobile phase 4, 17 Nov 2026): the same people and texts as the Telegram alerts
- * ({@link TelegramNotifier} calls {@link #toAdmins} and {@link #toUser}, members included), to every browser each person
+ * ({@link TelegramNotifier} calls {@link #toAdmins} and {@link #toUser}; {@link PositionAlerts} {@link #toMembers}), to every
+ * browser each person
  * allowed. Sent off the caller's thread (an alert loop never waits on a push service); a 404 / 410 drops the browser.
  * Nothing is sent, and no key is made, while {@code autotrade.execution.push.enabled} is off.
  */
@@ -94,6 +95,12 @@ class WebPushSender {
 
     void toUser(long appUserId, Message m) {
         send(subscriptions("where s.app_user_id = ?", appUserId), m);
+    }
+
+    /** A workspace's OWNER, TRADER, VIEWER and AUDITOR (the position alerts' members). */
+    void toMembers(long tenantId, Message m) {
+        send(subscriptions("where s.app_user_id in (select app_user_id from acct.tenant_membership where tenant_id = ? "
+                + "and role in ('OWNER', 'TRADER', 'VIEWER', 'AUDITOR'))", tenantId), m);
     }
 
     /** As Telegram's admin chat: everyone who is ADMIN of a tenant. */

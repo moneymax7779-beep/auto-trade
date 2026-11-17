@@ -22,14 +22,17 @@ final class PositionFacts {
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
 
     private final JdbcTemplate jdbc;
+    private final ContractQuotes quotes;
 
     PositionFacts(DataSource dataSource) {
         this.jdbc = new JdbcTemplate(dataSource);
+        this.quotes = new ContractQuotes(jdbc);
     }
 
     /** The facts of an open position (empty when it is not open). */
     Map<String, Object> of(long positionId) {
-        List<Map<String, Object>> rows = jdbc.queryForList("select p.instrument_token, p.quantity_open, p.average_entry, "
+        List<Map<String, Object>> rows = jdbc.queryForList("select p.instrument_token, p.instrument_key, p.underlying, "
+                + "p.quantity_open, p.average_entry, "
                 + "p.strategy_id, i.created_at intent_at, d0.decided_at signal_at, " + LiveBookController.STRATEGY_EXIT_AT
                 + " strategy_exit_at from exec.position p join exec.trade_intent i on i.id = p.entry_trade_intent_id "
                 + "left join exec.trade_batch b0 on b0.id = i.trade_batch_id "
@@ -42,7 +45,8 @@ final class PositionFacts {
         Map<String, Object> r = rows.getFirst();
         long qty = ((Number) r.get("quantity_open")).longValue();
         double entry = ((Number) r.get("average_entry")).doubleValue();
-        Map<String, Object> last = latestQuote(jdbc, ((Number) r.get("instrument_token")).longValue());
+        Map<String, Object> last = quotes.latest((String) r.get("instrument_key"), (String) r.get("underlying"),
+                ((Number) r.get("instrument_token")).longValue(), LiveBookController.QUOTE_MAX_AGE_MIN);
         if (last != null) {
             double bid = ((Number) last.get("bid")).doubleValue();
             out.put("bid", bid);
@@ -67,14 +71,6 @@ final class PositionFacts {
     }
 
     // ------------------------------------------------------------------- the rules the web's book and Telegram share
-
-    /** The contract's newest captured quote (bid, ask, ltp, delta, recv_ts) of the last few minutes, or null. */
-    static Map<String, Object> latestQuote(JdbcTemplate jdbc, long token) {
-        List<Map<String, Object>> last = jdbc.queryForList("select bid_px[1] bid, ask_px[1] ask, ltp, delta, recv_ts "
-                + "from md.option_tick where instrument_token = ? and recv_ts > now() - make_interval(mins => ?) "
-                + "and bid_px[1] > 0 order by recv_ts desc limit 1", token, LiveBookController.QUOTE_MAX_AGE_MIN);
-        return last.isEmpty() ? null : last.getFirst();
-    }
 
     /** The strategy exited the contract long enough ago that an open position is no longer a working exit. */
     static boolean notManaged(Timestamp strategyExitAt) {

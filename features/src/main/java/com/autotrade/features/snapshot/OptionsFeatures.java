@@ -86,7 +86,14 @@ public record OptionsFeatures(
          */
         double syntheticSpot,
         /**
-         * A-471/A-472: a dealer-gamma proxy over the ATM ± 10 strikes of this expiry, (Σ call OI × gamma − Σ put OI × gamma) /
+         * A-437 (A-401's gate): over the ATM ± 3 strikes, (Δ put OI − Δ call OI) in the 15 minutes ending now, divided by
+         * those contracts' OI 15 minutes ago (a fraction); NaN when any of them lacks an OI at either end.
+         */
+        double atmBand3Share15m,
+        /** A-452: as atmBand3Share15m over 30 minutes. */
+        double atmBand3Share30m,
+        /**
+         * A-471: a dealer-gamma proxy over the ATM ± 10 strikes of this expiry, (Σ call OI × gamma − Σ put OI × gamma) /
          * (Σ call OI × gamma + Σ put OI × gamma), the naive convention (dealers long calls, short puts; Dim, Eraker and Vilkov's
          * market-maker gamma); + = call gamma dominates. Recomputed once a minute; NaN without OI and a quote.
          */

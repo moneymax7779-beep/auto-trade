@@ -103,16 +103,22 @@ autotrade:
       # PF 1.30 (May-Sep 2026 negative); v2-v12 and bcr-v1 all FAIL (A-326, A-349, A-351..A-355). Not tested inside the set
       # (A-145 / A-262: a profitable addition can cost the others capital). Last, so the other five take the capital first.
       # PAPER-1 only: no account subscribes to break-retest-runner.
-      - config/strategy/break-retest-runner.v1.yaml
+      # 2026-11-17 (A-476, user: "keep brtr out from the live list"): brtr-v1 removed from the live set.
+      # 2026-11-17 (A-475, user: "keep v21 in live PAPER", "shared capital put only 10% of the capital and not fixed, allocate
+      # only if no capital is fully used by the other strategies, otherwise keep priority to other strategies"): sbr-v27 =
+      # sbr-v21 (break-retest of session lines, A-453) at 10 % of equity, low priority under paper-risk v43 (an entry only
+      # while 50 % of the capital stays free), closed to make room when another strategy's entry is refused for capital
+      # (risk v44, A-476). Last in the list. PAPER-1 only: no account subscribes to session-break-retest.
+      - config/strategy/session-break-retest.v27.yaml
       # zbf-v10 removed 2026-10-19 after one live session (A-149, user 19 Oct ~16:50: "remove zbf-v10 from the live set"):
       # live 19 Oct only (A-148), 3 trades, 3 losses, -Rs 1,49,446 (the set's day -Rs 1,16,673; without it +Rs 32,774).
       # Its file and code stay; it returns only through a new registered test.
-    features-file: config/features/features.v12.yaml   # v12 from 14 Oct (A-090 PASS, A-093): v11 + bar backfill of spot history, weekly/monthly levels, OI-change z-scores; no trade changed on 23 tick days. v11 (A-030) live 2-13 Oct
+    features-file: config/features/features.v15.yaml   # v15 from 18 Nov (A-475): v12 + structure.history_levels (sbr-v27's extra levels). Before:   # v12 from 14 Oct (A-090 PASS, A-093): v11 + bar backfill of spot history, weekly/monthly levels, OI-change z-scores; no trade changed on 23 tick days. v11 (A-030) live 2-13 Oct
     exchange-file: config/exchange/nse-bse-sessions.v3.yaml
     costs-file: config/costs/india-index-options-costs.v2.yaml   # v2: Upstox Plus brokerage Rs 30/order from 2026-09-01 (A-044, user 2026-10-06)
     # A-358 (9 Nov 2026): v19 = v17 + the `shorts` section the PAPER expiry short straddle shadow needs (every long-path
     # value is v17's; a risk file without that section refuses every SELL_STRADDLE). Deploying it is the user's decision.
-    risk-file: config/risk/paper-risk.v19.yaml   # v19 from the A-358 shadow deploy (= v17 + a `shorts` section; no long-path value changes); before: v17 from 15 Oct (A-106 PASS thin, A-107; user 15 Oct ~08:00: "deploy v17"): v12 + a single-leg entry at up to 1.5 x its budget when futures RVOL >= 1.5 at entry, using spare capital only (+Rs 66K over 193 days, worst day unchanged; review after 10 sessions). # v12 (A-063, user 2026-10-09 00:19: "switch to v12 and deploy before 09:00"): v10 + entries sliced to the visible book (0.5 % of the ask, 2 % drift, 10 s) + 2 % participation cap (A-062). v10 (A-054, user 2026-10-07 07:15: "start the sizing from 5,00,000 from today"): v9 with equity counted from 7 Oct (Rs 5L + live sessions from that date). v9 (A-047): capital = equity, budgets x equity/5L, daily loss 22 % of equity
+    risk-file: config/risk/paper-risk.v44.yaml   # v44 from 18 Nov (A-476): v19 + priority.low [session-break-retest], keep 50 % free, pre-empted for the others. Before:   # v19 from the A-358 shadow deploy (= v17 + a `shorts` section; no long-path value changes); before: v17 from 15 Oct (A-106 PASS thin, A-107; user 15 Oct ~08:00: "deploy v17"): v12 + a single-leg entry at up to 1.5 x its budget when futures RVOL >= 1.5 at entry, using spare capital only (+Rs 66K over 193 days, worst day unchanged; review after 10 sessions). # v12 (A-063, user 2026-10-09 00:19: "switch to v12 and deploy before 09:00"): v10 + entries sliced to the visible book (0.5 % of the ask, 2 % drift, 10 s) + 2 % participation cap (A-062). v10 (A-054, user 2026-10-07 07:15: "start the sizing from 5,00,000 from today"): v9 with equity counted from 7 Oct (Rs 5L + live sessions from that date). v9 (A-047): capital = equity, budgets x equity/5L, daily loss 22 % of equity
     poll-interval-ms: 250
     replay-speed: 0                # --mode=replay only: market seconds per second (e.g. 60); 0 = as fast as possible
     replay-source: zt              # --mode=replay only: zt (zt-tiger-v2's capture), own (auto-trade's live capture, md.*; from 28 Sep 2026) or bars (Upstox one-minute bars in hist.candle; --mode=fetch-bars loads them)

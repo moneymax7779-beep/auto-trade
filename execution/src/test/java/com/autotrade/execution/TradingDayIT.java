@@ -469,4 +469,25 @@ class TradingDayIT {
         assertThat(fanOut.fanOut(w.group(), today)).isEqualTo(1);
         assertThat(intents(w, "ENTER")).containsExactly("TWIN:PAPER");
     }
+
+    /** Review 17 Nov 2026: an entry the switch rule holds back is audited once (ENTRY_DROPPED_SWITCH), never in silence. */
+    @Test
+    void anEntryHeldBackBySwitchIsAuditedOnce() {
+        LocalDate today = TradingDay.today();
+        Workspace w = workspace("ana", today, false);
+        FanOut fanOut = new FanOut(dataSource);
+        jdbc.update("update acct.broker_account set enabled = false where id = ?", w.twin());    // no account takes it now
+        decide(w, today, Instant.now().minusSeconds(60), SignalDecision.Action.ENTER);
+        fanOut.fanOut(w.group(), today);
+        assertThat(intents(w, "ENTER")).isEmpty();
+        // the member switches, then the twin is on again: the earlier entry is not made late, and that is said once
+        new TradingDay(dataSource).append(w.tenant(), w.real(), TradingDay.Mode.PAPER, "BROKER", w.member());
+        jdbc.update("update acct.broker_account set enabled = true where id = ?", w.twin());
+        assertThat(fanOut.fanOut(w.group(), today)).isZero();
+        fanOut.fanOut(w.group(), today);
+        assertThat(jdbc.queryForList("select broker_account_id || ':' || (detail->>'strategy') from exec.audit_log "
+                + "where tenant_id = ? and action = 'ENTRY_DROPPED_SWITCH'", String.class, w.tenant()))
+                .containsExactly(w.twin() + ":ma-cross");
+        assertThat(intents(w, "ENTER")).isEmpty();
+    }
 }

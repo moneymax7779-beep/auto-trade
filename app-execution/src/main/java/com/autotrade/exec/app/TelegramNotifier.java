@@ -116,6 +116,12 @@ class TelegramNotifier {
         deliver(settings.get("TELEGRAM_BOT_TOKEN"), chat, text);
     }
 
+    /** To one chat by its id; false when the bot is not set up. */
+    boolean sendTo(String chat, String text) {
+        String token = settings().get("TELEGRAM_BOT_TOKEN");
+        return chat != null && token != null && deliver(token, chat, text);
+    }
+
     /** To one person's linked chat; false when they have none (or the bot is not set up). Also to their phones. */
     boolean sendToUser(long appUserId, String text) {
         return sendToUser(appUserId, text, true);

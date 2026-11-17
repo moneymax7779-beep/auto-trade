@@ -61,6 +61,8 @@ class LiveBookController {
     /** The contracts' freeze quantities (cached inside) and each risk file's order description, for the exit preview. */
     private final java.util.Map<String, String> hows = new java.util.concurrent.ConcurrentHashMap<>();
     private final com.autotrade.execution.FreezeQuantities freezes;
+    /** Quotes read through the contract index (never a token-only scan; review 17 Nov 2026). */
+    private final ContractQuotes quotes;
 
     /** The best bid since entry per open position, extended by each poll from where the last one stopped. */
     private record Best(double max, Timestamp upTo) {
@@ -85,6 +87,7 @@ class LiveBookController {
         this.jdbc = new JdbcTemplate(dataSource);
         this.rules = rules;
         this.freezes = new com.autotrade.execution.FreezeQuantities(dataSource);
+        this.quotes = new ContractQuotes(this.jdbc);
     }
 
     @GetMapping("/api/execution/accounts/{id}/live-book")
@@ -148,7 +151,8 @@ class LiveBookController {
                 long qty = ((Number) r.get("quantity_open")).longValue();
                 out.put("quantity", qty);
                 out.put("status", r.get("status"));
-                Map<String, Object> q = quote(((Number) r.get("id")).longValue(), ((Number) r.get("instrument_token")).longValue(),
+                Map<String, Object> q = quote(((Number) r.get("id")).longValue(), (String) r.get("instrument_key"),
+                        (String) r.get("underlying"), ((Number) r.get("instrument_token")).longValue(),
                         (Timestamp) r.get("opened_at"));
                 out.putAll(q);
                 Double stop = r.get("stop_trigger") == null ? null : num(r.get("stop_trigger"));
@@ -314,19 +318,15 @@ class LiveBookController {
         out.put("remaining", open - sell);
         out.put("entry", entry);
         List<String> warnings = new ArrayList<>();
-        List<Map<String, Object>> last = jdbc.queryForList("select bid_px[1] bid, ask_px[1] ask, bid_qty[1] bid_qty, "
-                + "extract(epoch from now() - recv_ts)::float8 age from md.option_tick where instrument_token = ? "
-                + "and recv_ts > now() - make_interval(mins => ?) and bid_px[1] > 0 order by recv_ts desc limit 1", token,
-                QUOTE_MAX_AGE_MIN);
+        Map<String, Object> q = quotes.latest((String) p.get("instrument_key"), underlying, token, QUOTE_MAX_AGE_MIN);
         Double bid = null, spreadPct = null;
         double age = Double.NaN;
-        if (last.isEmpty()) {
+        if (q == null) {
             warnings.add("no quote in the last " + QUOTE_MAX_AGE_MIN + " minutes: the price below is an old one");
         } else {
-            Map<String, Object> q = last.getFirst();
             bid = num(q.get("bid"));
             double ask = num(q.get("ask"));
-            age = num(q.get("age"));
+            age = Math.max(0, (System.currentTimeMillis() - ((Timestamp) q.get("recv_ts")).getTime()) / 1000.0);
             out.put("bid", bid);
             out.put("ask", ask > 0 ? ask : null);
             out.put("quoteAgeSec", Math.round(age));
@@ -451,23 +451,18 @@ class LiveBookController {
             heldRange.clear();                                  // a bound, not a policy: they are cheap to compute again
         }
         return heldRange.computeIfAbsent(position, id -> {
-            Map<String, Object> c = key == null ? null : jdbc.queryForList("select expiry, strike, type from ref.instrument "
-                    + "where instrument_key = ? and type in ('CE', 'PE') order by snapshot_id desc limit 1", key).stream()
-                    .findFirst().orElse(null);
-            if (c == null) {
-                return new Double[] {null, null};
+            if (quotes.contract(key) == null) {
+                return new Double[] {null, null};               // never a token-only scan of the whole window
             }
-            Map<String, Object> m = jdbc.queryForMap("select max(bid_px[1]) hi, min(bid_px[1]) lo from md.option_tick "
-                    + "where underlying = ? and expiry = ? and strike = ? and option_type = ? and recv_ts between ? and ? "
-                    + "and bid_px[1] > 0", underlying, c.get("expiry"), num(c.get("strike")), c.get("type"), opened, closed);
+            Map<String, Object> m = quotes.range(key, underlying, 0, new Timestamp(opened.getTime() - 1), closed);
             return new Double[] {m.get("hi") == null ? null : num(m.get("hi")), m.get("lo") == null ? null : num(m.get("lo"))};
         });
     }
 
     /** The newest captured quote of the contract (if recent) and the best bid since the entry (extended incrementally). */
-    private Map<String, Object> quote(long position, long token, Timestamp since) {
+    private Map<String, Object> quote(long position, String key, String underlying, long token, Timestamp since) {
         Map<String, Object> q = new LinkedHashMap<>();
-        Map<String, Object> l = PositionFacts.latestQuote(jdbc, token);
+        Map<String, Object> l = quotes.latest(key, underlying, token, QUOTE_MAX_AGE_MIN);
         if (l != null) {
             q.put("bid", num(l.get("bid")));
             q.put("ask", num(l.get("ask")));
@@ -479,9 +474,8 @@ class LiveBookController {
         }
         Best kept = best.get(position);
         Timestamp from = kept == null ? since : kept.upTo();
-        Map<String, Object> more = jdbc.queryForMap("select max(bid_px[1]) m, max(recv_ts) t from md.option_tick "
-                + "where instrument_token = ? and recv_ts > ? and bid_px[1] > 0", token, from);
-        double max = Math.max(kept == null ? 0 : kept.max(), more.get("m") == null ? 0 : ((Number) more.get("m")).doubleValue());
+        Map<String, Object> more = quotes.range(key, underlying, token, from, null);
+        double max = Math.max(kept == null ? 0 : kept.max(), more.get("hi") == null ? 0 : ((Number) more.get("hi")).doubleValue());
         if (more.get("t") != null) {
             best.put(position, new Best(max, (Timestamp) more.get("t")));
         }

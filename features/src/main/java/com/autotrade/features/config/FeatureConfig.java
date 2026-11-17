@@ -106,7 +106,9 @@ public record FeatureConfig(
         /** v13: pre-open and positioning cues (GIFT Nifty, NSE participant-wise OI); EMPTY when off. */
         boolean cues,
         /** v14: the constituents' pre-open call auction (IEP vs previous close, imbalance); EMPTY when off. */
-        boolean preopen) {
+        boolean preopen,
+        /** A-439: the older levels of {@code HistoryLevels} (2-day, 2-day opening range, 12 months) in the structure features. */
+        boolean historyLevels) {
 
     public static FeatureConfig from(ThresholdConfig features, ThresholdConfig exchange) {
         Map<String, LocalTime[]> windows = new LinkedHashMap<>();
@@ -191,7 +193,8 @@ public record FeatureConfig(
                 features.has("structure.period_levels") && features.getBoolean("structure.period_levels"),
                 features.has("options_chain.oi_zscore") && features.getBoolean("options_chain.oi_zscore"),
                 features.has("cues.enabled") && features.getBoolean("cues.enabled"),
-                features.has("preopen.enabled") && features.getBoolean("preopen.enabled"));
+                features.has("preopen.enabled") && features.getBoolean("preopen.enabled"),
+                features.has("structure.history_levels") && features.getBoolean("structure.history_levels"));
     }
 
     /** True when the file defines the v3 feature sections. */
