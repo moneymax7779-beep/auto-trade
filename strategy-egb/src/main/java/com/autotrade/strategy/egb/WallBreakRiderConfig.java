@@ -52,7 +52,13 @@ record WallBreakRiderConfig(
         /** A-340: false = the VWAP-side condition is off (default true). */
         boolean requireVwapSide,
         /** A-341: no entry when the ATM straddle is more than this many ATR(3m) (NaN = off). */
-        double maxStraddleAtr) {
+        double maxStraddleAtr,
+        /** A-469: from this many minutes after the entry, exit while the bid is below the average premium (0 = off). */
+        int belowEntryExitMin,
+        /** A-470: judge the bid at each minute's close, not every tick. */
+        boolean belowEntryMinuteClose,
+        /** A-470: after a below-entry exit, no new entry for the rest of the session. */
+        boolean belowEntryNoReentry) {
 
     static WallBreakRiderConfig from(ThresholdConfig c) {
         return new WallBreakRiderConfig(c.contentHash(), c.version(), c.getInt("scope.dte"),
@@ -76,7 +82,10 @@ record WallBreakRiderConfig(
                 c.has("signal.max_entry_iv") ? c.getDouble("signal.max_entry_iv") : Double.NaN,
                 !c.has("signal.require_wall_oi_drop") || Boolean.TRUE.equals(c.get("signal.require_wall_oi_drop")),
                 !c.has("signal.require_vwap_side") || Boolean.TRUE.equals(c.get("signal.require_vwap_side")),
-                c.has("signal.max_straddle_atr") ? c.getDouble("signal.max_straddle_atr") : Double.NaN);
+                c.has("signal.max_straddle_atr") ? c.getDouble("signal.max_straddle_atr") : Double.NaN,
+                c.has("exits.below_entry_exit_min") ? c.getInt("exits.below_entry_exit_min") : 0,
+                c.has("exits.below_entry_minute_close") && Boolean.TRUE.equals(c.get("exits.below_entry_minute_close")),
+                c.has("exits.below_entry_no_reentry") && Boolean.TRUE.equals(c.get("exits.below_entry_no_reentry")));
     }
 
     @SuppressWarnings("unchecked")

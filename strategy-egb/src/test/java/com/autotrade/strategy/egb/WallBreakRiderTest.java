@@ -3,6 +3,7 @@ package com.autotrade.strategy.egb;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.nio.file.Path;
+import java.util.List;
 
 import org.junit.jupiter.api.Test;
 
@@ -169,6 +170,41 @@ class WallBreakRiderTest {
         never.decide(callSignal(23115).at("12:41"), PositionView.FLAT);
         assertThat(never.decide(covering(false).set("structure.lastBarClose", 23140.0).at("13:09"), held).orders())
                 .as("below a wall it never crossed: no wall exit").isEmpty();
+    }
+
+    /**
+     * A-469/A-470 (wbr-v29's exits on wbr-v3): the call bought at 12:41 for 100 is sold at the first minute open 15 minutes
+     * or more after the entry whose previous minute closed with the bid below 100; with no_reentry the signal is then
+     * ignored for the rest of the day.
+     */
+    @Test
+    void belowEntryExitOnMinuteClosesAndNoReentry(@org.junit.jupiter.api.io.TempDir Path dir) throws java.io.IOException {
+        String v3 = java.nio.file.Files.readString(Path.of("..", "config", "strategy", "wall-break-rider.v3.yaml"));
+        assertThat(v3).contains("\nexits:\n");
+        for (boolean noReentry : new boolean[] {true, false}) {
+            Path f = dir.resolve(String.valueOf(noReentry)).resolve("wall-break-rider.v3.yaml");
+            java.nio.file.Files.createDirectories(f.getParent());
+            java.nio.file.Files.writeString(f, v3.replace("\nexits:\n", "\nexits:\n  below_entry_exit_min: 15\n"
+                    + "  below_entry_minute_close: true\n  below_entry_no_reentry: " + noReentry + "\n"));
+            Strategy s = Strategies.load(f).create("NIFTY", Snapshots.SESSION);
+            s.decide(callSignal(23115).at("12:40"), PositionView.FLAT);
+            assertThat(s.decide(callSignal(23115).at("12:41"), PositionView.FLAT).orders()).hasSize(1);
+            PositionView under = new PositionView(true, OptionSide.CE, 1, 100, at(12, 41), 90);
+            assertThat(s.decide(covering(false).at("12:54"), under).orders()).as("13 minutes in").isEmpty();
+            assertThat(s.decide(covering(false).at("12:55"), new PositionView(true, OptionSide.CE, 1, 100, at(12, 41), 104))
+                    .orders()).as("14 minutes in").isEmpty();
+            assertThat(s.decide(covering(false).at("12:56"), under).orders()).as("12:55 closed at 104").isEmpty();
+            assertThat(s.decide(covering(false).at("12:57"), under).orders()).singleElement()
+                    .satisfies(o -> assertThat(o.reason()).isEqualTo("BELOW_ENTRY_15"));
+            s.decide(callSignal(23115).at("12:58"), PositionView.flat(1));            // the close resets the 2-minute streak
+            s.decide(callSignal(23115).at("12:59"), PositionView.flat(1));
+            List<OrderIntent> again = s.decide(callSignal(23115).at("13:00"), PositionView.flat(1)).orders();
+            if (noReentry) {
+                assertThat(again).as("no re-entry after a below-entry exit").isEmpty();
+            } else {
+                assertThat(again).as("re-entry allowed").hasSize(1);
+            }
+        }
     }
 
     // ------------------------------------------------------------------ A-328 versions

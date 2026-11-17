@@ -85,11 +85,18 @@ autotrade:
       # (ATM +- 2 OI burst, one entry 09:21-11:00, flat 15:15) + A-266's gap rule (no entry in the direction of an opening
       # gap >= 0.4 %); 29 tick days +Rs 36.7 L alone, held-out unchanged. Inside the set A-262 measured obc-v11 at +Rs 16.3 L
       # for the set but -Rs 8.6 L for the four above (capital and kill switch shared); last, so the others take the capital first.
-      - config/strategy/oi-burst-cross.v13.yaml
+      # 2026-11-17 (A-472, user ~07:00: "lets keep these strategies in live" for the obc-v31 + wbr-v29 set): obc-v31 = obc-v13
+      # + on the traded index's expiry day an exit once a minute closes with the bid below the entry 15+ minutes in, no re-entry
+      # after it (A-469/A-470) + no PE entry when the dealer-gamma proxy gexShare > 0.06, no CE entry > 0.25 (A-471/A-472).
+      # In-sample on 32 tick days in the A-458 set: +64.17 L vs +59.76 L, both halves up, losing days 9 -> 6; held-out
+      # 22-25 Sep uninformative (no PE entry). Before: obc-v13 from 29 Oct.
+      - config/strategy/oi-burst-cross.v31.yaml
       # 2026-11-08 (A-346, user: "make one of this in live" -> v13, "GCP live set (PAPER-1)"): wbr-v13 = wbr-v9 without the
       # VWAP-side rule (A-340: 12 expiry tick days +33.36 L vs v9 +32.23 L, 3 extra small wins; in-sample; trades only on an
       # index's expiry day, 10:30-14:30). Last, so the other four take the capital first (A-338: wbr crowds when it goes first).
-      - config/strategy/wall-break-rider.v13.yaml
+      # 2026-11-17 (A-470, same instruction): wbr-v29 = wbr-v13 + the same minute-close below-entry exit and no re-entry
+      # (wbr trades only the expiring index). Before: wbr-v13 from 8 Nov.
+      - config/strategy/wall-break-rider.v29.yaml
       # 2026-11-09 (user: "ok add to live", after A-355): brtr-v1 = break-retest runner (ORH/ORL/PDH/PDL break, retest within
       # 20 min, stop at the retest's extreme close, 3-min VWAP trail, flat 15:15; Rs 1,25,000 premium budget, user 9 Nov).
       # Best brtr version on every completed test: 28 tick days +6.94 L PF 2.25, 2025 bars +13.82 L PF 1.35, 2026 bars +8.34 L

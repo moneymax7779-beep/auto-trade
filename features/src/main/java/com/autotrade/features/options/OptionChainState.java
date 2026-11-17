@@ -241,7 +241,37 @@ public final class OptionChainState {
                 bandSide(time, atm, step, true), bandSide(time, atm, step, false), bandChange(time, atm, step, 2, 0),
                 bandDelta(time, atm, step, 5, 2, true), bandDelta(time, atm, step, 5, 2, false),
                 bandDelta(time, atm, step, 5, 5, true), bandDelta(time, atm, step, 5, 5, false),
-                syntheticSpot(time, atm));
+                syntheticSpot(time, atm), gexShare(time, spot, atm, step, years));
+    }
+
+    private Instant gexMinute;
+    private double gexValue = Double.NaN;
+
+    /** A-471: the OI-weighted gamma share over the ATM ± 10 strikes, once a minute (see OptionsFeatures.gexShare). */
+    private double gexShare(Instant time, double spot, double atm, double step, double years) {
+        Instant minute = time.truncatedTo(java.time.temporal.ChronoUnit.MINUTES);
+        if (minute.equals(gexMinute)) {
+            return gexValue;
+        }
+        gexMinute = minute;
+        double calls = 0, puts = 0;
+        for (Contract contract : contracts.values()) {
+            if (Math.abs(contract.strike - atm) > 10 * step + 1e-9 || contract.oi.isEmpty()) {
+                continue;
+            }
+            double gamma = quote(contract, spot, years).gamma;
+            if (!(gamma > 0)) {
+                continue;
+            }
+            double term = gamma * contract.oi.latest();
+            if (contract.call) {
+                calls += term;
+            } else {
+                puts += term;
+            }
+        }
+        gexValue = calls + puts > 0 ? (calls - puts) / (calls + puts) : Double.NaN;
+        return gexValue;
     }
 
     /** A-283: strike + call mid - put mid at the strike nearest the last value (first: ATM), both sides quoted in 60 s. */
@@ -665,7 +695,7 @@ public final class OptionChainState {
         double n = Double.NaN;
         return new OptionsFeatures(expiry == null ? null : expiry.toString(), n, n, contracts.size(), n, n, n, n, n, n, n,
                 n, "UNKNOWN", "UNKNOWN", n, n, n, n, false, false, n, n, n, n, n, n, n, n, n, "NONE", n, n, n, n, n, n,
-                n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n);
+                n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n);
     }
 
     static double midPrice(OptionTick tick) {
