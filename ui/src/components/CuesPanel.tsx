@@ -45,7 +45,8 @@ export function CuesPanel() {
         <Stat label="Client index futures long" value={pct(f.clientIndexFutLongPct, 1).replace("+", "")} />
       </div>
       {fii.length > 0 && (
-        <table className="mt-4 w-full text-sm">
+        <div className="mt-3 overflow-x-auto">   {/* mobile phase 0: scrolls inside itself on a phone */}
+        <table className="mt-4 w-full whitespace-nowrap text-sm">
           <thead className="text-left text-muted">
             <tr><th className="py-1">FII (NSE, end of day)</th><th className="text-right">Index fut long</th>
               <th className="text-right">Index fut short</th><th className="text-right">Long %</th>
@@ -61,6 +62,7 @@ export function CuesPanel() {
             ))}
           </tbody>
         </table>
+        </div>
       )}
       <p className="mt-2 text-xs text-muted">
         GIFT Nifty from NSE IX (quote age {f.giftNiftyQuoteAgeMin == null ? "–" : `${Math.round(f.giftNiftyQuoteAgeMin)} min`});

@@ -22,6 +22,9 @@
 :root { color-scheme: light; }
 
 html, body, #root { height: 100%; }
+/* mobile phase 0: no font inflation on phone rotation, no grey flash on tap */
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body { -webkit-tap-highlight-color: transparent; }
 body { background: var(--color-bg); color: var(--color-text); font-family: var(--font-sans); }
 .num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
 

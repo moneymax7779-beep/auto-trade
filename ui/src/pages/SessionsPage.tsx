@@ -144,12 +144,12 @@ export function SessionsPage() {
   const filters = (
     <div className="flex flex-wrap items-center gap-2 text-sm">
       <select aria-label="Strategy" value={pickedStrategy} onChange={(e) => pick(e.target.value, "")}
-        className="max-w-72 rounded border border-line bg-panel px-2 py-1">
+        className="min-w-0 max-w-[calc(100vw-4.5rem)] sm:max-w-72 rounded border border-line bg-panel px-2 py-1">
         <option value="">All strategies</option>
         {strategies.map(([id, n]) => <option key={id} value={id}>{strategyLabel(id)} ({n} run{n === 1 ? "" : "s"})</option>)}
       </select>
       <select aria-label="Run" value={pickedRun} onChange={(e) => pick(pickedStrategy, e.target.value)}
-        className="max-w-[36rem] rounded border border-line bg-panel px-2 py-1">
+        className="min-w-0 max-w-[calc(100vw-4.5rem)] sm:max-w-[36rem] rounded border border-line bg-panel px-2 py-1">
         <option value="">{pickedStrategy ? "All runs of this strategy" : "Newest sessions (all runs)"}</option>
         {runList.isError && <option value="" disabled>Run list unavailable</option>}
         {pickedMissing && <option value={pickedRun}>{`${pickedRun.split("|")[1]} · run from the link (not in the run list)`}</option>}

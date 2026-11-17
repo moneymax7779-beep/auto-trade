@@ -205,7 +205,7 @@ function LastSession({ canAct }: { canAct: boolean }) {
   });
 
   const toggle = (
-    <div className="flex gap-1 text-xs">
+    <div className="flex min-w-0 flex-wrap gap-1 text-xs">   {/* wraps on a phone (mobile phase 0) */}
       {SESSION_KINDS.map((kind) => (
         <button key={kind.mode} type="button" onClick={() => { setMode(kind.mode); setPicked(null); }}
           className={`rounded border px-2 py-1 ${mode === kind.mode ? "border-accent bg-accent/10 font-semibold" : "border-line text-muted"}`}>
@@ -214,7 +214,7 @@ function LastSession({ canAct }: { canAct: boolean }) {
       ))}
       {ofMode.length > 1 && (
         <select aria-label="Session" value={session?.id ?? ""} onChange={(e) => setPicked(Number(e.target.value))}
-          className="num rounded border border-line bg-panel px-1 py-1">
+          className="num min-w-0 max-w-full rounded border border-line bg-panel px-1 py-1">
           {ofMode.slice(0, 60).map((row) => (
             <option key={row.id} value={row.id}>
               #{row.id} · {row.session_date} · {row.code_version}
@@ -350,7 +350,8 @@ function EquityPanel({ today }: { today?: Status }) {
         <p className="mt-2 text-sm text-muted">The risk file uses a fixed capital: profits are not added to the size.</p>
       )}
       {open && (
-        <table className="mt-3 w-full text-sm">
+        <div className="mt-3 overflow-x-auto">   {/* mobile phase 0: scrolls inside itself on a phone */}
+        <table className="mt-3 w-full whitespace-nowrap text-sm">
           <thead>
             <tr className="text-left text-muted">
               <th className="py-1">Session</th><th className="text-right">Equity before</th>
@@ -368,6 +369,7 @@ function EquityPanel({ today }: { today?: Status }) {
             ))}
           </tbody>
         </table>
+        </div>
       )}
     </Panel>
   );
