@@ -624,12 +624,18 @@ public final class ExecutionLoop implements AutoCloseable {
      * account keeps trading.
      */
     public List<String> exitPosition(long accountId, long positionId, String actor, LocalDate day) throws Exception {
+        return exitPosition(accountId, positionId, actor, day, null);
+    }
+
+    /** {@code quantity}: sell this many (whole lots) and keep the rest open; null: all of it (17 Nov 2026). */
+    public List<String> exitPosition(long accountId, long positionId, String actor, LocalDate day, Long quantity)
+            throws Exception {
         BrokerAccount account = accounts.byId(accountId).orElseThrow(() -> new IllegalArgumentException("no account "
                 + accountId));
         if (account.role() == com.autotrade.account.AccountRole.SIGNAL_SOURCE) {
             throw new IllegalArgumentException(account.displayName() + " is a signal source: its positions are not orders");
         }
-        List<String> lines = flattenOnLane(account, day, "TRADER_EXIT", positionId);
+        List<String> lines = flattenOnLane(account, day, "TRADER_EXIT", positionId, quantity);
         return lines.isEmpty() ? List.of("position " + positionId + " is not open") : lines;
     }
 
@@ -772,7 +778,7 @@ public final class ExecutionLoop implements AutoCloseable {
                     return lines;
                 }
                 for (long positionId : open) {
-                    lines.addAll(flattenHere(account, risk, route, epoch, borrowed, day, "TRADER_EXIT", positionId));
+                    lines.addAll(flattenHere(account, risk, route, epoch, borrowed, day, "TRADER_EXIT", positionId, null));
                 }
                 return lines;
             });
@@ -790,10 +796,11 @@ public final class ExecutionLoop implements AutoCloseable {
     }
 
     private List<String> flattenOnLane(BrokerAccount account, LocalDate day, String reason) throws Exception {
-        return flattenOnLane(account, day, reason, null);
+        return flattenOnLane(account, day, reason, null, null);
     }
 
-    private List<String> flattenOnLane(BrokerAccount account, LocalDate day, String reason, Long positionId) throws Exception {
+    private List<String> flattenOnLane(BrokerAccount account, LocalDate day, String reason, Long positionId, Long quantity)
+            throws Exception {
         FollowerRisk risk = risks.computeIfAbsent(account.id(), id -> FollowerRisk.load(Path.of(account.riskFile())));
         BrokerConnections.Route route = connections.route(account, risk);
         if (route.venue() == null) {
@@ -801,7 +808,7 @@ public final class ExecutionLoop implements AutoCloseable {
         }
         try {
             return onLane(account, (epoch, borrowed) -> flattenHere(account, risk, route, epoch, borrowed, day, reason,
-                    positionId));
+                    positionId, quantity));
         } catch (IllegalStateException e) {
             if (!String.valueOf(e.getMessage()).startsWith("another worker")) {
                 throw e;
@@ -812,11 +819,11 @@ public final class ExecutionLoop implements AutoCloseable {
 
     /** A flatten already on the account's lane, under its lease ({@code borrowed}: a simulator of its own). */
     private List<String> flattenHere(BrokerAccount account, FollowerRisk risk, BrokerConnections.Route route, long epoch,
-                                     boolean borrowed, LocalDate day, String reason, Long positionId) {
+                                     boolean borrowed, LocalDate day, String reason, Long positionId, Long quantity) {
         // main 16 Nov 2026 (multi-broker): the account's own costs and the broker's rules, as every follower is built
         FollowerSimulator simulator = borrowed ? follower(account, risk, route, epoch)
                 : simulators.computeIfAbsent(account.id(), id -> follower(account, risk, route, epoch));
-        return simulator.flatten(account, day, this::flattenPrice, reason, positionId);
+        return simulator.flatten(account, day, this::flattenPrice, reason, positionId, quantity);
     }
 
     /** Work on an account's own lane, under its lease (borrowed for the call when this worker does not hold it). */

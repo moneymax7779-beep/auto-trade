@@ -77,6 +77,8 @@ class TelegramCommands {
     }
 
     private final JdbcTemplate jdbc;
+    /** A position's bid, P&L, exposure and warnings, as the web's book shows them (17 Nov 2026). */
+    private final PositionFacts facts;
     private final Access access;
     private final AccountStore accounts;
     private final KillSwitches kills;
@@ -112,6 +114,7 @@ class TelegramCommands {
     TelegramCommands(DataSource dataSource, Access access, Actions actions, TelegramBot bot,
                      TelegramCommandProperties props, Executor runner) {
         this.jdbc = new JdbcTemplate(dataSource);
+        this.facts = new PositionFacts(dataSource);
         this.access = access;
         this.accounts = new AccountStore(dataSource);
         this.kills = new KillSwitches(dataSource);
@@ -305,7 +308,7 @@ class TelegramCommands {
         }
         StringBuilder out = new StringBuilder();
         for (Map<String, Object> p : open) {
-            out.append(positionLine(p)).append('\n');
+            out.append(positionLine(p)).append("\n  ").append(facts.line(((Number) p.get("id")).longValue())).append('\n');
         }
         return out.toString().trim();
     }
@@ -488,8 +491,9 @@ class TelegramCommands {
                         + "from exec.position where id = ?", positionId);
                 yield "EXIT " + a.displayName() + " (" + a.tradeMode() + "): #" + p.get("id") + " " + p.get("symbol")
                         + " qty " + p.get("quantity_open") + " avg " + round(p.get("average_entry")) + " (" + p.get("strategy_id")
-                        + "), workspace " + tenantName(a.tenantId()) + ".\nIts broker stop is cancelled and it is sold now "
-                        + "at the bid. The account keeps trading.";
+                        + "), workspace " + tenantName(a.tenantId()) + ".\nNow: " + facts.line(positionId)
+                        + "\nIts broker stop is cancelled and all of it is sold now at the bid (part of it: on the web). "
+                        + "The account keeps trading.";
             }
             default -> verb;
         };
@@ -596,8 +600,10 @@ class TelegramCommands {
      * says INCOMPLETE, not DONE.
      */
     static boolean incomplete(List<String> lines) {
+        // a short fill reads "N of M sold (CODE reason); K stay open ..." (17 Nov 2026), a stop not re-placed "NOT placed"
         return lines.stream().map(l -> l.toLowerCase(Locale.ROOT)).anyMatch(l -> l.contains("not flattened")
-                || l.contains("has not started") || l.contains("keeps its broker stop") || l.contains("unknown outcome"));
+                || l.contains("has not started") || l.contains("keeps its broker stop") || l.contains("unknown outcome")
+                || l.contains(" sold (") || l.contains("not placed yet"));
     }
 
     /** Runs a confirmed command (the rights checked again) and edits its card with the result. */

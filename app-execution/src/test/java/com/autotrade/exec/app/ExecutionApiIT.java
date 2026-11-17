@@ -202,20 +202,30 @@ class ExecutionApiIT {
     @Test
     void aPositionsExitAndHandExitAreTheOwnersAloneAndCheckedBeforeTheWorker() throws Exception {
         AccountsController.HandExit hand = new AccountsController.HandExit(118.55, "2026-11-06T09:57:30", false);
-        assertThat(code(() -> api.exitPosition("kc-bob", aliceAccount, 1, new AccountsController.PositionExit("EXIT"))))
+        assertThat(code(() -> api.exitPosition("kc-bob", aliceAccount, 1, new AccountsController.PositionExit("EXIT", null, null))))
                 .isEqualTo(404);
         assertThat(code(() -> api.handExit("kc-bob", aliceAccount, 1, hand))).isEqualTo(404);
-        assertThat(code(() -> api.exitPosition("kc-viewer", aliceAccount, 1, new AccountsController.PositionExit("EXIT"))))
+        assertThat(code(() -> api.exitPosition("kc-viewer", aliceAccount, 1, new AccountsController.PositionExit("EXIT", null, null))))
                 .isEqualTo(403);
         assertThat(code(() -> api.handExit("kc-viewer", aliceAccount, 1, hand))).isEqualTo(403);
-        assertThat(code(() -> api.exitPosition("kc-alice", aliceAccount, 1, new AccountsController.PositionExit("yes"))))
+        assertThat(code(() -> api.exitPosition("kc-alice", aliceAccount, 1, new AccountsController.PositionExit("yes", null, null))))
                 .as("needs its confirmation word").isEqualTo(403);
         assertThat(code(() -> api.handExit("kc-alice", aliceAccount, 1, new AccountsController.HandExit(118.55, "9:57",
                 false)))).isEqualTo(400);
         assertThat(code(() -> api.handExit("kc-alice", aliceAccount, 1, new AccountsController.HandExit(null,
                 "2026-11-06T09:57:30", false)))).isEqualTo(400);
-        assertThat(api.exitPosition("kc-alice", aliceAccount, 1, new AccountsController.PositionExit("EXIT")))
+        assertThat(api.exitPosition("kc-alice", aliceAccount, 1, new AccountsController.PositionExit("EXIT", null, null)))
                 .containsEntry("result", List.of("the worker has not started"));
         assertThat(code(() -> api.handExit("kc-alice", aliceAccount, 1, hand))).isEqualTo(409);
+        // 17 Nov 2026: a partial exit needs a quantity above 0; one click's key answers its repeats without selling again
+        assertThat(code(() -> api.exitPosition("kc-alice", aliceAccount, 1, new AccountsController.PositionExit("EXIT", 0L,
+                null)))).isEqualTo(400);
+        Map<String, Object> first = api.exitPosition("kc-alice", aliceAccount, 1,
+                new AccountsController.PositionExit("EXIT", 65L, "click-1"));
+        assertThat(first).doesNotContainKey("repeat");
+        assertThat(api.exitPosition("kc-alice", aliceAccount, 1, new AccountsController.PositionExit("EXIT", 65L, "click-1")))
+                .containsEntry("repeat", true).containsEntry("result", first.get("result"));
+        assertThat(api.exitPosition("kc-alice", aliceAccount, 1, new AccountsController.PositionExit("EXIT", 65L, "click-2")))
+                .doesNotContainKey("repeat");
     }
 }

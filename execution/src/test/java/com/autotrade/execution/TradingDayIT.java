@@ -107,6 +107,8 @@ class TradingDayIT {
         jdbc.update("update acct.strategy_subscription set enabled_at = now() - interval '30 days' where copy_group_id = ?",
                 group);
         jdbc.update("update acct.tenant set default_broker_account_id = ? where id = ?", real, tenant);
+        // a default the workspace has had all along (V44: a default counts from its change, -infinity for old ones)
+        jdbc.update("update acct.tenant set default_since = '-infinity' where id = ?", tenant);
         return new Workspace(group, tenant, member, real, twin);
     }
 
@@ -443,6 +445,7 @@ class TradingDayIT {
                 TradeMode.PAPER, 30_000, EquityMode.FIXED, today, "../config/risk/follower-risk.v7.yaml", 0);
         accounts.ensurePaperTwin(upstox);
         jdbc.update("update acct.tenant set default_broker_account_id = ? where id = ?", upstox, w.tenant());
+        jdbc.update("update acct.tenant set default_since = '-infinity' where id = ?", w.tenant());
         assertThat(jdbc.queryForObject("select count(*) from acct.trading_day_event where tenant_id = ?", Integer.class,
                 w.tenant())).isZero();
         FanOut fanOut = new FanOut(dataSource);
@@ -456,7 +459,8 @@ class TradingDayIT {
         new TradingDay(dataSource).append(w.tenant(), w.real(), TradingDay.Mode.PAPER, "BROKER", w.member());
         jdbc.update("update acct.tenant set default_broker_account_id = ? where id = ?", w.real(), w.tenant());
         assertThat(jdbc.queryForObject("select acct.entry_target(?, now() - interval '60 seconds')", Long.class,
-                w.tenant())).as("the as-of target moved with the default").isEqualTo(w.twin());
+                w.tenant())).as("V44: a default changed now does not rewrite the morning (unknown before it: Off)").isNull();
+        assertThat(jdbc.queryForObject("select acct.entry_target(?, now())", Long.class, w.tenant())).isEqualTo(w.twin());
         assertThat(fanOut.fanOut(w.group(), today)).isZero();
         assertThat(intents(w, "ENTER")).isEmpty();
 

@@ -96,9 +96,10 @@ class LiveBookIT {
 
     private static void tick(String ago, double bid) {
         jdbc.update("insert into md.option_tick (manifest_id, session_date, underlying, recv_ts, src_seq, instrument_token, symbol, "
-                + "strike, option_type, ltp, bid_px, bid_qty, bid_orders, ask_px, ask_qty, ask_orders, analytics_complete, "
-                + "depth_complete) values (1, current_date, 'NIFTY', now() - ?::interval, 1, ?, 'NIFTY 24650 CE 09 NOV 26', 24650, "
-                + "'CE', ?, array[?]::float8[], '{650}', '{3}', array[?]::float8[], '{650}', '{3}', false, true)",
+                + "expiry, strike, option_type, ltp, bid_px, bid_qty, bid_orders, ask_px, ask_qty, ask_orders, analytics_complete, "
+                + "depth_complete) values (1, current_date, 'NIFTY', now() - ?::interval, 1, ?, 'NIFTY 24650 CE 09 NOV 26', "
+                + "date '2026-11-09', 24650, 'CE', ?, array[?]::float8[], '{650}', '{3}', array[?]::float8[], '{650}', '{3}', "
+                + "false, true)",
                 ago, TOKEN, bid + 0.05, bid, bid + 0.05);
     }
 
@@ -128,9 +129,20 @@ class LiveBookIT {
         order(tenant, account, live, "STOP", "OPEN", 0, 73.15);
         tick("3 minutes", 163.80);                         // the best since entry
         tick("30 seconds", 163.70);                        // the newest
+        jdbc.update("update md.option_tick set delta = 0.45 where instrument_token = ? and recv_ts > now() - interval '40 "
+                + "seconds'", TOKEN);                                // phase 3: rupees per index point = delta x quantity
 
         long done = intent(group, session, account, 2, "LIVE");
         position(tenant, account, done, "CLOSED", 185.00, "2 days 01:00:00", "2 days", -2574.0, 89.51);
+        // the contract (best and worst while held are read through the contract index, not the token)
+        jdbc.update("insert into ref.instrument_snapshot (id, snapshot_date, source, file_sha256, instruments) values "
+                + "(901, current_date, 'it', 'it', 1) on conflict do nothing");
+        jdbc.update("insert into ref.instrument (snapshot_id, instrument_key, exchange_token, segment, exchange, type, "
+                + "underlying, trading_symbol, expiry, strike, lot_size, tick_size, freeze_quantity, weekly) values (901, "
+                + "'NSE_FO|40009', '40009', 'NSE_FO', 'NSE', 'CE', 'NIFTY', 'NIFTY 24650 CE', date '2026-11-09', 24650, 65, "
+                + "0.05, 1755, true) on conflict do nothing");
+        tick("2 days 00:40:00", 190.00);                   // while it was held: the best bid
+        tick("2 days 00:20:00", 160.00);                   // and the worst
         order(tenant, account, done, "ENTRY", "FILLED", 65, null);
         long add = intent(group, session, account, 4, "LIVE");             // an add to it 30 minutes in: 130 bought in all
         jdbc.update("update exec.trade_intent set action = 'ADD', created_at = now() - interval '2 days 00:30:00' where id = ?", add);
@@ -155,15 +167,34 @@ class LiveBookIT {
             assertThat((Double) p.get("pnl")).isEqualTo(1127.75);
             assertThat((Double) p.get("pnlPct")).isEqualTo(11.86);
             assertThat((Double) p.get("atRisk")).isEqualTo(5885.75);
+            assertThat(p).containsEntry("perPoint", 29.25);
         });
         List<Map<String, Object>> closed = (List<Map<String, Object>>) book.get("closed");
         assertThat(closed).as("the DRY_RUN rehearsal is not real money").singleElement().satisfies(p -> {
             assertThat(p).containsEntry("quantity", 130L).containsEntry("exit", 165.2).containsEntry("exitReason", "STOP")
                     .containsEntry("net", -2663.51).containsEntry("pct", -10.7);
+            assertThat(p).containsEntry("bestBid", 190.0).containsEntry("worstBid", 160.0).containsEntry("missed", 3224.0)
+                    .containsEntry("saved", 676.0);                    // (190 - 165.2) x 130 and (165.2 - 160) x 130
         });
         Map<String, Object> summary = (Map<String, Object>) book.get("summary");
         assertThat(summary).containsEntry("openPnl", 1127.75).containsEntry("atRisk", 5885.75)
                 .containsEntry("realisedToday", 0.0).containsEntry("sinceLiveNet", -2663.51).containsEntry("sinceLiveTrades", 1);
+        assertThat((Map<String, Object>) summary.get("perPoint")).containsExactly(Map.entry("NIFTY", 29.25));
+        assertThat(new PositionFacts(dataSource).of(((Number) open.getFirst().get("id")).longValue()))
+                .containsEntry("bid", 163.70).containsEntry("pnl", 1127.75).containsEntry("perPoint", 29.25)
+                .doesNotContainKeys("strategyExitedAt", "lateJoin");
+
+        // 17 Nov 2026 (phase 2): the exit preview prices the sale at the captured bid; a 30 s old quote asks for typing EXIT
+        long openId = ((Number) open.getFirst().get("id")).longValue();
+        Map<String, Object> preview = api.exitPreview("local-owner", account, openId, null);
+        assertThat(preview).containsEntry("mode", "LIVE").containsEntry("quantity", 65L).containsEntry("lots", 1L)
+                .containsEntry("remaining", 0L).containsEntry("bid", 163.70).containsEntry("price", 163.70)
+                .containsEntry("priceFrom", "bid").containsEntry("bidQuantity", 650L).containsEntry("orders", 1L)
+                .containsEntry("gross", 1127.75).containsEntry("typeToConfirm", true);
+        assertThat((List<String>) preview.get("warnings")).singleElement().asString().contains("s old");
+        assertThatThrownBy(() -> api.exitPreview("local-owner", account, openId, 30L)).isInstanceOf(ResponseStatusException.class)
+                .hasMessageContaining("400");
+        assertThatThrownBy(() -> api.exitPreview("kc-nobody", account, openId, null)).isInstanceOf(ResponseStatusException.class);
 
         // a stop being cancelled no longer protects the position: not working, nothing counted at risk
         jdbc.update("update exec.order_execution set status = 'CANCEL_PENDING' where role = 'STOP' and trade_intent_id = ?", live);
@@ -245,5 +276,16 @@ class LiveBookIT {
         assertThat((Map<String, Object>) s.get("lateJoin")).containsKeys("signalAt", "joinedAt");
         Map<String, Object> m = open.stream().filter(p -> p != s).findFirst().orElseThrow();
         assertThat(m).doesNotContainKeys("strategyExitedAt", "lateJoin");
+
+        // its preview: no quote captured, so the signal's price; paper never asks for typing
+        Map<String, Object> preview = new LiveBookController(new Access(dataSource), dataSource)
+                .exitPreview("kc-paper", twin, ((Number) s.get("id")).longValue(), null);
+        assertThat(preview).containsEntry("mode", "PAPER").containsEntry("quantity", 65L).containsEntry("price", 64.25)
+                .containsEntry("priceFrom", "signal").containsEntry("orders", 1L).containsEntry("typeToConfirm", false)
+                .doesNotContainKeys("charges", "rest");
+        assertThat((List<String>) preview.get("warnings")).singleElement().asString().contains("no quote");
+        // Telegram's line for it says the same as the book
+        String line = new PositionFacts(dataSource).line(((Number) s.get("id")).longValue());
+        assertThat(line).contains("no recent quote").contains("NOT MANAGED").contains("LATE JOIN");
     }
 }

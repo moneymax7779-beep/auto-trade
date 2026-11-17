@@ -1,6 +1,6 @@
 import { type ReactNode, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { get, postJson, type ExecutionAccount, type LiveBook, type LiveOpenPosition, type PositionRow } from "../api";
+import { get, postJson, type ExecutionAccount, type ExitPreview, type LiveBook, type LiveOpenPosition, type PositionRow } from "../api";
 import { ErrorNote } from "./ui";
 
 /**
@@ -44,6 +44,9 @@ export interface OpenView {
   actions?: ReactNode;
   /** warnings across the card (not managed by its strategy, a late join) */
   flags?: ReactNode;
+  /** rupees per index point and its index */
+  perPoint?: number | null;
+  underlying?: string;
 }
 
 export interface ClosedView {
@@ -60,6 +63,10 @@ export interface ClosedView {
   charges: number;
   net: number;
   pct: number | null;
+  best?: number;
+  worst?: number;
+  missed?: number;
+  saved?: number;
 }
 
 interface TotalView {
@@ -126,7 +133,7 @@ export function LiveBookPanel({ accountId, hideEmpty }: { accountId: number; hid
   const open: OpenView[] = b.open.map((p) => ({
     key: p.id, strategy: p.strategy, symbol: p.symbol, quantity: p.quantity, lotSize: p.lotSize, entry: p.entry,
     opened: p.opened, bid: p.bid, quoteAt: p.quoteAt ?? null, best: p.best, stop: p.stop, pnl: p.pnl ?? null,
-    pnlPct: p.pnlPct ?? null,
+    pnlPct: p.pnlPct ?? null, perPoint: p.perPoint ?? null, underlying: p.underlying,
     stopNote: paper ? "paper: exits on the strategy's signal, your Exit or the square-off"
       : p.stop == null ? "no stop on record"
       : p.stopWorking ? <>stop resting at the broker{p.bid != null ? <> · {px(p.bid - p.stop)} pts below the bid · {money(p.atRisk ?? null, false)} at risk</> : null}</>
@@ -142,13 +149,17 @@ export function LiveBookPanel({ accountId, hideEmpty }: { accountId: number; hid
   }));
   const closed: ClosedView[] = b.closed.map((c) => ({ key: c.id, strategy: c.strategy, symbol: c.symbol, quantity: c.quantity,
     lotSize: c.lotSize, entry: c.entry, exit: c.exit, exitReason: c.exitReason, opened: c.opened, closed: c.closed,
-    charges: c.charges, net: c.net, pct: c.pct }));
+    charges: c.charges, net: c.net, pct: c.pct, best: c.bestBid, worst: c.worstBid, missed: c.missed, saved: c.saved }));
   const since = `Since ${paper ? "start" : "LIVE"}${b.summary.sinceLiveFrom ? ` (${dayLabel(b.summary.sinceLiveFrom)})` : ""}, net`;
   const totals: TotalView[] = [
     { label: "Open P&L", value: money(b.summary.openPnl), cls: tone(b.summary.openPnl) },
     { label: "Realised today", value: money(b.summary.realisedToday), cls: tone(b.summary.realisedToday) },
     ...(paper ? [] : [{ label: "At risk to stops", value: money(b.summary.atRisk, false) }]),
     { label: since, value: money(b.summary.sinceLiveNet), cls: tone(b.summary.sinceLiveNet), sub: `${b.summary.sinceLiveTrades} closed trades` },
+    ...(b.summary.perPoint && Object.keys(b.summary.perPoint).length > 0 ? [{
+      label: "Exposure per index point",
+      value: Object.entries(b.summary.perPoint).map(([u, v]) => `${money(v)} ${u}`).join(" · "),
+      sub: "delta × quantity: what 1 point up does to the open P&L" }] : []),
   ];
   return (
     <PositionsPanel title={<>{paper ? "Paper positions" : "Auto-trade positions"} · {b.account}</>} badge={paper ? "PAPER" : "LIVE"}
@@ -205,11 +216,33 @@ function PositionActions({ accountId, p, paper }: { accountId: number; p: LiveOp
   const [done, setDone] = useState<string | null>(null);
   const refresh = () => client.invalidateQueries({ queryKey: ["live-book", accountId] });
   const base = `/api/execution/accounts/${accountId}/positions/${p.id}`;
+  // the exit sheet (17 Nov 2026, phase 2): how many lots, a preview of the sale, typed EXIT when it is big or risky,
+  // and one key per opened sheet so a double click or a retry never sells twice
+  const allLots = p.lotSize ? Math.max(1, Math.round(p.quantity / p.lotSize)) : 1;
+  const [lots, setLots] = useState(allLots);
+  const [typed, setTyped] = useState("");
+  const [key, setKey] = useState("");
+  // review 17 Nov 2026: All sends no quantity (everything that is open), never a computed lot count
+  const all = !p.lotSize || lots >= allLots;
+  const qty: number | undefined = all ? undefined : lots * p.lotSize!;
+  const preview = useQuery({ queryKey: ["exit-preview", accountId, p.id, qty ?? "all"], enabled: mode === "exit",
+    queryFn: () => get<ExitPreview>(`${base}/exit-preview${qty != null ? `?quantity=${qty}` : ""}`), refetchInterval: 3_000 });
+  const newKey = () => setKey(typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random()}`);
   const exit = useMutation({
-    mutationFn: () => postJson<{ result: string[] }>(`${base}/exit`, { confirm: "EXIT" }),
-    onSuccess: (r) => { setDone(r.result.join(" · ")); setMode("idle"); },
+    mutationFn: () => postJson<{ result: string[]; repeat?: boolean }>(`${base}/exit`, { confirm: "EXIT", quantity: qty ?? null, key }),
+    onSuccess: (r) => { setDone((r.repeat ? "already sent: " : "") + r.result.join(" · ")); setMode("idle"); },
+    // a refusal (4xx) sold nothing: the next click is a new attempt; anything else may have sold, so it keeps its key
+    onError: (e) => { if (/^4\d\d:/.test((e as Error).message)) newKey(); },
     onSettled: refresh,
   });
+  const openExit = () => {
+    exit.reset(); setLots(allLots); setTyped(""); newKey();
+    setMode("exit");
+  };
+  const pv = preview.data;
+  // review 17 Nov 2026: a failed preview never blocks the exit; it asks for the typed EXIT instead
+  const mustType = preview.error != null || (pv != null && (pv.typeToConfirm || (paper === true && pv.warnings.length > 0)));
   const hand = useMutation({
     mutationFn: () => postJson<{ result: string }>(`${base}/hand-exit`, { price: Number(price), at, unchecked }),
     onSuccess: (r) => { setDone(r.result); setMode("idle"); },
@@ -231,21 +264,54 @@ function PositionActions({ accountId, p, paper }: { accountId: number; p: LiveOp
       )}
       {mode === "idle" && (
         <div className="flex flex-wrap items-center gap-2">
-          {!hint && <button className={`${btn} border-rose-400 text-rose-700 hover:bg-rose-50`} onClick={() => { exit.reset(); setMode("exit"); }}>Exit</button>}
+          {!hint && <button className={`${btn} border-rose-400 text-rose-700 hover:bg-rose-50`} onClick={openExit}>Exit</button>}
+          {p.bookedSoFar != null && <span className="text-xs text-muted">booked so far by partial exits <span className={tone(p.bookedSoFar)}>{money(p.bookedSoFar)}</span></span>}
           {!paper && <button className={`${btn} border-line text-muted hover:text-text`} onClick={() => { hand.reset(); setMode("hand"); }}>
             Sold it in Kite? Book the exit</button>}
           {done && <span className="text-sm text-muted">{done}</span>}
         </div>
       )}
       {mode === "exit" && (
-        <div className="flex flex-wrap items-center gap-2 rounded-md border border-rose-300 bg-rose-50 px-3 py-2 text-sm">
-          {paper
-            ? <span>Sell <b>{lotsText(p.quantity, p.lotSize)}</b> of <b>{contract(p.symbol).name}</b> now in paper at the captured bid{p.bid != null ? <> ({px(p.bid)}, about {money((p.bid - p.entry) * p.quantity)} before charges)</> : null}? No broker order is sent; the strategy keeps trading.</span>
-            : <span>Sell <b>{lotsText(p.quantity, p.lotSize)}</b> of <b>{contract(p.symbol).name}</b> now at the broker{p.bid != null ? <> (bid {px(p.bid)})</> : null}? Its stop comes off first.</span>}
-          <button className={`${btn} border-rose-500 bg-rose-600 text-white hover:bg-rose-700`} disabled={exit.isPending}
-            onClick={() => exit.mutate()}>{exit.isPending ? "Selling…" : "Confirm exit"}</button>
-          <button className={`${btn} border-line bg-white`} disabled={exit.isPending} onClick={() => setMode("idle")}>Cancel</button>
-          {exit.error && <span className="w-full text-rose-800">Not sold: {(exit.error as Error).message}</span>}
+        <div className="space-y-2 rounded-md border border-rose-300 bg-rose-50 px-3 py-2 text-sm">
+          <div className="flex flex-wrap items-center gap-2">
+            <span>Exit <b>{contract(p.symbol).name}</b>{paper ? " (paper)" : ""}:</span>
+            <button className={`${btn} ${lots >= allLots ? "border-rose-500 bg-white font-semibold" : "border-line bg-white"}`}
+              onClick={() => setLots(allLots)}>All {allLots} lot{allLots === 1 ? "" : "s"}</button>
+            {allLots >= 2 && <button className={`${btn} ${lots === Math.floor(allLots / 2) ? "border-rose-500 bg-white font-semibold" : "border-line bg-white"}`}
+              onClick={() => setLots(Math.floor(allLots / 2))}>Half ({Math.floor(allLots / 2)})</button>}
+            {allLots >= 2 && <label className="flex items-center gap-1 text-xs text-muted">lots
+              <input type="number" min={1} max={allLots} step={1} value={lots}
+                onChange={(e) => setLots(Math.max(1, Math.min(allLots, Math.floor(Number(e.target.value) || 1))))}
+                className="num w-16 rounded border border-line bg-white px-2 py-1 text-sm text-text" /></label>}
+          </div>
+          {preview.error ? <div className="text-rose-800">No preview ({(preview.error as Error).message}): you can still exit; type EXIT to confirm.</div> : !pv ? <div className="text-muted">Pricing…</div> : (
+            <table className="w-full max-w-xl text-sm">
+              <tbody>
+                <tr><td className="py-0.5 pr-3 text-muted">Sell</td><td className="num">{lotsText(pv.quantity, pv.lotSize)}{pv.remaining > 0 ? ` · ${pv.remaining.toLocaleString("en-IN")} stay open` : " · closes the position"}</td></tr>
+                <tr><td className="py-0.5 pr-3 text-muted">Order</td><td>{pv.how}{pv.orders > 1 ? ` · ${pv.orders} orders (freeze ${pv.freezeQuantity?.toLocaleString("en-IN")})` : ""}</td></tr>
+                <tr><td className="py-0.5 pr-3 text-muted">Est. price</td><td className="num">{px(pv.price)} {pv.priceFrom === "bid" ? <>bid{pv.bidQuantity != null ? <> × {pv.bidQuantity.toLocaleString("en-IN")}</> : null}</> : <span className="text-amber-800">({pv.priceFrom}'s price: no fresh bid)</span>}
+                  {pv.spreadPct != null ? ` · spread ${pv.spreadPct.toFixed(1)} %` : ""}{pv.quoteAgeSec != null ? ` · ${pv.quoteAgeSec} s old` : ""}</td></tr>
+                <tr><td className="py-0.5 pr-3 text-muted">Gross</td><td className={`num ${tone(pv.gross)}`}>{money(pv.gross)}</td></tr>
+                {pv.charges != null && <tr><td className="py-0.5 pr-3 text-muted">Charges</td><td className="num">{money(pv.charges, false)}</td></tr>}
+                {pv.net != null && <tr><td className="py-0.5 pr-3 text-muted">Net if filled</td><td className={`num font-semibold ${tone(pv.net)}`}>{money(pv.net)}</td></tr>}
+                <tr><td className="py-0.5 pr-3 text-muted">After</td><td>{pv.rest ?? (pv.remaining > 0 ? `${pv.remaining} stay open` : "the position closes")}; the strategy keeps trading and won't re-buy this signal</td></tr>
+              </tbody>
+            </table>
+          )}
+          {pv && pv.warnings.length > 0 && (
+            <ul className="list-disc pl-5 text-amber-900">{pv.warnings.map((w) => <li key={w}>{w}</li>)}</ul>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            {mustType && <input placeholder="type EXIT" value={typed} onChange={(e) => setTyped(e.target.value)}
+              className="w-28 rounded border border-rose-300 bg-white px-2 py-1 text-sm" />}
+            <button className={`${btn} border-rose-500 bg-rose-600 text-white hover:bg-rose-700`}
+              disabled={exit.isPending || (!pv && !preview.error) || (mustType && typed !== "EXIT")}
+              onClick={() => exit.mutate()}>{exit.isPending ? "Selling…" : `Exit ${Math.min(lots, allLots)} lot${Math.min(lots, allLots) === 1 ? "" : "s"} now`}</button>
+            <button className={`${btn} border-line bg-white`} disabled={exit.isPending} onClick={() => setMode("idle")}>Cancel</button>
+            {mustType && <span className="text-xs text-muted">{preview.error ? "No preview: type EXIT to confirm."
+              : pv?.typeToConfirm ? "Big or risky sale: type EXIT to confirm." : "The price is not a fresh bid: type EXIT to confirm."}</span>}
+          </div>
+          {exit.error && <div className="text-rose-800">Not sold: {(exit.error as Error).message}</div>}
         </div>
       )}
       {mode === "hand" && (
@@ -431,6 +497,7 @@ function OpenCard({ p }: { p: OpenView }) {
             <div className="text-xs text-muted">Entry → bid</div>
             <div className="num text-lg font-bold">{px(p.entry)} → {px(p.bid)}</div>
             <div className="text-xs text-muted">{money(p.entry * p.quantity, false)} paid{p.quoteAt ? ` · ${hhmm(p.quoteAt)}` : p.bid == null ? " · no recent quote" : ""}</div>
+            {p.perPoint != null && <div className="text-xs text-muted">≈ {money(p.perPoint)} per {p.underlying ?? "index"} point</div>}
           </div>
           <Rail p={p} />
         </>
@@ -492,7 +559,9 @@ const REASONS: Record<string, string> = { STOP: "stop", MANUAL: "sold by hand", 
   EARLY_FAIL_15: "15-min early exit" };
 
 function ClosedTable({ rows, showDay }: { rows: ClosedView[]; showDay: boolean }) {
-  const heads = ["Day", "Contract", "Strategy", "Lots · qty", "Entry → exit", "Exit", "In → out", "P&L %", "Charges", "Net"];
+  const ranged = rows.some((r) => r.best != null);
+  const heads = ["Day", "Contract", "Strategy", "Lots · qty", "Entry → exit", "Exit", "In → out", "Best · worst held", "P&L %", "Charges", "Net"]
+    .filter((h) => ranged || h !== "Best · worst held");
   const left = new Set(["Day", "Contract", "Strategy", "Exit", "In → out"]);
   return (
     <div className="overflow-x-auto">
@@ -513,6 +582,10 @@ function ClosedTable({ rows, showDay }: { rows: ClosedView[]; showDay: boolean }
                 <td className="num px-3 py-2.5 text-right">{px(r.entry)} → {px(r.exit)}</td>
                 <td className="px-3 py-2.5"><Tag>{REASONS[r.exitReason ?? ""] ?? r.exitReason?.toLowerCase().replace(/_/g, " ") ?? "–"}</Tag></td>
                 <td className="num px-3 py-2.5 text-muted">{hhmm(r.opened)} → {hhmm(r.closed)} · {held(r.opened, r.closed)}</td>
+                {ranged && <td className="num px-3 py-2.5 text-right">{r.best != null ? <>
+                  {px(r.best)} · {px(r.worst)}
+                  {r.missed != null && r.missed > 0 ? <div className="text-xs text-muted">left {money(r.missed, false)} vs best</div> : null}
+                </> : <span className="text-muted">–</span>}</td>}
                 <td className={`num px-3 py-2.5 text-right ${tone(r.pct)}`}>{r.pct != null ? `${r.pct > 0 ? "+" : ""}${r.pct.toFixed(1)} %` : "–"}</td>
                 <td className="num px-3 py-2.5 text-right text-muted">{r.charges.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                 <td className={`num px-3 py-2.5 text-right font-semibold ${tone(r.net)}`}>{money(r.net)}</td>

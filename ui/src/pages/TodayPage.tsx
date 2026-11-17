@@ -81,7 +81,8 @@ function TodayFor({ tenant }: { tenant: number }) {
   const chosen = t.brokers.find((b) => b.id === s.brokerAccountId);
   const loaded = books.map((q) => q.data).filter((b): b is NonNullable<typeof b> => b != null);
   const openOf = (mode: "PAPER" | "LIVE") => loaded.filter((b) => (b.bookMode ?? "LIVE") === mode)
-    .reduce((a, b) => ({ pnl: a.pnl + b.summary.openPnl, n: a.n + b.open.length }), { pnl: 0, n: 0 });
+    .reduce((a, b) => ({ pnl: a.pnl + b.summary.openPnl, n: a.n + b.open.length, booked: a.booked + (b.summary.bookedOnOpen ?? 0) }),
+      { pnl: 0, n: 0, booked: 0 });
   const paperOpen = openOf("PAPER"), liveOpen = openOf("LIVE");
   const shownBooks = bookIds.filter((_, i) => { const d = books[i]?.data; return d != null && bookHasToday(d); });
   const live = s.trading === "LIVE";
@@ -109,12 +110,12 @@ function TodayFor({ tenant }: { tenant: number }) {
           <Stat label="Broker" value={s.broker ?? "Off"} />
           <Stat label={live ? "LIVE since" : "Mode"} value={live ? time(s.since) : s.trading === "OFF" ? "no trading" : "PAPER"}
             tone={live ? "down" : "warn"} />
-          <Stat label="Paper today" value={<Pnl value={t.totals.paperNet + paperOpen.pnl} />} />
-          <Stat label="Live today" value={<Pnl value={t.totals.liveNet + liveOpen.pnl} />} />
+          <Stat label="Paper today" value={<Pnl value={t.totals.paperNet + paperOpen.booked + paperOpen.pnl} />} />
+          <Stat label="Live today" value={<Pnl value={t.totals.liveNet + liveOpen.booked + liveOpen.pnl} />} />
         </div>
         <p className="mt-2 text-xs text-muted">
-          Paper: booked <Pnl value={t.totals.paperNet} /> · open <Pnl value={paperOpen.pnl} /> at the bid · {paperOpen.n} open.
-          {" "}Live: booked <Pnl value={t.totals.liveNet} /> · open <Pnl value={liveOpen.pnl} /> · {liveOpen.n} open.
+          Paper: booked <Pnl value={t.totals.paperNet + paperOpen.booked} /> · open <Pnl value={paperOpen.pnl} /> at the bid · {paperOpen.n} open.
+          {" "}Live: booked <Pnl value={t.totals.liveNet + liveOpen.booked} /> · open <Pnl value={liveOpen.pnl} /> · {liveOpen.n} open.
           {paperOpen.n + liveOpen.n > 0 && <> <a className="underline" href="#positions">See positions</a>.</>}
         </p>
         {s.mode === "LIVE" && s.trading !== "LIVE" && (
@@ -127,7 +128,9 @@ function TodayFor({ tenant }: { tenant: number }) {
 
       <div id="positions" className="space-y-4">
         {shownBooks.map((id) => <LiveBookPanel key={id} accountId={id} hideEmpty />)}
-        {shownBooks.length === 0 && loaded.length === bookIds.length && (
+        {/* review 17 Nov 2026: a book that failed to load says so, never vanishes */}
+        {books.map((q, i) => q.error ? <ErrorNote key={`err-${bookIds[i]}`} error={q.error} /> : null)}
+        {shownBooks.length === 0 && books.every((q) => q.data != null || q.error != null) && !books.some((q) => q.error) && (
           <Panel title="Positions"><p className="text-sm text-muted">No position open and no trade today.</p></Panel>
         )}
       </div>

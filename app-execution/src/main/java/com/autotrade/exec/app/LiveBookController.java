@@ -21,6 +21,8 @@ import org.springframework.web.server.ResponseStatusException;
 
 import com.autotrade.account.AccountStore;
 import com.autotrade.account.BrokerAccount;
+import com.autotrade.sim.CostModel;
+import com.autotrade.sim.Side;
 
 /**
  * The Overview page's "Auto-trade positions" panel (6 Nov 2026, user: "I just want the application traded positions shown in
@@ -32,8 +34,8 @@ import com.autotrade.account.BrokerAccount;
  * 17 Nov 2026 (workspace positions, phase 1): a PAPER account (a broker account's paper twin) has the same book of its
  * PAPER entries ({@code bookMode}), so a member sees and exits paper positions on the Today page. Each open position also
  * says when the strategy no longer manages it ({@code strategyExitedAt}: the strategy exited that contract at least
- * {@link #EXIT_SETTLE} ago and this position is still open) and when it was a late join ({@code lateJoin}: bought more
- * than {@link #LATE_JOIN} after its signal, at the signal's price); the book carries the account's square-off time.
+ * {@link #EXIT_SETTLE_SEC} s ago and this position is still open) and when it was a late join ({@code lateJoin}: bought more
+ * than {@link #LATE_JOIN_SEC} s after its signal, at the signal's price); the book carries the account's square-off time.
  */
 @RestController
 class LiveBookController {
@@ -45,9 +47,20 @@ class LiveBookController {
     private static final List<String> STOP_WORKING = List.of("SUBMITTED", "ACKNOWLEDGED", "OPEN", "PARTIALLY_FILLED");
     /** A strategy EXIT this old with the position still open is not a working exit (they fill or retry within a minute). */
     static final int EXIT_SETTLE_SEC = 120;
-    private static final java.time.Duration EXIT_SETTLE = java.time.Duration.ofSeconds(EXIT_SETTLE_SEC);
     /** An entry intent made this long after its signal is a late join. */
-    private static final java.time.Duration LATE_JOIN = java.time.Duration.ofSeconds(60);
+    static final int LATE_JOIN_SEC = 60;
+    /**
+     * The strategy's own exit of the position's contract after its entry's signal (an EXIT closes the whole position), as
+     * a select column over {@code p} (exec.position) and {@code d0} (the entry's signal_decision).
+     */
+    static final String STRATEGY_EXIT_AT = "(select min(d.decided_at) from exec.signal_decision d where d0.id is not null "
+            + "and d.copy_group_id = d0.copy_group_id and d.session_date = d0.session_date and d.strategy_id = p.strategy_id "
+            + "and d.instrument_token = p.instrument_token and d.action = 'EXIT' and d.decided_at >= d0.decided_at)";
+    /** Best and worst bid while a closed position was held, per position (they never change once it is closed). */
+    private final java.util.Map<Long, Double[]> heldRange = new java.util.concurrent.ConcurrentHashMap<>();
+    /** The contracts' freeze quantities (cached inside) and each risk file's order description, for the exit preview. */
+    private final java.util.Map<String, String> hows = new java.util.concurrent.ConcurrentHashMap<>();
+    private final com.autotrade.execution.FreezeQuantities freezes;
 
     /** The best bid since entry per open position, extended by each poll from where the last one stopped. */
     private record Best(double max, Timestamp upTo) {
@@ -71,6 +84,7 @@ class LiveBookController {
         this.accounts = new AccountStore(dataSource);
         this.jdbc = new JdbcTemplate(dataSource);
         this.rules = rules;
+        this.freezes = new com.autotrade.execution.FreezeQuantities(dataSource);
     }
 
     @GetMapping("/api/execution/accounts/{id}/live-book")
@@ -97,12 +111,7 @@ class LiveBookController {
                 + "(select o.status from exec.order_execution o where o.broker_account_id = p.broker_account_id "
                 + "and o.trade_intent_id = p.entry_trade_intent_id and o.role = 'STOP' and o.trigger_price > 0 "
                 + "order by o.id desc limit 1) stop_status, "
-                + "i.created_at intent_at, d0.decided_at signal_at, "
-                // the strategy's own exit of this contract after the entry's signal (an EXIT closes the whole position)
-                + "(select min(d.decided_at) from exec.signal_decision d where d0.id is not null "
-                + "and d.copy_group_id = d0.copy_group_id and d.session_date = d0.session_date and d.strategy_id = p.strategy_id "
-                + "and d.instrument_token = p.instrument_token and d.action = 'EXIT' and d.decided_at >= d0.decided_at) "
-                + "strategy_exit_at "
+                + "i.created_at intent_at, d0.decided_at signal_at, " + STRATEGY_EXIT_AT + " strategy_exit_at "
                 + "from exec.position p join exec.trade_intent i on i.id = p.entry_trade_intent_id "
                 + "left join exec.trade_batch b0 on b0.id = i.trade_batch_id "
                 + "left join exec.signal_decision d0 on d0.id = b0.signal_decision_id "
@@ -121,7 +130,8 @@ class LiveBookController {
         LocalDate today = LocalDate.now(IST);
         List<Map<String, Object>> open = new ArrayList<>();
         List<Map<String, Object>> closed = new ArrayList<>();
-        double openPnl = 0, atRisk = 0, realisedToday = 0;
+        double openPnl = 0, atRisk = 0, realisedToday = 0, bookedOnOpen = 0;
+        Map<String, Double> perPointBy = new java.util.TreeMap<>();
         for (Map<String, Object> r : rows) {
             double entry = num(r.get("average_entry"));
             long bought = ((Number) r.get("bought")).longValue();
@@ -147,6 +157,11 @@ class LiveBookController {
                 out.put("stopStatus", r.get("stop_status"));
                 out.put("stopWorking", working);
                 Double bid = (Double) q.get("bid");
+                if (q.get("delta") != null) {                  // rupees per index point (17 Nov 2026, phase 3)
+                    double perPoint = (Double) q.get("delta") * qty;
+                    out.put("perPoint", round(perPoint));
+                    perPointBy.merge((String) r.get("underlying"), perPoint, Double::sum);
+                }
                 if (bid != null) {
                     double pnl = (bid - entry) * qty;
                     out.put("pnl", round(pnl));
@@ -159,13 +174,20 @@ class LiveBookController {
                     }
                 }
                 Timestamp exitAt = (Timestamp) r.get("strategy_exit_at");
-                if (exitAt != null && exitAt.toInstant().isBefore(java.time.Instant.now().minus(EXIT_SETTLE))) {
+                if (PositionFacts.notManaged(exitAt)) {
                     out.put("strategyExitedAt", ist(exitAt));
                 }
                 Timestamp intentAt = (Timestamp) r.get("intent_at"), signalAt = (Timestamp) r.get("signal_at");
-                if (intentAt != null && signalAt != null
-                        && intentAt.toInstant().isAfter(signalAt.toInstant().plus(LATE_JOIN))) {
+                if (PositionFacts.lateJoin(intentAt, signalAt)) {
                     out.put("lateJoin", Map.of("signalAt", ist(signalAt), "joinedAt", ist(intentAt)));
+                }
+                if (r.get("realised_gross") != null) {         // a partial Exit already sold some (17 Nov 2026)
+                    double soFar = num(r.get("realised_gross")) - num(r.get("charges"));
+                    out.put("bookedSoFar", round(soFar));
+                    if (openedToday(r)) {
+                        realisedToday += soFar;
+                        bookedOnOpen += soFar;
+                    }
                 }
                 Map<String, Object> hint = handSaleHint(r, killRows);
                 if (hint != null) {
@@ -186,6 +208,18 @@ class LiveBookController {
                 out.put("charges", round(charges));
                 out.put("net", round(gross - charges));
                 out.put("pct", bought > 0 && entry > 0 ? round(100 * gross / (bought * entry)) : null);
+                Double[] range = closedAt == null ? null : heldRange(((Number) r.get("id")).longValue(),
+                        (String) r.get("instrument_key"), (String) r.get("underlying"), (Timestamp) r.get("opened_at"),
+                        closedAt);
+                if (range != null && range[0] != null) {
+                    out.put("bestBid", range[0]);
+                    out.put("worstBid", range[1]);
+                    Double exit = (Double) out.get("exit");
+                    if (exit != null && bought > 0) {
+                        out.put("missed", round(Math.max(0, range[0] - exit) * bought));   // left on the table vs the best bid
+                        out.put("saved", round(Math.max(0, exit - range[1]) * bought));    // kept vs the worst bid
+                    }
+                }
                 if (closedAt != null && closedAt.toInstant().atZone(IST).toLocalDate().equals(today)) {
                     realisedToday += gross - charges;
                 }
@@ -206,6 +240,10 @@ class LiveBookController {
         summary.put("openPnl", round(openPnl));
         summary.put("atRisk", round(atRisk));
         summary.put("realisedToday", round(realisedToday));
+        summary.put("bookedOnOpen", round(bookedOnOpen));               // partial sales of still-open positions, today
+        Map<String, Object> perPoint = new LinkedHashMap<>();
+        perPointBy.forEach((u, v) -> perPoint.put(u, round(v)));
+        summary.put("perPoint", perPoint);                              // rupees per index point, by index
         summary.put("sinceLiveNet", round(num(since.get("net"))));
         summary.put("sinceLiveTrades", ((Number) since.get("trades")).intValue());
         summary.put("sinceLiveFrom", since.get("first") == null ? null
@@ -224,6 +262,148 @@ class LiveBookController {
         out.put("open", open);
         out.put("closed", closed);
         return out;
+    }
+
+    /** A quote older than this (seconds) makes the exit preview ask for the typed confirmation. */
+    static final int PREVIEW_STALE_SEC = 10;
+    /** A spread wider than this (% of the mid) does too. */
+    static final double PREVIEW_WIDE_SPREAD_PCT = 3.0;
+    /** And a LIVE exit of more lots than this. */
+    static final int PREVIEW_TYPED_ABOVE_LOTS = 5;
+
+    /**
+     * What an Exit of {@code quantity} (whole lots; default all) of one open position would do now (17 Nov 2026, phase 2):
+     * the price it is estimated at (the captured bid, as the exit itself prices it), whether the bid's size covers it,
+     * the spread and the quote's age, the sale's charges and net, how many orders the exchange's freeze quantity splits a
+     * LIVE sale into and how the broker order is worked, the warnings, and whether the trader must type EXIT. Read-only.
+     */
+    @GetMapping("/api/execution/accounts/{id}/positions/{positionId}/exit-preview")
+    Map<String, Object> exitPreview(@RequestHeader(value = Access.HEADER, required = false) String subject,
+                                    @PathVariable long id, @PathVariable long positionId,
+                                    @RequestParam(required = false) Long quantity) {
+        Access.User user = access.user(subject);
+        BrokerAccount a = accounts.byId(id).filter(x -> user.sees(x.tenantId()))
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "no such account"));
+        Map<String, Object> p = jdbc.queryForList("select p.id, p.underlying, p.symbol, p.instrument_token, p.instrument_key, "
+                + "p.quantity_open, p.average_entry, d.lot_size from exec.position p join exec.trade_intent i on "
+                + "i.id = p.entry_trade_intent_id join exec.trade_batch b on b.id = i.trade_batch_id join exec.signal_decision d "
+                + "on d.id = b.signal_decision_id where p.id = ? and p.broker_account_id = ? and p.status = 'OPEN' "
+                + "and p.quantity_open > 0", positionId, id).stream().findFirst()
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.CONFLICT, "position " + positionId + " is not open"));
+        long open = ((Number) p.get("quantity_open")).longValue();
+        int lot = ((Number) p.get("lot_size")).intValue();
+        long sell = quantity == null ? open : quantity;
+        if (sell <= 0 || lot <= 0 || sell % lot != 0) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, sell + " is not a whole number of lots of " + lot);
+        }
+        sell = Math.min(sell, open);
+        double entry = num(p.get("average_entry"));
+        long token = ((Number) p.get("instrument_token")).longValue();
+        String underlying = (String) p.get("underlying");
+        boolean paper = a.brokerType() == com.autotrade.account.BrokerType.PAPER;
+        String mode = paper ? "PAPER" : a.tradeMode().name();
+
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("positionId", positionId);
+        out.put("symbol", p.get("symbol"));
+        out.put("mode", mode);
+        out.put("open", open);
+        out.put("lotSize", lot);
+        out.put("quantity", sell);
+        out.put("lots", sell / lot);
+        out.put("remaining", open - sell);
+        out.put("entry", entry);
+        List<String> warnings = new ArrayList<>();
+        List<Map<String, Object>> last = jdbc.queryForList("select bid_px[1] bid, ask_px[1] ask, bid_qty[1] bid_qty, "
+                + "extract(epoch from now() - recv_ts)::float8 age from md.option_tick where instrument_token = ? "
+                + "and recv_ts > now() - make_interval(mins => ?) and bid_px[1] > 0 order by recv_ts desc limit 1", token,
+                QUOTE_MAX_AGE_MIN);
+        Double bid = null, spreadPct = null;
+        double age = Double.NaN;
+        if (last.isEmpty()) {
+            warnings.add("no quote in the last " + QUOTE_MAX_AGE_MIN + " minutes: the price below is an old one");
+        } else {
+            Map<String, Object> q = last.getFirst();
+            bid = num(q.get("bid"));
+            double ask = num(q.get("ask"));
+            age = num(q.get("age"));
+            out.put("bid", bid);
+            out.put("ask", ask > 0 ? ask : null);
+            out.put("quoteAgeSec", Math.round(age));
+            if (ask > 0 && ask >= bid) {
+                spreadPct = round(100 * (ask - bid) / ((ask + bid) / 2));
+                out.put("spreadPct", spreadPct);
+            }
+            Long bidQty = q.get("bid_qty") == null ? null : ((Number) q.get("bid_qty")).longValue();
+            out.put("bidQuantity", bidQty);
+            if (age > PREVIEW_STALE_SEC) {
+                warnings.add("the quote is " + Math.round(age) + " s old");
+            }
+            if (spreadPct != null && spreadPct > PREVIEW_WIDE_SPREAD_PCT) {
+                warnings.add("wide spread: " + spreadPct + " % of the price");
+            }
+            if (bidQty != null && bidQty < sell) {
+                warnings.add("the best bid is for " + bidQty + " only: the rest sells lower");
+            }
+        }
+        // the price the exit itself uses (ExecutionLoop.flattenPrice): the bid of the last 5 minutes, else the signal's
+        double price;
+        String priceFrom;
+        if (bid != null && age <= 300) {
+            price = bid;
+            priceFrom = "bid";
+        } else {
+            List<Double> ref = jdbc.queryForList("select reference_price from exec.signal_decision where instrument_token = ? "
+                    + "and reference_price > 0 order by decided_at desc limit 1", Double.class, token);
+            price = !ref.isEmpty() && ref.getFirst() != null ? ref.getFirst() : entry;
+            priceFrom = !ref.isEmpty() && ref.getFirst() != null ? "signal" : "entry";
+        }
+        out.put("price", price);
+        out.put("priceFrom", priceFrom);
+        double gross = (price - entry) * sell;
+        out.put("gross", round(gross));
+        CostModel costs = rules == null ? null : rules.costs(a.brokerType());
+        if (costs != null) {
+            double charges = costs.costs(LocalDate.now(IST), "SENSEX".equals(underlying) ? "BSE" : "NSE", Side.SELL, price, sell)
+                    .total();
+            out.put("charges", round(charges));
+            out.put("net", round(gross - charges));
+        }
+        long slices = 1;
+        if (!paper) {
+            long freeze = freezes.of(
+                    com.autotrade.execution.InstrumentKeys.normalize((String) p.get("instrument_key"), token), underlying);
+            slices = freeze > 0 ? (sell + freeze - 1) / freeze : 1;
+            out.put("freezeQuantity", freeze > 0 ? freeze : null);
+        }
+        out.put("orders", slices);
+        out.put("how", paper ? "paper: filled at the captured bid, no broker order" : how(a));
+        if (!paper && open - sell > 0) {
+            out.put("rest", (open - sell) + " stay open with a new stop at the broker");
+        }
+        out.put("warnings", warnings);
+        boolean typed = !paper && (sell / lot > PREVIEW_TYPED_ABOVE_LOTS || !warnings.isEmpty());
+        out.put("typeToConfirm", typed);
+        return out;
+    }
+
+    /** How the account's sell is worked at the broker (its risk file's order rules; files are versioned: read once each). */
+    private String how(BrokerAccount a) {
+        return hows.computeIfAbsent(a.riskFile(), LiveBookController::describeOrders);
+    }
+
+    private static String describeOrders(String riskFile) {
+        try {
+            com.autotrade.execution.OrderRules o = com.autotrade.execution.FollowerRisk.load(java.nio.file.Path.of(riskFile))
+                    .orders();
+            if (o != null) {
+                return String.format(java.util.Locale.ROOT, "limit at the bid, re-priced every %.0f s up to %d times, then %.1f %% "
+                        + "through the bid; its stop comes off first", o.exitChaseSec(), o.exitChaseMax(), o.exitCrossPct());
+            }
+        } catch (RuntimeException e) {
+            // the description only; the exit itself loads the file again
+        }
+        return "sold at the broker by the account's order rules; its stop comes off first";
     }
 
     /**
@@ -260,18 +440,40 @@ class LiveBookController {
         return hint;
     }
 
+    /**
+     * The best and worst bid of the contract while the position was held; computed once per closed position. Read through
+     * the contract index (underlying, expiry, strike, type, time: the contract from ref.instrument), never by token alone,
+     * which would scan every option tick of the window (review 17 Nov 2026). {null, null} when the contract or its ticks
+     * are not known.
+     */
+    private Double[] heldRange(long position, String key, String underlying, Timestamp opened, Timestamp closed) {
+        if (heldRange.size() > 5_000) {
+            heldRange.clear();                                  // a bound, not a policy: they are cheap to compute again
+        }
+        return heldRange.computeIfAbsent(position, id -> {
+            Map<String, Object> c = key == null ? null : jdbc.queryForList("select expiry, strike, type from ref.instrument "
+                    + "where instrument_key = ? and type in ('CE', 'PE') order by snapshot_id desc limit 1", key).stream()
+                    .findFirst().orElse(null);
+            if (c == null) {
+                return new Double[] {null, null};
+            }
+            Map<String, Object> m = jdbc.queryForMap("select max(bid_px[1]) hi, min(bid_px[1]) lo from md.option_tick "
+                    + "where underlying = ? and expiry = ? and strike = ? and option_type = ? and recv_ts between ? and ? "
+                    + "and bid_px[1] > 0", underlying, c.get("expiry"), num(c.get("strike")), c.get("type"), opened, closed);
+            return new Double[] {m.get("hi") == null ? null : num(m.get("hi")), m.get("lo") == null ? null : num(m.get("lo"))};
+        });
+    }
+
     /** The newest captured quote of the contract (if recent) and the best bid since the entry (extended incrementally). */
     private Map<String, Object> quote(long position, long token, Timestamp since) {
         Map<String, Object> q = new LinkedHashMap<>();
-        List<Map<String, Object>> last = jdbc.queryForList("select bid_px[1] bid, ask_px[1] ask, ltp, recv_ts from md.option_tick "
-                + "where instrument_token = ? and recv_ts > now() - make_interval(mins => ?) and bid_px[1] > 0 "
-                + "order by recv_ts desc limit 1", token, QUOTE_MAX_AGE_MIN);
-        if (!last.isEmpty()) {
-            Map<String, Object> l = last.getFirst();
+        Map<String, Object> l = PositionFacts.latestQuote(jdbc, token);
+        if (l != null) {
             q.put("bid", num(l.get("bid")));
             q.put("ask", num(l.get("ask")));
             q.put("ltp", l.get("ltp") == null ? null : num(l.get("ltp")));
             q.put("quoteAt", ist((Timestamp) l.get("recv_ts")));
+            q.put("delta", l.get("delta") == null ? null : num(l.get("delta")));
         } else {
             q.put("bid", null);
         }
@@ -285,6 +487,12 @@ class LiveBookController {
         }
         q.put("best", max > 0 ? max : null);
         return q;
+    }
+
+    /** Whether a partially sold open position's sales count as today's (it was opened today). */
+    private static boolean openedToday(Map<String, Object> r) {
+        Timestamp opened = (Timestamp) r.get("opened_at");
+        return opened != null && opened.toInstant().atZone(IST).toLocalDate().equals(LocalDate.now(IST));
     }
 
     private static String ist(Timestamp t) {
