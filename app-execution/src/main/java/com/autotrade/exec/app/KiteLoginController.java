@@ -41,7 +41,7 @@ class KiteLoginController {
             return html("<meta http-equiv=\"refresh\" content=\"0; url=" + href + "\"><p>Opening the Zerodha login... "
                     + "<a href=\"" + href + "\">continue</a></p>");
         } catch (RuntimeException e) {
-            return html("<h3>Kite login not started</h3><p>" + HtmlUtils.htmlEscape(String.valueOf(e.getMessage())) + "</p>");
+            return BrokerLoginPage.result("Kite", false, "Kite login not started", null, String.valueOf(e.getMessage()));
         }
     }
 
@@ -50,9 +50,8 @@ class KiteLoginController {
                                     @RequestParam(value = "status", required = false) String status,
                                     @RequestParam(value = "state", required = false) String state) {
         KiteLogin.Result r = login.callback(requestToken, status, state);
-        String title = r.ok() ? "Kite session active" : "Kite login failed";
-        return html("<h3>" + title + (r.account() == null ? "" : ": " + HtmlUtils.htmlEscape(r.account())) + "</h3><p>"
-                + HtmlUtils.htmlEscape(r.message()) + "</p>");
+        return BrokerLoginPage.result("Kite", r.ok(), r.ok() ? "Kite session active" : "Kite login failed", r.account(),
+                r.message());
     }
 
     private static ResponseEntity<String> html(String body) {

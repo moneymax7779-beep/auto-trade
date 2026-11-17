@@ -65,8 +65,7 @@ class BrokerLoginController {
             return html("Upstox", "<meta http-equiv=\"refresh\" content=\"0; url=" + href + "\"><p>Opening the Upstox "
                     + "login... <a href=\"" + href + "\">continue</a></p>");
         } catch (RuntimeException e) {
-            return html("Upstox", "<h3>Upstox login not started</h3><p>" + HtmlUtils.htmlEscape(String.valueOf(e.getMessage()))
-                    + "</p>");
+            return BrokerLoginPage.result("Upstox", false, "Upstox login not started", null, String.valueOf(e.getMessage()));
         }
     }
 
@@ -74,9 +73,8 @@ class BrokerLoginController {
     ResponseEntity<String> upstoxCallback(@RequestParam(value = "code", required = false) String code,
                                           @RequestParam(value = "state", required = false) String state) {
         KiteLogin.Result r = upstox.callback(code, state);
-        return html("Upstox", "<h3>" + (r.ok() ? "Upstox session active" : "Upstox login failed")
-                + (r.account() == null ? "" : ": " + HtmlUtils.htmlEscape(r.account())) + "</h3><p>"
-                + HtmlUtils.htmlEscape(r.message()) + "</p>");
+        return BrokerLoginPage.result("Upstox", r.ok(), r.ok() ? "Upstox session active" : "Upstox login failed", r.account(),
+                r.message());
     }
 
     record KotakCodes(String totp, String mpin) {

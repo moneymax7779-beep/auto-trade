@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { Link } from "react-router";
 import {
   BROKER_NAMES, get, postJson, type BrokerApp, type BrokerApps, type LoginResult, type WorkspaceBroker, type WorkspaceToday,
 } from "../api";
@@ -52,7 +53,8 @@ function BrokersFor({ tenant }: { tenant: number }) {
           {message.text} <button className="ml-2 text-muted" onClick={() => setMessage(null)}>dismiss</button>
         </div>
       )}
-      <Panel title="Your brokers">
+      <Panel title="Your brokers" right={t.canManage ? <Link to="/brokers/add"
+        className="rounded bg-sky-700 px-3 py-1.5 text-sm font-semibold text-white">Add a broker step by step</Link> : undefined}>
         <div className="space-y-3">
           {t.brokers.length === 0 && <p className="text-sm text-muted">No broker account yet: add one below.</p>}
           {t.brokers.map((b) => (
@@ -190,10 +192,10 @@ function BrokerRow({ b, apps, register, t, open, onManage, onDone, onError }: {
             Get today's token</button>}
           {b.broker === "GROWW" && <span className="text-xs text-muted">approve the API key on Groww's API keys page first</span>}
           {b.broker === "KOTAK_NEO" && <>
-            <input className={`${input} w-24`} placeholder="TOTP" inputMode="numeric" autoComplete="one-time-code" maxLength={6}
-              value={totp} onChange={(e) => setTotp(e.target.value.replace(/\D/g, ""))} />
+            <input className={`${input} w-24`} placeholder="TOTP" inputMode="numeric" autoComplete="one-time-code"
+              value={totp} onChange={(e) => setTotp(e.target.value.replace(/\D/g, "").slice(0, 6))} />
             <input className={`${input} w-24`} placeholder="MPIN" type="password" inputMode="numeric" autoComplete="off"
-              maxLength={6} value={mpin} onChange={(e) => setMpin(e.target.value.replace(/\D/g, ""))} />
+              value={mpin} onChange={(e) => setMpin(e.target.value.replace(/\D/g, "").slice(0, 6))} />
             <button className={primary} disabled={login.isPending || totp.length !== 6 || mpin.length < 4}
               onClick={() => login.mutate({ path: `/api/execution/accounts/${b.id}/kotak/login`, body: { totp, mpin } })}>
               Log in to Kotak</button>

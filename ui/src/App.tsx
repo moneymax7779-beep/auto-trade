@@ -41,6 +41,7 @@ const TodayPage = page(() => import("./pages/TodayPage"), "TodayPage");
 const HomeScreen = page(() => import("./mobile/HomeScreen"), "HomeScreen");
 const PositionsScreen = page(() => import("./mobile/PositionsScreen"), "PositionsScreen");
 const LedgerScreen = page(() => import("./mobile/LedgerScreen"), "LedgerScreen");
+const BrokerWizard = page(() => import("./mobile/BrokerWizard"), "BrokerWizard");
 
 /** Below the md breakpoint "/" opens the phone's Home instead of the desktop's first page. */
 const phone = () => typeof window !== "undefined" && window.matchMedia?.("(max-width: 767px)").matches;
@@ -123,6 +124,7 @@ export function App() {
             <Route path="/index/:underlying" element={<IndexPage />} />
             <Route path="/today" element={<TodayPage />} />
             <Route path="/brokers" element={<BrokersPage />} />
+            <Route path="/brokers/add" element={<BrokerWizard />} />
             <Route path="/settings" element={<SettingsPage />} />
             <Route path="*" element={<AccountsPage />} />
           </Routes>
@@ -145,6 +147,7 @@ export function App() {
           <Route path="/household" element={<HouseholdPage />} />
           <Route path="/today" element={<TodayPage />} />
           <Route path="/brokers" element={<BrokersPage />} />
+            <Route path="/brokers/add" element={<BrokerWizard />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
         )}

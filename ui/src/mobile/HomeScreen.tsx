@@ -70,8 +70,8 @@ export function HomeScreen() {
                 text={`${r.account} ${r.ready ? "logged in" : "not logged in"}`}
                 note={r.ready ? (r.sessionUntil ? `until ${istTime(r.sessionUntil)}` : r.broker) : `${r.broker} · ${r.mode}`}
                 action={!r.ready && (url
-                  ? <a className="min-h-11 rounded-lg bg-sky-700 px-3 py-2.5 text-sm font-semibold text-white" href={url}
-                      target="_blank" rel="noreferrer">Log in</a>
+                  // same tab: the broker's page sends the browser back to Home after the login (phase 2)
+                  ? <a className="min-h-11 rounded-lg bg-sky-700 px-3 py-2.5 text-sm font-semibold text-white" href={url}>Log in</a>
                   : <Link className="min-h-11 rounded-lg border border-line px-3 py-2.5 text-sm" to="/brokers">Log in</Link>)} />
             );
           })}
