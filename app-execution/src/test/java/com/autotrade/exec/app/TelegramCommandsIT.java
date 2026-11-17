@@ -585,6 +585,13 @@ class TelegramCommandsIT {
         assertThat(TelegramCommands.incomplete(List.of("X: 25 of 75 sold (PARTIAL x); the rest keeps its broker stop")))
                 .isTrue();
         assertThat(TelegramCommands.incomplete(List.of("the worker has not started"))).isTrue();
+        // 17 Nov 2026 wording: a short fill, a stop not placed again, and a whole partial exit (complete)
+        assertThat(TelegramCommands.incomplete(List.of("X: 25 of 75 sold (PARTIAL x); 50 stay open with a new broker stop")))
+                .isTrue();
+        assertThat(TelegramCommands.incomplete(List.of("X: 65 of 130 sold at 31.10; 65 stay open, their broker stop NOT "
+                + "placed yet (retried; the account takes no new entries until it is)"))).isTrue();
+        assertThat(TelegramCommands.incomplete(List.of("X: 65 of 130 sold at 31.10; 65 stay open with a new broker stop")))
+                .isFalse();
     }
 
     // ---------------------------------------------------------------------------------------------------- helpers

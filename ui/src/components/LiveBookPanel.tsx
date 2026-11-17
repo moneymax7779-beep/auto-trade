@@ -222,21 +222,27 @@ function PositionActions({ accountId, p, paper }: { accountId: number; p: LiveOp
   const [lots, setLots] = useState(allLots);
   const [typed, setTyped] = useState("");
   const [key, setKey] = useState("");
-  const qty = p.lotSize ? Math.min(lots, allLots) * p.lotSize : p.quantity;
-  const preview = useQuery({ queryKey: ["exit-preview", accountId, p.id, qty], enabled: mode === "exit",
-    queryFn: () => get<ExitPreview>(`${base}/exit-preview?quantity=${qty}`), refetchInterval: 3_000 });
+  // review 17 Nov 2026: All sends no quantity (everything that is open), never a computed lot count
+  const all = !p.lotSize || lots >= allLots;
+  const qty: number | undefined = all ? undefined : lots * p.lotSize!;
+  const preview = useQuery({ queryKey: ["exit-preview", accountId, p.id, qty ?? "all"], enabled: mode === "exit",
+    queryFn: () => get<ExitPreview>(`${base}/exit-preview${qty != null ? `?quantity=${qty}` : ""}`), refetchInterval: 3_000 });
+  const newKey = () => setKey(typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID()
+    : `${Date.now()}-${Math.random()}`);
   const exit = useMutation({
-    mutationFn: () => postJson<{ result: string[]; repeat?: boolean }>(`${base}/exit`, { confirm: "EXIT", quantity: qty, key }),
+    mutationFn: () => postJson<{ result: string[]; repeat?: boolean }>(`${base}/exit`, { confirm: "EXIT", quantity: qty ?? null, key }),
     onSuccess: (r) => { setDone((r.repeat ? "already sent: " : "") + r.result.join(" · ")); setMode("idle"); },
+    // a refusal (4xx) sold nothing: the next click is a new attempt; anything else may have sold, so it keeps its key
+    onError: (e) => { if (/^4\d\d:/.test((e as Error).message)) newKey(); },
     onSettled: refresh,
   });
   const openExit = () => {
-    exit.reset(); setLots(allLots); setTyped("");
-    setKey(typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
+    exit.reset(); setLots(allLots); setTyped(""); newKey();
     setMode("exit");
   };
   const pv = preview.data;
-  const mustType = pv != null && (pv.typeToConfirm || (paper === true && pv.warnings.length > 0));
+  // review 17 Nov 2026: a failed preview never blocks the exit; it asks for the typed EXIT instead
+  const mustType = preview.error != null || (pv != null && (pv.typeToConfirm || (paper === true && pv.warnings.length > 0)));
   const hand = useMutation({
     mutationFn: () => postJson<{ result: string }>(`${base}/hand-exit`, { price: Number(price), at, unchecked }),
     onSuccess: (r) => { setDone(r.result); setMode("idle"); },
@@ -278,7 +284,7 @@ function PositionActions({ accountId, p, paper }: { accountId: number; p: LiveOp
                 onChange={(e) => setLots(Math.max(1, Math.min(allLots, Math.floor(Number(e.target.value) || 1))))}
                 className="num w-16 rounded border border-line bg-white px-2 py-1 text-sm text-text" /></label>}
           </div>
-          {preview.error ? <div className="text-rose-800">No preview: {(preview.error as Error).message}</div> : !pv ? <div className="text-muted">Pricing…</div> : (
+          {preview.error ? <div className="text-rose-800">No preview ({(preview.error as Error).message}): you can still exit; type EXIT to confirm.</div> : !pv ? <div className="text-muted">Pricing…</div> : (
             <table className="w-full max-w-xl text-sm">
               <tbody>
                 <tr><td className="py-0.5 pr-3 text-muted">Sell</td><td className="num">{lotsText(pv.quantity, pv.lotSize)}{pv.remaining > 0 ? ` · ${pv.remaining.toLocaleString("en-IN")} stay open` : " · closes the position"}</td></tr>
@@ -299,10 +305,11 @@ function PositionActions({ accountId, p, paper }: { accountId: number; p: LiveOp
             {mustType && <input placeholder="type EXIT" value={typed} onChange={(e) => setTyped(e.target.value)}
               className="w-28 rounded border border-rose-300 bg-white px-2 py-1 text-sm" />}
             <button className={`${btn} border-rose-500 bg-rose-600 text-white hover:bg-rose-700`}
-              disabled={exit.isPending || !pv || (mustType && typed !== "EXIT")}
+              disabled={exit.isPending || (!pv && !preview.error) || (mustType && typed !== "EXIT")}
               onClick={() => exit.mutate()}>{exit.isPending ? "Selling…" : `Exit ${Math.min(lots, allLots)} lot${Math.min(lots, allLots) === 1 ? "" : "s"} now`}</button>
             <button className={`${btn} border-line bg-white`} disabled={exit.isPending} onClick={() => setMode("idle")}>Cancel</button>
-            {mustType && <span className="text-xs text-muted">{pv?.typeToConfirm ? "Big or risky sale: type EXIT to confirm." : "The price is not a fresh bid: type EXIT to confirm."}</span>}
+            {mustType && <span className="text-xs text-muted">{preview.error ? "No preview: type EXIT to confirm."
+              : pv?.typeToConfirm ? "Big or risky sale: type EXIT to confirm." : "The price is not a fresh bid: type EXIT to confirm."}</span>}
           </div>
           {exit.error && <div className="text-rose-800">Not sold: {(exit.error as Error).message}</div>}
         </div>

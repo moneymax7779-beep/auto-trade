@@ -96,9 +96,10 @@ class LiveBookIT {
 
     private static void tick(String ago, double bid) {
         jdbc.update("insert into md.option_tick (manifest_id, session_date, underlying, recv_ts, src_seq, instrument_token, symbol, "
-                + "strike, option_type, ltp, bid_px, bid_qty, bid_orders, ask_px, ask_qty, ask_orders, analytics_complete, "
-                + "depth_complete) values (1, current_date, 'NIFTY', now() - ?::interval, 1, ?, 'NIFTY 24650 CE 09 NOV 26', 24650, "
-                + "'CE', ?, array[?]::float8[], '{650}', '{3}', array[?]::float8[], '{650}', '{3}', false, true)",
+                + "expiry, strike, option_type, ltp, bid_px, bid_qty, bid_orders, ask_px, ask_qty, ask_orders, analytics_complete, "
+                + "depth_complete) values (1, current_date, 'NIFTY', now() - ?::interval, 1, ?, 'NIFTY 24650 CE 09 NOV 26', "
+                + "date '2026-11-09', 24650, 'CE', ?, array[?]::float8[], '{650}', '{3}', array[?]::float8[], '{650}', '{3}', "
+                + "false, true)",
                 ago, TOKEN, bid + 0.05, bid, bid + 0.05);
     }
 
@@ -133,6 +134,13 @@ class LiveBookIT {
 
         long done = intent(group, session, account, 2, "LIVE");
         position(tenant, account, done, "CLOSED", 185.00, "2 days 01:00:00", "2 days", -2574.0, 89.51);
+        // the contract (best and worst while held are read through the contract index, not the token)
+        jdbc.update("insert into ref.instrument_snapshot (id, snapshot_date, source, file_sha256, instruments) values "
+                + "(901, current_date, 'it', 'it', 1) on conflict do nothing");
+        jdbc.update("insert into ref.instrument (snapshot_id, instrument_key, exchange_token, segment, exchange, type, "
+                + "underlying, trading_symbol, expiry, strike, lot_size, tick_size, freeze_quantity, weekly) values (901, "
+                + "'NSE_FO|40009', '40009', 'NSE_FO', 'NSE', 'CE', 'NIFTY', 'NIFTY 24650 CE', date '2026-11-09', 24650, 65, "
+                + "0.05, 1755, true) on conflict do nothing");
         tick("2 days 00:40:00", 190.00);                   // while it was held: the best bid
         tick("2 days 00:20:00", 160.00);                   // and the worst
         order(tenant, account, done, "ENTRY", "FILLED", 65, null);

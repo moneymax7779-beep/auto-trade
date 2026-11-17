@@ -34,8 +34,8 @@ import com.autotrade.sim.Side;
  * 17 Nov 2026 (workspace positions, phase 1): a PAPER account (a broker account's paper twin) has the same book of its
  * PAPER entries ({@code bookMode}), so a member sees and exits paper positions on the Today page. Each open position also
  * says when the strategy no longer manages it ({@code strategyExitedAt}: the strategy exited that contract at least
- * {@link #EXIT_SETTLE} ago and this position is still open) and when it was a late join ({@code lateJoin}: bought more
- * than {@link #LATE_JOIN} after its signal, at the signal's price); the book carries the account's square-off time.
+ * {@link #EXIT_SETTLE_SEC} s ago and this position is still open) and when it was a late join ({@code lateJoin}: bought more
+ * than {@link #LATE_JOIN_SEC} s after its signal, at the signal's price); the book carries the account's square-off time.
  */
 @RestController
 class LiveBookController {
@@ -47,10 +47,8 @@ class LiveBookController {
     private static final List<String> STOP_WORKING = List.of("SUBMITTED", "ACKNOWLEDGED", "OPEN", "PARTIALLY_FILLED");
     /** A strategy EXIT this old with the position still open is not a working exit (they fill or retry within a minute). */
     static final int EXIT_SETTLE_SEC = 120;
-    private static final java.time.Duration EXIT_SETTLE = java.time.Duration.ofSeconds(EXIT_SETTLE_SEC);
     /** An entry intent made this long after its signal is a late join. */
     static final int LATE_JOIN_SEC = 60;
-    private static final java.time.Duration LATE_JOIN = java.time.Duration.ofSeconds(LATE_JOIN_SEC);
     /**
      * The strategy's own exit of the position's contract after its entry's signal (an EXIT closes the whole position), as
      * a select column over {@code p} (exec.position) and {@code d0} (the entry's signal_decision).
@@ -60,6 +58,9 @@ class LiveBookController {
             + "and d.instrument_token = p.instrument_token and d.action = 'EXIT' and d.decided_at >= d0.decided_at)";
     /** Best and worst bid while a closed position was held, per position (they never change once it is closed). */
     private final java.util.Map<Long, Double[]> heldRange = new java.util.concurrent.ConcurrentHashMap<>();
+    /** The contracts' freeze quantities (cached inside) and each risk file's order description, for the exit preview. */
+    private final java.util.Map<String, String> hows = new java.util.concurrent.ConcurrentHashMap<>();
+    private final com.autotrade.execution.FreezeQuantities freezes;
 
     /** The best bid since entry per open position, extended by each poll from where the last one stopped. */
     private record Best(double max, Timestamp upTo) {
@@ -83,6 +84,7 @@ class LiveBookController {
         this.accounts = new AccountStore(dataSource);
         this.jdbc = new JdbcTemplate(dataSource);
         this.rules = rules;
+        this.freezes = new com.autotrade.execution.FreezeQuantities(dataSource);
     }
 
     @GetMapping("/api/execution/accounts/{id}/live-book")
@@ -172,12 +174,11 @@ class LiveBookController {
                     }
                 }
                 Timestamp exitAt = (Timestamp) r.get("strategy_exit_at");
-                if (exitAt != null && exitAt.toInstant().isBefore(java.time.Instant.now().minus(EXIT_SETTLE))) {
+                if (PositionFacts.notManaged(exitAt)) {
                     out.put("strategyExitedAt", ist(exitAt));
                 }
                 Timestamp intentAt = (Timestamp) r.get("intent_at"), signalAt = (Timestamp) r.get("signal_at");
-                if (intentAt != null && signalAt != null
-                        && intentAt.toInstant().isAfter(signalAt.toInstant().plus(LATE_JOIN))) {
+                if (PositionFacts.lateJoin(intentAt, signalAt)) {
                     out.put("lateJoin", Map.of("signalAt", ist(signalAt), "joinedAt", ist(intentAt)));
                 }
                 if (r.get("realised_gross") != null) {         // a partial Exit already sold some (17 Nov 2026)
@@ -208,7 +209,8 @@ class LiveBookController {
                 out.put("net", round(gross - charges));
                 out.put("pct", bought > 0 && entry > 0 ? round(100 * gross / (bought * entry)) : null);
                 Double[] range = closedAt == null ? null : heldRange(((Number) r.get("id")).longValue(),
-                        ((Number) r.get("instrument_token")).longValue(), (Timestamp) r.get("opened_at"), closedAt);
+                        (String) r.get("instrument_key"), (String) r.get("underlying"), (Timestamp) r.get("opened_at"),
+                        closedAt);
                 if (range != null && range[0] != null) {
                     out.put("bestBid", range[0]);
                     out.put("worstBid", range[1]);
@@ -369,7 +371,7 @@ class LiveBookController {
         }
         long slices = 1;
         if (!paper) {
-            long freeze = new com.autotrade.execution.FreezeQuantities(jdbc.getDataSource()).of(
+            long freeze = freezes.of(
                     com.autotrade.execution.InstrumentKeys.normalize((String) p.get("instrument_key"), token), underlying);
             slices = freeze > 0 ? (sell + freeze - 1) / freeze : 1;
             out.put("freezeQuantity", freeze > 0 ? freeze : null);
@@ -385,10 +387,14 @@ class LiveBookController {
         return out;
     }
 
-    /** How the account's sell is worked at the broker (its risk file's order rules). */
-    private static String how(BrokerAccount a) {
+    /** How the account's sell is worked at the broker (its risk file's order rules; files are versioned: read once each). */
+    private String how(BrokerAccount a) {
+        return hows.computeIfAbsent(a.riskFile(), LiveBookController::describeOrders);
+    }
+
+    private static String describeOrders(String riskFile) {
         try {
-            com.autotrade.execution.OrderRules o = com.autotrade.execution.FollowerRisk.load(java.nio.file.Path.of(a.riskFile()))
+            com.autotrade.execution.OrderRules o = com.autotrade.execution.FollowerRisk.load(java.nio.file.Path.of(riskFile))
                     .orders();
             if (o != null) {
                 return String.format(java.util.Locale.ROOT, "limit at the bid, re-priced every %.0f s up to %d times, then %.1f %% "
@@ -435,32 +441,34 @@ class LiveBookController {
     }
 
     /**
-     * The best and worst bid of the contract while the position was held (captured option ticks, time-bounded); computed
-     * once per closed position. {null, null} when no tick was captured then.
+     * The best and worst bid of the contract while the position was held; computed once per closed position. Read through
+     * the contract index (underlying, expiry, strike, type, time: the contract from ref.instrument), never by token alone,
+     * which would scan every option tick of the window (review 17 Nov 2026). {null, null} when the contract or its ticks
+     * are not known.
      */
-    private Double[] heldRange(long position, long token, Timestamp opened, Timestamp closed) {
-        Double[] kept = heldRange.get(position);
-        if (kept != null) {
-            return kept;
-        }
-        Map<String, Object> m = jdbc.queryForMap("select max(bid_px[1]) hi, min(bid_px[1]) lo from md.option_tick "
-                + "where instrument_token = ? and recv_ts between ? and ? and bid_px[1] > 0", token, opened, closed);
-        Double[] range = {m.get("hi") == null ? null : num(m.get("hi")), m.get("lo") == null ? null : num(m.get("lo"))};
+    private Double[] heldRange(long position, String key, String underlying, Timestamp opened, Timestamp closed) {
         if (heldRange.size() > 5_000) {
             heldRange.clear();                                  // a bound, not a policy: they are cheap to compute again
         }
-        heldRange.put(position, range);
-        return range;
+        return heldRange.computeIfAbsent(position, id -> {
+            Map<String, Object> c = key == null ? null : jdbc.queryForList("select expiry, strike, type from ref.instrument "
+                    + "where instrument_key = ? and type in ('CE', 'PE') order by snapshot_id desc limit 1", key).stream()
+                    .findFirst().orElse(null);
+            if (c == null) {
+                return new Double[] {null, null};
+            }
+            Map<String, Object> m = jdbc.queryForMap("select max(bid_px[1]) hi, min(bid_px[1]) lo from md.option_tick "
+                    + "where underlying = ? and expiry = ? and strike = ? and option_type = ? and recv_ts between ? and ? "
+                    + "and bid_px[1] > 0", underlying, c.get("expiry"), num(c.get("strike")), c.get("type"), opened, closed);
+            return new Double[] {m.get("hi") == null ? null : num(m.get("hi")), m.get("lo") == null ? null : num(m.get("lo"))};
+        });
     }
 
     /** The newest captured quote of the contract (if recent) and the best bid since the entry (extended incrementally). */
     private Map<String, Object> quote(long position, long token, Timestamp since) {
         Map<String, Object> q = new LinkedHashMap<>();
-        List<Map<String, Object>> last = jdbc.queryForList("select bid_px[1] bid, ask_px[1] ask, ltp, delta, recv_ts from md.option_tick "
-                + "where instrument_token = ? and recv_ts > now() - make_interval(mins => ?) and bid_px[1] > 0 "
-                + "order by recv_ts desc limit 1", token, QUOTE_MAX_AGE_MIN);
-        if (!last.isEmpty()) {
-            Map<String, Object> l = last.getFirst();
+        Map<String, Object> l = PositionFacts.latestQuote(jdbc, token);
+        if (l != null) {
             q.put("bid", num(l.get("bid")));
             q.put("ask", num(l.get("ask")));
             q.put("ltp", l.get("ltp") == null ? null : num(l.get("ltp")));

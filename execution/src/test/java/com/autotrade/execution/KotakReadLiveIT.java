@@ -545,6 +545,7 @@ class KotakReadLiveIT {
         jdbc.update("update acct.strategy_subscription set enabled_at = now() - interval '1 hour' where copy_group_id = ?",
                 group);
         jdbc.update("update acct.tenant set default_broker_account_id = ? where id = ?", listed, tenant);
+        jdbc.update("update acct.tenant set default_since = '-infinity' where id = ?", tenant);   // V44: a default all along
         // the member's own order at Kotak today (this simulator stands for their Kotak)
         KotakConfig config = KotakConfig.simulator(kotak.baseUri());
         try (KotakHttp h = new KotakHttp(config)) {

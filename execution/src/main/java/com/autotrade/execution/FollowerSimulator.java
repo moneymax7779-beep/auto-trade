@@ -1403,12 +1403,16 @@ public final class FollowerSimulator {
                 book(day, positionId, fill.parts(), fill.at(), reason);
             }
             if (fill.quantity() < open) {
-                protect(day, null, positionId, symbol);
+                boolean stopped = protect(day, null, positionId, symbol);
+                // review 17 Nov 2026: say whether the rest really has its stop again (protect may fail: the account is
+                // then stopped with "flatten left ... without a broker stop" and the stop is retried)
+                String rest = !venue.broker() ? "" : stopped ? " with a new broker stop"
+                        : ", their broker stop NOT placed yet (retried; the account takes no new entries until it is)";
                 lines.add(fill.quantity() == sell && sell < open
                         ? symbol + ": " + sell + " of " + open + " sold at " + String.format(java.util.Locale.ROOT, "%.2f",
-                                fill.price()) + "; " + (open - sell) + " stay open"
+                                fill.price()) + "; " + (open - sell) + " stay open" + rest
                         : symbol + ": " + fill.quantity() + " of " + sell + " sold (" + fill.code() + " " + fill.reason()
-                                + "); the rest keeps its broker stop");
+                                + "); " + (open - fill.quantity()) + " stay open" + rest);
             } else {
                 lines.add(symbol + ": " + open + " sold at " + String.format(java.util.Locale.ROOT, "%.2f", fill.price()));
             }

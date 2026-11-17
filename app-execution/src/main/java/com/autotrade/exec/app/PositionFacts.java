@@ -42,32 +42,50 @@ final class PositionFacts {
         Map<String, Object> r = rows.getFirst();
         long qty = ((Number) r.get("quantity_open")).longValue();
         double entry = ((Number) r.get("average_entry")).doubleValue();
-        List<Map<String, Object>> last = jdbc.queryForList("select bid_px[1] bid, delta, recv_ts from md.option_tick "
-                + "where instrument_token = ? and recv_ts > now() - make_interval(mins => ?) and bid_px[1] > 0 "
-                + "order by recv_ts desc limit 1", ((Number) r.get("instrument_token")).longValue(),
-                LiveBookController.QUOTE_MAX_AGE_MIN);
-        if (!last.isEmpty()) {
-            double bid = ((Number) last.getFirst().get("bid")).doubleValue();
+        Map<String, Object> last = latestQuote(jdbc, ((Number) r.get("instrument_token")).longValue());
+        if (last != null) {
+            double bid = ((Number) last.get("bid")).doubleValue();
             out.put("bid", bid);
-            out.put("quoteAt", ((Timestamp) last.getFirst().get("recv_ts")).toInstant().atZone(IST).toLocalTime().withNano(0)
+            out.put("quoteAt", ((Timestamp) last.get("recv_ts")).toInstant().atZone(IST).toLocalTime().withNano(0)
                     .toString());
             out.put("pnl", Math.round((bid - entry) * qty * 100) / 100.0);
-            Object delta = last.getFirst().get("delta");
+            Object delta = last.get("delta");
             if (delta != null) {
                 out.put("perPoint", Math.round(((Number) delta).doubleValue() * qty * 100) / 100.0);
             }
         }
         Timestamp exitAt = (Timestamp) r.get("strategy_exit_at");
-        if (exitAt != null && exitAt.toInstant().isBefore(Instant.now().minusSeconds(LiveBookController.EXIT_SETTLE_SEC))) {
+        if (notManaged(exitAt)) {
             out.put("strategyExitedAt", exitAt.toInstant().atZone(IST).toLocalTime().withNano(0).toString());
         }
         Timestamp intentAt = (Timestamp) r.get("intent_at"), signalAt = (Timestamp) r.get("signal_at");
-        if (intentAt != null && signalAt != null
-                && intentAt.toInstant().isAfter(signalAt.toInstant().plusSeconds(LiveBookController.LATE_JOIN_SEC))) {
+        if (lateJoin(intentAt, signalAt)) {
             out.put("lateJoin", signalAt.toInstant().atZone(IST).toLocalTime().withNano(0) + " signal, bought "
                     + intentAt.toInstant().atZone(IST).toLocalTime().withNano(0));
         }
         return out;
+    }
+
+    // ------------------------------------------------------------------- the rules the web's book and Telegram share
+
+    /** The contract's newest captured quote (bid, ask, ltp, delta, recv_ts) of the last few minutes, or null. */
+    static Map<String, Object> latestQuote(JdbcTemplate jdbc, long token) {
+        List<Map<String, Object>> last = jdbc.queryForList("select bid_px[1] bid, ask_px[1] ask, ltp, delta, recv_ts "
+                + "from md.option_tick where instrument_token = ? and recv_ts > now() - make_interval(mins => ?) "
+                + "and bid_px[1] > 0 order by recv_ts desc limit 1", token, LiveBookController.QUOTE_MAX_AGE_MIN);
+        return last.isEmpty() ? null : last.getFirst();
+    }
+
+    /** The strategy exited the contract long enough ago that an open position is no longer a working exit. */
+    static boolean notManaged(Timestamp strategyExitAt) {
+        return strategyExitAt != null
+                && strategyExitAt.toInstant().isBefore(Instant.now().minusSeconds(LiveBookController.EXIT_SETTLE_SEC));
+    }
+
+    /** Bought long after its signal (at the signal's price). */
+    static boolean lateJoin(Timestamp intentAt, Timestamp signalAt) {
+        return intentAt != null && signalAt != null
+                && intentAt.toInstant().isAfter(signalAt.toInstant().plusSeconds(LiveBookController.LATE_JOIN_SEC));
     }
 
     /** One line for Telegram: "bid 31.10 (11:42:03) · P&L −2,155 · ₹29/pt · NOT MANAGED: ... · LATE JOIN ...". */

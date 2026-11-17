@@ -272,15 +272,30 @@ class AccountsController {
                 return earlier;
             } catch (java.util.concurrent.ExecutionException ex) {
                 throw ex.getCause() instanceof ResponseStatusException r ? r
-                        : new ResponseStatusException(HttpStatus.CONFLICT, String.valueOf(ex.getCause().getMessage()));
+                        : new ResponseStatusException(HttpStatus.CONFLICT, "the first request of this exit failed ("
+                                + ex.getCause().getMessage() + "): it may have sold; check the position before trying again");
+            } catch (java.util.concurrent.TimeoutException | InterruptedException ex) {
+                if (ex instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+                // review 17 Nov 2026: was a raw 500 while the first sale may still be running
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "the first request of this exit is still running: "
+                        + "check the position before trying again (nothing more is sold for this click)");
             }
         }
         try {
             Map<String, Object> result = exitNow(a, positionId, user, e.quantity());
             mine.result().complete(result);
             return result;
-        } catch (Exception ex) {
+        } catch (ResponseStatusException ex) {
+            if (ex.getStatusCode().is4xxClientError()) {
+                // review 17 Nov 2026: a refusal sold nothing; a retry with the same key (the sheet still open) runs again
+                exitsByKey.remove(k, mine);
+            }
             mine.result().completeExceptionally(ex);
+            throw ex;
+        } catch (Exception ex) {
+            mine.result().completeExceptionally(ex);           // the outcome is unknown: this key stays answered
             throw ex;
         }
     }

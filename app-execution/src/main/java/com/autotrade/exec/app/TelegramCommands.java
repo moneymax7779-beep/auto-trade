@@ -600,8 +600,10 @@ class TelegramCommands {
      * says INCOMPLETE, not DONE.
      */
     static boolean incomplete(List<String> lines) {
+        // a short fill reads "N of M sold (CODE reason); K stay open ..." (17 Nov 2026), a stop not re-placed "NOT placed"
         return lines.stream().map(l -> l.toLowerCase(Locale.ROOT)).anyMatch(l -> l.contains("not flattened")
-                || l.contains("has not started") || l.contains("keeps its broker stop") || l.contains("unknown outcome"));
+                || l.contains("has not started") || l.contains("keeps its broker stop") || l.contains("unknown outcome")
+                || l.contains(" sold (") || l.contains("not placed yet"));
     }
 
     /** Runs a confirmed command (the rights checked again) and edits its card with the result. */

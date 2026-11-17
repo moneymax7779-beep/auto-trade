@@ -128,7 +128,9 @@ function TodayFor({ tenant }: { tenant: number }) {
 
       <div id="positions" className="space-y-4">
         {shownBooks.map((id) => <LiveBookPanel key={id} accountId={id} hideEmpty />)}
-        {shownBooks.length === 0 && loaded.length === bookIds.length && (
+        {/* review 17 Nov 2026: a book that failed to load says so, never vanishes */}
+        {books.map((q, i) => q.error ? <ErrorNote key={`err-${bookIds[i]}`} error={q.error} /> : null)}
+        {shownBooks.length === 0 && books.every((q) => q.data != null || q.error != null) && !books.some((q) => q.error) && (
           <Panel title="Positions"><p className="text-sm text-muted">No position open and no trade today.</p></Panel>
         )}
       </div>
