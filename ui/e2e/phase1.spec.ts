@@ -171,3 +171,20 @@ test("Home with the execution worker down after the close: one plain line, no fa
   await expect(page.getByText("Day P&L (closed, after charges)")).toHaveCount(0);
   await page.screenshot({ path: `e2e-out/p5-${test.info().project.name}-home-down.png` });
 });
+
+test("Home after the close shows PAPER-1's last session, kept out of both totals", async ({ page }) => {
+  await mock(page);
+  const json = (b: unknown) => ({ status: 200, contentType: "application/json", body: JSON.stringify(b) });
+  await page.route("**/api/status", (r) => r.fulfill(json({ status: "NO_SESSION", schedule: { mode: "LIVE", nextStart: "2099-01-05T09:00+05:30" } })));
+  await page.route("**/api/sessions", (r) => r.fulfill(json([
+    { id: 1290, account: "PAPER-1", mode: "PAPER_REPLAY", session_date: "2026-11-18", status: "DONE", summary: { net: 999 } },
+    { id: 1273, account: "SIGNAL-1", mode: "PAPER_LIVE", session_date: "2026-11-17", status: "DONE", summary: { net: 5 } },
+    { id: 1272, account: "PAPER-1", mode: "PAPER_LIVE", session_date: "2026-11-17", status: "DONE", summary: { net: 182995 } },
+    { id: 1260, account: "PAPER-1", mode: "PAPER_LIVE", session_date: "2026-11-16", status: "DONE", summary: { net: -5000 } },
+  ])));
+  await page.goto("/home");
+  await expect(page.getByText("strategy session · last session 17 Nov · not in the totals")).toBeVisible();
+  await expect(page.getByText("+₹1,82,995")).toBeVisible();
+  await expect(page.getByText("+₹18,420").first()).toBeVisible();          // the paper total is still PAPER-40's alone
+  await expect(page.getByText("+₹999")).toHaveCount(0);                    // a replay is not a live session
+});

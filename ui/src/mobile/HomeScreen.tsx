@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useRef, useState } from "react";
 import { Link } from "react-router";
-import { brokerLoginUrl, get, postJson, type ExecutionAccount, type KillSwitch, type Status } from "../api";
+import { brokerLoginUrl, get, isPrimaryLive, postJson, type ExecutionAccount, type KillSwitch, type SessionRow,
+  type Status } from "../api";
 import { pushSupported, usePush } from "./NotificationsScreen";
 import { activeAccounts, Big, Card, ErrorLine, Freshness, serviceDown, istTime, ModeBadge, Sheet, signed, tone, useAccess,
   useAccounts } from "./common";
@@ -31,6 +32,17 @@ export function HomeScreen() {
     retry: false });
   const [stopping, setStopping] = useState(false);
   const push = usePush();
+  // PAPER-1's strategy session: today's while it runs (status.dayPnl), else its last finished session's net (review 17 Nov:
+  // after the close it vanished from Home while the desktop showed +1,82,995); never added into either total
+  const running = typeof status.data?.dayPnl === "number";
+  const sessions = useQuery({ queryKey: ["sessions-home"], enabled: status.isFetched && !running, staleTime: 300_000,
+    retry: false, queryFn: () => get<SessionRow[]>("/api/sessions") });
+  const lastSession = (sessions.data ?? []).filter((r) => isPrimaryLive(r) && r.status !== "RUNNING"
+    && typeof r.summary?.net === "number").sort((a, b) => b.session_date.localeCompare(a.session_date) || b.id - a.id)[0];
+  const strategySession = running
+    ? { account: status.data?.account ?? "PAPER-1", net: status.data!.dayPnl!, day: status.data?.date ?? "", last: false }
+    : lastSession ? { account: lastSession.account, net: lastSession.summary.net!, day: lastSession.session_date, last: true }
+    : null;
 
   const shown = activeAccounts(accounts.data);
   const stopped = new Set((switches.data ?? []).filter((k) => k.scope === "ACCOUNT").map((k) => k.accountId));
@@ -123,11 +135,12 @@ export function HomeScreen() {
               <span className={`num shrink-0 ${tone(a.today?.net)}`}>{signed(a.today?.net ?? 0)}</span>
             </li>
           ))}
-          {typeof status.data?.dayPnl === "number" && (
+          {strategySession && (
             <li className="flex items-center justify-between gap-2 py-2">
-              <span className="min-w-0"><span className="flex items-center gap-2"><span className="truncate">{status.data.account ?? "PAPER-1"}</span>
-                <ModeBadge mode="PAPER" /></span><span className="text-xs text-muted">strategy session · not in the total</span></span>
-              <span className={`num ${tone(status.data.dayPnl)}`}>{signed(status.data.dayPnl)}</span>
+              <span className="min-w-0"><span className="flex items-center gap-2"><span className="truncate">{strategySession.account}</span>
+                <ModeBadge mode="PAPER" /></span><span className="text-xs text-muted">strategy session{strategySession.last
+                  ? ` · last session ${shortDay(strategySession.day)}` : ""} · not in the totals</span></span>
+              <span className={`num ${tone(strategySession.net)}`}>{signed(strategySession.net)}</span>
             </li>
           )}
         </ul>
@@ -168,6 +181,12 @@ function Check({ ok, text, note, action }: { ok: boolean | null; text: string; n
       {action}
     </li>
   );
+}
+
+/** "17 Nov" from a yyyy-mm-dd day. */
+function shortDay(day: string): string {
+  const d = new Date(`${day}T00:00:00Z`);
+  return Number.isNaN(d.getTime()) ? day : d.toLocaleDateString("en-IN", { timeZone: "UTC", day: "2-digit", month: "short" });
 }
 
 /** The checklist's heading by the IST clock: before the open, during the day, and for tomorrow after the close. */
