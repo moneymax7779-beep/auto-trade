@@ -63,7 +63,8 @@ class TelegramCommands {
     interface Actions {
         List<String> flatten(long accountId, String actor, String reason) throws Exception;
 
-        List<String> exitPosition(long accountId, long positionId, String actor) throws Exception;
+        /** {@code quantity}: whole lots of it to sell, the rest stays open; null: all of it. */
+        List<String> exitPosition(long accountId, long positionId, String actor, Long quantity) throws Exception;
 
         /** The worker's last finished tick (null: none yet). */
         Instant lastTick();
@@ -99,8 +100,8 @@ class TelegramCommands {
             }
 
             @Override
-            public List<String> exitPosition(long accountId, long positionId, String actor) throws Exception {
-                return service.exitPosition(accountId, positionId, actor, service.day());
+            public List<String> exitPosition(long accountId, long positionId, String actor, Long quantity) throws Exception {
+                return service.exitPosition(accountId, positionId, actor, service.day(), quantity);
             }
 
             @Override
@@ -256,7 +257,7 @@ class TelegramCommands {
                 auto-trade bot
                 /status   accounts, mode, session, kill switches
                 /positions   open positions
-                /exit   sell one open position now (pick it)
+                /exit [ID [LOTS]]   sell one open position now (pick it), or LOTS of it
                 /flatten [ACCOUNT]   kill switch on + sell every open position
                 /kill [ACCOUNT]   stop new entries (no account: your whole workspace). Exits continue; nothing is sold
                 /killall   platform admin: stop every LIVE account
@@ -385,14 +386,29 @@ class TelegramCommands {
 
     private String exit(long updateId, Caller c, String arg) {
         if (!arg.isEmpty()) {
-            Map<String, Object> p = arg.matches("#?\\d{1,18}") ? openPosition(c, Long.parseLong(arg.replace("#", "")))
-                    : null;
+            String[] parts = arg.trim().split("\\s+");
+            Map<String, Object> p = parts.length <= 2 && parts[0].matches("#?\\d{1,18}")
+                    ? openPosition(c, Long.parseLong(parts[0].replace("#", ""))) : null;
             if (p == null) {
-                return reply(c, "No open position " + arg + " you may exit. /exit lists them.", "NO_POSITION");
+                return reply(c, "No open position " + parts[0] + " you may exit. /exit lists them.", "NO_POSITION");
+            }
+            long positionId = ((Number) p.get("id")).longValue();
+            Long quantity = null;
+            if (parts.length == 2) {
+                // 17 Nov 2026: /exit ID LOTS sells whole lots of it; as many lots as are open (or more) is all of it
+                if (!parts[1].matches("\\d{1,4}") || Integer.parseInt(parts[1]) < 1) {
+                    return reply(c, "LOTS is a whole number of lots, 1 or more: /exit " + positionId + " 2", "BAD_LOTS");
+                }
+                long lot = lotSize(positionId), open = ((Number) p.get("quantity_open")).longValue();
+                if (lot <= 0) {
+                    return reply(c, "The lot size of #" + positionId + " is not known: exit all of it, or part on the web.",
+                            "BAD_LOTS");
+                }
+                long asked = Integer.parseInt(parts[1]) * lot;
+                quantity = asked >= open ? null : asked;
             }
             return card(updateId, c, "EXIT", ((Number) p.get("tenant_id")).longValue(),
-                    accounts.byId(((Number) p.get("broker_account_id")).longValue()).orElseThrow(),
-                    ((Number) p.get("id")).longValue());
+                    accounts.byId(((Number) p.get("broker_account_id")).longValue()).orElseThrow(), positionId, quantity);
         }
         List<Map<String, Object>> open = openPositions(c, true);
         if (open.isEmpty()) {
@@ -402,13 +418,20 @@ class TelegramCommands {
         for (Map<String, Object> p : open.subList(0, Math.min(MAX_BUTTONS, open.size()))) {
             rows.add(List.of(new TelegramBot.Button(positionLine(p), "p:e:" + p.get("id"))));
         }
-        bot.send(c.chat(), "Which position? (you confirm on the next card)" + (open.size() > MAX_BUTTONS
+        bot.send(c.chat(), "Which position? (you confirm on the next card; /exit ID LOTS sells part of one)"
+                + (open.size() > MAX_BUTTONS
                 ? "\nThe first " + MAX_BUTTONS + " of " + open.size() + ": /exit ID for the others (/positions)" : ""), rows);
         return "PICK";
     }
 
     /** Shows the confirm card of a write command (rights checked first) and stores it PENDING. */
     private String card(long updateId, Caller c, String verb, Long tenant, BrokerAccount account, Long positionId) {
+        return card(updateId, c, verb, tenant, account, positionId, null);
+    }
+
+    /** {@code quantity}: an EXIT of part of the position (whole lots); null: all of it. */
+    private String card(long updateId, Caller c, String verb, Long tenant, BrokerAccount account, Long positionId,
+                        Long quantity) {
         String refused = refusal(c, verb, tenant, account, positionId);
         if (refused != null) {
             return reply(c, refused, "FORBIDDEN");
@@ -416,11 +439,11 @@ class TelegramCommands {
         String nonce = nonce();
         Long botId = bot.botId();
         long id = jdbc.queryForObject("insert into exec.telegram_command (bot_id, update_id, app_user_id, chat_id, tenant_id, "
-                        + "verb, broker_account_id, position_id, trade_mode, nonce) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                        + "verb, broker_account_id, position_id, trade_mode, nonce, quantity) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                         + "returning id", Long.class, botId == null ? 0 : botId, updateId, c.appUserId(), Long.parseLong(c.chat()), tenant, verb,
                 account == null ? null : account.id(), positionId,
-                account == null ? null : account.tradeMode().name(), nonce);
-        String text = "T" + id + " " + describe(verb, tenant, account, positionId) + "\n\nConfirm within "
+                account == null ? null : account.tradeMode().name(), nonce, quantity);
+        String text = "T" + id + " " + describe(verb, tenant, account, positionId, quantity) + "\n\nConfirm within "
                 + props.confirmSeconds() + " s.";
         Long message = bot.send(c.chat(), text, List.of(
                 List.of(new TelegramBot.Button(confirmLabel(verb, account), "c:" + id + ":" + nonce)),
@@ -463,7 +486,7 @@ class TelegramCommands {
         };
     }
 
-    private String describe(String verb, Long tenant, BrokerAccount a, Long positionId) {
+    private String describe(String verb, Long tenant, BrokerAccount a, Long positionId, Long quantity) {
         return switch (verb) {
             case "KILL_GLOBAL" -> "KILL ALL LIVE ACCOUNTS (GLOBAL_LIVE).\nNew entries stop on every LIVE account. Exits "
                     + "continue; nothing is sold. Release on the web only.";
@@ -489,11 +512,14 @@ class TelegramCommands {
             case "EXIT" -> {
                 Map<String, Object> p = jdbc.queryForMap("select id, symbol, quantity_open, average_entry, strategy_id "
                         + "from exec.position where id = ?", positionId);
+                long lot = lotSize(positionId);
+                String what = quantity == null ? "all of it is sold now at the bid (part: /exit " + positionId + " LOTS)"
+                        : (lot > 0 ? quantity / lot + " lot(s), " : "") + quantity + " of " + p.get("quantity_open")
+                                + " are sold now at the bid; the rest stays open with its broker stop placed again";
                 yield "EXIT " + a.displayName() + " (" + a.tradeMode() + "): #" + p.get("id") + " " + p.get("symbol")
                         + " qty " + p.get("quantity_open") + " avg " + round(p.get("average_entry")) + " (" + p.get("strategy_id")
                         + "), workspace " + tenantName(a.tenantId()) + ".\nNow: " + facts.line(positionId)
-                        + "\nIts broker stop is cancelled and all of it is sold now at the bid (part of it: on the web). "
-                        + "The account keeps trading.";
+                        + "\nIts broker stop is cancelled and " + what + ". The account keeps trading.";
             }
             default -> verb;
         };
@@ -563,7 +589,7 @@ class TelegramCommands {
                         + "confirmed_at = case when ? then now() end, done_at = case when ? then null else now() end "
                         + "where id = ? and nonce = ? and app_user_id = ? and chat_id = ? and status = 'PENDING' "
                         + "and created_at > now() - make_interval(secs => ?) "
-                        + "returning id, verb, tenant_id, broker_account_id, position_id, card_message_id, trade_mode",
+                        + "returning id, verb, tenant_id, broker_account_id, position_id, card_message_id, trade_mode, quantity",
                 confirm ? "CONFIRMED" : "CANCELLED", confirm, confirm, commandId, nonce, c.appUserId(),
                 Long.parseLong(c.chat()), props.confirmSeconds());
         if (rows.isEmpty()) {
@@ -613,6 +639,7 @@ class TelegramCommands {
         Long tenant = cmd.get("tenant_id") == null ? null : ((Number) cmd.get("tenant_id")).longValue();
         Long accountId = cmd.get("broker_account_id") == null ? null : ((Number) cmd.get("broker_account_id")).longValue();
         Long positionId = cmd.get("position_id") == null ? null : ((Number) cmd.get("position_id")).longValue();
+        Long quantity = cmd.get("quantity") == null ? null : ((Number) cmd.get("quantity")).longValue();
         String cardMode = (String) cmd.get("trade_mode");
         String status;
         String result;
@@ -643,7 +670,7 @@ class TelegramCommands {
                         kills.engageAccount(a, "FLATTEN by " + c.actor() + ": " + reason, c.actor());
                         yield actions.flatten(a.id(), c.actor(), reason);
                     }
-                    case "EXIT" -> actions.exitPosition(a.id(), positionId, c.actor());
+                    case "EXIT" -> actions.exitPosition(a.id(), positionId, c.actor(), quantity);
                     default -> throw new IllegalStateException(verb);
                 };
                 status = incomplete(lines) ? "INCOMPLETE" : "DONE";
@@ -738,6 +765,13 @@ class TelegramCommands {
     private static String positionLine(Map<String, Object> p) {
         return "#" + p.get("id") + " " + p.get("display_name") + " " + p.get("trade_mode") + " " + p.get("symbol") + " qty "
                 + p.get("quantity_open") + " @" + round(p.get("average_entry"));
+    }
+
+    /** The position's lot size (its entry's signal), 0 when unknown. */
+    private long lotSize(long positionId) {
+        return jdbc.queryForList("select d.lot_size from exec.position p join exec.trade_intent i on i.id = "
+                + "p.entry_trade_intent_id join exec.trade_batch b on b.id = i.trade_batch_id join exec.signal_decision d "
+                + "on d.id = b.signal_decision_id where p.id = ?", Long.class, positionId).stream().findFirst().orElse(0L);
     }
 
     private int openCount(long accountId) {

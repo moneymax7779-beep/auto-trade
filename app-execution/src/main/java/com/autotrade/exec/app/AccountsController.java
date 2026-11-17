@@ -238,6 +238,19 @@ class AccountsController {
     }
 
     static final java.time.Duration EXIT_KEY_TTL = java.time.Duration.ofMinutes(15);
+
+    /** Runs one position's exit (the worker's; tests give their own to see how the key answers each outcome). */
+    interface ExitRunner {
+        List<String> run(long accountId, long positionId, String actor, LocalDate day, Long quantity) throws Exception;
+    }
+
+    private ExitRunner exitRunner;
+
+    /** Tests: the exit is run by {@code runner} instead of the worker. */
+    AccountsController withExitRunner(ExitRunner runner) {
+        this.exitRunner = runner;
+        return this;
+    }
     private final Map<String, KeyedExit> exitsByKey = new java.util.concurrent.ConcurrentHashMap<>();
 
     /**
@@ -302,7 +315,8 @@ class AccountsController {
 
     private Map<String, Object> exitNow(BrokerAccount a, long positionId, Access.User user, Long quantity) throws Exception {
         try {
-            return Map.of("account", a.displayName(), "result", service.exitPosition(a.id(), positionId, user.subject(),
+            ExitRunner runner = exitRunner != null ? exitRunner : service::exitPosition;
+            return Map.of("account", a.displayName(), "result", runner.run(a.id(), positionId, user.subject(),
                     LocalDate.now(IST), quantity));
         } catch (IllegalArgumentException ex) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, ex.getMessage());
