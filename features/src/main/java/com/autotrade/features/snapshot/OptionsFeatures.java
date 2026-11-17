@@ -84,5 +84,11 @@ public record OptionsFeatures(
          * (first: nearest ATM) with both sides quoted (bid and ask > 0) in the last 60 s; NaN when none. The index feed
          * freezes 15:15-15:28 on the exchange's closing session, the options do not.
          */
-        double syntheticSpot) {
+        double syntheticSpot,
+        /**
+         * A-471/A-472: a dealer-gamma proxy over the ATM ± 10 strikes of this expiry, (Σ call OI × gamma − Σ put OI × gamma) /
+         * (Σ call OI × gamma + Σ put OI × gamma), the naive convention (dealers long calls, short puts; Dim, Eraker and Vilkov's
+         * market-maker gamma); + = call gamma dominates. Recomputed once a minute; NaN without OI and a quote.
+         */
+        double gexShare) {
 }

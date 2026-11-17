@@ -68,6 +68,9 @@ final class WallBreakRider implements Strategy {
     private double entryWall = Double.NaN;
     private boolean wallCrossed;
     private double barAtCross = Double.NaN;
+    private LocalTime beMinute;                       // A-470: the minute-close bid for the below-entry exit
+    private double beLastBid = Double.NaN;
+    private boolean belowEntryExited;                 // A-470: no re-entry today after a below-entry exit
     private int tradesToday;    // the last 3-minute close when the wall was crossed (bar from before it)
     private boolean wonToday;
 
@@ -144,6 +147,17 @@ final class WallBreakRider implements Strategy {
             // only a 3-minute close made after the crossing counts: the bar closed before it is still on the old side
             // (A-327 first run, 6 Nov: without this the exit fired at the crossing itself)
             boolean newBar = wallCrossed && Double.isFinite(st.lastBarClose()) && st.lastBarClose() != barAtCross;
+            double beBid = bid;
+            if (config.belowEntryMinuteClose()) {                 // A-470: the bid at the close of the previous minute
+                LocalTime minute = time.withSecond(0).withNano(0);
+                boolean newMinute = beMinute != null && !minute.equals(beMinute);
+                double closeBid = beLastBid;
+                beMinute = minute;
+                if (bid > 0) {
+                    beLastBid = bid;
+                }
+                beBid = newMinute ? closeBid : Double.NaN;
+            }
             String exit = null;
             if (!time.isBefore(config.flatBy())) {
                 exit = "FLAT_BY";
@@ -156,6 +170,10 @@ final class WallBreakRider implements Strategy {
             } else if (config.timeStopMin() > 0 && position.openedAt() != null && Duration.between(position.openedAt(), now).toMinutes() >= config.timeStopMin()
                     && !(bestBid >= position.averagePremium() * (1 + config.timeStopMinGainPct() / 100.0))) {
                 exit = "NO_PROGRESS_" + config.timeStopMin();
+            } else if (config.belowEntryExitMin() > 0 && position.openedAt() != null && beBid > 0 && beBid < position.averagePremium()
+                    && Duration.between(position.openedAt(), now).toMinutes() >= config.belowEntryExitMin()) {
+                exit = "BELOW_ENTRY_" + config.belowEntryExitMin();      // A-469 (wbr trades the expiring index only)
+                belowEntryExited |= config.belowEntryNoReentry();
             }
             if (exit != null && !exitSent) {
                 orders.add(OrderIntent.exit(side, Stage.RUNNER, exit));
@@ -165,6 +183,8 @@ final class WallBreakRider implements Strategy {
             exitSent = false;
             trailPeak = Double.NaN;
             bestBid = Double.NaN;
+            beMinute = null;
+            beLastBid = Double.NaN;
             heldSide = null;
             lastBid = Double.NaN;
             lastAverage = Double.NaN;
@@ -264,6 +284,10 @@ final class WallBreakRider implements Strategy {
             boolean ok = !(Double.isFinite(wall) && atr > 0 && (wall - s.spot()) * (call ? 1 : -1) / atr < config.minWallDistAtr());
             c.put("wall_room", ok);
             v3 = v3 && ok;
+        }
+        if (config.belowEntryNoReentry()) {
+            c.put("no_reentry_after_below_entry", !belowEntryExited);
+            v3 = v3 && !belowEntryExited;
         }
         if (config.maxTradesPerDay() > 0) {
             boolean ok = tradesToday < config.maxTradesPerDay();

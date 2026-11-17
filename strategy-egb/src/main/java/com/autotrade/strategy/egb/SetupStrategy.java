@@ -39,6 +39,19 @@ abstract class SetupStrategy implements Strategy {
     private final LocalTime lastNewEntry;
     private final LocalTime flatBy;
     private final int timeStopMin;
+    /**
+     * A-469: from this many minutes after the entry, exit while the bid is below the average premium paid (0 = off); with
+     * below_entry_0dte_only (default true) only when the option chain traded expires today (the expiry day's decay).
+     */
+    private final int belowEntryExitMin;
+    private final boolean belowEntry0dteOnly;
+    /** A-470: judge the bid as it stood at the end of each minute, not on every tick (one dip cut a winner in A-469). */
+    private final boolean belowEntryMinuteClose;
+    /** A-470: after a below-entry exit, no new entry in this index for the rest of the session (A-469 3 Nov re-entry). */
+    private final boolean belowEntryNoReentry;
+    private LocalTime beMinute;
+    private double beLastBid = Double.NaN;
+    private boolean belowEntryExited;
     /** A-087: the entry needs the ATM IV percentile at least this, or the ATM IV rising over 3 minutes (NaN = off). */
     private final double ivPercentileMin;
     /** A-088: the entry needs mover breadth at least this far in its direction (+ for calls, - for puts; NaN = off). */
@@ -84,6 +97,10 @@ abstract class SetupStrategy implements Strategy {
         this.lastNewEntry = config.getTime("scope.last_new_entry");
         this.flatBy = config.getTime("scope.flat_by");
         this.timeStopMin = config.getInt("scope.time_stop_min");
+        this.belowEntryExitMin = config.has("exits.below_entry_exit_min") ? config.getInt("exits.below_entry_exit_min") : 0;
+        this.belowEntry0dteOnly = !config.has("exits.below_entry_0dte_only") || config.getBoolean("exits.below_entry_0dte_only");
+        this.belowEntryMinuteClose = config.has("exits.below_entry_minute_close") && config.getBoolean("exits.below_entry_minute_close");
+        this.belowEntryNoReentry = config.has("exits.below_entry_no_reentry") && config.getBoolean("exits.below_entry_no_reentry");
         this.ivPercentileMin = config.has("filters.iv_percentile_min") ? config.getDouble("filters.iv_percentile_min") : Double.NaN;
         this.breadthMinAgree = config.has("filters.breadth_min_agree") ? config.getDouble("filters.breadth_min_agree") : Double.NaN;
         this.profitLockArmPct = config.has("exits.profit_lock_arm_pct") ? config.getDouble("exits.profit_lock_arm_pct") : Double.NaN;
@@ -143,6 +160,10 @@ abstract class SetupStrategy implements Strategy {
         c.put("not_expiring_index", !expiringIndex);
         c.put("window", window);
         Entry entry = evaluate(s, time, window && !expiringIndex && !position.open() && Double.isFinite(spot), c);
+        if (entry != null && belowEntryExited) {
+            c.put("after_below_entry_exit", true);               // A-470: no re-entry today after a below-entry exit
+            entry = null;
+        }
         if (entry != null && !filtersPass(entry, s, c)) {
             entry = null;                                    // A-087 / A-088: the setup's trade, vetoed by its filter
         }
@@ -163,6 +184,25 @@ abstract class SetupStrategy implements Strategy {
             if (exit == null) {
                 exit = customExit(s, position, time);              // a family's own exit (A-122); none by default
             }
+            double beBid = position.bid();
+            if (belowEntryMinuteClose) {                             // A-470: the bid at the close of the previous minute
+                LocalTime minute = time.withSecond(0).withNano(0);
+                boolean newMinute = beMinute != null && !minute.equals(beMinute);
+                double closeBid = beLastBid;
+                beMinute = minute;
+                if (position.bid() > 0) {
+                    beLastBid = position.bid();
+                }
+                beBid = newMinute ? closeBid : Double.NaN;
+            }
+            if (exit == null && belowEntryExitMin > 0 && enteredAt != null && position.averagePremium() > 0
+                    && beBid > 0 && beBid < position.averagePremium()
+                    && Duration.between(enteredAt, now).toMinutes() >= belowEntryExitMin
+                    && (!belowEntry0dteOnly || (s.options() != null && s.options().expiry() != null
+                            && s.options().expiry().equals(s.session().toString())))) {
+                exit = "BELOW_ENTRY_" + belowEntryExitMin;           // A-469
+                belowEntryExited |= belowEntryNoReentry;
+            }
             if (exit == null && !Double.isNaN(profitLockArmPct) && position.averagePremium() > 0 && position.bid() > 0) {
                 double gainPct = (position.bid() / position.averagePremium() - 1) * 100.0;   // A-124 profit lock
                 profitLockArmed |= gainPct >= profitLockArmPct;
@@ -182,6 +222,8 @@ abstract class SetupStrategy implements Strategy {
             exitSent = false;
             profitLockArmed = false;
             trailPeak = Double.NaN;
+            beMinute = null;
+            beLastBid = Double.NaN;
             if (entry != null) {
                 orders.add(new OrderIntent(OrderIntent.Action.ENTER, entry.side(), 1, Stage.CONFIRMED, entry.reason(),
                         premiumStopPct, strikeOffset(entry, s), premiumTargetPct, Double.NaN));

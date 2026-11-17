@@ -54,6 +54,8 @@ import com.autotrade.strategy.OptionSide;
  */
 final class OiBurstCross extends SetupStrategy {
 
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(OiBurstCross.class);
+
     private final boolean nifty;
     private final double share3Min;
     private final double emaK;
@@ -65,6 +67,8 @@ final class OiBurstCross extends SetupStrategy {
     private final boolean counterBurstByTime;
     private final boolean skipFreshBuildup;
     private final double skipGapPct;
+    /** A-471/A-472: no PE (CE) entry when the dealer-gamma proxy gexShare is above this (NaN = off). */
+    private final double gexVetoPe, gexVetoCe;
     private int vetoedBurst = -1000;
     private int heldSide;
     private final int burstMemoryMin;
@@ -111,6 +115,8 @@ final class OiBurstCross extends SetupStrategy {
         counterBurstByTime = c.has("exits.counter_burst_by_time") && c.getBoolean("exits.counter_burst_by_time");
         skipFreshBuildup = c.has("setup.skip_fresh_buildup") && c.getBoolean("setup.skip_fresh_buildup");
         skipGapPct = c.has("setup.skip_gap_continuation_pct") ? c.getDouble("setup.skip_gap_continuation_pct") : Double.NaN;
+        gexVetoPe = c.has("setup.gex_veto_pe") ? c.getDouble("setup.gex_veto_pe") : Double.NaN;
+        gexVetoCe = c.has("setup.gex_veto_ce") ? c.getDouble("setup.gex_veto_ce") : Double.NaN;
         burstMemoryMin = c.has("setup.burst_memory_min") ? c.getInt("setup.burst_memory_min") : 0;
         atrStopMult = c.has("exits.atr_stop_mult") ? c.getDouble("exits.atr_stop_mult") : Double.NaN;
         trailArmAtr = c.has("exits.trail_arm_atr") ? c.getDouble("exits.trail_arm_atr") : Double.NaN;
@@ -224,6 +230,17 @@ final class OiBurstCross extends SetupStrategy {
             boolean gapChase = crossed * (st.dayOpen() - st.prevClose()) / st.prevClose() * 100 >= skipGapPct;
             c.put("gap_veto", gapChase);
             if (gapChase) {
+                vetoedBurst = burstStart;
+                return null;
+            }
+        }
+        double gexLimit = crossed > 0 ? gexVetoCe : gexVetoPe;
+        if (Double.isFinite(gexLimit)) {                     // A-471/A-472: long dealer gamma absorbs the burst
+            double gex = s.options() == null ? Double.NaN : s.options().gexShare();
+            boolean veto = Double.isFinite(gex) && gex > gexLimit;
+            c.put("gex_veto", veto);
+            log.info("A471GEX {} {} side {} gex {}", s.underlying(), time, crossed > 0 ? "CE" : "PE", gex);
+            if (veto) {
                 vetoedBurst = burstStart;
                 return null;
             }

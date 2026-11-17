@@ -40,6 +40,68 @@ class OiBurstCrossTest {
         });
     }
 
+    /** obc-v1 with extra lines under {@code setup:} or {@code exits:} (A-472 obc-v31's keys on the v1 cross). */
+    private static Strategy withLines(Path dir, String section, String lines) throws java.io.IOException {
+        String v1 = java.nio.file.Files.readString(Path.of("..", "config", "strategy", "oi-burst-cross.v1.yaml"));
+        assertThat(v1).contains("\n" + section + ":\n");
+        Path f = dir.resolve(Integer.toHexString(lines.hashCode())).resolve("oi-burst-cross.v1.yaml");
+        java.nio.file.Files.createDirectories(f.getParent());
+        java.nio.file.Files.writeString(f, v1.replace("\n" + section + ":\n", "\n" + section + ":\n" + lines));
+        return Strategies.load(f).create("NIFTY", Snapshots.SESSION);
+    }
+
+    /** As {@link #cross} with the dealer-gamma proxy at the 09:31 burst. */
+    private static java.util.List<com.autotrade.strategy.OrderIntent> crossGex(Strategy s, double gex) {
+        for (int m = 556; m <= 570; m++) {
+            s.decide(snap(22690, 22680, 0.0, 0.0).at(String.format("%02d:%02d", m / 60, m % 60)), PositionView.FLAT);
+        }
+        return s.decide(snap(22720, 22680, 0.07, 0.01).set("options.gexShare", gex).at("09:31"), PositionView.FLAT).orders();
+    }
+
+    /** A-471/A-472: gex_veto_ce 0.25 skips the call burst above 0.25 only; a missing gexShare never vetoes; the PE limit leaves calls alone. */
+    @Test
+    void gexVetoSkipsTheBurstWhenTheGammaShareIsAboveTheSidesLimit(@org.junit.jupiter.api.io.TempDir Path dir) throws java.io.IOException {
+        String both = "  gex_veto_pe: 0.06\n  gex_veto_ce: 0.25\n";
+        assertThat(crossGex(withLines(dir, "setup", both), 0.30)).as("0.30 > 0.25").isEmpty();
+        assertThat(crossGex(withLines(dir, "setup", both), 0.20)).as("0.20 <= 0.25").singleElement()
+                .satisfies(o -> assertThat(o.side()).isEqualTo(OptionSide.CE));
+        assertThat(crossGex(withLines(dir, "setup", both), Double.NaN)).as("no gamma data").singleElement()
+                .satisfies(o -> assertThat(o.side()).isEqualTo(OptionSide.CE));
+        assertThat(crossGex(withLines(dir, "setup", "  gex_veto_pe: 0.06\n"), 0.30)).as("the PE limit only").singleElement()
+                .satisfies(o -> assertThat(o.side()).isEqualTo(OptionSide.CE));
+    }
+
+    /**
+     * A-469/A-470: on the traded index's expiry day the call bought at 09:31 for 100 is sold once a minute closes with the
+     * bid below 100, 15 minutes or more after the entry; a one-tick dip inside a minute does not count, and on a day the
+     * chain does not expire nothing happens.
+     */
+    @Test
+    void belowEntryExitOnTheExpiryDayJudgedOnMinuteCloses(@org.junit.jupiter.api.io.TempDir Path dir) throws java.io.IOException {
+        String lines = "  below_entry_exit_min: 15\n  below_entry_0dte_only: true\n  below_entry_minute_close: true\n"
+                + "  below_entry_no_reentry: true\n";
+        for (String expiry : new String[] {Snapshots.SESSION.toString(), Snapshots.SESSION.plusDays(2).toString()}) {
+            Strategy s = withLines(dir, "exits", lines);
+            assertThat(cross(s, 22680, 0.07, 0.01)).singleElement().satisfies(o -> assertThat(o.side()).isEqualTo(OptionSide.CE));
+            java.util.function.BiFunction<String, Double, java.util.List<com.autotrade.strategy.OrderIntent>> at = (t, bid) ->
+                    s.decide(snap(22720, 22680, 0.0, 0.0).set("options.expiry", expiry).at(t),
+                            new PositionView(true, OptionSide.CE, 1, 100.0, null, bid)).orders();
+            assertThat(at.apply("09:44:00", 90.0)).as("13 minutes in").isEmpty();
+            assertThat(at.apply("09:45:00", 104.0)).as("14 minutes in, 09:44 closed at 90").isEmpty();
+            assertThat(at.apply("09:45:30", 95.0)).as("a dip inside 09:45").isEmpty();
+            assertThat(at.apply("09:45:50", 101.0)).isEmpty();
+            assertThat(at.apply("09:46:00", 101.0)).as("15 minutes in, 09:45 closed at 101").isEmpty();
+            assertThat(at.apply("09:47:00", 99.0)).as("09:46 closed at 101").isEmpty();
+            java.util.List<com.autotrade.strategy.OrderIntent> at49 = at.apply("09:48:00", 99.0);
+            if (expiry.equals(Snapshots.SESSION.toString())) {
+                assertThat(at49).as("09:47 closed at 99 on the expiry day").singleElement()
+                        .satisfies(o -> assertThat(o.reason()).isEqualTo("BELOW_ENTRY_15"));
+            } else {
+                assertThat(at49).as("not the expiry day").isEmpty();
+            }
+        }
+    }
+
     @Test
     void noBurstOrAWrongOneMinuteSignMeansNoTrade() {
         assertThat(cross(load(), 22680, 0.05, 0.01)).as("below the 3-minute threshold").isEmpty();
