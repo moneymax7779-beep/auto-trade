@@ -44,9 +44,12 @@ export function useAccounts() {
     refetchInterval: 10_000 });
 }
 
-/** Accounts worth a phone's screen: enabled ones, and any that still holds a position. */
+/**
+ * Accounts worth a phone's screen: enabled ones, and any that still holds a position; never the signal source
+ * (SIGNAL-1, which the followers copy: not an account anyone trades; review of the first GCP screen, 17 Nov).
+ */
 export function activeAccounts(rows: ExecutionAccount[] | undefined): ExecutionAccount[] {
-  return (rows ?? []).filter((a) => a.enabled || (a.today?.open ?? 0) > 0);
+  return (rows ?? []).filter((a) => a.role !== "SIGNAL_SOURCE" && (a.enabled || (a.today?.open ?? 0) > 0));
 }
 
 export function Card({ children, className = "" }: { children: ReactNode; className?: string }) {

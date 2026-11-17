@@ -6,6 +6,8 @@ export const ACCOUNTS = [
     riskFile: "x", connection: null, lastTurn: null, today: { net: -3150, trades: 2, open: 1, liveNet: -3150, liveTrades: 2, liveOpen: 1 } },
   { id: 5, tenantId: 1, name: "PAPER-40", broker: "PAPER", mode: "PAPER", role: "OWNER", enabled: true, allocatedCapital: 500000,
     riskFile: "x", connection: "ACTIVE", lastTurn: null, today: { net: 18420, trades: 3, open: 0, liveNet: 0, liveTrades: 0, liveOpen: 0 } },
+  { id: 3, tenantId: 1, name: "SIGNAL-1", broker: "PAPER", mode: "PAPER", role: "SIGNAL_SOURCE", enabled: true, allocatedCapital: 1e9,
+    riskFile: "x", connection: "ACTIVE", lastTurn: null, today: { net: 0, trades: 0, open: 0, liveNet: 0, liveTrades: 0, liveOpen: 0 } },
   { id: 9, tenantId: 1, name: "OLD-1", broker: "PAPER", mode: "PAPER", role: "OWNER", enabled: false, allocatedCapital: 0,
     riskFile: "x", connection: null, lastTurn: null, today: { net: 0, trades: 0, open: 0, liveNet: 0, liveTrades: 0, liveOpen: 0 } },
 ];

@@ -34,7 +34,11 @@ export function HomeScreen() {
 
   const shown = activeAccounts(accounts.data);
   const stopped = new Set((switches.data ?? []).filter((k) => k.scope === "ACCOUNT").map((k) => k.accountId));
-  const total = shown.reduce((s, a) => s + (a.today?.net ?? 0), 0);
+  // real money and paper apart (review 17 Nov: one total added ZERODHA-1's LIVE rupees to the paper accounts'); each
+  // account's book says which part of its day was entered LIVE (today.liveNet), the rest is paper
+  const live = shown.reduce((s, a) => s + (a.today?.liveNet ?? 0), 0);
+  const paper = shown.reduce((s, a) => s + (a.today?.net ?? 0) - (a.today?.liveNet ?? 0), 0);
+  const hasLive = shown.some((a) => a.mode === "LIVE" || (a.today?.liveTrades ?? 0) > 0);
   const open = shown.reduce((s, a) => s + (a.today?.open ?? 0), 0);
   const logins = (board.data?.accounts ?? []).filter((r) => r.broker !== "PAPER");
   const spots = indexSpots(status.data);
@@ -50,7 +54,7 @@ export function HomeScreen() {
 
       <Card>
         <div className="mb-1 flex items-center justify-between">
-          <h2 className="text-sm font-semibold">Before 09:15</h2>
+          <h2 className="text-sm font-semibold">{checklistTitle()}</h2>
           {board.data && !board.data.tradingDay && <span className="text-xs text-muted">market closed today</span>}
         </div>
         <ul className="flex flex-col gap-2 text-sm">
@@ -94,10 +98,20 @@ export function HomeScreen() {
       {accounts.data && (
       <Card>
         <div className="flex items-baseline justify-between">
-          <span className="text-xs text-muted">Day P&amp;L (closed, after charges)</span>
+          <span className="text-xs text-muted">Today, closed trades after charges</span>
           <span className="text-xs text-muted">{open} open</span>
         </div>
-        <div className={`num text-3xl font-semibold ${tone(total)}`}>{signed(total)}</div>
+        {hasLive ? (
+          <div className="mt-1 grid grid-cols-2 gap-3">
+            <div><div className="text-xs font-semibold text-down">Real money (LIVE)</div>
+              <div className={`num text-3xl font-semibold ${tone(live)}`}>{signed(live)}</div></div>
+            <div><div className="text-xs font-semibold text-warn">Paper</div>
+              <div className={`num text-2xl font-semibold ${tone(paper)}`}>{signed(paper)}</div></div>
+          </div>
+        ) : (
+          <div><div className="text-xs font-semibold text-warn">Paper</div>
+            <div className={`num text-3xl font-semibold ${tone(paper)}`}>{signed(paper)}</div></div>
+        )}
         <ul className="mt-2 flex flex-col divide-y divide-line text-sm">
           {shown.map((a) => (
             <li key={a.id} className="flex items-center justify-between gap-2 py-2">
@@ -154,6 +168,13 @@ function Check({ ok, text, note, action }: { ok: boolean | null; text: string; n
       {action}
     </li>
   );
+}
+
+/** The checklist's heading by the IST clock: before the open, during the day, and for tomorrow after the close. */
+function checklistTitle(): string {
+  const [h, m] = new Date().toLocaleTimeString("en-GB", { timeZone: "Asia/Kolkata", hour12: false }).split(":").map(Number);
+  const t = h * 60 + m;
+  return t < 9 * 60 + 15 ? "Before 09:15" : t < 15 * 60 + 30 ? "Today" : "For tomorrow";
 }
 
 /** "09:00 tomorrow" / "09:00 Tue 18 Nov" (IST) from the scheduler's next start. */

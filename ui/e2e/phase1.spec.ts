@@ -14,8 +14,13 @@ test("Home: checklist with the Kite login, day P&L, indices, and phone fit", asy
   await expect(page.getByText("ZERODHA-1 not logged in")).toBeVisible();
   await expect(page.getByRole("link", { name: "Log in" })).toHaveAttribute("href", "/api/execution/accounts/1/kite/login");
   await expect(page.getByText("Market data live")).toBeVisible();
-  await expect(page.getByText("+₹15,270")).toBeVisible();                 // −3,150 + 18,420; OLD-1 (disabled, flat) left out
+  // real money and paper apart, never added together; the signal source and a disabled flat account are not listed
+  await expect(page.getByText("Real money (LIVE)")).toBeVisible();
+  await expect(page.getByText("−₹3,150").first()).toBeVisible();
+  await expect(page.getByText("+₹18,420").first()).toBeVisible();
+  await expect(page.getByText("+₹15,270")).toHaveCount(0);
   await expect(page.getByText("OLD-1")).toHaveCount(0);
+  await expect(page.getByText("SIGNAL-1")).toHaveCount(0);
   await expect(page.getByText("25,291.1")).toBeVisible();
   await fits(page);
   await page.screenshot({ path: `e2e-out/p1-${test.info().project.name}-home.png`, fullPage: true });
