@@ -397,6 +397,27 @@ class CanaryIT {
     }
 
     @Test
+    void theBrokersPageFindsTheContractAndThePhraseWithTheRunsAuthority(@TempDir Path dir) {
+        BrokerAccount a = account(BrokerType.KOTAK_NEO, V9, true);
+        CanaryController api = api(clock(10, 0), dir);
+        Map<String, Object> found = api.contract("kc-admin", a.id(), "nifty", 23100, "pe");
+        assertThat(found).containsEntry("instrumentKey", KEY).containsEntry("symbol", "NIFTY 23100 PE")
+                .containsEntry("lotSize", 65).containsEntry("expiry", DAY.plusDays(2).toString())
+                .containsEntry("phrase", phrase(a));
+        assertThat(refusal(() -> api.contract("kc-admin", a.id(), "NIFTY", 23150, "PE")))
+                .isEqualTo("404 no NIFTY 23150 PE expiring from " + DAY + " in the contract master");
+        assertThat(refusal(() -> api.contract("kc-admin", a.id(), "NIFTY", 23100, "XX"))).startsWith("400 side");
+        assertThat(refusal(() -> api.contract("kc-admin", a.id(), "TCS", 23100, "PE"))).startsWith("400 index");
+        assertThat(refusal(() -> api(clock(DAY.plusDays(3), 10, 0), dir).contract("kc-admin", a.id(), "NIFTY", 23100,
+                "PE"))).as("expired").startsWith("404");
+        BrokerAccount m = account(member, memberOwner, BrokerType.KOTAK_NEO, V9, true);
+        assertThat(refusal(() -> api.contract("kc-admin", m.id(), "NIFTY", 23100, "PE")))
+                .as("SUPPORT without the member's grant, as for the run").startsWith("403 a canary sends a real order");
+        assertThat(refusal(() -> api.contract("member-owner", m.id(), "NIFTY", 23100, "PE")))
+                .startsWith("403 only the platform admin");
+    }
+
+    @Test
     void aMembersAccountNeedsTheAuthorityToSwitchItLive(@TempDir Path dir) throws Exception {
         BrokerAccount m = account(member, memberOwner, BrokerType.ZERODHA, V9, true);
         CanaryController.Request ok = new CanaryController.Request(KEY, phrase(m));

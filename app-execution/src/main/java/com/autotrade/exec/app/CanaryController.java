@@ -32,6 +32,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -260,6 +261,46 @@ class CanaryController {
     }
 
     /** A run's steps so far, or its result: from memory, else (an older run, a restart) from its audit rows. */
+    /** The indices a canary's contract may be on (the platform's own: their options are in the contract master). */
+    static final Set<String> INDICES = Set.of("NIFTY", "SENSEX", "BANKNIFTY");
+
+    /**
+     * The canary's contract for the Brokers page (18 Nov 2026, Kotak step 3): the nearest expiry not past today of the
+     * index's option at that strike and side, from the latest contract master of that index, with the phrase to type.
+     * Same authority as the run. Reads only the contract master (no quotes: the canary checks the live quote itself).
+     */
+    @GetMapping("/api/execution/accounts/{id}/canary/contract")
+    Map<String, Object> contract(@RequestHeader(value = Access.HEADER, required = false) String subject,
+                                 @PathVariable long id, @RequestParam String index, @RequestParam double strike,
+                                 @RequestParam String side) {
+        BrokerAccount a = authorised(access.user(subject), id);
+        String underlying = index == null ? "" : index.trim().toUpperCase(java.util.Locale.ROOT);
+        String type = side == null ? "" : side.trim().toUpperCase(java.util.Locale.ROOT);
+        require(INDICES.contains(underlying), HttpStatus.BAD_REQUEST, "index: one of " + new java.util.TreeSet<>(INDICES));
+        require(type.equals("CE") || type.equals("PE"), HttpStatus.BAD_REQUEST, "side: CE or PE");
+        require(strike > 0 && strike < 1_000_000, HttpStatus.BAD_REQUEST, "strike: a positive number");
+        LocalDate today = clock.instant().atZone(IST).toLocalDate();
+        List<Map<String, Object>> rows = jdbc.queryForList("select instrument_key, trading_symbol, expiry, lot_size from "
+                + "ref.instrument where snapshot_id = (select max(snapshot_id) from ref.instrument where underlying = ?) "
+                + "and underlying = ? and type = ? and strike = ? and expiry >= ? order by expiry limit 1", underlying,
+                underlying, type, strike, java.sql.Date.valueOf(today));
+        require(!rows.isEmpty(), HttpStatus.NOT_FOUND, "no " + underlying + " " + fmt(strike) + " " + type
+                + " expiring from " + today + " in the contract master");
+        Map<String, Object> r = rows.getFirst();
+        String key = (String) r.get("instrument_key");
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("instrumentKey", key);
+        out.put("symbol", r.get("trading_symbol"));
+        out.put("expiry", String.valueOf(r.get("expiry")));
+        out.put("lotSize", r.get("lot_size"));
+        out.put("phrase", phrase(a, key));
+        return out;
+    }
+
+    private static String fmt(double strike) {
+        return strike == Math.rint(strike) ? String.valueOf((long) strike) : String.valueOf(strike);
+    }
+
     @GetMapping("/api/execution/accounts/{id}/canary/{runId}")
     Map<String, Object> run(@RequestHeader(value = Access.HEADER, required = false) String subject,
                             @PathVariable long id, @PathVariable String runId) {
