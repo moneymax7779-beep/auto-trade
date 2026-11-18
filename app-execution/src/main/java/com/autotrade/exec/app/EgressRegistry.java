@@ -34,8 +34,9 @@ import org.springframework.stereotype.Component;
  *       old ones): it waits until the account is flat, except at startup, before any route opens;</li>
  *   <li>{@link #checkAll}: every few minutes, on its own thread, asks two independent echo services through each
  *       provisioned account's own address which public IP the call came from. Conclusive: every service answered (all
- *       the reserved IP = pass, any other IP = fail) or the address is not on this host (fail). A service that does not
- *       answer is inconclusive: logged, the last conclusive result stands (review 18 Nov 2026: an echo-service outage
+ *       the reserved IP = pass, any other IP = fail), the address is not on this host (fail), or no service answers
+ *       through the address while one answers over the shared route (fail: the account's route is broken). A service
+ *       that does not answer otherwise is inconclusive: logged, the last conclusive result stands (review 18 Nov 2026: an echo-service outage
  *       must not lock a LIVE account out). Nothing about the account is sent: a plain GET with no headers of ours.</li>
  * </ul>
  * LIVE for a provisioned account needs a conclusive pass within {@link #FRESH} and the owner's typed word that the IP is
@@ -110,8 +111,9 @@ class EgressRegistry {
             return "the check that its calls leave from " + r.publicIp() + " has not passed yet";
         }
         if (!Boolean.TRUE.equals(r.checkOk())) {
-            return "its calls were seen from " + (r.checkIp() == null ? "nowhere (address not on this host)"
-                    : r.checkIp()) + ", not " + r.publicIp();
+            return r.checkIp() == null ? "its last check failed: its calls are not leaving from " + r.publicIp()
+                    + " (the reason is on its broker page)"
+                    : "its calls were seen from " + r.checkIp() + ", not " + r.publicIp();
         }
         if (r.checkAt().isBefore(now.minus(FRESH))) {
             return "no conclusive check in the last " + FRESH.toHours() + " hours";
@@ -214,6 +216,12 @@ class EgressRegistry {
             return record(r, false, other.equals("not an IP") ? null : other, "seen from " + String.join(" / ", seen)
                     + ", reserved " + r.publicIp());
         }
+        if (seen.isEmpty() && sharedRouteAnswers()) {
+            // E0 18 Nov 2026: a broken account route (no source rule in the container, a NAT gateway gone) looks
+            // exactly like an echo outage from the bound address; the shared route answering tells them apart
+            return record(r, false, null, "no echo service answered through " + r.container().getHostAddress()
+                    + " while the shared route did: its route is broken (" + unanswered + ")");
+        }
         if (unanswered != null || seen.isEmpty()) {
             jdbc.update("update acct.broker_egress set last_error = ?, updated_at = now() where broker_account_id = ? "
                     + "and state = 'PROVISIONED'", "inconclusive check: " + unanswered, r.account());
@@ -221,6 +229,20 @@ class EgressRegistry {
             return null;
         }
         return record(r, true, r.publicIp(), null);
+    }
+
+    /** Whether any echo service answers over the default route (no bound address). */
+    private boolean sharedRouteAnswers() {
+        for (URI u : echo) {
+            try {
+                if (IPV4.matcher(ask.apply(null, u).trim()).matches()) {
+                    return true;
+                }
+            } catch (RuntimeException e) {
+                // next service
+            }
+        }
+        return false;
     }
 
     private Boolean record(Row r, boolean ok, String seenIp, String error) {

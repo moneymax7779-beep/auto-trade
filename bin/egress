@@ -194,15 +194,53 @@ def ensure_connected(n, k):
     if r.returncode != 0:
         return False                                    # not running (deploy in progress): next pass
     nets = json.loads(r.stdout)[0]["NetworkSettings"]["Networks"]
-    if n["network"] in nets:
-        if nets[n["network"]].get("IPAddress") == str(ip):
-            return True
+    if n["network"] in nets and nets[n["network"]].get("IPAddress") != str(ip):
         sh(["docker", "network", "disconnect", "-f", n["network"], EXEC_CONTAINER])
-    log(f"connecting {EXEC_CONTAINER} to {n['network']} at {ip}")
-    # the lowest gateway priority: the container's default route stays on its own network, so every other account
-    # (ZERODHA-1 included) keeps leaving from the shared NAT; only calls bound to this address use the account's IP
-    sh(["docker", "network", "connect", "--ip", str(ip), "--gw-priority", "-1000", n["network"], EXEC_CONTAINER])
+        nets = {}
+    if n["network"] not in nets:
+        log(f"connecting {EXEC_CONTAINER} to {n['network']} at {ip}")
+        # the lowest gateway priority: the container's default route stays on its own network, so every other
+        # account (ZERODHA-1 included) keeps leaving from the shared NAT; only calls bound to this address use its IP
+        sh(["docker", "network", "connect", "--ip", str(ip), "--gw-priority", "-1000", n["network"], EXEC_CONTAINER])
+    return ensure_source_rule(k)
+
+
+def source_table(k):
+    return 1000 + k
+
+
+def ensure_source_rule(k):
+    """E0 18 Nov 2026: with the default route on the container's own network, a packet bound to the account's address
+    left through that network and its answer never came back. A source rule inside the execution container's network
+    namespace (set from the host: the container gets no network rights) sends what is bound to the account's address
+    out of the account's network. A restarted container loses it: every pass checks it."""
+    _, gw, ip = slot_docker(k)
+    pid = sh(["docker", "inspect", "-f", "{{.State.Pid}}", EXEC_CONTAINER], check=False).stdout.strip()
+    if not pid or pid == "0":
+        return False
+    ns = ["nsenter", "-t", pid, "-n", "ip"]
+    dev = next((line.split()[1] for line in sh(ns + ["-o", "-4", "addr", "show"]).stdout.splitlines()
+                if f" {ip}/" in line), None)
+    if dev is None:
+        raise RuntimeError(f"{ip} not on any interface of {EXEC_CONTAINER}")
+    t = str(source_table(k))
+    want = f"default via {gw} dev {dev}"
+    if want not in sh(ns + ["route", "show", "table", t], check=False).stdout:     # an empty table is an error
+        sh(ns + ["route", "replace", "default", "via", str(gw), "dev", dev, "table", t])
+        log(f"{EXEC_CONTAINER}: table {t} {want}")
+    if not re.search(rf"from {re.escape(str(ip))} lookup {t}\b", sh(ns + ["rule", "show"]).stdout):
+        sh(ns + ["rule", "add", "from", str(ip), "lookup", t, "priority", t])
+        log(f"{EXEC_CONTAINER}: rule from {ip} lookup {t}")
     return True
+
+
+def drop_source_rule(k):
+    _, _, ip = slot_docker(k)
+    pid = sh(["docker", "inspect", "-f", "{{.State.Pid}}", EXEC_CONTAINER], check=False).stdout.strip()
+    if pid and pid != "0":
+        t = str(source_table(k))
+        sh(["nsenter", "-t", pid, "-n", "ip", "rule", "del", "from", str(ip), "lookup", t], check=False)
+        sh(["nsenter", "-t", pid, "-n", "ip", "route", "flush", "table", t], check=False)
 
 
 def provision(account, k):
@@ -318,6 +356,7 @@ def retire(account, apply):
     print(f"the reserved IP {n['address']} is KEPT (it may still be registered at the broker): release it by hand later")
     if not apply:
         return
+    drop_source_rule(k)
     for kind, c in steps:
         sh([kind, *c], check=False) if kind == "docker" else gcloud(*c, check=False)
     gcloud("compute", "instances", "network-interfaces", "update", VM, f"--zone={ZONE}", "--network-interface=nic0",

@@ -125,8 +125,15 @@ class EgressIT {
         AccountEgress egress = new AccountEgress(Map.of(), AccountEgress.DEFAULT_REQUIRED, a -> true);
         Map<String, String> answers = new HashMap<>(Map.of("a.example", "34.1.2.3", "b.example", "34.1.2.3"));
         List<InetAddress> boundTo = new java.util.ArrayList<>();
+        boolean[] sharedUp = {true};
         EgressRegistry registry = new EgressRegistry(dataSource, egress,
                 List.of(URI.create("https://a.example"), URI.create("https://b.example")), (from, uri) -> {
+                    if (from == null) {                               // the shared route
+                        if (!sharedUp[0]) {
+                            throw new IllegalStateException("no internet");
+                        }
+                        return "34.14.137.170";
+                    }
                     boundTo.add(from);
                     String v = answers.get(uri.getHost());
                     if (v == null) {
@@ -167,9 +174,24 @@ class EgressIT {
         assertThat(egress.liveRefusal(a)).as("an echo outage does not lock a LIVE account out").isNull();
         assertThat((String) api.get("local-owner", kotak).get("error")).contains("inconclusive")
                 .contains("b.example: timeout");
+        answers.clear();                                              // nothing answers through the account's
+        registry.checkAll();                                          // address, the shared route does: broken route
+        assertThat(egress.liveRefusal(a)).as("E0: a broken account route is a fail, not an outage")
+                .contains("not leaving from 34.1.2.3");
+        assertThat((String) api.get("local-owner", kotak).get("error")).contains("its route is broken");
+        answers.put("a.example", "34.1.2.3");
+        answers.put("b.example", "34.1.2.3");
+        registry.checkAll();
+        assertThat(egress.liveRefusal(a)).isNull();
+        answers.clear();
+        sharedUp[0] = false;                                          // nothing answers anywhere: the internet,
+        registry.checkAll();                                          // not the account: inconclusive
+        assertThat(egress.liveRefusal(a)).isNull();
+        sharedUp[0] = true;
+        answers.put("a.example", "34.1.2.3");
         answers.put("b.example", "not an ip at all");                 // a garbage answer is a conclusive fail
         registry.checkAll();
-        assertThat(egress.liveRefusal(a)).contains("not 34.1.2.3");
+        assertThat(egress.liveRefusal(a)).contains("not leaving from 34.1.2.3");
 
         answers.put("b.example", "34.1.2.3");
         registry.checkAll();
