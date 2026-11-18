@@ -42,14 +42,16 @@ Slots: 7 (region quota 8 static IPs, 1 used by `zt-egress-ip`). More needs a quo
    gcloud iam roles create autotradeEgressRead --project=zt-tiger-v2-prod --title="auto-trade egress read" \
      --permissions=compute.addresses.get,compute.addresses.list,compute.routers.get,compute.instances.get,compute.subnetworks.get,compute.regionOperations.get,compute.zoneOperations.get,compute.networks.get
    gcloud iam roles create autotradeEgressWrite --project=zt-tiger-v2-prod --title="auto-trade egress write" \
-     --permissions=compute.addresses.create,compute.addresses.use,compute.routers.update,compute.instances.updateNetworkInterface,compute.subnetworks.use
+     --permissions=compute.addresses.create,compute.addresses.use,compute.routers.update,compute.instances.updateNetworkInterface,compute.subnetworks.use,compute.networks.updatePolicy
    gcloud projects add-iam-policy-binding zt-tiger-v2-prod --member=serviceAccount:zt-autotrade-vm@zt-tiger-v2-prod.iam.gserviceaccount.com \
      --role=projects/zt-tiger-v2-prod/roles/autotradeEgressRead --condition=None
    gcloud projects add-iam-policy-binding zt-tiger-v2-prod --member=serviceAccount:zt-autotrade-vm@zt-tiger-v2-prod.iam.gserviceaccount.com \
      --role=projects/zt-tiger-v2-prod/roles/autotradeEgressWrite \
-     --condition='title=egress-only,expression=resource.name == "projects/zt-tiger-v2-prod/regions/asia-south1/routers/autotrade-egress-router" || resource.name.startsWith("projects/zt-tiger-v2-prod/regions/asia-south1/addresses/egress-acct-") || resource.name == "projects/zt-tiger-v2-prod/zones/asia-south1-a/instances/zt-autotrade" || resource.name == "projects/zt-tiger-v2-prod/regions/asia-south1/subnetworks/zt-subnet"'
+     --condition='title=egress-only,expression=resource.name == "projects/zt-tiger-v2-prod/regions/asia-south1/routers/autotrade-egress-router" || resource.name.startsWith("projects/zt-tiger-v2-prod/regions/asia-south1/addresses/egress-acct-") || resource.name == "projects/zt-tiger-v2-prod/zones/asia-south1-a/instances/zt-autotrade" || resource.name == "projects/zt-tiger-v2-prod/regions/asia-south1/subnetworks/zt-subnet" || resource.name == "projects/zt-tiger-v2-prod/global/networks/zt-net"'
    ```
 
+   `compute.networks.updatePolicy` on zt-net is what `routers nats create` asks for (18 Nov 2026); alone it cannot
+   create firewall rules or routes (each also needs its own create permission, which neither role has).
    Check from the VM host that the conditions hold: `gcloud compute addresses create probe-denied --region=asia-south1`
    must be refused (name outside `egress-acct-`) and `gcloud compute routers describe zt-router --region=asia-south1`
    allowed (read role) while nothing on zt-router can be updated. If a provisioning step is refused for a permission
@@ -77,3 +79,10 @@ can go to a stranger): release it by hand once the owner has removed it at the b
 
 | When (IST) | What | Result |
 |---|---|---|
+| 18 Nov 16:47 | deploy main d1f9bdb (V48, registry, Brokers card), deploy-exec SCHEMA=48 + egress hook | ok; ZERODHA-1 LIVE route unchanged |
+| 18 Nov 16:50 | step 1: outbound IP of zt-v2 and zt-autotrade | both 34.14.137.170 |
+| 18 Nov 16:51 | step 2 D10: zt-nat → zt-subnet PRIMARY_IP_RANGE | done; both VMs still 34.14.137.170 |
+| 18 Nov 16:53 | step 3 setup --apply | autotrade-egress-router, acct-slot-1..7 on zt-subnet |
+| 18 Nov 16:55 | step 4 install | DOCKER-USER drop 169.254.169.254; containers blocked, host not; execution still 34.14.137.170; timer every 30 s |
+| 18 Nov 16:58 | step 5 IAM roles + bindings | conditions hold (probe-denied refused, reads allowed) |
+| 18 Nov 17:00 | E0 via the provisioner's steps, account 21 slot 1 | egress-acct-21 = 34.100.156.146 reserved; NAT create refused: needs compute.networks.updatePolicy on zt-net (added to this runbook; grant pending the owner) |
