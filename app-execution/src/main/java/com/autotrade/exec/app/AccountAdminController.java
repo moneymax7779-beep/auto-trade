@@ -561,6 +561,10 @@ class AccountAdminController {
                 + ")");
         String legacy = jdbc.queryForObject("select legacy_account_label from acct.broker_account where id = ?", String.class, id);
         require(legacy == null, a.displayName() + " is set up on the server (" + legacy + "): it is not removed here");
+        // 18 Nov 2026: a static IP is real GCP infrastructure (and may be registered at the broker): retire it first
+        require(jdbc.queryForObject("select count(*) from acct.broker_egress where broker_account_id = ? and state <> "
+                + "'RETIRED'", Integer.class, id) == 0, a.displayName() + " has a static IP: it has to be retired first "
+                + "(bin/egress retire, docs/runbooks/static-ip.md)");
         Long twin = jdbc.queryForList("select id from acct.broker_account where paper_of_account_id = ?", Long.class, id)
                 .stream().findFirst().orElse(null);
         List<Long> ids = twin == null ? List.of(id) : List.of(id, twin);
@@ -595,7 +599,8 @@ class AccountAdminController {
             jdbc.update("update acct.tenant t set default_broker_account_id = (select min(x.id) from acct.broker_account x "
                     + "where x.tenant_id = t.id and x.broker_type <> 'PAPER' and x.paper_of_account_id is null and x.id <> ?) "
                     + "where t.id = ? and t.default_broker_account_id in (" + in + ")", concat(id, a.tenantId(), args));
-            for (String table : List.of("acct.strategy_subscription", "acct.capital_movement", "exec.account_lease")) {
+            for (String table : List.of("acct.strategy_subscription", "acct.capital_movement", "exec.account_lease",
+                    "acct.broker_egress")) {                      // only a RETIRED row can be left (checked above)
                 jdbc.update("delete from " + table + " where broker_account_id in (" + in + ")", args);
             }
             jdbc.update("update exec.audit_log set detail = detail || jsonb_build_object('removedAccountId', broker_account_id, "

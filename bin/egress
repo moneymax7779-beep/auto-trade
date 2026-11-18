@@ -1,0 +1,390 @@
+#!/usr/bin/env python3
+"""Per-account static IPs on the order VM, provisioned automatically (user 18 Nov 2026: "static ip should be auto
+provisioned to enable LIVE"; plan 2026-11-01 section 3.9, D9/D10).
+
+Runs on the zt-autotrade VM as root, from a systemd timer (`bin/egress install`), never inside a container. The
+application only writes a REQUESTED row to acct.broker_egress (the owner's "Get a static IP"); this script does the
+network work with the VM's GCP identity, which the containers cannot reach (the metadata server is blocked for Docker
+traffic by `ensure_metadata_block`, installed before Docker starts). Its GCP rights are a custom role limited by IAM
+conditions to: addresses named egress-acct-*, the router autotrade-egress-router, the instance zt-autotrade and the
+subnet zt-subnet (docs/runbooks/static-ip.md). It cannot touch zt-router / zt-nat or zt-v2.
+
+Per account A on slot K (slots = the secondary ranges acct-slot-K of zt-subnet, made once by `setup`):
+  reserved IP egress-acct-A  ->  NAT gateway nat-acct-A on autotrade-egress-router serving only acct-slot-K
+  alias IP 10.21.0.(8K+2) on the VM  <-  Docker network egress-acct-A (172.30.0.(8K)/29, SNAT to the alias)
+  the execution container joins it at 172.30.0.(8K+2) with the lowest gateway priority; the worker binds that
+  account's broker calls to it and checks they leave from the reserved IP.
+Idempotent: every step checks first, so a re-run finishes a half-done account.
+
+Commands:
+  run                 one pass: block metadata for containers, provision REQUESTED rows, reconnect PROVISIONED ones
+  list                the rows and the GCP / Docker state
+  setup [--apply]     one-time, by the project owner (not the VM): router, slot ranges, IAM role (dry-run default)
+  install             systemd units for `run` every 30 s and the metadata block before Docker
+  retire --account A [--apply]   by the project owner: remove the account's NAT, alias, network; keeps the IP
+"""
+import argparse
+import fcntl
+import ipaddress
+import json
+import re
+import subprocess
+import sys
+import time
+
+PROJECT = "zt-tiger-v2-prod"
+REGION = "asia-south1"
+ZONE = "asia-south1-a"
+VM = "zt-autotrade"
+NETWORK = "zt-net"
+SUBNET = "zt-subnet"
+ROUTER = "autotrade-egress-router"
+SLOTS = 7                       # region quota 8 static IPs, 1 used by zt-egress-ip (2 Nov 2026)
+POOL = ipaddress.ip_network("10.21.0.0/24")
+DOCKER_POOL = ipaddress.ip_network("172.30.0.0/24")
+EXEC_CONTAINER = "autotrade-execution"
+PG = ["docker", "exec", "-i", "autotrade-postgres", "psql", "-U", "autotrade", "-d", "autotrade", "-v",
+      "ON_ERROR_STOP=1", "-At", "-F", "\t"]
+METADATA = "169.254.169.254"
+MAX_ATTEMPTS = 3
+LOCK = "/run/autotrade-egress.lock"
+
+
+def log(msg):
+    print(time.strftime("%H:%M:%S"), msg, flush=True)
+
+
+def sh(cmd, check=True, capture=True):
+    r = subprocess.run(cmd, text=True, capture_output=capture)
+    if check and r.returncode != 0:
+        raise RuntimeError(f"{' '.join(cmd[:4])}...: {(r.stderr or r.stdout).strip()[:400]}")
+    return r
+
+
+def gcloud(*args, check=True):
+    return sh(["gcloud", *args, f"--project={PROJECT}", "--quiet", "--format=json"], check=check)
+
+
+def gjson(*args):
+    r = gcloud(*args, check=False)
+    if r.returncode != 0:
+        if "was not found" in r.stderr or "notFound" in r.stderr or "not found" in r.stderr.lower():
+            return None
+        raise RuntimeError(f"gcloud {' '.join(args[:3])}: {r.stderr.strip()[:400]}")
+    return json.loads(r.stdout or "null")
+
+
+# ---- slots ----------------------------------------------------------------------------------------------------------
+
+def slot_range(k):
+    return ipaddress.ip_network(f"{POOL.network_address + 8 * k}/29")
+
+
+def slot_alias(k):
+    return slot_range(k).network_address + 2
+
+
+def slot_docker(k):
+    net = ipaddress.ip_network(f"{DOCKER_POOL.network_address + 8 * k}/29")
+    return net, net.network_address + 1, net.network_address + 2
+
+
+def names(account):
+    return {"address": f"egress-acct-{account}", "nat": f"nat-acct-{account}", "network": f"egress-acct-{account}",
+            "bridge": f"eg-{account}"[:15]}
+
+
+# ---- database (values are ints and IP literals only, checked before use) ---------------------------------------------
+
+def sql(query):
+    r = sh(PG + ["-c", query])
+    return [line.split("\t") for line in r.stdout.splitlines() if line]
+
+
+def ip_literal(v):
+    return str(ipaddress.ip_address(v))
+
+
+# ---- the metadata block -----------------------------------------------------------------------------------------------
+
+def ensure_metadata_block():
+    """Containers must not reach the VM's GCP identity: drop forwarded traffic to the metadata server."""
+    sh(["iptables", "-N", "DOCKER-USER"], check=False)
+    rule = ["DOCKER-USER", "-d", METADATA + "/32", "-j", "DROP"]
+    if sh(["iptables", "-C", *rule], check=False).returncode != 0:
+        sh(["iptables", "-I", *rule])
+        log("metadata server blocked for containers")
+
+
+# ---- provisioning ---------------------------------------------------------------------------------------------------
+
+def free_slot(used):
+    sub = gjson("compute", "networks", "subnets", "describe", SUBNET, f"--region={REGION}")
+    have = {r["rangeName"] for r in (sub or {}).get("secondaryIpRanges", [])}
+    for k in range(1, SLOTS + 1):
+        if k not in used and f"acct-slot-{k}" in have:
+            return k
+    raise RuntimeError(f"no free slot: {len(used)} in use of {SLOTS} (ask for a static IP quota increase and run setup)")
+
+
+def ensure_address(n):
+    a = gjson("compute", "addresses", "describe", n["address"], f"--region={REGION}")
+    if a is None:
+        log(f"reserving {n['address']}")
+        gcloud("compute", "addresses", "create", n["address"], f"--region={REGION}", "--network-tier=PREMIUM")
+        a = gjson("compute", "addresses", "describe", n["address"], f"--region={REGION}")
+    return ip_literal(a["address"])
+
+
+def ensure_nat(n, k):
+    r = gjson("compute", "routers", "nats", "describe", n["nat"], f"--router={ROUTER}", f"--region={REGION}")
+    if r is None:
+        log(f"creating NAT {n['nat']} for acct-slot-{k}")
+        gcloud("compute", "routers", "nats", "create", n["nat"], f"--router={ROUTER}", f"--region={REGION}",
+               f"--nat-custom-subnet-ip-ranges={SUBNET}:acct-slot-{k}", f"--nat-external-ip-pool={n['address']}",
+               "--enable-logging", "--log-filter=ERRORS_ONLY")
+
+
+def aliases():
+    vm = gjson("compute", "instances", "describe", VM, f"--zone={ZONE}")
+    return vm["networkInterfaces"][0].get("aliasIpRanges", []), vm["networkInterfaces"][0].get("fingerprint")
+
+
+def ensure_alias(k):
+    current, _ = aliases()
+    want = f"{slot_alias(k)}/32"
+    if any(a.get("subnetworkRangeName") == f"acct-slot-{k}" and a.get("ipCidrRange") == want for a in current):
+        return
+    spec = [f"{a['subnetworkRangeName']}:{a['ipCidrRange']}" if a.get("subnetworkRangeName") else a["ipCidrRange"]
+            for a in current]
+    spec.append(f"acct-slot-{k}:{want}")
+    log(f"adding alias {want} (acct-slot-{k}) to {VM}")
+    gcloud("compute", "instances", "network-interfaces", "update", VM, f"--zone={ZONE}", "--network-interface=nic0",
+           f"--aliases={';'.join(spec)}")
+
+
+def wait_local_route(ip, seconds=90):
+    """The guest agent routes an alias IP locally; until then nothing can leave from it."""
+    for _ in range(seconds // 3):
+        out = sh(["ip", "route", "show", "table", "local"]).stdout
+        if re.search(rf"\blocal {re.escape(str(ip))}\b", out):
+            return
+        time.sleep(3)
+    raise RuntimeError(f"alias {ip} not routed locally after {seconds} s (google-guest-agent)")
+
+
+def ensure_network(n, k):
+    subnet, gw, _ = slot_docker(k)
+    r = sh(["docker", "network", "inspect", n["network"]], check=False)
+    if r.returncode == 0:
+        info = json.loads(r.stdout)[0]
+        if (info.get("Options") or {}).get("com.docker.network.host_ipv4") != str(slot_alias(k)):
+            raise RuntimeError(f"docker network {n['network']} exists with another SNAT address: retire it first")
+        return
+    log(f"creating docker network {n['network']} {subnet} SNAT {slot_alias(k)}")
+    sh(["docker", "network", "create", "--driver", "bridge", f"--subnet={subnet}", f"--gateway={gw}",
+        "-o", f"com.docker.network.bridge.name={n['bridge']}",
+        "-o", f"com.docker.network.host_ipv4={slot_alias(k)}",
+        "--label", f"autotrade.egress.account={n['network'].rsplit('-', 1)[1]}", n["network"]])
+
+
+def ensure_connected(n, k):
+    _, _, ip = slot_docker(k)
+    r = sh(["docker", "inspect", EXEC_CONTAINER], check=False)
+    if r.returncode != 0:
+        return False                                    # not running (deploy in progress): next pass
+    nets = json.loads(r.stdout)[0]["NetworkSettings"]["Networks"]
+    if n["network"] in nets:
+        if nets[n["network"]].get("IPAddress") == str(ip):
+            return True
+        sh(["docker", "network", "disconnect", "-f", n["network"], EXEC_CONTAINER])
+    log(f"connecting {EXEC_CONTAINER} to {n['network']} at {ip}")
+    # the lowest gateway priority: the container's default route stays on its own network, so every other account
+    # (ZERODHA-1 included) keeps leaving from the shared NAT; only calls bound to this address use the account's IP
+    sh(["docker", "network", "connect", "--ip", str(ip), "--gw-priority", "-1000", n["network"], EXEC_CONTAINER])
+    return True
+
+
+def provision(account, k):
+    n = names(account)
+    public = ensure_address(n)
+    ensure_nat(n, k)
+    ensure_alias(k)
+    wait_local_route(slot_alias(k))
+    ensure_network(n, k)
+    ensure_connected(n, k)
+    return public
+
+
+def run():
+    with open(LOCK, "w") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return
+        ensure_metadata_block()
+        rows = sql("select broker_account_id, state, coalesce(slot::text, ''), attempts, "
+                   "coalesce(extract(epoch from now() - updated_at)::int, 0) from acct.broker_egress "
+                   "where state in ('REQUESTED', 'PROVISIONED') order by requested_at")
+        used = {int(r[0]) for r in sql("select slot from acct.broker_egress where slot is not null "
+                                       "and state <> 'RETIRED'")}
+        for account_s, state, slot_s, attempts_s, age_s in rows:
+            account, attempts = int(account_s), int(attempts_s)
+            if state == "PROVISIONED":
+                try:
+                    ensure_network(names(account), int(slot_s))
+                    ensure_connected(names(account), int(slot_s))
+                except RuntimeError as e:
+                    log(f"account {account}: reconnect failed: {e}")
+                continue
+            if attempts > 0 and int(age_s) < 300:
+                continue                                # back off 5 minutes between attempts
+            k = int(slot_s) if slot_s else None
+            try:
+                if k is None:
+                    k = free_slot(used)
+                    sql(f"update acct.broker_egress set slot = {k}, updated_at = now() "
+                        f"where broker_account_id = {account} and state = 'REQUESTED'")
+                    used.add(k)
+                public = provision(account, k)
+                _, _, cip = slot_docker(k)
+                n = names(account)
+                sql(f"update acct.broker_egress set state = 'PROVISIONED', public_ip = '{public}', "
+                    f"address_name = '{n['address']}', range_name = 'acct-slot-{k}', alias_ip = '{slot_alias(k)}', "
+                    f"docker_network = '{n['network']}', container_ip = '{cip}', nat_name = '{n['nat']}', "
+                    f"provisioned_at = now(), last_error = null, "
+                    f"registered_at = case when public_ip = '{public}'::inet then registered_at end, "
+                    f"registered_by = case when public_ip = '{public}'::inet then registered_by end, "
+                    f"updated_at = now() where broker_account_id = {account}")
+                log(f"account {account}: PROVISIONED {public} (slot {k}, container {cip})")
+            except RuntimeError as e:
+                msg = str(e).replace("'", "''")[:900]
+                final = attempts + 1 >= MAX_ATTEMPTS
+                new_state = "'FAILED'" if final else "state"
+                sql(f"update acct.broker_egress set attempts = attempts + 1, last_error = '{msg}', "
+                    f"state = {new_state}, updated_at = now() where broker_account_id = {account}")
+                log(f"account {account}: attempt {attempts + 1} failed: {e}")
+
+
+def list_():
+    for r in sql("select broker_account_id, state, slot, host(public_ip), host(container_ip), attempts, "
+                 "coalesce(last_error, ''), last_check_ok, registered_at from acct.broker_egress order by 1"):
+        print("\t".join(x or "-" for x in r))
+
+
+# ---- one-time setup and retire (run by the project owner from a workstation, dry-run by default) ----------------------
+
+def plan_setup():
+    cmds = []
+    if gjson("compute", "routers", "describe", ROUTER, f"--region={REGION}") is None:
+        cmds.append(["compute", "routers", "create", ROUTER, f"--network={NETWORK}", f"--region={REGION}"])
+    sub = gjson("compute", "networks", "subnets", "describe", SUBNET, f"--region={REGION}")
+    have = {r["rangeName"] for r in sub.get("secondaryIpRanges", [])}
+    add = [f"acct-slot-{k}={slot_range(k)}" for k in range(1, SLOTS + 1) if f"acct-slot-{k}" not in have]
+    if add:
+        cmds.append(["compute", "networks", "subnets", "update", SUBNET, f"--region={REGION}",
+                     f"--add-secondary-ranges={','.join(add)}"])
+    return cmds
+
+
+def setup(apply):
+    for c in plan_setup():
+        print("gcloud", " ".join(c))
+        if apply:
+            gcloud(*c)
+    print("IAM: see docs/runbooks/static-ip.md (role autotradeEgress + conditions); not changed by this command")
+
+
+def retire(account, apply):
+    rows = sql(f"select coalesce(slot::text, '') from acct.broker_egress where broker_account_id = {int(account)}")
+    if not rows or not rows[0][0]:
+        sys.exit(f"account {account} has no slot")
+    k, n = int(rows[0][0]), names(int(account))
+    busy = sql(f"select (a.trade_mode = 'LIVE' or a.live_trading_enabled or exists (select 1 from exec.position p "
+               f"where p.broker_account_id = a.id and p.status <> 'CLOSED')) from acct.broker_account a "
+               f"where a.id = {int(account)}")
+    if busy and busy[0][0] == "t":
+        sys.exit(f"account {account} is LIVE or holds a position: its broker calls would lose their registered IP")
+    steps = [("docker", ["network", "disconnect", "-f", n["network"], EXEC_CONTAINER]),
+             ("docker", ["network", "rm", n["network"]]),
+             ("gcloud", ["compute", "routers", "nats", "delete", n["nat"], f"--router={ROUTER}", f"--region={REGION}"])]
+    for kind, c in steps:
+        print(kind, " ".join(c))
+    current, _ = aliases()
+    keep = [a for a in current if a.get("subnetworkRangeName") != f"acct-slot-{k}"]
+    spec = ";".join(f"{a['subnetworkRangeName']}:{a['ipCidrRange']}" if a.get("subnetworkRangeName")
+                    else a["ipCidrRange"] for a in keep)
+    print(f"gcloud compute instances network-interfaces update {VM} --aliases='{spec}'")
+    print(f"the reserved IP {n['address']} is KEPT (it may still be registered at the broker): release it by hand later")
+    if not apply:
+        return
+    for kind, c in steps:
+        sh([kind, *c], check=False) if kind == "docker" else gcloud(*c, check=False)
+    gcloud("compute", "instances", "network-interfaces", "update", VM, f"--zone={ZONE}", "--network-interface=nic0",
+           f"--aliases={spec}")
+    sql(f"update acct.broker_egress set state = 'RETIRED', slot = null, container_ip = null, registered_at = null, "
+        f"registered_by = null, updated_at = now() where broker_account_id = {int(account)}")
+
+
+UNITS = {
+    "/etc/systemd/system/autotrade-metadata-block.service": """[Unit]
+Description=auto-trade: containers may not reach the GCP metadata server (static-IP provisioner rights)
+Before=docker.service
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'iptables -N DOCKER-USER 2>/dev/null; iptables -C DOCKER-USER -d 169.254.169.254/32 -j DROP 2>/dev/null || iptables -I DOCKER-USER -d 169.254.169.254/32 -j DROP'
+[Install]
+WantedBy=multi-user.target
+""",
+    "/etc/systemd/system/autotrade-egress.service": """[Unit]
+Description=auto-trade: provision per-account static IPs (bin/egress run)
+After=docker.service
+[Service]
+Type=oneshot
+ExecStart=/srv/auto-trade/bin/egress run
+TimeoutStartSec=600
+""",
+    "/etc/systemd/system/autotrade-egress.timer": """[Unit]
+Description=auto-trade: static-IP provisioner every 30 s
+[Timer]
+OnBootSec=30s
+OnUnitInactiveSec=30s
+[Install]
+WantedBy=timers.target
+""",
+}
+
+
+def install():
+    for path, text in UNITS.items():
+        with open(path, "w") as f:
+            f.write(text)
+    sh(["systemctl", "daemon-reload"])
+    sh(["systemctl", "enable", "--now", "autotrade-metadata-block.service"])
+    sh(["systemctl", "enable", "--now", "autotrade-egress.timer"])
+    print("installed: autotrade-metadata-block.service, autotrade-egress.timer")
+
+
+def main():
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("command", choices=["run", "list", "setup", "install", "retire"])
+    p.add_argument("--account", type=int)
+    p.add_argument("--apply", action="store_true")
+    a = p.parse_args()
+    if a.command == "run":
+        run()
+    elif a.command == "list":
+        list_()
+    elif a.command == "setup":
+        setup(a.apply)
+    elif a.command == "install":
+        install()
+    elif a.command == "retire":
+        if not a.account:
+            sys.exit("--account is required")
+        retire(a.account, a.apply)
+
+
+if __name__ == "__main__":
+    main()

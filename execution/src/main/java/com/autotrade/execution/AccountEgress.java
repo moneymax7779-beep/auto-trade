@@ -46,7 +46,17 @@ public final class AccountEgress {
     /** No account has an address; the default brokers need one for LIVE (tests, and a worker without the setting). */
     public static final AccountEgress NONE = new AccountEgress(Map.of(), DEFAULT_REQUIRED, Egress::assigned);
 
-    private final Map<Long, InetAddress> byAccount;
+    /** The configuration's addresses (fixed at startup). */
+    private final Map<Long, InetAddress> configuredAddresses;
+    /**
+     * The addresses in effect (the configuration's plus the provisioned ones, {@link #provisioned}) and the provisioned
+     * accounts not ready for LIVE yet with the reason, swapped together as one snapshot (review 18 Nov 2026: two
+     * separate fields let a reader see a new address without its not-ready reason, and open LIVE for an instant).
+     */
+    private record State(Map<Long, InetAddress> byAccount, Map<Long, String> notReady) {
+    }
+
+    private volatile State state;
     private final Set<BrokerType> required;
     private final Predicate<InetAddress> assigned;
 
@@ -56,7 +66,8 @@ public final class AccountEgress {
      * @param assigned  whether an address is on this host now ({@link Egress#assigned}; a stand-in in tests)
      */
     public AccountEgress(Map<Long, InetAddress> byAccount, Set<BrokerType> required, Predicate<InetAddress> assigned) {
-        this.byAccount = Map.copyOf(byAccount);
+        this.configuredAddresses = Map.copyOf(byAccount);
+        this.state = new State(this.configuredAddresses, Map.of());
         this.required = required.isEmpty() ? Set.of() : Collections.unmodifiableSet(EnumSet.copyOf(required));
         this.assigned = assigned;
     }
@@ -140,9 +151,46 @@ public final class AccountEgress {
         return out;
     }
 
+    /**
+     * The provisioned accounts from acct.broker_egress (18 Nov 2026, automatic static IPs), merged over the
+     * configuration's: an account the configuration names keeps that address, and an address already used by another
+     * account is skipped (one static IP per account). Returns one line per skipped entry, for the log.
+     *
+     * @param addresses the provisioned accounts' container addresses
+     * @param pending   provisioned accounts not ready for LIVE yet, with the reason
+     */
+    public synchronized List<String> provisioned(Map<Long, InetAddress> addresses, Map<Long, String> pending) {
+        Map<Long, InetAddress> merged = new LinkedHashMap<>(configuredAddresses);
+        Map<InetAddress, Long> owners = new java.util.HashMap<>();
+        configuredAddresses.forEach((id, a) -> owners.put(a, id));
+        List<String> skipped = new ArrayList<>();
+        addresses.forEach((id, a) -> {
+            if (configuredAddresses.containsKey(id)) {
+                skipped.add("account " + id + ": provisioned " + a.getHostAddress() + " ignored, the configuration gives "
+                        + configuredAddresses.get(id).getHostAddress());
+                return;
+            }
+            Long other = owners.putIfAbsent(a, id);
+            if (other != null) {
+                skipped.add("account " + id + ": provisioned " + a.getHostAddress() + " ignored, it is account " + other
+                        + "'s");
+                return;
+            }
+            merged.put(id, a);
+        });
+        Map<Long, String> waiting = new LinkedHashMap<>();
+        pending.forEach((id, why) -> {
+            if (merged.containsKey(id) && !configuredAddresses.containsKey(id)) {
+                waiting.put(id, why);
+            }
+        });
+        this.state = new State(Map.copyOf(merged), Map.copyOf(waiting));
+        return skipped;
+    }
+
     /** The account's configured address, assigned or not. */
     public Optional<InetAddress> configured(long accountId) {
-        return Optional.ofNullable(byAccount.get(accountId));
+        return Optional.ofNullable(state.byAccount().get(accountId));
     }
 
     /** Whether a LIVE connection of this broker needs the account's own verified address. */
@@ -159,7 +207,11 @@ public final class AccountEgress {
      * address: the default route, as before; or an address this host has).
      */
     public String refusal(BrokerAccount account) {
-        InetAddress a = byAccount.get(account.id());
+        return refusal(state, account);
+    }
+
+    private String refusal(State st, BrokerAccount account) {
+        InetAddress a = st.byAccount().get(account.id());
         if (a == null || assigned.test(a)) {
             return null;
         }
@@ -172,14 +224,19 @@ public final class AccountEgress {
      * on this host, or its broker needs one ({@link #required}) and it has none.
      */
     public String liveRefusal(BrokerAccount account) {
-        String unassigned = refusal(account);
+        State st = state;                                       // one snapshot for every check below
+        String unassigned = refusal(st, account);
         if (unassigned != null) {
             return unassigned;
         }
-        if (required(account.brokerType()) && !byAccount.containsKey(account.id())) {
+        String waiting = st.notReady().get(account.id());
+        if (waiting != null) {
+            return account.displayName() + "'s static IP is not ready for LIVE: " + waiting;
+        }
+        if (required(account.brokerType()) && !st.byAccount().containsKey(account.id())) {
             return account.brokerType() + " takes orders only from the client's registered static IP, and "
-                    + account.displayName() + " has no egress address on this host "
-                    + "(autotrade.execution.egress.accounts)";
+                    + account.displayName() + " has no static IP yet: "
+                    + "press Get a static IP on its broker page";
         }
         return null;
     }
@@ -190,9 +247,10 @@ public final class AccountEgress {
      * (the account cannot reach its broker as registered; entries are refused, nothing is sent from another address).
      */
     public InetAddress address(BrokerAccount account) {
-        InetAddress a = byAccount.get(account.id());
+        State st = state;
+        InetAddress a = st.byAccount().get(account.id());
         if (a != null && !assigned.test(a)) {
-            throw new BrokerException(BrokerException.Kind.SESSION, refusal(account));
+            throw new BrokerException(BrokerException.Kind.SESSION, refusal(st, account));
         }
         return a;
     }
@@ -200,20 +258,20 @@ public final class AccountEgress {
     /** The startup check: one line per configured account, saying whether its address is on this host. */
     public List<String> check() {
         List<String> lines = new ArrayList<>();
-        byAccount.forEach((id, a) -> lines.add("account " + id + ": egress " + a.getHostAddress()
+        state.byAccount().forEach((id, a) -> lines.add("account " + id + ": egress " + a.getHostAddress()
                 + (assigned.test(a) ? " is on this host" : " is NOT on this host: its routes and logins are refused")));
         return lines;
     }
 
     /** Whether every configured address is on this host. */
     public boolean allAssigned() {
-        return byAccount.values().stream().allMatch(assigned);
+        return state.byAccount().values().stream().allMatch(assigned);
     }
 
     @Override
     public String toString() {
         Map<Long, String> shown = new LinkedHashMap<>();
-        byAccount.forEach((id, a) -> shown.put(id, a.getHostAddress()));
+        state.byAccount().forEach((id, a) -> shown.put(id, a.getHostAddress()));
         return "AccountEgress[accounts=" + shown + ", required=" + required + "]";
     }
 }

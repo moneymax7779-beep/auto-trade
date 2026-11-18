@@ -121,4 +121,34 @@ class AccountEgressTest {
                 com.autotrade.zerodha.KiteConfig.REAL_API, AccountEgress.parse("", "ZERODHA"));
         assertThat(required.live(zerodha1, limits).description()).contains("static IP");
     }
+
+    /** 18 Nov 2026: provisioned static IPs join at runtime, never over the configuration's, and gate LIVE until ready. */
+    @Test
+    void provisionedAddressesJoinAtRuntimeAndGateLiveUntilReady() {
+        AccountEgress e = new AccountEgress(Map.of(15L, Egress.parse("10.20.0.15")), AccountEgress.DEFAULT_REQUIRED,
+                a -> true);
+        BrokerAccount kotak = account(21, BrokerType.KOTAK_NEO, "KOTAK-1");
+        BrokerAccount upstox = account(15, BrokerType.UPSTOX, "UPSTOX-1");
+        BrokerAccount groww = account(22, BrokerType.GROWW, "GROWW-1");
+        assertThat(e.liveRefusal(kotak)).contains("registered static IP").contains("Get a static IP");
+        assertThat(e.address(kotak)).isNull();
+
+        java.util.List<String> skipped = e.provisioned(Map.of(21L, Egress.parse("172.30.0.10"),
+                15L, Egress.parse("172.30.0.18"), 22L, Egress.parse("10.20.0.15")),
+                Map.of(21L, "register 34.1.2.3 at the broker"));
+        assertThat(skipped).as("the configuration wins; one address per account").hasSize(2);
+        assertThat(e.address(kotak).getHostAddress()).isEqualTo("172.30.0.10");
+        assertThat(e.address(upstox).getHostAddress()).isEqualTo("10.20.0.15");
+        assertThat(e.address(groww)).as("its address is account 15's: skipped, default route").isNull();
+        assertThat(e.liveRefusal(kotak)).isEqualTo("KOTAK-1's static IP is not ready for LIVE: register 34.1.2.3 at the "
+                + "broker");
+        assertThat(e.liveRefusal(upstox)).isNull();
+
+        e.provisioned(Map.of(21L, Egress.parse("172.30.0.10")), Map.of());
+        assertThat(e.liveRefusal(kotak)).as("checked and registered").isNull();
+        e.provisioned(Map.of(), Map.of());
+        assertThat(e.address(kotak)).as("retired: back to the default route").isNull();
+        assertThat(e.liveRefusal(kotak)).contains("registered static IP");
+        assertThat(e.address(upstox).getHostAddress()).as("the configuration stays").isEqualTo("10.20.0.15");
+    }
 }
