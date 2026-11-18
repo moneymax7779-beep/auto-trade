@@ -11,11 +11,14 @@ owner: Brokers → Static IP → "Get a static IP"     → acct.broker_egress RE
 VM: autotrade-egress.timer, every 30 s, as root    → bin/egress run                         (no container involved)
       reserve egress-acct-<id>  → NAT nat-acct-<id> on autotrade-egress-router, serving only acct-slot-<k>
       alias 10.21.0.(8k+2) on zt-autotrade nic0     → docker network egress-acct-<id> (172.30.0.(8k)/29, SNAT to alias)
-      connect autotrade-execution at 172.30.0.(8k+2), gateway priority -1000  → PROVISIONED
+      connect autotrade-execution at 172.30.0.(8k+2), gateway priority -1000; in its namespace (nsenter from the
+      host) rule `from 172.30.0.(8k+2) lookup 1000+k`, table default via 172.30.0.(8k+1)  → PROVISIONED
+      (every pass re-checks the connection and the rule: a recreated or restarted container gets them back)
 worker: EgressRegistry every 10 s binds the account's broker calls to 172.30.0.(8k+2); every 5 min asks
-        api.ipify.org and checkip.amazonaws.com through that address: both must answer the reserved IP
+        api.ipify.org and checkip.amazonaws.com through that address: both must answer the reserved IP (no answer
+        through it while the shared route answers = fail: the account's route is broken; no answer anywhere = inconclusive)
 owner: registers the IP at the broker, types it on the Brokers page ("I registered it")
-LIVE gate: PROVISIONED + a passing check younger than 15 min + registered (plus the broker's LIVE adapter, the admin's
+LIVE gate: PROVISIONED + a passing check younger than 12 h + registered (plus the broker's LIVE adapter, the admin's
            eligibility and the rest of the existing gates)
 ```
 
@@ -23,6 +26,9 @@ Everything else (market data, zt-v2, ZERODHA-1, every account without a row) kee
 34.14.137.170: the execution container's default route stays on its own network; only calls bound to an account's
 address use that account's IP. An account whose address is missing (deploy just recreated the container, a broken
 network) is refused, never sent from the shared IP; the timer reconnects within 30 s.
+
+Why the source rule (E0, 18 Nov 2026): the default route stays on the container's own network (gateway priority), so
+without it a call bound to the account's address leaves through that network and its answer never returns.
 
 Slots: 7 (region quota 8 static IPs, 1 used by `zt-egress-ip`). More needs a quota increase (console) and `setup`.
 
@@ -86,3 +92,7 @@ can go to a stranger): release it by hand once the owner has removed it at the b
 | 18 Nov 16:55 | step 4 install | DOCKER-USER drop 169.254.169.254; containers blocked, host not; execution still 34.14.137.170; timer every 30 s |
 | 18 Nov 16:58 | step 5 IAM roles + bindings | conditions hold (probe-denied refused, reads allowed) |
 | 18 Nov 17:00 | E0 via the provisioner's steps, account 21 slot 1 | egress-acct-21 = 34.100.156.146 reserved; NAT create refused: needs compute.networks.updatePolicy on zt-net (added to this runbook; grant pending the owner) |
+| 18 Nov 18:00 | owner added compute.networks.updatePolicy + zt-net to the condition; E0 steps rerun | NAT nat-acct-21, alias 10.21.0.10, docker network egress-acct-21 |
+| 18 Nov 18:02 | throwaway container (default network + egress-acct-21 at -1000) | default route kept, unbound 34.14.137.170, BOUND TIMED OUT (asymmetric route) |
+| 18 Nov 18:05 | same + source rule from 172.30.0.11 lookup 1001 | bound 34.100.156.146 on both services, Kite 200, unbound 34.14.137.170 → bdee022 |
+| 18 Nov 18:09 | new bin/egress connect + rule on a throwaway, restart, drop | rule restored after restart by the next pass, dropped on retire |
