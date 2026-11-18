@@ -207,6 +207,7 @@ function BrokerRow({ b, apps, register, t, open, onManage, onDone, onError }: {
           {loginNote && <span className={`w-full text-xs ${loginNote.ok ? "text-up" : "text-down"}`}>{loginNote.text}</span>}
         </div>
       )}
+      {real && <StaticIp id={b.id} name={b.name} canManage={t.canManage} />}
       {real && b.liveCapable && t.platformAdmin && (
         <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-line pt-2">
           <span className="text-xs text-muted">Admin: {b.liveEligible ? "LIVE-eligible (the member may switch LIVE)" : "one-time check before the member may switch LIVE"}</span>
@@ -362,5 +363,72 @@ function AppsPanel({ tenant, data, onDone, onError }: {
         </div>
       )}
     </Panel>
+  );
+}
+
+type Egress = {
+  state: "NONE" | "REQUESTED" | "PROVISIONED" | "FAILED" | "RETIRED"; publicIp?: string | null; attempts?: number;
+  error?: string | null; checkAt?: string | null; checkOk?: boolean | null; checkIp?: string | null;
+  registeredAt?: string | null; registerAt?: string;
+};
+
+/**
+ * The account's own static IP (18 Nov 2026, provisioned automatically): ask for one, see the IP to register at the
+ * broker and whether calls really leave from it, and tick that it is registered (typing the IP). LIVE needs all three.
+ */
+function StaticIp({ id, name, canManage }: { id: number; name: string; canManage: boolean }) {
+  const client = useQueryClient();
+  const q = useQuery({ queryKey: ["egress", id], queryFn: () => get<Egress>(`/api/execution/accounts/${id}/egress`),
+    refetchInterval: (query) => query.state.data?.state === "REQUESTED" ? 5000 : 30000 });
+  const [typed, setTyped] = useState("");
+  const [note, setNote] = useState<string | null>(null);
+  const act = useMutation({
+    mutationFn: ({ path, body }: { path: string; body: unknown }) => postJson<Egress>(path, body),
+    onSuccess: (r) => { client.setQueryData(["egress", id], r); setTyped(""); setNote(null);
+      client.invalidateQueries({ queryKey: ["ws-today"] }); },
+    onError: (e) => setNote(e instanceof Error ? e.message : String(e)),
+  });
+  const e = q.data;
+  if (!e) return null;
+  const checked = e.checkOk === true;
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-line pt-2 text-xs" data-testid={`static-ip-${id}`}>
+      <span className="font-semibold text-text">Static IP</span>
+      {(e.state === "NONE" || e.state === "RETIRED") && <>
+        <span className="text-muted">none: brokers take LIVE orders only from an IP registered for the account</span>
+        {canManage && <button className={button} disabled={act.isPending}
+          onClick={() => act.mutate({ path: `/api/execution/accounts/${id}/egress`, body: {} })}>Get a static IP</button>}
+      </>}
+      {e.state === "REQUESTED" && <span className="text-muted">
+        being set up{e.attempts ? ` (attempt ${e.attempts + 1}; last: ${e.error})` : ""}: usually a minute or two</span>}
+      {e.state === "FAILED" && <>
+        <span className="text-down">could not be set up: {e.error}</span>
+        {canManage && <button className={button} disabled={act.isPending}
+          onClick={() => act.mutate({ path: `/api/execution/accounts/${id}/egress`, body: {} })}>Try again</button>}
+      </>}
+      {e.state === "PROVISIONED" && <>
+        <code className="rounded bg-panel-2 px-1.5 py-0.5 text-sm text-text">{e.publicIp}</code>
+        <span className={checked ? "text-up" : "text-warn"}>
+          {e.checkAt == null ? "checking that calls leave from it…" : checked ? `calls leave from it (checked ${when(e.checkAt)})`
+            : `check failed: ${e.error ?? `seen from ${e.checkIp}`}`}</span>
+        {e.registeredAt ? <>
+          <span className="text-up">registered at the broker (your word, {when(e.registeredAt)})</span>
+          {canManage && <button className={button} disabled={act.isPending}
+            onClick={() => act.mutate({ path: `/api/execution/accounts/${id}/egress/registered`,
+              body: { registered: false, confirm: null } })}>Not registered</button>}
+        </> : <>
+          <span className="w-full text-muted">Register <b>{e.publicIp}</b> as {name}'s primary static IP at the broker
+            ({e.registerAt}), then type it here. Until then the account stays PAPER.</span>
+          {canManage && <>
+            <input className={`${input} w-36`} placeholder={e.publicIp ?? ""} value={typed} inputMode="decimal"
+              onChange={(ev) => setTyped(ev.target.value.trim())} />
+            <button className={button} disabled={act.isPending || typed !== e.publicIp}
+              onClick={() => act.mutate({ path: `/api/execution/accounts/${id}/egress/registered`,
+                body: { registered: true, confirm: typed } })}>I registered it</button>
+          </>}
+        </>}
+      </>}
+      {note && <span className="w-full text-down">{note}</span>}
+    </div>
   );
 }

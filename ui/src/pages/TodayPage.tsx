@@ -194,7 +194,8 @@ function TodayFor({ tenant }: { tenant: number }) {
           )}
           {s.mode === "LIVE" && <span className="text-sm text-down">LIVE on {s.broker} since {time(s.since)}</span>}
         </div>
-        {s.mode !== "LIVE" && t.canManage && liveBlock && <p className="mt-2 text-xs text-muted">LIVE not possible now: {liveBlock}.</p>}
+        {s.mode !== "LIVE" && t.canManage && liveBlock && <p className="mt-2 text-xs text-muted">LIVE not possible now: {liveBlock}.
+          {/static IP/.test(liveBlock) && <> <Link className="text-accent underline" to="/brokers">Static IP on Brokers</Link></>}</p>}
         {s.mode !== "LIVE" && !t.canManage && <p className="mt-2 text-xs text-muted">Only the workspace's owner switches LIVE.</p>}
         {chosen && chosen.liveStrategies.length > 0 && (
           <p className="mt-2 text-xs text-muted">LIVE trades these strategies only: {chosen.liveStrategies.join(", ")} ({chosen.sizeStepPct > 0

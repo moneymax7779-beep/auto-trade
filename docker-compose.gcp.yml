@@ -48,6 +48,8 @@ services:
       AUTOTRADE_TELEGRAM_ALARM_FILE: ${AUTOTRADE_TELEGRAM_ALARM_FILE:-}
       # READ_LIVE probe on idle accounts (reads only; user 8 Nov 2026): 21 = Ravali Kotak Neo 2 (family-satyatrader)
       AUTOTRADE_READ_LIVE_PROBE_ACCOUNTS: "21"
+      # ...and its redacted answers kept (D2; user 18 Nov 2026, Kotak LIVE step 2: the READ_LIVE sessions' evidence)
+      AUTOTRADE_READ_LIVE_RECORD_ACCOUNTS: "21"
     volumes:
       - ./.local/kite-secrets:/app/secrets:ro
       - ./.local/broker-sessions:/app/broker-sessions
