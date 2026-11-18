@@ -208,6 +208,7 @@ function BrokerRow({ b, apps, register, t, open, onManage, onDone, onError }: {
         </div>
       )}
       {real && <StaticIp id={b.id} name={b.name} canManage={t.canManage} />}
+      {real && t.platformAdmin && <Canary id={b.id} name={b.name} />}
       {real && b.liveCapable && t.platformAdmin && (
         <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-line pt-2">
           <span className="text-xs text-muted">Admin: {b.liveEligible ? "LIVE-eligible (the member may switch LIVE)" : "one-time check before the member may switch LIVE"}</span>
@@ -432,3 +433,106 @@ function StaticIp({ id, name, canManage }: { id: number; name: string; canManage
     </div>
   );
 }
+
+type CanaryContract = { instrumentKey: string; symbol: string; expiry: string; lotSize: number; phrase: string };
+type CanaryStep = { n: number; step: string; ok: boolean; millis: number; status: string | null; rawStatus: string | null;
+  detail: string | null };
+type CanaryRun = { runId: string; status: "RUNNING" | "DONE" | "UNKNOWN"; result?: string; message?: string;
+  connection?: string | null; steps?: CanaryStep[]; bid?: number | null; ask?: number | null; buyPrice?: number | null;
+  modifiedPrice?: number | null; funds?: number | null; leftover?: boolean };
+const errorText = (e: unknown) => e instanceof Error ? e.message : String(e);
+
+/**
+ * The morning canary (18 Nov 2026, Kotak step 3): the platform admin proves an account's real order path with one lot
+ * bought at half the bid (it never fills), read back by its tag, modified and cancelled. Only on the admin's typed
+ * phrase, 09:20-15:00 IST on a trading day; the server checks everything again. Nothing here runs by itself.
+ */
+function Canary({ id, name }: { id: number; name: string }) {
+  const [open, setOpen] = useState(false);
+  const [index, setIndex] = useState("NIFTY");
+  const [strike, setStrike] = useState("");
+  const [side, setSide] = useState<"CE" | "PE">("CE");
+  const [contract, setContract] = useState<CanaryContract | null>(null);
+  const [typed, setTyped] = useState("");
+  const [runId, setRunId] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const find = useMutation({
+    mutationFn: () => get<CanaryContract>(`/api/execution/accounts/${id}/canary/contract?index=${index}`
+      + `&strike=${encodeURIComponent(strike.trim())}&side=${side}`),
+    onSuccess: (c) => { setContract(c); setTyped(""); setNote(null); },
+    onError: (e) => { setContract(null); setNote(errorText(e)); },
+  });
+  const start = useMutation({
+    mutationFn: () => postJson<CanaryRun>(`/api/execution/accounts/${id}/canary`,
+      { instrumentKey: contract?.instrumentKey, confirm: typed }),
+    onSuccess: (r) => { setRunId(r.runId); setTyped(""); setNote(null); },
+    onError: (e) => setNote(errorText(e)),
+  });
+  const run = useQuery({
+    queryKey: ["canary", id, runId], enabled: runId != null,
+    queryFn: () => get<CanaryRun>(`/api/execution/accounts/${id}/canary/${runId}`),
+    refetchInterval: (q) => q.state.data == null || q.state.data.status === "RUNNING" ? 1500 : false,
+  });
+  const r = run.data;
+  const running = runId != null && (r == null || r.status === "RUNNING");
+  if (!open) {
+    return (
+      <div className="mt-2 flex flex-wrap items-center gap-2 border-t border-line pt-2 text-xs">
+        <span className="text-muted">Admin: canary — one real order that never fills, to prove {name}'s order path</span>
+        <button className={button} onClick={() => setOpen(true)}>Open</button>
+      </div>
+    );
+  }
+  return (
+    <div className="mt-2 flex flex-col gap-2 border-t border-line pt-2 text-xs" data-testid={`canary-${id}`}>
+      <span className="text-muted"><b className="text-text">Canary</b> (admin): buys one lot at half the bid on {name}'s
+        real broker, reads it back by its tag, modifies it, cancels it. It never fills; new entries on the account are held
+        while it runs. Trading days 09:20–15:00 IST, after today's broker login.</span>
+      <div className="flex flex-wrap items-center gap-2">
+        <select className={input} value={index} disabled={running} onChange={(e) => { setIndex(e.target.value); setContract(null); }}>
+          {["NIFTY", "SENSEX", "BANKNIFTY"].map((x) => <option key={x}>{x}</option>)}
+        </select>
+        <input className={`${input} w-24`} placeholder="strike" inputMode="numeric" value={strike} disabled={running}
+          onChange={(e) => { setStrike(e.target.value.replace(/[^0-9.]/g, "")); setContract(null); }} />
+        <select className={input} value={side} disabled={running}
+          onChange={(e) => { setSide(e.target.value as "CE" | "PE"); setContract(null); }}>
+          <option>CE</option><option>PE</option>
+        </select>
+        <button className={button} disabled={running || find.isPending || !strike} onClick={() => find.mutate()}>Find</button>
+        <span className="text-muted">a liquid near-the-money option: its bid must be well above 0.05</span>
+      </div>
+      {contract && !running && (
+        <div className="flex flex-wrap items-center gap-2">
+          <span>{contract.symbol} · lot {contract.lotSize} · <code>{contract.instrumentKey}</code></span>
+          <input className={`${input} min-w-[22rem] flex-1`} placeholder={contract.phrase} value={typed}
+            onChange={(e) => setTyped(e.target.value)} />
+          <button className={primary} disabled={start.isPending || typed !== contract.phrase}
+            onClick={() => start.mutate()}>Run the canary</button>
+          <span className="w-full text-muted">type <code>{contract.phrase}</code> exactly: it sends a real order</span>
+        </div>
+      )}
+      {runId && (
+        <div className="rounded border border-line p-2">
+          <div className="mb-1 flex flex-wrap gap-2">
+            <b className={r?.result === "PASS" ? "text-up" : r?.status === "DONE" || r?.status === "UNKNOWN" ? "text-down"
+              : "text-text"}>{r == null || r.status === "RUNNING" ? "running…" : r.result ?? r.status}</b>
+            {r?.connection && <span className="text-muted">{r.connection}</span>}
+          </div>
+          {r?.message && <p className="mb-1">{r.message}</p>}
+          <ol className="list-decimal pl-5">
+            {(r?.steps ?? []).map((st) => (
+              <li key={`${st.n}-${st.step}`} className={st.ok ? "" : "text-down"}>
+                {st.step} {st.ok ? "ok" : "FAILED"} ({st.millis} ms){st.rawStatus ? ` · broker: ${st.rawStatus}` : ""}
+                {st.detail ? ` · ${st.detail}` : ""}
+              </li>
+            ))}
+          </ol>
+          {r?.status !== "RUNNING" && r != null && <button className={`${button} mt-1`}
+            onClick={() => { setRunId(null); setContract(null); }}>Done</button>}
+        </div>
+      )}
+      {note && <span className="text-down">{note}</span>}
+    </div>
+  );
+}
+
