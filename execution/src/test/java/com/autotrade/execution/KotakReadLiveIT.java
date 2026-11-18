@@ -575,6 +575,19 @@ class KotakReadLiveIT {
                     + "'READ_LIVE_PROBE'", Integer.class, unlisted)).as("an account not on the list is not read").isZero();
             loop.tick(DAY, 20_000);
             assertThat(kotak.requests("scrip")).as("one connection kept across turns").isEqualTo(1);
+            // its static IP comes up while the worker runs (18 Nov 2026, GCP: the probe kept the client it built from the
+            // shared route): the same address keeps the connection, a new one reopens it
+            AccountEgress egress = new AccountEgress(Map.of(), AccountEgress.DEFAULT_REQUIRED, a -> true);
+            loop.egress(egress);
+            loop.tick(DAY, 20_000);
+            Thread.sleep(1500);
+            assertThat(probes(account, 1)).as("no address yet: nothing changed, no new probe").hasSize(1);
+            egress.provisioned(Map.of(listed, com.autotrade.broker.Egress.parse("172.30.0.10")), Map.of());
+            loop.tick(DAY, 20_000);
+            assertThat(probes(account, 2)).as("its new address rebuilt the probe, which read at once").hasSize(2);
+            loop.tick(DAY, 20_000);
+            Thread.sleep(1500);
+            assertThat(probes(account, 2)).as("and keeps it while the address stays").hasSize(2);
             // its session ends: the probe closes and waits for the next login
             jdbc.update("update acct.broker_session set status = 'EXPIRED' where broker_account_id = ?", listed);
             loop.tick(DAY, 20_000);

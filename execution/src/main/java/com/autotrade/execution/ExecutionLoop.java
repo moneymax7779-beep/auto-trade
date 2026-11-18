@@ -83,6 +83,8 @@ public final class ExecutionLoop implements AutoCloseable {
     private final BrokerRules brokerRules;
     private final QuoteSource quotes;
     private final BrokerConnections connections;
+    /** The account's own address as text ("-" for none): part of its route's signature ({@link #egress}). */
+    private volatile java.util.function.LongFunction<String> egressOf = id -> "-";
     /** One per broker: each charges with its broker's costs (an account's state lives in its broker's reconciler). */
     private final Map<com.autotrade.account.BrokerType, BrokerReconciler> reconcilers = new ConcurrentHashMap<>();
     private final TradingDay tradingDay;
@@ -181,6 +183,18 @@ public final class ExecutionLoop implements AutoCloseable {
 
     public ExecutionLoop probeOnly(java.util.Set<Long> accountIds) {
         this.probeOnly = java.util.Set.copyOf(accountIds);
+        return this;
+    }
+
+    /**
+     * The accounts' own static IPs (18 Nov 2026): an account whose address comes up, changes or goes away gets a fresh
+     * route and READ_LIVE probe, like a changed mode or risk file. A broker client built before the address existed kept
+     * sending from the shared route (seen on GCP: account 21's Kotak probe after its IP was provisioned). The registry
+     * never moves an address under a LIVE or busy account, so this never rebuilds a route that holds anything.
+     */
+    public ExecutionLoop egress(AccountEgress egress) {
+        java.util.Objects.requireNonNull(egress);
+        this.egressOf = id -> egress.configured(id).map(java.net.InetAddress::getHostAddress).orElse("-");
         return this;
     }
 
@@ -351,8 +365,9 @@ public final class ExecutionLoop implements AutoCloseable {
 
     private void turn(BrokerAccount account, List<Long> groupIds, LocalDate day) {
         try {
-            // an account whose mode, broker or risk file changed gets a fresh risk, route and simulator
-            String signature = account.tradeMode() + "/" + account.brokerType() + "/" + account.riskFile();
+            // an account whose mode, broker, risk file or own address changed gets a fresh risk, route and simulator
+            String signature = account.tradeMode() + "/" + account.brokerType() + "/" + account.riskFile() + "/"
+                    + egressOf.apply(account.id());
             String before = signatures.put(account.id(), signature);
             if (before != null && !before.equals(signature)) {
                 risks.remove(account.id());

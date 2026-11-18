@@ -261,7 +261,7 @@ class ExecutionService implements DisposableBean {
         rules.describe().forEach(line -> log.info("broker rules {}: {}", rules.version(), line));
         loop = new ExecutionLoop(dataSource, properties.tenant(), properties.copyGroup(), properties.workerId(), rules,
                 new StoredQuotes(dataSource, null), properties.brokerFunds(), brokerAdapters).liveBrokers(liveBrokers)
-                .probeOnly(probeAccounts());
+                .probeOnly(probeAccounts()).egress(egress);
         if (!probeAccounts().isEmpty()) {
             log.warn("READ_LIVE probe (reads only, no order path) for idle accounts {}", probeAccounts());
         }
