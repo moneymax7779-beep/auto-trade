@@ -174,6 +174,9 @@ class BrokerLoginIT {
     }
 
     private static long account(String who, long tenant, String name, String brokerType, String clientId) {
+        // one enabled account per broker client (V50): an earlier test's account on this client is history now
+        jdbc.update("update acct.broker_account set enabled = false where upper(external_broker_user_id) = upper(?) "
+                + "and broker_type = ?", clientId, brokerType);
         return ((Number) admin.create(who, new AccountAdminController.NewAccount(name, brokerType, null, clientId, null,
                 200_000.0, "FIXED", null, null, List.of("ma-cross"), true, tenant)).get("id")).longValue();
     }

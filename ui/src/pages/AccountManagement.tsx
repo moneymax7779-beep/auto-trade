@@ -5,6 +5,8 @@ import {
   type GlobalLiveStrategies, type LiveStrategyChoice, type Status,
 } from "../api";
 import { ErrorNote, Loading, Panel, Table } from "../components/ui";
+import { useNavigate } from "react-router";
+import { useWorkspace } from "../workspace";
 
 // Account management (user, 24 Oct 2026): add a follower account and change its capital, loss limit, mode and
 // strategies; its Kite login, today's positions and its daily P&L. Every change goes through the execution workers'
@@ -65,11 +67,15 @@ const amount = (s: string) => {
   return s.trim() === "" || !Number.isFinite(n) ? null : n;
 };
 
-export function AddAccountPanel({ tenants, onDone }: {
-  /** Tenants the caller manages (an admin also manages family members'): whose account this is. */
+export function AddAccountPanel({ tenants, members = [], onDone }: {
+  /** The caller's own workspaces it manages (not a member's daily-switch one): an account is created here. */
   tenants: ExecMe["tenants"];
+  /** Members' daily-switch workspaces the caller sees: their broker is added on their Brokers page, not here. */
+  members?: ExecMe["tenants"];
   onDone: (text: string, ok: boolean) => void;
 }) {
+  const navigate = useNavigate();
+  const { current, select } = useWorkspace();
   const client = useQueryClient();
   const profiles = useQuery({ queryKey: ["exec-profiles"],
     queryFn: () => get<CredentialProfile[]>("/api/execution/credential-profiles") });
@@ -83,7 +89,11 @@ export function AddAccountPanel({ tenants, onDone }: {
   const [loss, setLoss] = useState("");
   const [strategies, setStrategies] = useState<string[]>([]);
   const [enabled, setEnabled] = useState(true);
-  const [tenantId, setTenantId] = useState<number | "">(tenants.length === 1 ? tenants[0].id : "");
+  // account-management review 19 Nov 2026: an account meant for a member went into the admin's workspace while the
+  // header showed the member's; the header's workspace is the default, and a member's opens their Brokers page
+  const [tenantId, setTenantId] = useState<number | "">(
+    current && members.some((m) => m.id === current.id) ? current.id : tenants.length === 1 ? tenants[0].id : "");
+  const member = members.find((m) => m.id === tenantId);
   const zerodhaProfiles = (profiles.data ?? []).filter((p) => p.broker_type === "ZERODHA" && p.status === "ACTIVE"
     && (tenantId === "" || p.tenant_id === tenantId));
   useEffect(() => {
@@ -115,18 +125,20 @@ export function AddAccountPanel({ tenants, onDone }: {
       {!open ? (
         <p className="text-sm text-muted">A follower account takes the chosen strategies' signals from the live PAPER set and
           trades them with its own allocation. New broker accounts start in DRY_RUN (orders go to a local simulator); LIVE is a
-          separate, confirmed step on the account (Manage). Accounts added here are yours (your own workspace); a family member's
-          broker goes in their workspace: Family page, Brokers on their card (or they add it themselves).</p>
+          separate, confirmed step on the account (Manage). You choose whose account it is first: one of your own
+          workspaces, or a family member's, which opens their Brokers page (their broker belongs in their workspace).</p>
       ) : (
         <div className="space-y-3">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            {tenants.length > 1 && <Field label="Whose account" hint="family members trade their own money">
+            <Field label="Whose account" hint="family members trade their own money">
               <select className={input} value={tenantId}
                 onChange={(e) => setTenantId(e.target.value === "" ? "" : Number(e.target.value))}>
-                <option value="">choose…</option>
-                {tenants.map((t) => <option key={t.id} value={t.id}>{t.name}</option>)}
+                {tenants.length !== 1 && <option value="">choose…</option>}
+                {tenants.map((t) => <option key={t.id} value={t.id}>{t.name} (yours)</option>)}
+                {members.map((t) => <option key={t.id} value={t.id}>{t.name} (member: their Brokers page)</option>)}
               </select>
-            </Field>}
+            </Field>
+            {!member && <>
             <Field label="Account name"><input className={input} value={name} placeholder="e.g. ZERODHA-2"
               onChange={(e) => setName(e.target.value)} /></Field>
             <Field label="Broker">
@@ -164,7 +176,17 @@ export function AddAccountPanel({ tenants, onDone }: {
                 <input type="checkbox" checked={enabled} onChange={(e) => setEnabled(e.target.checked)} /> follow signals
               </label>
             </Field>
+            </>}
           </div>
+          {member ? (
+            <div className="rounded border border-accent/40 bg-accent/5 p-3 text-sm">
+              <p><b>{member.name}</b> is a family member's workspace: their broker is added on their Brokers page, which also
+                makes its paper twin and its daily PAPER/LIVE switch (an account made here would be yours, not theirs).
+                {!member.manages && " You are SUPPORT there: they add it themselves, or grant you access on their Settings page first."}</p>
+              <button className={`${primary} mt-2`} onClick={() => { select(member.id); navigate("/brokers"); }}>
+                Open {member.name}'s Brokers page</button>
+            </div>
+          ) : <>
           <Field label="Strategies"><StrategyPicker value={strategies} onChange={setStrategies} /></Field>
           <div className="flex items-center gap-2">
             <button className={primary} disabled={!ready || create.isPending} onClick={() => create.mutate()}>
@@ -172,6 +194,7 @@ export function AddAccountPanel({ tenants, onDone }: {
             {lossValue != null && alloc != null && lossValue > alloc &&
               <span className="text-xs text-down">the loss limit cannot exceed the allocation</span>}
           </div>
+          </>}
         </div>
       )}
     </Panel>
@@ -348,6 +371,7 @@ export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDo
         )}
 
         {kite && canManage && !dailySwitch && <LiveSwitch account={a} onDone={onDone} />}
+        {a.broker === "PAPER" && canManage && <MirrorControl account={a} onDone={onDone} />}
         {a.broker !== "PAPER" && <LiveStrategiesPicker accountId={a.id} onDone={onDone} />}
 
         <div>
@@ -494,6 +518,47 @@ function LiveStrategiesPicker({ accountId, onDone }: { accountId: number; onDone
         </div>
       ) : (
         <p className="mt-2 text-xs text-muted">Trades LIVE: {c.effective.join(", ") || "none"}.</p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * A PAPER account's mirror (V49; account-management review 19 Nov 2026: set by SQL until now). Platform admin only: the
+ * account then shows an engine account's trades (e.g. PAPER-1) and takes none of its own. The server refuses it while the
+ * account holds positions, working orders or pending entries, and for a paper twin.
+ */
+function MirrorControl({ account, onDone }: { account: AccountDetails; onDone: (text: string, ok: boolean) => void }) {
+  const client = useQueryClient();
+  const me = useQuery({ queryKey: ["exec-me"], queryFn: () => get<ExecMe>("/api/execution/me"), staleTime: 30_000 });
+  const [to, setTo] = useState(account.mirrorOf ?? "PAPER-1");
+  const save = useMutation({
+    mutationFn: (mirrorOf: string) => postJson<{ mirrorOf: string }>(`/api/execution/accounts/${account.id}/mirror`, { mirrorOf }),
+    onSuccess: (r) => {
+      onDone(r.mirrorOf ? `${account.name} now mirrors ${r.mirrorOf}` : `${account.name} no longer mirrors`, true);
+      ["exec-details", "exec-accounts", "exec-live-book"].forEach((k) => client.invalidateQueries({ queryKey: [k] }));
+    },
+    onError: (e) => onDone(e instanceof Error ? e.message : String(e), false),
+  });
+  if (!me.data?.admin) return null;
+  return (
+    <div className="rounded border border-line p-3 text-sm">
+      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Mirror</div>
+      {account.mirrorOf ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <span>Shows <b>{account.mirrorOf}</b>'s trades; takes none of its own.</span>
+          <button className={button} disabled={save.isPending} onClick={() => window.confirm(`Stop mirroring ${account.mirrorOf}? `
+            + `${account.name} then shows its own trades again and takes new entries by its own settings and strategies.`)
+            && save.mutate("")}>Stop mirroring</button>
+        </div>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-muted">Show an engine account's trades instead of its own:</span>
+          <input className={`${input} w-28`} value={to} onChange={(e) => setTo(e.target.value)} />
+          <button className={button} disabled={save.isPending || to.trim() === ""} onClick={() => window.confirm(
+            `${account.name} will show ${to.trim()}'s trades and take none of its own (its allocation, loss limit and `
+            + "strategies are then not used). Continue?") && save.mutate(to.trim())}>Mirror</button>
+        </div>
       )}
     </div>
   );

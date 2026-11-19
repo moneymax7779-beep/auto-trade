@@ -446,6 +446,8 @@ class MultiBrokerLiveIT {
                 BrokerAdapter.Live live = adapter.live(account, ONE_LOT);
                 assertThat(live.isRefused()).as(user).isTrue();
                 assertThat(live.description()).contains("never traded LIVE here");
+                // one enabled account per broker client (V50): the next case pins the same client
+                jdbc.update("update acct.broker_account set enabled = false where id = ?", account.id());
             }
             BrokerAccount unpinned = liveAccount(BrokerType.UPSTOX, null);
             assertThat(new UpstoxDryRunAdapter(dataSource, 1e9, BrokerSessions.NONE, UpstoxConfig.at(upstox.baseUri()),

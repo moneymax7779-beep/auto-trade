@@ -315,6 +315,8 @@ export function AccountsPage() {
   const [flattenFor, setFlattenFor] = useState<number | null>(null);
   const [openAccount, setOpenAccount] = useState<number | null>(null);
   const [folded, fold] = useStoredSet("accounts-folded-workspaces");
+  // review 19 Nov 2026: disabled accounts (e.g. test accounts) hidden unless asked for; one holding a position still shows
+  const [showDisabled, setShowDisabled] = useState(false);
   const navigate = useNavigate();
   const { select: selectWorkspace } = useWorkspace();
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
@@ -419,7 +421,11 @@ export function AccountsPage() {
       <Panel title={readOnly ? "Your accounts" : "Follower accounts"} collapsible="accounts-followers" right={readOnly
         // the worker's health stays visible to a viewer (it was on the "Your access" panel this one replaces)
         ? <span className="flex gap-1.5">{s?.stale && <Badge text="STALE" tone="down" />}<Badge text="READ-ONLY" tone="muted" /></span>
-        : <span className="text-xs text-muted">{rows.length} account{rows.length === 1 ? "" : "s"}</span>}>
+        : <span className="flex items-center gap-3 text-xs text-muted">
+            {rows.some((a) => !a.enabled) && <label className="flex items-center gap-1">
+              <input type="checkbox" checked={showDisabled} onChange={(e) => setShowDisabled(e.target.checked)} />
+              show disabled ({rows.filter((a) => !a.enabled).length})</label>}
+            <span>{rows.length} account{rows.length === 1 ? "" : "s"}</span></span>}>
         {readOnly && me.data && (
           <div className="mb-3 space-y-0.5 text-xs text-muted">
             {me.data.tenants.map((t) => (
@@ -439,7 +445,8 @@ export function AccountsPage() {
                 accounts={rows.filter((r) => r.tenantId === o.a.tenantId)} open={!folded.has(String(o.a.tenantId))}
                 onToggle={() => fold(String(o.a.tenantId))} />
             : null}
-          hidden={(o) => several && folded.has(String(o.a.tenantId)) && openAccount !== o.a.id}
+          hidden={(o) => openAccount !== o.a.id && ((several && folded.has(String(o.a.tenantId)))
+            || (!showDisabled && !o.a.enabled && !((o.a.today?.open ?? 0) > 0)))}
           columns={([
           { key: "n", label: "Account", render: ({ a, twin }) => (
             <div className={`whitespace-nowrap ${twin ? "pl-4" : ""}`}>
@@ -550,7 +557,8 @@ export function AccountsPage() {
           onDone={(text, ok) => setMessage({ ok, text })} />
       )}
 
-      {managed.length > 0 && <AddAccountPanel tenants={managed} onDone={(text, ok) => setMessage({ ok, text })} />}
+      {managed.length > 0 && <AddAccountPanel tenants={managed} members={legacy ? []
+        : [...tenants.values()].filter((t) => t.control === "DAILY_SWITCH")} onDone={(text, ok) => setMessage({ ok, text })} />}
 
       {me.data?.admin && <p className="text-sm text-muted">Family members and their workspaces: the Family page.</p>}
 
