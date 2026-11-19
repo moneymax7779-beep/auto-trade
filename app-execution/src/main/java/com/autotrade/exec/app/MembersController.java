@@ -279,6 +279,48 @@ class MembersController {
         return Map.of("username", username, "status", status, "login", login);
     }
 
+    record Role(Long tenantId, String role) {
+    }
+
+    /**
+     * Changes a member's role in their workspace (user, 19 Nov 2026: a member added as TRADER who should run it): OWNER,
+     * TRADER or VIEWER. Refused to VIEWER while the workspace is LIVE (a viewer could no longer stop it; switch it to PAPER
+     * first). Without an OWNER the admin (SUPPORT) manages the workspace, as before.
+     */
+    @PostMapping("/api/execution/admin/members/{username}/role")
+    Map<String, Object> role(@RequestHeader(value = Access.HEADER, required = false) String subject,
+                             @PathVariable String username, @RequestBody Role body) {
+        Access.User user = access.user(subject);
+        Access.require(user.admin(), "needs the platform admin");
+        List<Long> theirs = memberOf(user, username);
+        String role = body.role() == null ? "" : body.role().trim().toUpperCase(Locale.ROOT);
+        require(MEMBER_ROLES.contains(role), "role: OWNER, TRADER or VIEWER");
+        long tenant = body.tenantId() != null ? body.tenantId() : theirs.size() == 1 ? theirs.getFirst() : -1;
+        require(theirs.contains(tenant), "tenantId: one of " + username + "'s workspaces " + theirs);
+        Map<String, Object> changed = tx.execute(t -> {
+            tradingDay.lock(tenant);
+            String from = jdbc.queryForObject("select m.role from acct.tenant_membership m join acct.app_user u on "
+                    + "u.id = m.app_user_id where m.tenant_id = ? and u.external_subject = ? for update of m", String.class,
+                    tenant, username);
+            require(MEMBER_ROLES.contains(from), username + " is " + from + " there: not a member role");
+            require(!role.equals("VIEWER") || from.equals("VIEWER") || !tradingDay.dailySwitch(tenant)
+                    || tradingDay.stateNow(tenant).mode() != com.autotrade.execution.TradingDay.Mode.LIVE,
+                    "the workspace is LIVE now: a VIEWER could not stop it; switch it to PAPER first");
+            jdbc.update("update acct.tenant_membership m set role = ? from acct.app_user u where u.id = m.app_user_id "
+                    + "and m.tenant_id = ? and u.external_subject = ?", role, tenant, username);
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("username", username);
+            m.put("tenantId", tenant);
+            m.put("from", from);
+            m.put("role", role);
+            return m;
+        });
+        if (!role.equals(changed.get("from"))) {
+            audit.audit(tenant, null, user.subject(), "MEMBER_ROLE_CHANGED", changed);
+        }
+        return changed;
+    }
+
     /** A new one-time password for a member (the old password stops working), shown once. */
     @PostMapping("/api/execution/admin/members/{username}/one-time-password")
     Map<String, Object> oneTimePassword(@RequestHeader(value = Access.HEADER, required = false) String subject,

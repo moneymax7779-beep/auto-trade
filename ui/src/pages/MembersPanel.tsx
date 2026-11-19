@@ -11,6 +11,13 @@ import { ErrorNote, Panel, Table } from "../components/ui";
 const input = "rounded border border-line bg-bg px-2 py-1 text-sm";
 const button = "rounded border border-line px-2 py-0.5 text-xs hover:bg-panel-2 disabled:opacity-40";
 const RELATIONSHIPS = [["SPOUSE", "Spouse"], ["CHILD", "Child"], ["PARENT", "Parent"], ["SIBLING", "Sibling"]] as const;
+const MEMBER_ROLES = ["OWNER", "TRADER", "VIEWER"] as const;
+const ROLE_TEXT: Record<string, string> = {
+  OWNER: "They run it: brokers, capital, loss limit, strategies, PAPER/LIVE, and they grant you access.",
+  TRADER: "They trade and can stop trouble, but cannot add brokers or change capital, limits or strategies.",
+  VIEWER: "They only read. Not while the workspace is LIVE.",
+};
+const ROLE_HELP = "Change the member's role in their workspace. Without an OWNER you (SUPPORT) manage it.";
 const when = (iso: string | null | undefined) => iso ? new Date(iso).toLocaleString("en-IN", { timeZone: "Asia/Kolkata",
   hour12: false, day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" }) : "never";
 
@@ -50,10 +57,10 @@ export function MembersPanel({ onDone }: { onDone: (text: string, ok: boolean) =
     onError: fail,
   });
   const rows = (members.data ?? []).flatMap((t) => t.members.filter((m) => m.role !== "SUPPORT" && m.role !== "ADMIN")
-    .map((m) => ({ ...m, tenant: t.tenant, accounts: t.accounts })));
+    .map((m) => ({ ...m, tenantId: t.tenantId, tenant: t.tenant, accounts: t.accounts })));
 
   return (
-    <Panel title="Family members" right={<span className="text-xs text-muted">admin</span>}>
+    <Panel title="Family members" collapsible="family-members" right={<span className="text-xs text-muted">admin</span>}>
       {secret && (
         <div className="mb-3 rounded border border-warn/60 bg-warn/10 p-3 text-sm">
           One-time password for <b>{secret.who}</b>: <code className="select-all font-semibold">{secret.password}</code>
@@ -68,7 +75,17 @@ export function MembersPanel({ onDone }: { onDone: (text: string, ok: boolean) =
           { key: "n", label: "Name", render: (m) => m.display_name },
           { key: "rel", label: "Relationship", render: (m) => m.relationship ?? "–" },
           { key: "t", label: "Workspace", render: (m) => m.tenant },
-          { key: "r", label: "Role", render: (m) => m.role },
+          { key: "r", label: "Role", render: (m) => (
+            <select className={`${input} py-0.5 text-xs`} value={m.role} disabled={act.isPending} title={ROLE_HELP}
+              onChange={(e) => {
+                const to = e.target.value;
+                if (to !== m.role && window.confirm(`Make ${m.username} ${to} of ${m.tenant}? ${ROLE_TEXT[to] ?? ""}`)) {
+                  act.mutate({ who: m.username, path: `/api/execution/admin/members/${encodeURIComponent(m.username)}/role`,
+                    body: { tenantId: m.tenantId, role: to }, ok: `${m.username}: now ${to} of ${m.tenant}` });
+                }
+              }}>
+              {MEMBER_ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+            </select>) },
           { key: "a", label: "Brokers", align: "right", render: (m) => m.accounts },
           { key: "seen", label: "Last seen", render: (m) => <span className="text-xs">{m.invite === "PENDING" ? "invited" : when(m.last_seen)}</span> },
           { key: "tg", label: "Telegram", render: (m) => m.telegram ? "linked" : <span className="text-muted">no</span> },

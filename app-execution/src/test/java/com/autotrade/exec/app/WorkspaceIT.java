@@ -372,6 +372,33 @@ class WorkspaceIT {
         members.status("satya", "hina", new MembersController.Status("ACTIVE"));
     }
 
+    /** User, 19 Nov 2026: the admin changes a member's role; never to VIEWER while LIVE; never the admin's own SUPPORT. */
+    @Test
+    void theAdminChangesAMembersRole() {
+        long jaya = member("jaya", "TRADER");
+        long account = account("satya", jaya, "Kite", "ZERODHA", "JY1234");
+        loggedIn(jaya, account);
+        workspaces.liveEligible("satya", account, new WorkspaceController.Eligible(true, "Kite"));
+        assertThat(code(() -> workspaces.mode("jaya", jaya, new WorkspaceController.Mode("LIVE", "LIVE")))).isEqualTo(403);
+
+        assertThat(members.role("satya", "jaya", new MembersController.Role(null, "owner")))
+                .containsEntry("from", "TRADER").containsEntry("role", "OWNER").containsEntry("tenantId", jaya);
+        assertThat(code(() -> workspaces.broker("jaya", jaya, new WorkspaceController.Broker(account)))).isEqualTo(200);
+        workspaces.mode("jaya", jaya, new WorkspaceController.Mode("LIVE", "LIVE"));
+        assertThat(reason(() -> members.role("satya", "jaya", new MembersController.Role(jaya, "VIEWER"))))
+                .contains("LIVE now");
+        assertThat(code(() -> members.role("satya", "jaya", new MembersController.Role(jaya, "ADMIN")))).isEqualTo(400);
+        assertThat(code(() -> members.role("satya", "jaya", new MembersController.Role(ownerTenant, "OWNER")))).isEqualTo(400);
+        assertThat(code(() -> members.role("jaya", "jaya", new MembersController.Role(jaya, "TRADER")))).isEqualTo(403);
+        assertThat(code(() -> members.role("satya", "satya", new MembersController.Role(jaya, "OWNER")))).isEqualTo(404);
+        workspaces.mode("jaya", jaya, new WorkspaceController.Mode("PAPER", null));
+        members.role("satya", "jaya", new MembersController.Role(jaya, "VIEWER"));
+        assertThat(code(() -> workspaces.broker("jaya", jaya, new WorkspaceController.Broker(null)))).isEqualTo(403);
+        assertThat(jdbc.queryForList("select detail->>'from' || '>' || (detail->>'role') from exec.audit_log where "
+                + "tenant_id = ? and action = 'MEMBER_ROLE_CHANGED' order by id", String.class, jaya))
+                .containsExactly("TRADER>OWNER", "OWNER>VIEWER");
+    }
+
     /** Second review, 7 Nov 2026: LIVE eligibility was checked for a client id and an app; changing either removes it. */
     @Test
     void changingTheClientIdOrTheBrokerAppRemovesLiveEligibility() {
