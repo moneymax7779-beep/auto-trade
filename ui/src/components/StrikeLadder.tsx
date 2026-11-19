@@ -324,8 +324,10 @@ const dirText = (s: SincePrint) => (dirArrow(s.last) ? `OI likely ${dirArrow(s.l
 
 /** The badge text: the arrow and the size of the last update it repeats ("↑6k"), so it is not read as the window's change. */
 const dirBadge = (last: N) => (dirArrow(last) ? `${dirArrow(last)}${big(Math.abs(last as number))}` : "");
-/** Room the badge takes from a change cell (9 px digits, 2 px padding a side, 2 px gap). */
-const dirW = (last: N) => (dirArrow(last) ? Math.round(5.6 * dirBadge(last).length) + 6 : 0);
+/** Gap between the badge and the window's change, so "↑63k +47k" is not read as one string. */
+const DIR_GAP = 6;
+/** Room the badge takes from a change cell (8.5 px digits, 2 px padding a side, then the gap). */
+const dirW = (last: N) => (dirArrow(last) ? Math.round(5.3 * dirBadge(last).length) + 4 + DIR_GAP : 0);
 
 /**
  * The persistence hint beside a flagged change cell (19 Nov 2026): an outlined badge with the direction AND size of the
@@ -335,11 +337,11 @@ const dirW = (last: N) => (dirArrow(last) ? Math.round(5.6 * dirBadge(last).leng
 function DirMark({ x, y, last, color }: { x: number; y: number; last: N; color: string }) {
   const a = dirArrow(last);
   if (!a) return null;
-  const w = dirW(last) - 2;
+  const w = dirW(last) - DIR_GAP;
   return (
     <g>
       <rect x={x} y={y - 9.5} width={w} height={13} rx={3} fill="var(--color-panel)" stroke={ink(color)} strokeOpacity={0.6} strokeWidth={1} />
-      <text x={x + w / 2} y={y} textAnchor="middle" className="num font-semibold" style={{ fill: ink(color), fontSize: "9px" }}>{dirBadge(last)}</text>
+      <text x={x + w / 2} y={y} textAnchor="middle" className="num font-semibold" style={{ fill: ink(color), fontSize: "8.5px" }}>{dirBadge(last)}</text>
       <title>{`Last OI update ${big(last, true)}, so the next one is likely ${a} (OI, not the price); ${arrowOdds(last)}. The number beside it is the change over the whole window and can have the other sign.`}</title>
     </g>
   );
