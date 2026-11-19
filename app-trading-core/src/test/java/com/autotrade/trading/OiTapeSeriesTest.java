@@ -117,7 +117,8 @@ class OiTapeSeriesTest {
         assertThat(OiTapeController.who(900, 1_000, 0.160, 0.150, iv)).isEqualTo("COVERING");     // OI down, IV up
         assertThat(OiTapeController.who(900, 1_000, 0.140, 0.150, iv)).isEqualTo("CLOSING");      // OI down, IV down
         assertThat(OiTapeController.who(1_004, 1_000, 0.140, 0.150, iv)).isNull();                // OI change under 0.5 %
-        assertThat(OiTapeController.who(1_100, 1_000, 0.1505, 0.150, iv)).isNull();               // IV change under 0.1 point
+        assertThat(OiTapeController.who(1_100, 1_000, 0.1514, 0.150, iv)).isNull();               // IV change under 0.15 point
+        assertThat(OiTapeController.who(1_100, 1_000, 0.1516, 0.150, iv)).isEqualTo("BUYING");    // just over it
         assertThat(OiTapeController.who(1_100, Double.NaN, 0.140, 0.150, iv)).isNull();
         assertThat(OiTapeController.who(1_100, 1_000, Double.NaN, 0.150, iv)).isNull();
     }
@@ -136,7 +137,8 @@ class OiTapeSeriesTest {
         assertThat(r.subList(5, 7)).containsExactly((double) 0.14f, (double) 0.15f);
         assertThat(r.get(13)).isEqualTo(4_000.0);                                          // 9,000 - 5,000 traded
         assertThat(r.get(15)).isEqualTo("WRITING");
-        assertThat(r.get(16)).isNull();                                                    // no put IV recorded
+        // no put IV recorded: the strike's IV is the call's (fell 0.150 -> 0.140), and put OI 2,000 -> 1,900: buyers out
+        assertThat(r.get(16)).isEqualTo("CLOSING");
         // the calls' gamma × OI from their IV; the puts', with no put IV recorded, from the calls' IV
         double g = OiTapeController.gamma(23_020, 23_000, 0.14f, OiTapeController.yearsToExpiry(d.date, d.expiry, 2));
         assertThat((Double) r.get(17)).isCloseTo(g * 1_300, org.assertj.core.data.Offset.offset(1e-9));
@@ -450,5 +452,17 @@ class OiTapeSeriesTest {
         assertThat(old).isNotNull();
         assertThat(old.extras).isFalse();
         assertThat(old.callIv).isEmpty();
+    }
+
+    @Test
+    void strikeIvAveragesTheCallAndThePutSoAnIndexMoveOnOneSideCancels() {
+        // 19 Nov 2026 NIFTY 25,100, 09:28 -> 09:33 (30 s step averages): the call's IV 13.36 -> 13.60, the put's 14.48 -> 13.43,
+        // call OI 3.14M -> 4.22M. One side alone read "buying"; the strike's IV fell 0.41 point, so writers opened.
+        double then = OiTapeController.strikeIv(0.1336, 0.1448), now = OiTapeController.strikeIv(0.1360, 0.1343);
+        assertThat(OiTapeController.who(4_224_870, 3_144_440, 0.1360, 0.1336, OiTapeController.MIN_IV_CHANGE)).isEqualTo("BUYING");
+        assertThat(OiTapeController.who(4_224_870, 3_144_440, now, then, OiTapeController.MIN_IV_CHANGE)).isEqualTo("WRITING");
+        assertThat(OiTapeController.strikeIv(Double.NaN, 0.14)).isEqualTo(0.14);
+        assertThat(OiTapeController.strikeIv(0.13, Double.NaN)).isEqualTo(0.13);
+        assertThat(OiTapeController.strikeIv(Double.NaN, Double.NaN)).isNaN();
     }
 }

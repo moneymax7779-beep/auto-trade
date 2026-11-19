@@ -349,8 +349,13 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
     static final double WALL_MARGIN = 1.05;
     /** An OI change smaller than this share of the strike's earlier OI gets no who-traded reading. */
     static final double MIN_OI_SHARE = 0.005;
-    /** An IV change smaller than this (0.1 volatility point) is too small to say who traded. */
-    static final double MIN_IV_CHANGE = 0.001;
+    /**
+     * A change in the strike's IV smaller than this (0.15 volatility point) is too small to say who traded. 19 Nov 2026,
+     * NIFTY 25,000-25,300 on the day: the strike IV ({@link #strikeIv}) moves a median 0.04 point between 30 s steps,
+     * 0.15 at the 90th percentile, so this is above step-to-step noise. (0.1 point before 19 Nov, on the last tick of one
+     * side, whose step-to-step median move was 0.21 point: the label was mostly noise.)
+     */
+    static final double MIN_IV_CHANGE = 0.0015;
     private static final double TRADING_MINUTES = 375;
     /**
      * The windows the ladder's "changes" column shows side by side (user, 5 Nov 2026; 1 h added 7 Nov), in seconds; after
@@ -408,7 +413,8 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
             rows.add(Arrays.asList(k, num(c), num(c0), num(p), num(p0), num(cIv), num(cIv0), num(pIv), num(pIv0),
                     num(cPx), num(cPx0), num(pPx), num(pPx0), num(windowVolume(d.callVol, k, i, j)),
                     num(windowVolume(d.putVol, k, i, j)),
-                    who(c, c0, cIv, cIv0, MIN_IV_CHANGE), who(p, p0, pIv, pIv0, MIN_IV_CHANGE), num(cG), num(pG),
+                    who(c, c0, strikeIv(cIv, pIv), strikeIv(cIv0, pIv0), MIN_IV_CHANGE),
+                    who(p, p0, strikeIv(cIv, pIv), strikeIv(cIv0, pIv0), MIN_IV_CHANGE), num(cG), num(pG),
                     windowChanges(calls, puts, k, i, open), sincePrint(calls, d.callVol, puts, d.putVol, k, i)));
         }
         out.put("rows", rows);
@@ -431,12 +437,23 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
     }
 
     /**
-     * Who most likely traded a contract between two steps, from its OI change and the change in its IV (not its premium,
+     * Who most likely traded a contract between two steps, from its OI change and the change in its strike's IV
+     * ({@link #strikeIv}; not its premium,
      * which mostly follows the index: OI rising in a rally would read as call buying and put writing whoever traded):
      * OI up as IV falls = writers opening ("WRITING"), OI up as IV rises = buyers opening ("BUYING"), OI down as IV rises
      * = writers buying back ("COVERING"), OI down as IV falls = buyers selling out ("CLOSING"). Null when either change
      * is too small to read or a value is missing. An inference from prices, not a record of who traded.
      */
+    /**
+     * The strike's IV for who traded (19 Nov 2026): the call's and the put's IV averaged (each a 30 s step's average of
+     * its ticks), else whichever side is known. The feed's IV for one side moves with the index on its own (at 09:28-09:33
+     * on 19 Nov the NIFTY 25,100 call's rose 0.24 point while the put's fell 1.05 as NIFTY fell, so OI added at a falling
+     * premium read as call buying); the two sides' moves cancel in the average, which is what parity says they share.
+     */
+    static double strikeIv(double callIv, double putIv) {
+        return Double.isNaN(callIv) ? putIv : Double.isNaN(putIv) ? callIv : (callIv + putIv) / 2;
+    }
+
     static String who(double oi, double oi0, double x, double x0, double xMin) {
         if (Double.isNaN(oi) || Double.isNaN(oi0) || Double.isNaN(x) || Double.isNaN(x0) || oi0 <= 0) {
             return null;
@@ -857,8 +874,9 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
                             && Math.abs(e.getValue()[0]) > Math.abs(n[0])).count();
                     double[] oi = (c.call() ? calls : puts).get(c.strike());
                     int t = (int) n[1];
-                    Map<Double, float[]> iv = c.call() ? d.callIv : d.putIv;
-                    who = who(oi[t + 1], oi[t], at(iv, c.strike(), t), at(iv, c.strike(), f), MIN_IV_CHANGE);
+                    double k = c.strike();
+                    who = who(oi[t + 1], oi[t], strikeIv(at(d.callIv, k, t), at(d.putIv, k, t)),
+                            strikeIv(at(d.callIv, k, f), at(d.putIv, k, f)), MIN_IV_CHANGE);
                 }
                 // the persistence hint at the flag's step: the direction of the contract's last print before it
                 Double before = lastPrintChange((c.call() ? calls : puts).get(c.strike()), f);
@@ -1036,7 +1054,11 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
         return rebuilding.contains(day + "|" + u);
     }
 
-    static final String KIND = "oi-tape";
+    /**
+     * The cache kind. "oi-tape-2" from 19 Nov 2026: each step's IV is the average of its ticks, not the last tick, so days
+     * kept under "oi-tape" (last-tick IV) are read again from the ticks once, not reused.
+     */
+    static final String KIND = "oi-tape-2";
     /** 2 (5 Nov 2026): with each contract's price, IV and volume per step; a format-1 day still reads, without them. */
     private static final int FORMAT = 2;
 
@@ -1179,7 +1201,7 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
         Timestamp from = Timestamp.from(overlap.isAfter(open) ? overlap : d.readUntil), to = Timestamp.from(until);
         // volume is the day's running total, so the bucket's largest is its last
         jdbc.query("select time_bucket('30 seconds', recv_ts) b, strike, option_type, last(oi, recv_ts), last(ltp, recv_ts), "
-                        + "last(iv, recv_ts) filter (where iv > 0), max(volume) from md.option_tick "
+                        + "avg(iv) filter (where iv > 0), max(volume) from md.option_tick "
                         + "where session_date = ? and underlying = ? and expiry = ? and recv_ts >= ? and recv_ts < ? and oi > 0 "
                         + "group by 1, 2, 3 order by 1",                // in time order: the last pre-open bucket seeds
                 rs -> {
