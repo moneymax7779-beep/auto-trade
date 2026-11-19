@@ -7,3 +7,7 @@ target/
 .DS_Store
 node_modules/
 ui/dist/
+
+# Udemy course video frames: private reference only, never committed
+docs/research/udemy/price-action-binary/
+docs/research/udemy/nimblrta-orb/
