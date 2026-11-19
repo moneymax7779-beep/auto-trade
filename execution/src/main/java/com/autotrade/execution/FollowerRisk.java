@@ -17,12 +17,14 @@ import com.autotrade.config.ThresholdConfig;
  * above it is taken at full size whatever the account's size step (A-378, the PAPER forward test of A-377's X1 flag).
  * From v14, {@code maxStopRiskPct} (capital.max_stop_risk_pct_of_daily_loss; NaN = off; review 19 Nov 2026): what the
  * open positions plus a new entry could lose before their broker stops sell them (each stop-limit filled at its limit)
- * may be at most this % of the day's loss limit; an entry is sized down to fit and refused under one lot.
+ * may be at most this % of the day's loss limit; an entry is sized down to fit and refused under one lot. From v15,
+ * {@code stopRiskCountsRealised} (capital.stop_risk_counts_realised; review 19 Nov 2026): the day's realised loss is taken
+ * off that room too, so a losing morning plus the broker stops still stays within the day's limit.
  */
 public record FollowerRisk(String version, CapitalLimits limits, int maxOpenPositions, int maxLotsPerUnderlying,
                            double rvolBoostThreshold, double rvolBoostFactor, double adverseBps, OrderRules orders,
                            Combined combined, LiveLimits live, boolean dailyLossCountsOpen, double convictionRvolFull,
-                           double maxStopRiskPct) {
+                           double maxStopRiskPct, boolean stopRiskCountsRealised) {
 
     public FollowerRisk {
         // v14: a share of the daily loss limit; off (NaN) or positive only
@@ -93,7 +95,8 @@ public record FollowerRisk(String version, CapitalLimits limits, int maxOpenPosi
                 c.has("capital.daily_loss_counts_open") && c.getBoolean("capital.daily_loss_counts_open"),
                 c.has("sizing.conviction_rvol_full") ? c.getDouble("sizing.conviction_rvol_full") : Double.NaN,
                 c.has("capital.max_stop_risk_pct_of_daily_loss") ? c.getDouble("capital.max_stop_risk_pct_of_daily_loss")
-                        : Double.NaN);
+                        : Double.NaN,
+                c.has("capital.stop_risk_counts_realised") && c.getBoolean("capital.stop_risk_counts_realised"));
     }
 
     private static java.util.Set<String> names(Object list) {

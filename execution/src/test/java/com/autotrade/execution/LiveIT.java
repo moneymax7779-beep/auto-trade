@@ -67,6 +67,7 @@ class LiveIT {
     private static final String V7 = "../config/risk/follower-risk.v7.yaml";
     private static final String V11 = "../config/risk/follower-risk.v11.yaml";
     private static final String V14 = "../config/risk/follower-risk.v14.yaml";
+    private static final String V15 = "../config/risk/follower-risk.v15.yaml";
     /** The worker's broker rules (16 Nov 2026, A1): ZERODHA's last LIVE entry 15:10, square-off 15:20. */
     private static final BrokerRules RULES = BrokerRules.load(Path.of("..", "config", "brokers", "broker-rules.v1.yaml"));
     private static final int LOT = 65;
@@ -421,6 +422,37 @@ class LiveIT {
             enter(group, session, "oi-burst-cross", 1);
             follower.run(a, group, DAY);
             assertThat(intentState(a)).isEqualTo("REJECTED_STOP_RISK");
+        }
+    }
+
+    /**
+     * v15 (user 19 Nov 2026): the day's realised loss comes off the stop-risk room. Rs 10,000 limit; the first entry takes
+     * 5 lots (as v14), is sold 15 a unit lower (5 x 65 x 15 = 4,875 lost plus charges); the next entry has about 5,000
+     * of room left: 2 lots of 1,868.75, where v14 would take 5 again.
+     */
+    @Test
+    void aV15EntryAfterALossIsSizedByWhatIsLeftOfTheDaysLimit() {
+        long group = group();
+        BrokerAccount a = account(group, true, V15, 100, "ma-cross", "oi-burst-cross");
+        jdbc.update("update acct.broker_account set daily_loss_limit = 10000 where id = ?", a.id());
+        a = new AccountStore(dataSource).byId(a.id()).orElseThrow();
+        long session = signalSession(group);
+        enter(group, session, "ma-cross", 0);
+        try (BrokerConnections registry = registry()) {
+            FollowerSimulator follower = follower(registry, a);
+            follower.run(a, group, DAY);
+            assertThat(jdbc.queryForObject("select quantity_open from exec.position where broker_account_id = ?", Long.class,
+                    a.id())).isEqualTo(5L * LOT);
+            kite.depth(KEYS[0], List.of(new Quote.Level(85.0, 65_000)), List.of(new Quote.Level(85.5, 65_000)), 85.2);
+            exit(group, session, 0);
+            follower.run(a, group, DAY);
+            double lost = jdbc.queryForObject("select realised_gross - charges from exec.position where broker_account_id = ? "
+                    + "and status = 'CLOSED'", Double.class, a.id());
+            assertThat(lost).isLessThan(-4_875).isGreaterThan(-5_600);
+            enter(group, session, "oi-burst-cross", 1);
+            follower.run(a, group, DAY);
+            assertThat(jdbc.queryForObject("select quantity_open from exec.position where broker_account_id = ? "
+                    + "and status = 'OPEN'", Long.class, a.id())).as("what is left of the day's limit").isEqualTo(2L * LOT);
         }
     }
 
