@@ -1,5 +1,19 @@
 import { type CSSProperties, Fragment, type ReactNode, useState } from "react";
 
+/** A set of ids remembered in this browser under {@code key} (e.g. folded groups); toggle adds or removes one. */
+export function useStoredSet(key: string): [Set<string>, (id: string) => void] {
+  const [set, setSet] = useState<Set<string>>(() => {
+    try { return new Set(JSON.parse(localStorage.getItem(key) ?? "[]") as string[]); } catch { return new Set(); }
+  });
+  const toggle = (id: string) => setSet((old) => {
+    const next = new Set(old);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    try { localStorage.setItem(key, JSON.stringify([...next])); } catch { /* storage blocked: only this visit */ }
+    return next;
+  });
+  return [set, toggle];
+}
+
 /**
  * A titled box. With {@code collapsible} (a short id) the title is a toggle that shows or hides the body; the choice is
  * remembered in this browser per id ({@code defaultOpen} when nothing is stored).
@@ -141,7 +155,7 @@ export function ConfirmButton({ label, confirmLabel, onConfirm, tone = "danger",
   );
 }
 
-export function Table<T>({ rows, columns, empty = "Nothing yet.", rowStyle, before, baseline = false }: {
+export function Table<T>({ rows, columns, empty = "Nothing yet.", rowStyle, before, hidden, baseline = false }: {
   rows: T[];
   /**
    * width: the column's width (CSS, e.g. "5rem"). Tables that give the same widths line up with each other; a column
@@ -153,6 +167,8 @@ export function Table<T>({ rows, columns, empty = "Nothing yet.", rowStyle, befo
   rowStyle?: (row: T, i: number) => CSSProperties | undefined;
   /** Optional full-width row rendered above row i (e.g. a group heading); null for none. */
   before?: (row: T, i: number) => ReactNode;
+  /** Optional: rows not drawn (a folded group); the heading {@code before} them is still drawn. */
+  hidden?: (row: T, i: number) => boolean;
   /** Line the cells up on their first line of text (rows whose cells hold two lines, e.g. a P&L and its %). */
   baseline?: boolean;
 }) {
@@ -176,11 +192,11 @@ export function Table<T>({ rows, columns, empty = "Nothing yet.", rowStyle, befo
                 {heading != null && heading !== false && (
                   <tr><td colSpan={columns.length} className="px-2 pb-1 pt-4">{heading}</td></tr>
                 )}
-                <tr className="border-b border-line/50 hover:bg-panel-2/50" style={rowStyle?.(row, i)}>
+                {!hidden?.(row, i) && <tr className="border-b border-line/50 hover:bg-panel-2/50" style={rowStyle?.(row, i)}>
                   {columns.map((c) => (
                     <td key={c.key} className={`px-2 py-1.5 ${baseline ? "align-baseline" : ""} ${c.align === "right" ? "num text-right" : ""}`}>{c.render(row)}</td>
                   ))}
-                </tr>
+                </tr>}
               </Fragment>
             );
           })}

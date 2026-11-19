@@ -114,8 +114,9 @@ export function AddAccountPanel({ tenants, onDone }: {
     <Panel title="Add account" right={<button className={button} onClick={() => setOpen(!open)}>{open ? "Close" : "Add account…"}</button>}>
       {!open ? (
         <p className="text-sm text-muted">A follower account takes the chosen strategies' signals from the live PAPER set and
-          trades them with its own allocation. New Zerodha accounts start in DRY_RUN (orders go to a local simulator); LIVE is
-          a separate step and is not available here.</p>
+          trades them with its own allocation. New broker accounts start in DRY_RUN (orders go to a local simulator); LIVE is a
+          separate, confirmed step on the account (Manage). Accounts added here are yours (your own workspace); a family member's
+          broker goes in their workspace: Family page, Brokers on their card (or they add it themselves).</p>
       ) : (
         <div className="space-y-3">
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">

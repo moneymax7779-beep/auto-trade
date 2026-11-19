@@ -92,7 +92,8 @@ export function MembersPanel({ onDone }: { onDone: (text: string, ok: boolean) =
           { key: "s", label: "Status", render: (m) => <span className={m.status === "ACTIVE" ? "text-up" : "text-down"}>{m.status}</span> },
           { key: "x", label: "", render: (m) => (
             <span className="flex flex-wrap gap-1">
-              <button className={button} disabled={act.isPending} onClick={() => act.mutate({ who: m.username,
+              <button className={button} disabled={act.isPending} onClick={() => (m.status !== "ACTIVE" || window.confirm(
+                `Disable ${m.username}? They can no longer sign in; a LIVE day in their workspace goes back to PAPER.`)) && act.mutate({ who: m.username,
                 path: `/api/execution/admin/members/${encodeURIComponent(m.username)}/status`,
                 body: { status: m.status === "ACTIVE" ? "DISABLED" : "ACTIVE" }, ok: `${m.username}: ${m.status === "ACTIVE" ? "disabled" : "enabled"}` })}>
                 {m.status === "ACTIVE" ? "Disable" : "Enable"}</button>

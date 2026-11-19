@@ -285,7 +285,8 @@ class MembersController {
     /**
      * Changes a member's role in their workspace (user, 19 Nov 2026: a member added as TRADER who should run it): OWNER,
      * TRADER or VIEWER. Refused to VIEWER while the workspace is LIVE (a viewer could no longer stop it; switch it to PAPER
-     * first). Without an OWNER the admin (SUPPORT) manages the workspace, as before.
+     * first), and away from OWNER when they are the workspace's only active OWNER (that would hand the workspace to the
+     * admin's SUPPORT without the member's grant).
      */
     @PostMapping("/api/execution/admin/members/{username}/role")
     Map<String, Object> role(@RequestHeader(value = Access.HEADER, required = false) String subject,
@@ -303,6 +304,13 @@ class MembersController {
                     + "u.id = m.app_user_id where m.tenant_id = ? and u.external_subject = ? for update of m", String.class,
                     tenant, username);
             require(MEMBER_ROLES.contains(from), username + " is " + from + " there: not a member role");
+            // review 19 Nov 2026: demoting the only OWNER would hand the workspace to SUPPORT (the admin) without the
+            // member's grant; another OWNER first
+            Integer owners = jdbc.queryForObject("select count(*) from acct.tenant_membership m join acct.app_user u on "
+                    + "u.id = m.app_user_id where m.tenant_id = ? and m.role = 'OWNER' and u.status = 'ACTIVE' "
+                    + "and u.external_subject <> ?", Integer.class, tenant, username);
+            require(!from.equals("OWNER") || role.equals("OWNER") || owners != null && owners > 0,
+                    username + " is the workspace's only OWNER: make another member OWNER first");
             require(!role.equals("VIEWER") || from.equals("VIEWER") || !tradingDay.dailySwitch(tenant)
                     || tradingDay.stateNow(tenant).mode() != com.autotrade.execution.TradingDay.Mode.LIVE,
                     "the workspace is LIVE now: a VIEWER could not stop it; switch it to PAPER first");

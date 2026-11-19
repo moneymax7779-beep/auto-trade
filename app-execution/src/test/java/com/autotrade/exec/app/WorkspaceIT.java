@@ -372,7 +372,7 @@ class WorkspaceIT {
         members.status("satya", "hina", new MembersController.Status("ACTIVE"));
     }
 
-    /** User, 19 Nov 2026: the admin changes a member's role; never to VIEWER while LIVE; never the admin's own SUPPORT. */
+    /** User, 19 Nov 2026: the admin changes a member's role; never to VIEWER while LIVE, never the only OWNER away, never SUPPORT. */
     @Test
     void theAdminChangesAMembersRole() {
         long jaya = member("jaya", "TRADER");
@@ -384,6 +384,10 @@ class WorkspaceIT {
         assertThat(members.role("satya", "jaya", new MembersController.Role(null, "owner")))
                 .containsEntry("from", "TRADER").containsEntry("role", "OWNER").containsEntry("tenantId", jaya);
         assertThat(code(() -> workspaces.broker("jaya", jaya, new WorkspaceController.Broker(account)))).isEqualTo(200);
+        assertThat(reason(() -> members.role("satya", "jaya", new MembersController.Role(jaya, "TRADER"))))
+                .contains("only OWNER");
+        AccountStore accounts = new AccountStore(dataSource);
+        accounts.ensureMembership(jaya, accounts.ensureUser("jaya-2", "second owner"), "OWNER");
         workspaces.mode("jaya", jaya, new WorkspaceController.Mode("LIVE", "LIVE"));
         assertThat(reason(() -> members.role("satya", "jaya", new MembersController.Role(jaya, "VIEWER"))))
                 .contains("LIVE now");
