@@ -64,7 +64,7 @@ class AccountsController {
      */
     record AccountView(long id, long tenantId, String name, String broker, String mode, String role, boolean enabled,
                        double allocatedCapital, String riskFile, String connection, ExecutionLoop.AccountStatus lastTurn,
-                       Long paperOf, DayBook today) {
+                       Long paperOf, DayBook today, String mirrorOf) {
     }
 
     /**
@@ -85,10 +85,14 @@ class AccountsController {
         for (long tenant : user.tenants()) {
             Map<Long, String> connections = accounts.connectionStatuses(tenant);
             Map<Long, DayBook> books = dayBooks(tenant, today);
+            // V49 mirror accounts: the engine account whose trades they show (the UI labels them and drops stop controls)
+            Map<Long, String> mirrors = new LinkedHashMap<>();
+            jdbc.query("select id, mirror_of from acct.broker_account where tenant_id = ? and mirror_of is not null",
+                    rs -> { mirrors.put(rs.getLong(1), rs.getString(2)); }, tenant);
             for (BrokerAccount a : accounts.ofTenant(tenant)) {
                 out.add(new AccountView(a.id(), a.tenantId(), a.displayName(), a.brokerType().name(), a.tradeMode().name(),
                         a.role().name(), a.enabled(), a.allocatedCapital(), a.riskFile(), connections.get(a.id()),
-                        turns.get(a.id()), a.paperOf(), books.getOrDefault(a.id(), DayBook.NONE)));
+                        turns.get(a.id()), a.paperOf(), books.getOrDefault(a.id(), DayBook.NONE), mirrors.get(a.id())));
             }
         }
         return out;
