@@ -149,10 +149,11 @@ class OiTapeSeriesTest {
         assertThat(l.get("extras")).isEqualTo(true);
         // volume since each side's last OI print: the calls last changed in step 2 (09:16:00), nothing traded after its end;
         // the puts last changed in step 1, with no put volume recorded
-        assertThat(r.get(20)).isEqualTo(java.util.Arrays.asList(0.0, "09:16:00", null, "09:15:30"));
+        // then each side's last print's change (the persistence hint): calls +200 in step 2, puts -100 in step 1
+        assertThat(r.get(20)).isEqualTo(java.util.Arrays.asList(0.0, "09:16:00", null, "09:15:30", 200.0, -100.0));
         // at step 3 the calls have not changed since step 2: 9,500 - 9,000 traded since that print
         List<Object> r3 = ladderRow(OiTapeController.ladder(d, 3, 2, 50, t -> true), 23_000.0);
-        assertThat(r3.get(20)).isEqualTo(java.util.Arrays.asList(500.0, "09:16:00", null, "09:15:30"));
+        assertThat(r3.get(20)).isEqualTo(java.util.Arrays.asList(500.0, "09:16:00", null, "09:15:30", 200.0, -100.0));
     }
 
     @Test
@@ -166,7 +167,7 @@ class OiTapeSeriesTest {
         d.puts.put(23_000.0, steps(2_000, 2_000, 2_000));                     // no pre-open OI: first recorded in step 0
         d.putVol.put(23_000.0, fsteps(50, 60, 70));
         List<Object> r = ladderRow(OiTapeController.ladder(d, 2, 1, 50, t -> true), 23_000.0);
-        assertThat(r.get(20)).isEqualTo(java.util.Arrays.asList(400.0, null, null, null));
+        assertThat(r.get(20)).isEqualTo(java.util.Arrays.asList(400.0, null, null, null, null, null));
     }
 
     /**
@@ -204,16 +205,16 @@ class OiTapeSeriesTest {
         assertThat(headsUp(d, 1)).containsEntry("state", "JUST_PRINTED").containsEntry("flags", List.of());
         // step 2: 5,000 on the 23,000 calls against 100 on every other cell
         assertThat(headsUp(d, 2)).containsEntry("state", "BUILDING")
-                .containsEntry("flags", List.of(java.util.Arrays.asList(23_000.0, "c", 5_000.0)))
-                .containsEntry("check", null).containsEntry("today", List.of(0, 0));
+                .containsEntry("flags", List.of(java.util.Arrays.asList(23_000.0, "c", 5_000.0, 10.0)))   // its last print: +10
+                .containsEntry("check", null).containsEntry("today", List.of(0, 0, 0, 0));
         // step 4: the print; the step 3 flag had the calls' largest change (+500): a hit
         java.util.Map<String, Object> h = headsUp(d, 5);
-        assertThat(h).containsEntry("state", "BUILDING").containsEntry("today", List.of(1, 1));
+        assertThat(h).containsEntry("state", "BUILDING").containsEntry("today", List.of(1, 1, 1, 1));
         assertThat(h.get("check")).isEqualTo(java.util.Map.of("flagsAt", "09:16:30", "print", "09:17:00", "complete", true,
-                "cells", List.of(java.util.Arrays.asList(23_000.0, "c", 10_000.0, 500.0, 1, null))));
+                "cells", List.of(java.util.Arrays.asList(23_000.0, "c", 10_000.0, 500.0, 1, null, 10.0, true))));
         // at the print's own step the check is so far and not yet in the tally
         java.util.Map<String, Object> atPrint = headsUp(d, 4);
-        assertThat(atPrint).containsEntry("today", List.of(0, 0));
+        assertThat(atPrint).containsEntry("today", List.of(0, 0, 0, 0));
         assertThat(atPrint.get("check")).asInstanceOf(org.assertj.core.api.InstanceOfAssertFactories.MAP).containsEntry("complete", false);
     }
 
@@ -221,7 +222,7 @@ class OiTapeSeriesTest {
     void aFlagWhoseChangeIsThirdOnItsSideIsAMiss() {
         OiTapeController.Day d = headsDay(java.util.Map.of(22_950.0, 900.0, 23_050.0, 800.0));
         java.util.Map<String, Object> h = headsUp(d, 5);
-        assertThat(h).containsEntry("today", List.of(0, 1));
+        assertThat(h).containsEntry("today", List.of(0, 1, 1, 1));
         @SuppressWarnings("unchecked") List<Object> cell = (List<Object>) ((List<Object>) ((java.util.Map<String, Object>) h.get("check")).get("cells")).get(0);
         assertThat(cell.subList(3, 5)).containsExactly(500.0, 3);
     }
@@ -231,9 +232,20 @@ class OiTapeSeriesTest {
         OiTapeController.Day d = headsDay(java.util.Map.of());
         d.calls.put(23_000.0, steps(1_000, 1_010, 1_010, 1_010, 1_010, 1_010));   // skips the step 4 print
         java.util.Map<String, Object> h = headsUp(d, 5);
-        assertThat(h).containsEntry("today", List.of(0, 1));
+        assertThat(h).containsEntry("today", List.of(0, 1, 0, 0));
         @SuppressWarnings("unchecked") List<Object> cell = (List<Object>) ((List<Object>) ((java.util.Map<String, Object>) h.get("check")).get("cells")).get(0);
         assertThat(cell.subList(3, 6)).containsExactly(null, null, null);
+        assertThat(cell.subList(6, 8)).containsExactly(10.0, null);                // no change: direction not judged
+    }
+
+    @Test
+    void theDirectionHintIsCheckedAgainstTheNextPrint() {
+        OiTapeController.Day d = headsDay(java.util.Map.of());
+        d.calls.put(23_000.0, steps(1_000, 1_010, 1_010, 1_010, 600, 600));     // last print +10, then -410: direction broken
+        java.util.Map<String, Object> h = headsUp(d, 5);
+        assertThat(h).containsEntry("today", List.of(1, 1, 0, 1));               // still the largest change, wrong direction
+        @SuppressWarnings("unchecked") List<Object> cell = (List<Object>) ((List<Object>) ((java.util.Map<String, Object>) h.get("check")).get("cells")).get(0);
+        assertThat(cell.subList(3, 8)).containsExactly(-410.0, 1, null, 10.0, false);
     }
 
     @Test
@@ -256,7 +268,29 @@ class OiTapeSeriesTest {
         List<Object> r = ladderRow(OiTapeController.ladder(d, n - 1, n - 2, 50, t -> true), 23_000.0);
         // calls: the change in step 2 is more than 10 minutes back: off the clock, no volume (not the day's 100 x n)
         // puts: changed in step n - 2, traded 100 since its end
-        assertThat(r.get(20)).isEqualTo(java.util.Arrays.asList(null, null, 100.0, OiTapeController.time(n - 2)));
+        assertThat(r.get(20)).isEqualTo(java.util.Arrays.asList(null, null, 100.0, OiTapeController.time(n - 2), null, 100.0));
+    }
+
+    @Test
+    void theDirectionHintComesOnlyFromAPrintAtMost400SecondsOld() {
+        OiTapeController.Day d = new OiTapeController.Day(LocalDate.of(2026, 11, 4), LocalDate.of(2026, 11, 9));
+        int age = OiTapeController.PERSIST_MAX_AGE, n = 3 + age + 1;
+        d.steps = n;
+        d.spot[0] = 23_000;
+        double[] oi = new double[n];
+        float[] vol = new float[n];
+        for (int s = 0; s < n; s++) {
+            oi[s] = s < 2 ? 1_000 : 1_250;                                      // one print, +250 in step 2, then still
+            vol[s] = 100 * (s + 1);
+        }
+        d.calls.put(23_000.0, steps(oi));
+        d.callVol.put(23_000.0, vol);
+        List<Object> fresh = ladderRow(OiTapeController.ladder(d, 2 + age, 1 + age, 50, t -> true), 23_000.0);
+        List<Object> stale = ladderRow(OiTapeController.ladder(d, 3 + age, 2 + age, 50, t -> true), 23_000.0);
+        @SuppressWarnings("unchecked") List<Object> f = (List<Object>) fresh.get(20), st = (List<Object>) stale.get(20);
+        assertThat(f.get(4)).isEqualTo(250.0);
+        assertThat(st.get(4)).isNull();                                         // too old for the hint
+        assertThat(st.get(0)).isNotNull();                                      // the volume since the print is still read
     }
 
     @Test

@@ -61,5 +61,8 @@ export function pulseStep(prev: PulseMemo | null, ctx: string, at: string, live:
   return { memo, fresh };
 }
 
-/** One side's volume since its last OI print (null = not recorded or off the exchange's clock) and that print's step. */
-export interface SincePrint { vol: N; at: string | null }
+/**
+ * One side's volume since its last OI print (null = not recorded or off the exchange's clock), that print's step, and its
+ * OI change (null = none in the last 10 minutes): the persistence hint, A-493.
+ */
+export interface SincePrint { vol: N; at: string | null; last: N }
