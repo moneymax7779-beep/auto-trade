@@ -91,8 +91,9 @@ export function AddAccountPanel({ tenants, members = [], onDone }: {
   const [enabled, setEnabled] = useState(true);
   // account-management review 19 Nov 2026: an account meant for a member went into the admin's workspace while the
   // header showed the member's; the header's workspace is the default, and a member's opens their Brokers page
-  const [tenantId, setTenantId] = useState<number | "">(
-    current && members.some((m) => m.id === current.id) ? current.id : tenants.length === 1 ? tenants[0].id : "");
+  const defaultTenant = (): number | "" =>
+    current && members.some((m) => m.id === current.id) ? current.id : tenants.length === 1 ? tenants[0].id : "";
+  const [tenantId, setTenantId] = useState<number | "">(defaultTenant);
   const member = members.find((m) => m.id === tenantId);
   const zerodhaProfiles = (profiles.data ?? []).filter((p) => p.broker_type === "ZERODHA" && p.status === "ACTIVE"
     && (tenantId === "" || p.tenant_id === tenantId));
@@ -121,7 +122,10 @@ export function AddAccountPanel({ tenants, members = [], onDone }: {
     && (lossValue == null || (lossValue > 0 && alloc != null && lossValue <= alloc));
 
   return (
-    <Panel title="Add account" right={<button className={button} onClick={() => setOpen(!open)}>{open ? "Close" : "Add account…"}</button>}>
+    <Panel title="Add account" right={<button className={button} onClick={() => {
+      if (!open) setTenantId(defaultTenant());            // the header's workspace as it is now, not at page load
+      setOpen(!open);
+    }}>{open ? "Close" : "Add account…"}</button>}>
       {!open ? (
         <p className="text-sm text-muted">A follower account takes the chosen strategies' signals from the live PAPER set and
           trades them with its own allocation. New broker accounts start in DRY_RUN (orders go to a local simulator); LIVE is a

@@ -44,7 +44,7 @@ public final class TradingDay {
     }
 
     /** Orders still working at a broker (any of these may still fill or be cancelled). */
-    static final String WORKING_ORDER_STATES = "('CREATED', 'SUBMITTED', 'ACKNOWLEDGED', 'OPEN', 'PARTIALLY_FILLED', "
+    public static final String WORKING_ORDER_STATES = "('CREATED', 'SUBMITTED', 'ACKNOWLEDGED', 'OPEN', 'PARTIALLY_FILLED', "
             + "'CANCEL_PENDING', 'UNKNOWN', 'RECONCILIATION_REQUIRED')";
 
     private final JdbcTemplate jdbc;

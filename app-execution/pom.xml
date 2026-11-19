@@ -13,6 +13,12 @@
         follower account on its own lane under its lease (PAPER and DRY_RUN; LIVE refused until L2). No market-data
         connection of its own.</description>
     <dependencies>
+        <!-- servlet request/response stand-ins for the signed-user filter's test (review 19 Nov 2026) -->
+        <dependency>
+            <groupId>org.springframework</groupId>
+            <artifactId>spring-test</artifactId>
+            <scope>test</scope>
+        </dependency>
         <dependency><groupId>com.autotrade</groupId><artifactId>execution</artifactId></dependency>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-webmvc</artifactId></dependency>
         <dependency><groupId>org.springframework.boot</groupId><artifactId>spring-boot-starter-actuator</artifactId></dependency>

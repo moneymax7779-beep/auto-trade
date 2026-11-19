@@ -17,6 +17,8 @@ services:
       # Accounts page reaches the execution worker through /api/execution.
       AUTOTRADE_SIGNALSOURCE_ENABLED: "true"
       AUTOTRADE_UI_EXECUTION_URL: http://execution:8096
+      # review 19 Nov 2026: the proxy signs the user it names to the execution worker (shared secret, root-only .env)
+      AUTOTRADE_PROXY_SECRET: ${AUTOTRADE_PROXY_SECRET:?set in .env}
     volumes:
       - ./.local/zt-source.env:/run/zt/runtime.env:ro
 
@@ -39,6 +41,8 @@ services:
       AUTOTRADE_EXECUTION_KEYCLOAK_URL: http://keycloak:8180/auth
       AUTOTRADE_EXECUTION_KEYCLOAK_CLIENT_SECRET: ${AUTOTRADE_EXECUTION_KEYCLOAK_CLIENT_SECRET:-}
       AUTOTRADE_EXECUTION_BROKERS_EGRESS_IPS: ${AUTOTRADE_BROKER_EGRESS_IPS:-}
+      # review 19 Nov 2026: a request naming a user needs the proxy's signature (the same secret as trading-core's)
+      AUTOTRADE_PROXY_SECRET: ${AUTOTRADE_PROXY_SECRET:?set in .env}
       # mobile phase 4: web push to installed phones, off unless the root-only .env says true (runbook mobile-front-door)
       AUTOTRADE_EXECUTION_PUSH_ENABLED: ${AUTOTRADE_EXECUTION_PUSH_ENABLED:-false}
       AUTOTRADE_EXECUTION_PUSH_SUBJECT: ${AUTOTRADE_EXECUTION_PUSH_SUBJECT:-}

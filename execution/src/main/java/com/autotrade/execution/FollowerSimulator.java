@@ -390,6 +390,7 @@ public final class FollowerSimulator {
         if (day.lossCheckedAt != null && now.isBefore(day.lossCheckedAt.plus(DAILY_LOSS_MARK_EVERY))) {
             return null;
         }
+        day.lossCheckedAt = now;                                   // the mark interval covers the lookups below too
         long tenant = day.account.tenantId();
         // review 19 Nov 2026: a member workspace's own rupee limit (Today page) counts open LIVE positions too, and at the
         // limit sells, as v11 does for one account (it used to count closed trades and only refuse entries)
@@ -403,7 +404,6 @@ public final class FollowerSimulator {
         if (open.isEmpty()) {
             return null;
         }
-        day.lossCheckedAt = now;
         double limit = day.dailyLossLimit > 0 ? day.dailyLossLimit : day.equity * risk.limits().dailyLossPct() / 100;
         double openNet = 0;
         List<String> unmarked = new ArrayList<>();
@@ -736,6 +736,18 @@ public final class FollowerSimulator {
             if (leg.bookQuantity() >= 0) {
                 lots = Math.min(lots, (long) leg.bookQuantity() / leg.lotSize());
             }
+        }
+        if (risk.capsStopRisk() && lots >= 1) {                        // v14 (review 19 Nov 2026): both legs capped
+            double perLotRisk = ce.lotSize() * (ceAsk * stopLossShare(ce.stopPct()) + peAsk * stopLossShare(pe.stopPct()));
+            double room = stopRiskCap(day) - stopRisk(day.account.id());
+            long fit = perLotRisk > 0 ? Math.max(0, (long) Math.floor(room / perLotRisk)) : lots;
+            if (fit < 1) {
+                String why = String.format("the stop-risk cap: open positions could lose %.0f before their broker stops, one "
+                        + "lot pair of this straddle %.0f more, the cap is %.0f", stopRisk(day.account.id()), perLotRisk,
+                        stopRiskCap(day));
+                return List.of(reject(ce, "STOP_RISK", why), reject(pe, "STOP_RISK", why));
+            }
+            lots = Math.min(lots, fit);
         }
         if (lots < 1) {
             return List.of(reject(ce, "SIZE", "the straddle budget buys no lot pair"),
