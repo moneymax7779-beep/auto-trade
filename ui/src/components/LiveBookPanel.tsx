@@ -134,7 +134,8 @@ export function LiveBookPanel({ accountId, hideEmpty }: { accountId: number; hid
     key: p.id, strategy: p.strategy, symbol: p.symbol, quantity: p.quantity, lotSize: p.lotSize, entry: p.entry,
     opened: p.opened, bid: p.bid, quoteAt: p.quoteAt ?? null, best: p.best, stop: p.stop, pnl: p.pnl ?? null,
     pnlPct: p.pnlPct ?? null, perPoint: p.perPoint ?? null, underlying: p.underlying,
-    stopNote: paper ? "paper: exits on the strategy's signal, your Exit or the square-off"
+    stopNote: b.mirrorOf ? `${b.mirrorOf}'s position: it exits on its strategy's signal or the square-off`
+      : paper ? "paper: exits on the strategy's signal, your Exit or the square-off"
       : p.stop == null ? "no stop on record"
       : p.stopWorking ? <>stop resting at the broker{p.bid != null ? <> · {px(p.bid - p.stop)} pts below the bid · {money(p.atRisk ?? null, false)} at risk</> : null}</>
       : <span className="text-down">stop {p.stopStatus?.toLowerCase() ?? "not working"} at the broker</span>,
@@ -163,7 +164,7 @@ export function LiveBookPanel({ accountId, hideEmpty }: { accountId: number; hid
   ];
   return (
     <PositionsPanel title={<>{paper ? "Paper positions" : "Auto-trade positions"} · {b.account}</>} badge={paper ? "PAPER" : "LIVE"}
-      note={paper ? "paper money: no broker order" : "only trades auto-trade placed"}
+      note={b.mirrorOf ? `paper money: shows ${b.mirrorOf}'s trades, the same as ${b.mirrorOf}` : paper ? "paper money: no broker order" : "only trades auto-trade placed"}
       banner={b.killSwitches.length > 0 ? <KillBanner accountId={accountId} kills={b.killSwitches} /> : null}
       totals={totals} open={open} closed={closed} weekly
       footnote={`prices from the own capture · refreshed every 5 s · P&L at the bid${b.squareOff ? ` · square-off ${b.squareOff}` : ""}`} />

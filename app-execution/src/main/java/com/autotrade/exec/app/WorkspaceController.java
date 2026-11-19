@@ -495,6 +495,17 @@ class WorkspaceController {
             r.put("open", 0);
             return r;
         }
+        String mirrorOf = LiveBookController.mirrorOf(jdbc, accountId);
+        if (mirrorOf != null) {             // a mirror account (V49): the mirrored engine account's PAPER_LIVE trades of the day
+            Map<String, Object> m = jdbc.queryForMap("select coalesce(sum(p.net) filter (where p.closed_at is not null), 0)::float8 "
+                    + "net, count(*) filter (where p.closed_at is not null) trades, count(*) filter (where p.closed_at is null) "
+                    + "open from trade.position p join trade.session s on s.id = p.session_id where s.account = ? "
+                    + "and s.mode = 'PAPER_LIVE' and s.session_date = ?", mirrorOf, java.sql.Date.valueOf(day));
+            r.put("net", round(((Number) m.get("net")).doubleValue()));
+            r.put("trades", ((Number) m.get("trades")).intValue());
+            r.put("open", ((Number) m.get("open")).intValue());
+            return r;
+        }
         Map<String, Object> row = jdbc.queryForMap("select coalesce(sum(realised_gross - coalesce(charges, 0)) filter "
                 + "(where status = 'CLOSED' and (closed_at at time zone 'Asia/Kolkata')::date = ?), 0)::float8 net, "
                 + "count(*) filter (where status = 'CLOSED' and (closed_at at time zone 'Asia/Kolkata')::date = ?) trades, "
