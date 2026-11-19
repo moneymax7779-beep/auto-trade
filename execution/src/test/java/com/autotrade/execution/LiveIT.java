@@ -66,6 +66,7 @@ class LiveIT {
             "10:00"))).atZone(IST).toInstant(), IST);
     private static final String V7 = "../config/risk/follower-risk.v7.yaml";
     private static final String V11 = "../config/risk/follower-risk.v11.yaml";
+    private static final String V14 = "../config/risk/follower-risk.v14.yaml";
     /** The worker's broker rules (16 Nov 2026, A1): ZERODHA's last LIVE entry 15:10, square-off 15:20. */
     private static final BrokerRules RULES = BrokerRules.load(Path.of("..", "config", "brokers", "broker-rules.v1.yaml"));
     private static final int LOT = 65;
@@ -396,6 +397,76 @@ class LiveIT {
             enter(group, signalSession(group), "ma-cross", 2);
             follower(registry, a).withClock(Clock.fixed(CLOCK.instant().plusSeconds(7), IST)).run(a, group, DAY);
             assertThat(intentState(a)).isEqualTo("REJECTED_DAILY_LOSS");
+        }
+    }
+
+    /**
+     * v14 (review 19 Nov 2026): the stop-risk cap. Rs 10,000 day limit, a 25 % broker stop filled at its limit 5 % lower
+     * loses 28.75 % of the premium: 65 x 100 x 0.2875 = 1,868.75 a lot, so 5 lots fit (9,343.75), not v11's 16. A second
+     * entry while those are open has 656 of room: under one lot, refused.
+     */
+    @Test
+    void aV14EntryIsSizedDownByTheStopRiskCapAndASecondOneIsRefused() {
+        long group = group();
+        BrokerAccount a = account(group, true, V14, 100, "ma-cross", "oi-burst-cross");
+        jdbc.update("update acct.broker_account set daily_loss_limit = 10000 where id = ?", a.id());
+        a = new AccountStore(dataSource).byId(a.id()).orElseThrow();
+        long session = signalSession(group);
+        enter(group, session, "ma-cross", 0);
+        try (BrokerConnections registry = registry()) {
+            FollowerSimulator follower = follower(registry, a);
+            follower.run(a, group, DAY);
+            assertThat(jdbc.queryForObject("select quantity_open from exec.position where broker_account_id = ?", Long.class,
+                    a.id())).as("sized to the cap, not the allocation's 16 lots").isEqualTo(5L * LOT);
+            enter(group, session, "oi-burst-cross", 1);
+            follower.run(a, group, DAY);
+            assertThat(intentState(a)).isEqualTo("REJECTED_STOP_RISK");
+        }
+    }
+
+    /**
+     * Review 19 Nov 2026: a member workspace's own loss limit counts open LIVE positions and sells at the limit (it used
+     * to count closed trades only and refuse entries). The account's own limit is far away (1 crore); the workspace's
+     * Rs 10,000 is reached by an 11-a-unit drop on 16 lots (11,440): sold, audited with scope MEMBER.
+     */
+    @Test
+    void aMemberWorkspaceLimitCountsOpenLiveLossAndSellsEverything() {
+        long group = group();
+        BrokerAccount a = account(group, true, V11, 100, "ma-cross");
+        AccountStore accounts = new AccountStore(dataSource);
+        long member = accounts.ensureTenant("member-" + a.id());
+        jdbc.update("update acct.tenant set trading_control = 'DAILY_SWITCH', daily_loss_limit = 10000 where id = ?", member);
+        long owner = accounts.ensureUser("kc-owner", "owner");
+        accounts.ensureMembership(member, owner, "OWNER");
+        jdbc.update("update acct.broker_account set tenant_id = ?, daily_loss_limit = 10000000 where id = ?", member, a.id());
+        jdbc.update("update acct.broker_credential_profile set tenant_id = ? where id = (select credential_profile_id from "
+                + "acct.broker_account where id = ?)", member, a.id());
+        accounts.shareCopyGroup(group, member, owner);
+        // the switch is LIVE only after today's broker login (acct.entry_target): a login at 08:00, LIVE at 09:00
+        jdbc.update("update acct.broker_account set connection_status = 'ACTIVE' where id = ?", a.id());
+        jdbc.update("insert into acct.broker_session (broker_account_id, token_ref, acquired_at, expires_at, status, created_at) "
+                + "values (?, 'file:kite-it.token', ?, ?, 'ACTIVE', ?)", a.id(), java.sql.Timestamp.from(CLOCK.instant()
+                .minusSeconds(7200)), java.sql.Timestamp.from(CLOCK.instant().plusSeconds(21600)),
+                java.sql.Timestamp.from(CLOCK.instant().minusSeconds(7200)));
+        long live = new TradingDay(dataSource).append(member, a.id(), TradingDay.Mode.LIVE, "IT", null);
+        // LIVE before the signal's own time (the fan-out takes the target as of the decision, 10:00 on the test clock)
+        jdbc.update("update acct.trading_day_event set changed_at = ? where id = ?",
+                java.sql.Timestamp.from(CLOCK.instant().minusSeconds(3600)), live);
+        a = accounts.byId(a.id()).orElseThrow();
+        enter(group, signalSession(group), "ma-cross", 0);
+        try (BrokerConnections registry = registry()) {
+            FollowerSimulator follower = follower(registry, a);
+            follower.run(a, group, DAY);
+            assertThat(jdbc.queryForList("select i.state || coalesce('_' || i.reject_code, '') || coalesce(' ' || i.reject_reason, '') "
+                    + "from exec.trade_intent i where i.broker_account_id = ?", String.class, a.id())).containsExactly("EXECUTED");
+            assertThat(jdbc.queryForObject("select quantity_open from exec.position where broker_account_id = ?", Long.class,
+                    a.id())).isEqualTo(16L * LOT);
+            kite.depth(KEYS[0], List.of(new Quote.Level(89.0, 65_000)), List.of(new Quote.Level(89.5, 65_000)), 89.2);
+            follower.withClock(Clock.fixed(CLOCK.instant().plusSeconds(6), IST)).run(a, group, DAY);
+            assertThat(jdbc.queryForObject("select status || ' ' || quantity_open from exec.position "
+                    + "where broker_account_id = ?", String.class, a.id())).isEqualTo("CLOSED 0");
+            assertThat(jdbc.queryForObject("select detail->>'scope' from exec.audit_log where broker_account_id = ? "
+                    + "and action = 'DAILY_LOSS_STOP'", String.class, a.id())).isEqualTo("MEMBER");
         }
     }
 

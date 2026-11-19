@@ -15,12 +15,21 @@ import com.autotrade.config.ThresholdConfig;
  * day (before v11: closed trades only, and reaching it only refuses new entries). From v12,
  * {@code convictionRvolFull} (sizing.conviction_rvol_full; NaN = off): an entry whose signal carries futures RVOL at or
  * above it is taken at full size whatever the account's size step (A-378, the PAPER forward test of A-377's X1 flag).
+ * From v14, {@code maxStopRiskPct} (capital.max_stop_risk_pct_of_daily_loss; NaN = off; review 19 Nov 2026): what the
+ * open positions plus a new entry could lose before their broker stops sell them (each stop-limit filled at its limit)
+ * may be at most this % of the day's loss limit; an entry is sized down to fit and refused under one lot.
  */
 public record FollowerRisk(String version, CapitalLimits limits, int maxOpenPositions, int maxLotsPerUnderlying,
                            double rvolBoostThreshold, double rvolBoostFactor, double adverseBps, OrderRules orders,
-                           Combined combined, LiveLimits live, boolean dailyLossCountsOpen, double convictionRvolFull) {
+                           Combined combined, LiveLimits live, boolean dailyLossCountsOpen, double convictionRvolFull,
+                           double maxStopRiskPct) {
 
     public FollowerRisk {
+        // v14: a share of the daily loss limit; off (NaN) or positive only
+        if (!Double.isNaN(maxStopRiskPct) && !(maxStopRiskPct > 0 && Double.isFinite(maxStopRiskPct))) {
+            throw new IllegalArgumentException("capital.max_stop_risk_pct_of_daily_loss must be a positive %, not "
+                    + maxStopRiskPct);
+        }
         // review 12 Nov 2026: a threshold of 0 or below (a typo) would take every entry at full size, a LIVE account's
         // size step included; only off (absent = NaN) or a positive RVOL is accepted
         if (!Double.isNaN(convictionRvolFull) && !(convictionRvolFull > 0 && Double.isFinite(convictionRvolFull))) {
@@ -82,7 +91,9 @@ public record FollowerRisk(String version, CapitalLimits limits, int maxOpenPosi
                         c.getInt("live.max_open_positions"), names(c.get("live.strategies")),
                         c.has("live.default_strategies") ? names(c.get("live.default_strategies")) : null) : null,
                 c.has("capital.daily_loss_counts_open") && c.getBoolean("capital.daily_loss_counts_open"),
-                c.has("sizing.conviction_rvol_full") ? c.getDouble("sizing.conviction_rvol_full") : Double.NaN);
+                c.has("sizing.conviction_rvol_full") ? c.getDouble("sizing.conviction_rvol_full") : Double.NaN,
+                c.has("capital.max_stop_risk_pct_of_daily_loss") ? c.getDouble("capital.max_stop_risk_pct_of_daily_loss")
+                        : Double.NaN);
     }
 
     private static java.util.Set<String> names(Object list) {
@@ -92,6 +103,11 @@ public record FollowerRisk(String version, CapitalLimits limits, int maxOpenPosi
     /** The budget multiplier for an entry at this RVOL (risk v17: the factor at or above the threshold, else 1). */
     public double boost(double rvolTod) {
         return !Double.isNaN(rvolBoostThreshold) && rvolTod >= rvolBoostThreshold ? rvolBoostFactor : 1.0;
+    }
+
+    /** v14: whether the stop-risk cap is on. */
+    public boolean capsStopRisk() {
+        return !Double.isNaN(maxStopRiskPct);
     }
 
     /** v12 (A-378): true when an entry at this RVOL is taken at full size whatever the size step (a missing RVOL: no). */

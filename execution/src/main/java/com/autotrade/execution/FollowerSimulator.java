@@ -256,7 +256,8 @@ public final class FollowerSimulator {
                 protectionChecked.add(checked);
             }
         }
-        if (risk.dailyLossCountsOpen() && venue.broker() && !sessionLost) {
+        // v11's own-limit stop, or (review 19 Nov 2026) a member workspace's limit on a LIVE broker account
+        if ((risk.dailyLossCountsOpen() || venue.live()) && venue.broker() && !sessionLost) {
             try {
                 String stop = dailyLossStop(day);
                 if (stop != null) {
@@ -389,6 +390,13 @@ public final class FollowerSimulator {
         if (day.lossCheckedAt != null && now.isBefore(day.lossCheckedAt.plus(DAILY_LOSS_MARK_EVERY))) {
             return null;
         }
+        long tenant = day.account.tenantId();
+        // review 19 Nov 2026: a member workspace's own rupee limit (Today page) counts open LIVE positions too, and at the
+        // limit sells, as v11 does for one account (it used to count closed trades and only refuse entries)
+        Double memberLimit = venue.live() && tradingDay.dailySwitch(tenant) ? tradingDay.dailyLossLimit(tenant) : null;
+        if (!risk.dailyLossCountsOpen() && memberLimit == null) {
+            return null;
+        }
         List<Map<String, Object>> open = jdbc.queryForList("select id, instrument_token, instrument_key, symbol, "
                 + "quantity_open, average_entry from exec.position where broker_account_id = ? and status = 'OPEN' "
                 + "and quantity_open > 0 order by id", day.account.id());
@@ -397,9 +405,6 @@ public final class FollowerSimulator {
         }
         day.lossCheckedAt = now;
         double limit = day.dailyLossLimit > 0 ? day.dailyLossLimit : day.equity * risk.limits().dailyLossPct() / 100;
-        if (!(limit > 0)) {
-            return null;
-        }
         double openNet = 0;
         List<String> unmarked = new ArrayList<>();
         for (Map<String, Object> pos : open) {
@@ -412,14 +417,37 @@ public final class FollowerSimulator {
                     * ((Number) pos.get("quantity_open")).longValue();
         }
         double closedNet = day.todayNet();
-        if (closedNet + openNet > -limit) {
+        boolean accountHit = risk.dailyLossCountsOpen() && limit > 0 && closedNet + openNet <= -limit;
+        double memberDay = Double.NaN;
+        if (memberLimit != null && memberLimit > 0) {
+            // the workspace's LIVE day: closed LIVE trades of every broker + this account's open + its other real brokers'
+            // open LIVE positions (each account sells its own on its own turn; they all see the same total)
+            double others = 0;
+            for (Map<String, Object> pos : jdbc.queryForList("select p.id, p.instrument_token, p.instrument_key, p.symbol, "
+                    + "p.quantity_open, p.average_entry from exec.position p join exec.trade_intent i on i.id = "
+                    + "p.entry_trade_intent_id where p.tenant_id = ? and p.broker_account_id <> ? and p.status = 'OPEN' "
+                    + "and p.quantity_open > 0 and i.execution_mode = 'LIVE'", tenant, day.account.id())) {
+                double bid = mark(day.account, pos);
+                if (bid > 0) {
+                    others += (bid - ((Number) pos.get("average_entry")).doubleValue())
+                            * ((Number) pos.get("quantity_open")).longValue();
+                }
+            }
+            memberDay = tradingDay.liveNet(tenant, day.date) + openNet + others;
+        }
+        boolean memberHit = !Double.isNaN(memberDay) && memberDay <= -memberLimit;
+        if (!accountHit && !memberHit) {
             return null;
         }
         day.dailyLossLatched = true;
         day.dailyLossStopped = true;
         day.lossFlattenAt = now;
         Map<String, Object> detail = new LinkedHashMap<>();
-        detail.put("limit", Math.round(limit));
+        detail.put("scope", accountHit ? "ACCOUNT" : "MEMBER");
+        detail.put("limit", Math.round(accountHit ? limit : memberLimit));
+        if (memberHit) {
+            detail.put("memberDay", Math.round(memberDay));
+        }
         detail.put("closed", Math.round(closedNet));
         detail.put("open", Math.round(openNet));
         detail.put("positions", open.size());
@@ -427,9 +455,10 @@ public final class FollowerSimulator {
             detail.put("unmarked", unmarked);
         }
         kills.audit(day.account, "execution", "DAILY_LOSS_STOP", detail);
-        log.warn("account {} ({}): daily loss {} (closed {} + open {}) reached the limit {}: selling every open position, "
-                + "no entries today", day.account.id(), day.account.displayName(), Math.round(closedNet + openNet),
-                Math.round(closedNet), Math.round(openNet), Math.round(limit));
+        log.warn("account {} ({}): {} daily loss {} (account closed {} + open {}) reached the limit {}: selling every open "
+                + "position, no entries today", day.account.id(), day.account.displayName(), accountHit ? "the account's"
+                : "the member workspace's", Math.round(accountHit ? closedNet + openNet : memberDay), Math.round(closedNet),
+                Math.round(openNet), Math.round(accountHit ? limit : memberLimit));
         flatten(day.account, day.date, this::markOrEntry, "DAILY_LOSS_STOP");
         return "DAILY_LOSS_STOP";
     }
@@ -541,6 +570,16 @@ public final class FollowerSimulator {
         if (lots < 1) {
             return resumable ? resumeEntry(day, p) : reject(p, "SIZE", "under one lot after the size step");
         }
+        long fit = stopRiskFit(day, p, price);                                         // v14: the stop-risk cap
+        if (fit < lots) {
+            if (fit < 1) {
+                return resumable ? resumeEntry(day, p) : reject(p, "STOP_RISK", stopRiskReason(day, p, price));
+            }
+            log.info("account {} ({}): {} {} sized {} -> {} lots by the stop-risk cap", day.account.id(),
+                    day.account.displayName(), p.strategyId(), p.symbol(), lots, fit);
+            scale = Double.isNaN(scale) ? scale : scale * fit / lots;
+            lots = fit;
+        }
         long quantity = lots * p.lotSize();
         String refused = check(day, p, false, 1, lots, quantity * price);
         if (refused != null) {
@@ -570,6 +609,9 @@ public final class FollowerSimulator {
             return resumable ? resumeEntry(day, p) : reject(p, "SIZE", "no price to buy at");
         }
         long lots = p.fixedLots();
+        if (stopRiskFit(day, p, price) < lots) {                                       // v14: the stop-risk cap
+            return reject(p, "STOP_RISK", stopRiskReason(day, p, price));
+        }
         long quantity = lots * p.lotSize();
         String refused = check(day, p, false, 1, lots, quantity * price);
         if (refused != null) {
@@ -642,8 +684,15 @@ public final class FollowerSimulator {
                 return skip(p, "BOOK_LIMIT", "the signal account's fills leave no room for this add");
             }
         }
-        long quantity = lots * p.lotSize();
         double price = buyPrice(p.price());
+        long fit = stopRiskFit(day, p, price);                                         // v14: the stop-risk cap
+        if (fit < lots) {
+            if (fit < 1) {
+                return skip(p, "STOP_RISK", stopRiskReason(day, p, price));
+            }
+            lots = fit;
+        }
+        long quantity = lots * p.lotSize();
         String refused = check(day, p, true, 0, lots, quantity * price);
         if (refused != null) {
             if (refused.equals("REJECTED_CAPITAL") && quotes != null) {
@@ -875,6 +924,56 @@ public final class FollowerSimulator {
             return 0;
         }
         return p.budget() * (day.equity / p.referenceCapital()) * p.sizeMultiplier();
+    }
+
+    // ---------------------------------------------------------------- v14 stop-risk cap
+
+    /**
+     * The share of an entry's premium lost when its broker stop sells it: the stop's trigger % below the entry, then the
+     * stop-limit filled at its limit, {@code stopLimitOffsetPct} % below the trigger (a 50 % stop: 52.5 %).
+     */
+    private double stopLossShare(double stopPct) {
+        double stop = Double.isNaN(stopPct) && risk.orders() != null ? risk.orders().defaultStopPct() : stopPct;
+        double offset = risk.orders() == null ? 0 : risk.orders().stopLimitOffsetPct();
+        return Double.isNaN(stop) ? 1 : 1 - (1 - stop / 100) * (1 - offset / 100);
+    }
+
+    /** What the account's open positions could lose before their broker stops sell them. */
+    private double stopRisk(long accountId) {
+        double total = 0;
+        for (Map<String, Object> pos : jdbc.queryForList("select quantity_open, average_entry, stop_pct from exec.position "
+                + "where broker_account_id = ? and status = 'OPEN' and quantity_open > 0", accountId)) {
+            Object stop = pos.get("stop_pct");
+            total += ((Number) pos.get("quantity_open")).longValue() * ((Number) pos.get("average_entry")).doubleValue()
+                    * stopLossShare(stop == null ? Double.NaN : ((Number) stop).doubleValue());
+        }
+        return total;
+    }
+
+    /** The cap in rupees: max_stop_risk_pct_of_daily_loss of the day's loss limit (the account's own, else the %). */
+    private double stopRiskCap(Day day) {
+        double limit = day.dailyLossLimit > 0 ? day.dailyLossLimit : day.equity * risk.limits().dailyLossPct() / 100;
+        return limit * risk.maxStopRiskPct() / 100;
+    }
+
+    /**
+     * v14 (review 19 Nov 2026: on 19 Nov two oi-burst-cross entries with 50 % broker stops put Rs 41.7K at risk against
+     * ZERODHA-1's Rs 22K day limit): the most lots this entry may take so that the open positions plus it could lose at
+     * most the cap before their broker stops sell them; Long.MAX_VALUE when the cap is off.
+     */
+    private long stopRiskFit(Day day, Pending p, double price) {
+        if (!risk.capsStopRisk()) {
+            return Long.MAX_VALUE;
+        }
+        double perLot = p.lotSize() * price * stopLossShare(p.stopPct());
+        double room = stopRiskCap(day) - stopRisk(day.account.id());
+        return perLot > 0 ? Math.max(0, (long) Math.floor(room / perLot)) : Long.MAX_VALUE;
+    }
+
+    private String stopRiskReason(Day day, Pending p, double price) {
+        return String.format("the stop-risk cap: open positions could lose %.0f before their broker stops, one lot of this "
+                + "entry %.0f more, the cap is %.0f", stopRisk(day.account.id()),
+                p.lotSize() * price * stopLossShare(p.stopPct()), stopRiskCap(day));
     }
 
     // ---------------------------------------------------------------- exits
