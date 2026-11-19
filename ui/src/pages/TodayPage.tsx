@@ -220,8 +220,10 @@ function TodayFor({ tenant }: { tenant: number }) {
                 onClick={() => call.mutate({ path: `/api/execution/workspaces/${tenant}/limits`,
                   body: { dailyLossLimit: Number(lossInput.replace(/[,₹\s]/g, "")) }, ok: "loss limit set" })}>Set</button>
               {t.lossLimit.dailyLossLimit != null && <button className={button} disabled={call.isPending}
-                onClick={() => call.mutate({ path: `/api/execution/workspaces/${tenant}/limits`, body: { clear: true },
-                  ok: "loss limit cleared" })}>Clear</button>}
+                onClick={() => window.confirm(`Clear the daily loss limit of ₹${t.lossLimit.dailyLossLimit!.toLocaleString("en-IN")}?`
+                  + "\n\nThe workspace then has no rupee limit of its own today; each account's own risk limits still apply.")
+                  && call.mutate({ path: `/api/execution/workspaces/${tenant}/limits`, body: { clear: true },
+                    ok: "loss limit cleared" })}>Clear</button>}
             </div>
           )}
         </Panel>
@@ -231,8 +233,10 @@ function TodayFor({ tenant }: { tenant: number }) {
             <div className="space-y-2 text-sm">
               <p className="text-down">Engaged by {tenantKill.engaged_by}: {tenantKill.reason}. New entries stop; exits continue.</p>
               {t.canSwitch && <button className={button} disabled={call.isPending}
-                onClick={() => call.mutate({ path: `/api/execution/kill-switches/${tenantKill.id}/release`, body: {},
-                  ok: "kill switch released" })}>Release</button>}
+                onClick={() => window.confirm(`Release the kill switch on all your accounts?\n\nEngaged by ${tenantKill.engaged_by}: `
+                  + `${tenantKill.reason}\n\nNew entries resume from now${t.state?.mode === "LIVE" ? ", with REAL MONEY (today is LIVE)" : ""}.`)
+                  && call.mutate({ path: `/api/execution/kill-switches/${tenantKill.id}/release`, body: {},
+                    ok: "kill switch released" })}>Release</button>}
             </div>
           ) : t.canStop ? (
             <div className="flex flex-wrap items-center gap-2">

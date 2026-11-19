@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { type ComponentType, lazy, Suspense } from "react";
 import { Navigate, NavLink, Route, Routes, useLocation } from "react-router";
-import { get } from "./api";
+import { get, type ExecMe, type ExecutionAccount } from "./api";
 import { MobileNav, type NavItem } from "./components/MobileNav";
 import { AppUpdate } from "./components/AppUpdate";
 import { PageBoundary } from "./components/PageBoundary";
@@ -104,7 +104,7 @@ export function App() {
         <div className="mx-auto flex max-w-7xl items-center gap-3 py-2.5 pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] sm:gap-6">
           <div className="flex shrink-0 items-center gap-2">
             <span className="font-semibold">auto-trade</span>
-            <span className="rounded bg-warn/15 px-1.5 py-0.5 text-[10px] font-bold tracking-wider text-warn">PAPER</span>
+            <MoneyBadge />
           </div>
           {/* below md the menu is the bottom tab bar and its More sheet (MobileNav) */}
           <nav className="hidden min-w-0 gap-1 overflow-x-auto md:flex">
@@ -195,4 +195,28 @@ function SignedIn() {
       <button type="submit" className="rounded px-2 py-1 text-muted hover:bg-panel-2 hover:text-text">Sign out</button>
     </form>
   );
+}
+
+/**
+ * Real money or paper (review 19 Nov 2026: the header said PAPER while ZERODHA-1 traded LIVE). LIVE when an enabled real
+ * broker account trades LIVE by its own mode (not a member's daily-switch workspace, where LIVE on the account only
+ * means eligible), or when any account entered with real money today. Unknown when the accounts cannot be read.
+ */
+function MoneyBadge() {
+  const accounts = useQuery({ queryKey: ["exec-accounts"], queryFn: () => get<ExecutionAccount[]>("/api/execution/accounts"),
+    refetchInterval: 60_000, staleTime: 30_000, retry: false });
+  const execMe = useQuery({ queryKey: ["exec-me"], queryFn: () => get<ExecMe>("/api/execution/me"), staleTime: 30_000,
+    retry: false });
+  const daily = new Set((execMe.data?.tenants ?? []).filter((t) => t.control === "DAILY_SWITCH").map((t) => t.id));
+  const base = "rounded px-1.5 py-0.5 text-[10px] font-bold tracking-wider";
+  if (!accounts.data) {
+    return <span className={`${base} bg-panel-2 text-muted`} title="accounts could not be read: real money or paper unknown">
+      {accounts.isPending ? "…" : "MODE ?"}</span>;
+  }
+  const live = accounts.data.filter((a) => a.enabled && a.paperOf == null && a.broker !== "PAPER"
+    && ((a.mode === "LIVE" && !daily.has(a.tenantId)) || (a.today?.liveTrades ?? 0) + (a.today?.liveOpen ?? 0) > 0));
+  return live.length > 0
+    ? <span className={`${base} bg-down/15 text-down`} title={`Real money: ${live.map((a) => a.name).join(", ")}`}>
+        LIVE · {live.length}</span>
+    : <span className={`${base} bg-warn/15 text-warn`} title="no account trades real money now">PAPER</span>;
 }

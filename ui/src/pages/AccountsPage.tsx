@@ -4,7 +4,7 @@ import {
   get, postJson, type AuditRow, type ExecMe, type ExecutionAccount, type GlobalLiveStrategies, type KillSwitch,
   type WorkerStatus,
 } from "../api";
-import { ErrorNote, Loading, Panel, Stat, Table } from "../components/ui";
+import { ErrorNote, Loading, Panel, Stat, Table, useStoredSet } from "../components/ui";
 import { planGlobal, STATES, type StrategyState } from "../components/strategySwitch";
 import { AccountDetailPanel, AddAccountPanel } from "./AccountManagement";
 import { describeAudit } from "../components/auditText";
@@ -143,11 +143,15 @@ function FollowerSummary({ rows, killed }: { rows: ExecutionAccount[]; killed: S
   );
 }
 
-function GroupHeading({ name, daily, accounts }: { name: string; daily: boolean; accounts: ExecutionAccount[] }) {
+function GroupHeading({ name, daily, accounts, open, onToggle }: { name: string; daily: boolean; accounts: ExecutionAccount[];
+  open: boolean; onToggle: () => void }) {
   const b = dayTotals(accounts);
   return (
     <div className="flex flex-wrap items-baseline gap-x-3 border-b border-line pb-1">
-      <span className="text-sm font-semibold">{name}</span>
+      <button type="button" onClick={onToggle} aria-expanded={open} title={open ? "Fold this workspace" : "Show its accounts"}
+        className="flex items-baseline gap-1.5 text-sm font-semibold hover:text-accent">
+        <span aria-hidden className={`inline-block text-[10px] text-muted transition-transform ${open ? "rotate-90" : ""}`}>▶</span>
+        {name}</button>
       <span className="text-xs text-muted">{daily ? "daily-switch workspace" : "own accounts"} · {accounts.length} account
         {accounts.length === 1 ? "" : "s"}</span>
       {/* real money and paper are never added together */}
@@ -193,7 +197,7 @@ function GlobalLivePanel({ onDone }: { onDone: (text: string, ok: boolean) => vo
   const tone = (st: StrategyState) => st === "LIVE" ? "bg-down text-white" : st === "PAPER" ? "bg-accent text-white"
     : "bg-muted text-white";
   return (
-    <Panel title="Strategies · all accounts" right={<span className="text-xs text-muted">
+    <Panel title="Strategies · all accounts" collapsible="accounts-strategies" right={<span className="text-xs text-muted">
       {g.global == null ? "LIVE list not set: each account's risk-file default" : "your global list"}</span>}>
       <div className="grid gap-x-6 gap-y-2 text-sm sm:grid-cols-2 xl:grid-cols-3">
         {names.map((s) => {
@@ -308,6 +312,7 @@ export function AccountsPage() {
   });
   const [flattenFor, setFlattenFor] = useState<number | null>(null);
   const [openAccount, setOpenAccount] = useState<number | null>(null);
+  const [folded, fold] = useStoredSet("accounts-folded-workspaces");
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
   const [rawAudit, setRawAudit] = useState(false);
 
@@ -363,7 +368,7 @@ export function AccountsPage() {
   return (
     <div className="space-y-4">
       {readOnly ? null : me.data && !me.data.admin ? (
-        <Panel title="Your access" right={s && (s.stale ? <Badge text="STALE" tone="down" /> : <Badge text="RUNNING" tone="up" />)}>
+        <Panel title="Your access" collapsible="accounts-access" right={s && (s.stale ? <Badge text="STALE" tone="down" /> : <Badge text="RUNNING" tone="up" />)}>
           <div className="space-y-1 text-sm">
             {me.data.tenants.map((t) => (
               <div key={t.id} className="flex flex-wrap gap-x-6 gap-y-1">
@@ -382,15 +387,15 @@ export function AccountsPage() {
           </div>
         </Panel>
       ) : (
-      <Panel title="Execution worker" right={s && (s.stale ? <Badge text="STALE" tone="down" /> : <Badge text="TICKING" tone="up" />)}>
+      <Panel title="Execution worker" collapsible="accounts-worker" right={s && (s.stale ? <Badge text="STALE" tone="down" /> : <Badge text="TICKING" tone="up" />)}>
         {status.error ? <ErrorNote error={status.error} /> : !s ? <Loading what="worker" /> : (
           <div className="flex flex-wrap gap-x-8 gap-y-2 text-sm">
             <span><span className="text-muted">Worker </span><span className="num">{s.worker}</span></span>
             <span><span className="text-muted">Copy groups </span><span className="num">{s.copyGroup === "*" ? "all" : s.copyGroup}</span></span>
             <span><span className="text-muted">Session date </span><span className="num">{s.day}</span></span>
             <span><span className="text-muted">Last tick </span><span className="num">{time(s.lastTick)}</span></span>
-            <span className="text-muted">PAPER and DRY_RUN only: LIVE is refused; DRY_RUN orders go to a local broker simulator.
-              Open positions are squared off at 15:20 if the signal source sent no exit.</span>
+            <span className="text-muted">LIVE accounts trade real money at the broker; DRY_RUN orders go to a local broker
+              simulator; PAPER fills are simulated. Open positions are squared off at 15:20 if the signal source sent no exit.</span>
           </div>
         )}
       </Panel>
@@ -405,7 +410,7 @@ export function AccountsPage() {
 
       {me.data?.admin && <GlobalLivePanel onDone={(text, ok) => setMessage({ ok, text })} />}
 
-      <Panel title={readOnly ? "Your accounts" : "Follower accounts"} right={readOnly
+      <Panel title={readOnly ? "Your accounts" : "Follower accounts"} collapsible="accounts-followers" right={readOnly
         // the worker's health stays visible to a viewer (it was on the "Your access" panel this one replaces)
         ? <span className="flex gap-1.5">{s?.stale && <Badge text="STALE" tone="down" />}<Badge text="READ-ONLY" tone="muted" /></span>
         : <span className="text-xs text-muted">{rows.length} account{rows.length === 1 ? "" : "s"}</span>}>
@@ -425,8 +430,10 @@ export function AccountsPage() {
         <Table rows={ordered} rowStyle={(o) => (o.a.enabled || o.a.today == null || o.a.today.open > 0 ? undefined : { opacity: 0.55 })}
           before={(o, i) => several && (i === 0 || ordered[i - 1].a.tenantId !== o.a.tenantId)
             ? <GroupHeading name={tenants.get(o.a.tenantId)?.name ?? String(o.a.tenantId)} daily={daily(o.a.tenantId)}
-                accounts={rows.filter((r) => r.tenantId === o.a.tenantId)} />
+                accounts={rows.filter((r) => r.tenantId === o.a.tenantId)} open={!folded.has(String(o.a.tenantId))}
+                onToggle={() => fold(String(o.a.tenantId))} />
             : null}
+          hidden={(o) => several && folded.has(String(o.a.tenantId)) && openAccount !== o.a.id}
           columns={([
           { key: "n", label: "Account", render: ({ a, twin }) => (
             <div className={`whitespace-nowrap ${twin ? "pl-4" : ""}`}>
@@ -520,7 +527,7 @@ export function AccountsPage() {
         onEngage={(body) => act.mutate({ path: "/api/execution/kill-switches", body, done: "kill switch engaged" })}
         onRelease={(id) => act.mutate({ path: `/api/execution/kill-switches/${id}/release`, body: {}, done: `switch ${id} released` })} />
 
-      <Panel title="Flatten all">
+      <Panel title="Flatten all" collapsible="accounts-flatten">
         <p className="mb-2 text-sm text-muted">
           Every follower account you may act on{several ? ` (${acting.map((t) => t.name).join(", ")})` : ""}: kill switch,
           broker stops off, every open position sold.
@@ -530,7 +537,7 @@ export function AccountsPage() {
       </Panel>
       </>}
 
-      <Panel title={historyOnly ? "Account history" : "Audit log"} right={<span className="flex items-center gap-2">
+      <Panel title={historyOnly ? "Account history" : "Audit log"} collapsible="accounts-audit" right={<span className="flex items-center gap-2">
         {!historyOnly && <label className="flex items-center gap-1 text-xs text-muted">
           <input type="checkbox" checked={rawAudit} onChange={(e) => setRawAudit(e.target.checked)} />raw detail</label>}
         {rows.length > 1 && (
@@ -583,7 +590,7 @@ function KillSwitchPanel({ switches, accounts, names, busy, tenants, admin, canR
   const ready = reason.trim() !== "" && (!needsTenant || tenantId !== "")
     && (scope === "GLOBAL_LIVE" || (scope === "ACCOUNT" ? accountId !== "" : target.trim() !== ""));
   return (
-    <Panel title="Kill switches" right={<span className="text-xs text-muted">entries and adds stop; exits never</span>}>
+    <Panel title="Kill switches" collapsible="accounts-kills" right={<span className="text-xs text-muted">entries and adds stop; exits never</span>}>
       {switches.error ? <ErrorNote error={switches.error} /> : (
         <Table rows={switches.data ?? []} empty="None engaged." columns={[
           { key: "s", label: "Scope", render: (k) => <Badge text={k.scope} tone="down" /> },
@@ -593,7 +600,12 @@ function KillSwitchPanel({ switches, accounts, names, busy, tenants, admin, canR
           { key: "b", label: "By", render: (k) => <span className="text-xs">{k.engagedBy} · {dateTime(k.engagedAt)}</span> },
           { key: "x", label: "", render: (k) => canRelease(k) ? (
             <button className="rounded border border-line px-2 py-0.5 text-xs hover:bg-panel-2" disabled={busy}
-              onClick={() => onRelease(k.id)}>Release</button>
+              onClick={() => {
+                const on = k.scope === "ACCOUNT" ? `${names.get(k.accountId!) ?? k.accountId}` : k.scope === "GLOBAL_LIVE"
+                  ? "every LIVE account" : k.scope === "TENANT" ? "every account of the workspace" : k.strategyId ?? k.instrumentKey ?? k.scope;
+                if (window.confirm(`Release the ${k.scope} kill switch on ${on}?\n\nEngaged by ${k.engagedBy}: ${k.reason}\n\n`
+                  + `New entries resume${k.scope === "GLOBAL_LIVE" ? " with real money" : ""} from now.`)) onRelease(k.id);
+              }}>Release</button>
           ) : null },
         ]} />
       )}

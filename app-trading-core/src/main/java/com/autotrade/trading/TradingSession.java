@@ -161,7 +161,7 @@ public final class TradingSession {
             if (sessionId > 0) {
                 store.killSwitch(sessionId, scope, engagement != null,
                         engagement == null ? "released" : engagement.reason(), clock.get(),
-                        engagement == null ? "operator" : engagement.by());
+                        engagement == null ? releasedBy.get() : engagement.by());
             }
             log.warn("kill switch {} {}", scope, engagement == null ? "RELEASED" : "ENGAGED: " + engagement.reason());
         });
@@ -876,8 +876,20 @@ public final class TradingSession {
 
     // ---------------------------------------------------------------- operator actions
 
+    /**
+     * Who releases a switch on this thread (review 19 Nov 2026: every release was stored as "operator", so today's
+     * 14:13 release had no name): the signed-in user for an operator release, "risk" for the application's own; read by
+     * the kill switch's listener, which runs on the releasing thread.
+     */
+    private static final ThreadLocal<String> releasedBy = ThreadLocal.withInitial(() -> "operator");
+
     public void engageKillSwitch(String scope, String reason) {
-        killSwitch.engage(scope, reason, clock.get(), "operator");
+        engageKillSwitch(scope, reason, "operator");
+    }
+
+    /** {@code by}: the signed-in user (the operator's name in the session's kill-switch history). */
+    public void engageKillSwitch(String scope, String reason, String by) {
+        killSwitch.engage(scope, reason, clock.get(), by == null || by.isBlank() ? "operator" : by);
     }
 
     /**
@@ -905,7 +917,12 @@ public final class TradingSession {
         if (!risk.releaseDailyLoss()) {
             return false;
         }
-        killSwitch.release(scope);
+        releasedBy.set("risk");
+        try {
+            killSwitch.release(scope);
+        } finally {
+            releasedBy.remove();
+        }
         log.warn("{} {} {} {}: A-grade entry, daily-loss kill switch RELEASED by the application (day {}, limit now {}, "
                         + "releases left {})", time, underlying, strategyId, side, Math.round(oms.dayPnl()),
                 Math.round(risk.dailyLossLimit()), risk.dailyLossReleasesLeft());
@@ -922,6 +939,20 @@ public final class TradingSession {
      * once used, it stays engaged (A-101).
      */
     public Release releaseKillSwitch(String scope) {
+        return releaseKillSwitch(scope, "operator");
+    }
+
+    /** As {@link #releaseKillSwitch(String)}, recording {@code by} (the signed-in user) as who released each switch. */
+    public Release releaseKillSwitch(String scope, String by) {
+        releasedBy.set(by == null || by.isBlank() ? "operator" : by);
+        try {
+            return releaseScopes(scope);
+        } finally {
+            releasedBy.remove();
+        }
+    }
+
+    private Release releaseScopes(String scope) {
         List<String> scopes = "ALL".equals(scope) ? List.copyOf(killSwitch.engaged().keySet()) : List.of(scope);
         List<String> released = new ArrayList<>();
         String refused = null;
@@ -940,7 +971,7 @@ public final class TradingSession {
             if (killSwitch.release(s)) {
                 released.add(s);
                 if (dailyLoss) {
-                    log.warn("daily-loss kill switch released by the operator: limit now {}, releases left {}",
+                    log.warn("daily-loss kill switch released by {}: limit now {}, releases left {}", releasedBy.get(),
                             Math.round(risk.dailyLossLimit()), risk.dailyLossReleasesLeft());
                 }
             }

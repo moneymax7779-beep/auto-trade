@@ -63,12 +63,13 @@ class TradingController {
 
     @PostMapping("/kill")
     ResponseEntity<Map<String, Object>> kill(@RequestParam(defaultValue = "GLOBAL") String scope,
-                                             @RequestParam(defaultValue = "operator") String reason) {
+                                             @RequestParam(defaultValue = "operator") String reason,
+                                             java.security.Principal principal) {
         TradingSession session = runner.current();
         if (session == null) {
             return ResponseEntity.status(409).body(Map.of("error", "no session"));
         }
-        session.engageKillSwitch(scope, reason);
+        session.engageKillSwitch(scope, reason, principal == null ? null : principal.getName());   // the signed-in user
         return ResponseEntity.ok(session.status());
     }
 
@@ -78,12 +79,13 @@ class TradingController {
      * engages again at the next entry while the day's loss is still beyond the limit.
      */
     @PostMapping("/kill/release")
-    ResponseEntity<Map<String, Object>> release(@RequestParam(defaultValue = "ALL") String scope) {
+    ResponseEntity<Map<String, Object>> release(@RequestParam(defaultValue = "ALL") String scope,
+                                                java.security.Principal principal) {
         TradingSession session = runner.current();
         if (session == null) {
             return ResponseEntity.status(409).body(Map.of("error", "no session"));
         }
-        TradingSession.Release release = session.releaseKillSwitch(scope);
+        TradingSession.Release release = session.releaseKillSwitch(scope, principal == null ? null : principal.getName());
         if (release.released().isEmpty()) {
             String error = release.refused() != null ? release.refused() : "no engaged kill switch for scope " + scope;
             return ResponseEntity.status(409).body(Map.of("error", error,
