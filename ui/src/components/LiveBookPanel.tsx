@@ -1,6 +1,6 @@
 import { type ReactNode, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { get, postJson, type ExecutionAccount, type ExitPreview, type LiveBook, type LiveOpenPosition, type PositionRow } from "../api";
+import { get, postJson, type ExecutionAccount, type ExitPreview, type LiveBook, type LiveOpenPosition, type PositionRow, type Status } from "../api";
 import { ErrorNote } from "./ui";
 
 /**
@@ -117,7 +117,37 @@ export function LiveBooks() {
 
 /** The query the book panels and the Today page's totals share (one request per account and poll). */
 export const bookQuery = (accountId: number) => ({ queryKey: ["live-book", accountId],
-  queryFn: () => get<LiveBook>(`/api/execution/accounts/${accountId}/live-book?days=7`), refetchInterval: 5_000 });
+  queryFn: async () => withMirrorOpen(await get<LiveBook>(`/api/execution/accounts/${accountId}/live-book?days=7`)),
+  refetchInterval: 5_000 });
+
+/**
+ * V49 (review 19 Nov 2026): a mirror account's book from the server has only the mirrored account's closed trades (the
+ * engine writes a position when it closes); its open positions are the running session's, which members read from
+ * /api/status (the chart shows them from there too). They are added here, so the panel, the Today page's open P&L and
+ * "has today" all see them. Read-only rows: no Exit on a mirror (canAct is false).
+ */
+export async function withMirrorOpen(b: LiveBook): Promise<LiveBook> {
+  if (!b.mirrorOf) return b;
+  let s: Status;
+  try {
+    s = await get<Status>("/api/status");
+  } catch {
+    return b;                                        // the closed trades still show; the open ones come back next poll
+  }
+  if (s.status !== "RUNNING" || s.date !== istToday() || (s.account != null && s.account !== b.mirrorOf)) return b;
+  const open: LiveOpenPosition[] = (s.openPositions ?? []).filter((p) => p.quantity > 0).map((p, i) => {
+    const pnl = p.unrealised ?? (p.bid != null ? (p.bid - p.averageCost) * p.quantity : undefined);
+    return {
+      id: -(i + 1), strategy: p.strategy ?? "", underlying: p.underlying, side: p.side, symbol: p.symbol,
+      lotSize: p.lotSize ?? null, entry: p.averageCost, quantity: p.quantity,
+      opened: p.opened == null ? `${s.date}T00:00:00` : p.opened.length > 8 ? p.opened : `${s.date}T${p.opened}`,
+      status: "OPEN", bid: p.bid ?? null, best: null, stop: null, stopStatus: null, stopWorking: false,
+      pnl, pnlPct: p.bid != null && p.averageCost > 0 ? Math.round(10_000 * (p.bid / p.averageCost - 1)) / 100 : null,
+    };
+  });
+  const openPnl = open.reduce((sum, p) => sum + (p.pnl ?? 0), 0);
+  return { ...b, open, summary: { ...b.summary, openPnl } };
+}
 
 /** Whether a book has anything for today: an open position or a trade closed today. */
 export const bookHasToday = (b: LiveBook) => b.open.length > 0 || b.closed.some((c) => c.closed.startsWith(istToday()));

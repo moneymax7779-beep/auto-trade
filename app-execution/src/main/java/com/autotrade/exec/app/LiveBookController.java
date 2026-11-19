@@ -274,30 +274,25 @@ class LiveBookController {
 
     /** The engine session account a PAPER account mirrors (V49), or null. */
     static String mirrorOf(JdbcTemplate jdbc, long accountId) {
-        return jdbc.queryForList("select mirror_of from acct.broker_account where id = ?", String.class, accountId)
-                .stream().filter(java.util.Objects::nonNull).findFirst().orElse(null);
+        return Mirrors.of(jdbc, accountId);
     }
 
     /**
-     * A mirror account's book (V49, 19 Nov 2026, user on DEMO-1: "it should be as same as PAPER-1"): the trades of the
-     * mirrored engine account's PAPER_LIVE sessions (trade.position), in the same shape as an own book, read-only (no
-     * exit, no kill switch: the engine session manages them). Open positions (today's running session) are priced at
-     * the newest captured bid; "since" counts the mirrored trades from this account's own start ({@code equity_from}).
+     * A mirror account's book (V49, 19 Nov 2026, user on DEMO-1: "it should be as same as PAPER-1"): the mirrored engine
+     * account's closed PAPER_LIVE trades ({@link Mirrors#SOURCE}) in the same shape as an own book, read-only (no exit,
+     * no kill switch: the engine session manages them). Its open positions are not in the database (the engine writes a
+     * position when it closes): the UI adds the running session's from /api/status. "Since" counts from this account's
+     * own start ({@code equity_from}), as its ledger does.
      */
     private Map<String, Object> mirrorBook(BrokerAccount a, String mirrorOf, int window) {
         LocalDate today = LocalDate.now(IST);
-        List<Map<String, Object>> rows = jdbc.queryForList("select p.id, p.strategy_id, p.underlying, p.option_side, p.symbol, "
-                + "p.quantity, p.lot_size, p.average_cost, p.average_exit, p.opened_at, p.closed_at, p.exit_reason, p.costs, "
-                + "p.net, p.stages from trade.position p join trade.session s on s.id = p.session_id where s.account = ? "
-                + "and s.mode = 'PAPER_LIVE' and ((p.closed_at is null and s.session_date = ?) "
-                + "or p.closed_at > now() - make_interval(days => ?)) order by p.opened_at desc",
-                mirrorOf, java.sql.Date.valueOf(today), window);
-        List<Map<String, Object>> open = new ArrayList<>();
         List<Map<String, Object>> closed = new ArrayList<>();
-        double openPnl = 0, realisedToday = 0;
-        for (Map<String, Object> r : rows) {
-            double entry = num(r.get("average_cost"));
-            long qty = r.get("quantity") == null ? 0 : ((Number) r.get("quantity")).longValue();
+        double realisedToday = 0;
+        for (Map<String, Object> r : jdbc.queryForList("select * from " + Mirrors.SOURCE + " m where closed_at > now() - "
+                + "make_interval(days => ?) order by closed_at desc", a.id(), window)) {
+            double entry = num(r.get("average_entry")), net = num(r.get("realised_gross")) - num(r.get("charges"));
+            Timestamp closedAt = (Timestamp) r.get("closed_at");
+            Double exit = r.get("average_exit") == null ? null : round(num(r.get("average_exit")));
             Map<String, Object> out = new LinkedHashMap<>();
             out.put("id", r.get("id"));
             out.put("strategy", r.get("strategy_id"));
@@ -307,45 +302,24 @@ class LiveBookController {
             out.put("lotSize", r.get("lot_size"));
             out.put("entry", entry);
             out.put("opened", ist((Timestamp) r.get("opened_at")));
-            out.put("quantity", qty);
-            Timestamp closedAt = (Timestamp) r.get("closed_at");
-            if (closedAt == null) {
-                out.put("status", "OPEN");
-                ContractQuotes.Contract c = ContractQuotes.ofSymbol((String) r.get("symbol"));
-                Map<String, Object> q = c == null ? null : quotes.latest((String) r.get("underlying"), c, QUOTE_MAX_AGE_MIN);
-                if (q != null && q.get("bid") != null) {
-                    double bid = num(q.get("bid"));
-                    out.put("bid", bid);
-                    out.put("quoteAt", ist((Timestamp) q.get("recv_ts")));
-                    double pnl = (bid - entry) * qty;
-                    out.put("pnl", round(pnl));
-                    out.put("pnlPct", entry > 0 ? round(100 * (bid / entry - 1)) : null);
-                    openPnl += pnl;
-                }
-                open.add(out);
-            } else {
-                double net = num(r.get("net")), charges = num(r.get("costs"));
-                Double exit = r.get("average_exit") == null ? null : round(num(r.get("average_exit")));
-                out.put("exit", exit);
-                out.put("exitReason", r.get("exit_reason"));
-                out.put("closed", ist(closedAt));
-                out.put("gross", round(net + charges));
-                out.put("charges", round(charges));
-                out.put("net", round(net));
-                out.put("pct", exit != null && entry > 0 ? round(100 * (exit / entry - 1)) : null);
-                if (closedAt.toInstant().atZone(IST).toLocalDate().equals(today)) {
-                    realisedToday += net;
-                }
-                closed.add(out);
+            out.put("quantity", r.get("quantity") == null ? 0L : ((Number) r.get("quantity")).longValue());
+            out.put("exit", exit);
+            out.put("exitReason", r.get("exit_reason"));
+            out.put("closed", ist(closedAt));
+            out.put("gross", round(num(r.get("realised_gross"))));
+            out.put("charges", round(num(r.get("charges"))));
+            out.put("net", round(net));
+            out.put("pct", exit != null && entry > 0 ? round(100 * (exit / entry - 1)) : null);
+            if (closedAt.toInstant().atZone(IST).toLocalDate().equals(today)) {
+                realisedToday += net;
             }
+            closed.add(out);
         }
-        Map<String, Object> since = jdbc.queryForMap("select count(*) trades, coalesce(sum(p.net), 0) net, min(p.opened_at) first "
-                + "from trade.position p join trade.session s on s.id = p.session_id where s.account = ? and s.mode = 'PAPER_LIVE' "
-                + "and p.closed_at is not null and s.session_date >= ?", mirrorOf,
-                java.sql.Date.valueOf(a.equityFrom() == null ? LocalDate.of(2000, 1, 1) : a.equityFrom()));
+        Map<String, Object> since = jdbc.queryForMap("select count(*) trades, coalesce(sum(realised_gross - charges), 0) net, "
+                + "min(opened_at) first from " + Mirrors.SOURCE + " m", a.id());
 
         Map<String, Object> summary = new LinkedHashMap<>();
-        summary.put("openPnl", round(openPnl));
+        summary.put("openPnl", 0.0);                          // the UI adds the running session's open positions
         summary.put("atRisk", 0.0);
         summary.put("realisedToday", round(realisedToday));
         summary.put("bookedOnOpen", 0.0);
@@ -366,7 +340,7 @@ class LiveBookController {
         out.put("canStop", false);
         out.put("killSwitches", List.of());
         out.put("summary", summary);
-        out.put("open", open);
+        out.put("open", List.of());
         out.put("closed", closed);
         return out;
     }

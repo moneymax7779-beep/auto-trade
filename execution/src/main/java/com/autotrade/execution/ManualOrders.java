@@ -274,6 +274,7 @@ public final class ManualOrders {
         if (!account.enabled()) {
             throw new IllegalArgumentException(account.displayName() + " is disabled");
         }
+        refuseMirror(jdbc, account);
         if (account.tradeMode() == TradeMode.LIVE && !account.liveTradingEnabled()) {
             throw new IllegalArgumentException(account.displayName() + " is LIVE without its live switch: nothing sent");
         }
@@ -355,6 +356,19 @@ public final class ManualOrders {
      * on a PAPER day, through, and the turn then rejected the written buy as TARGET_CHANGED). Null = may take a buy.
      * Replayed days (another date than today) are left alone, as {@link FollowerSimulator} does.
      */
+    /**
+     * A mirror account (V49) shows another account's trades and takes none of its own: a manual buy or a chart order on
+     * it would be a position its own views never show, so it is refused before anything is written.
+     */
+    public static void refuseMirror(org.springframework.jdbc.core.JdbcTemplate jdbc, BrokerAccount account) {
+        String mirrorOf = jdbc.queryForList("select mirror_of from acct.broker_account where id = ?", String.class,
+                account.id()).stream().filter(java.util.Objects::nonNull).findFirst().orElse(null);
+        if (mirrorOf != null) {
+            throw new IllegalArgumentException(account.displayName() + " mirrors " + mirrorOf
+                    + " and takes no trades of its own: nothing sent");
+        }
+    }
+
     public String notEntryTarget(BrokerAccount account, LocalDate day) {
         if (!day.equals(TradingDay.today()) || !tradingDay.dailySwitch(account.tenantId())) {
             return null;

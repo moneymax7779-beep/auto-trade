@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
 import {
   get, postJson, type AccountDetails, type CredentialProfile, type ExecMe, type ExecPosition, type LedgerRow,
-  type GlobalLiveStrategies, type LiveStrategyChoice,
+  type GlobalLiveStrategies, type LiveStrategyChoice, type Status,
 } from "../api";
 import { ErrorNote, Loading, Panel, Table } from "../components/ui";
 
@@ -198,6 +198,19 @@ export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDo
     queryFn: () => get<LedgerRow[]>(`/api/execution/accounts/${accountId}/ledger?days=60`) });
 
   const d = details.data;
+  // V49 (review 19 Nov 2026): a mirror account's open positions are the running session's (the engine writes a position
+  // when it closes), read from /api/status as the chart reads them; shown with today's positions and in the Today line
+  const mirrorStatus = useQuery({ queryKey: ["status"], enabled: !!d?.mirrorOf, refetchInterval: 5000,
+    queryFn: () => get<Status>("/api/status") });
+  const istToday = new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 10);
+  const ms = mirrorStatus.data;
+  const mirrorOpen: ExecPosition[] = d?.mirrorOf && ms?.status === "RUNNING" && ms.date === istToday
+    && (ms.account == null || ms.account === d.mirrorOf)
+    ? (ms.openPositions ?? []).filter((p) => p.quantity > 0).map((p, i) => ({
+      id: -(i + 1), strategy_id: p.strategy ?? "", underlying: p.underlying, option_side: p.side, symbol: p.symbol,
+      quantity_open: p.quantity, average_entry: p.averageCost, opened: (p.opened ?? "").slice(-8), closed: null,
+      exit_reason: null, realised_gross: null, charges: null, status: "OPEN" }))
+    : [];
   const [form, setForm] = useState<{ allocation: string; equityMode: string; loss: string; mode: string; enabled: boolean;
     clientId: string; strategies: string[]; size: number } | null>(null);
   useEffect(() => {
@@ -252,7 +265,7 @@ export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDo
         <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
           <span><span className="text-muted">Broker </span>{a.broker}{a.clientId ? ` · ${a.clientId}` : ""}
             {a.credentialProfile ? <span className="text-muted"> · app {a.credentialProfile}</span> : null}</span>
-          <span><span className="text-muted">Today </span>{a.today.open} open · {a.today.closed} closed ·{" "}
+          <span><span className="text-muted">Today </span>{a.today.open + mirrorOpen.length} open · {a.today.closed} closed ·{" "}
             <span className={Number(a.today.net) >= 0 ? "text-up" : "text-down"}>{rupees(Number(a.today.net))}</span></span>
           {kite && <span><span className="text-muted">Kite session </span>
             <span className={sessionActive ? "text-up" : "text-down"}>{sessionActive ? `active until ${a.session!.expires}` : "not logged in"}</span>
@@ -261,6 +274,13 @@ export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDo
             {sessionActive ? "Log in to Kite again" : "Log in to Kite"}</a>}
         </div>
 
+        {a.mirrorOf && (
+          <div className="rounded border border-line bg-panel-2 p-3 text-sm">
+            <b>Mirrors {a.mirrorOf}.</b> The positions, P&amp;L and ledger below are {a.mirrorOf}'s trades, the same as{" "}
+            {a.mirrorOf}. This account takes no trades of its own, so the allocation, loss limit and strategies in its
+            settings are not used while it mirrors.
+          </div>
+        )}
         {!canManage ? (
           <div className="rounded border border-line p-3 text-sm">
             <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-muted">Settings</div>
@@ -271,7 +291,8 @@ export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDo
               <span><span className="text-muted">Mode </span>{a.mode}</span>
               <span><span className="text-muted">Size </span>{sizeLabel(a.sizeStepPct)}</span>
               <span><span className="text-muted">Following </span>
-                {a.strategies.filter((s) => s.enabled).map((s) => s.strategy_id).join(", ") || "nothing"}</span>
+                {a.mirrorOf ? `${a.mirrorOf}'s trades (mirror)`
+                  : a.strategies.filter((s) => s.enabled).map((s) => s.strategy_id).join(", ") || "nothing"}</span>
             </div>
             <p className="mt-2 text-xs text-muted">Only the account's owner or the admin changes these.</p>
           </div>
@@ -335,7 +356,8 @@ export function AccountDetailPanel({ accountId, canManage, canAct, onClose, onDo
             {day && <button className="text-xs text-muted" onClick={() => setDay("")}>today</button>}
           </div>
           {positions.error ? <ErrorNote error={positions.error} /> : (
-            <Table rows={positions.data ?? []} empty="No positions that day." columns={[
+            <Table rows={[...(positions.data ?? []), ...(day === "" || day === istToday ? mirrorOpen : [])]}
+              empty="No positions that day." columns={[
               { key: "s", label: "Strategy", render: (p) => p.strategy_id },
               { key: "c", label: "Contract", render: (p) => <span className="num">{p.symbol}</span> },
               { key: "o", label: "Opened", render: (p) => <span className="num text-xs">{p.opened}</span> },

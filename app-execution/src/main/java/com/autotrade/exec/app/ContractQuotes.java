@@ -50,41 +50,6 @@ final class ContractQuotes {
         return found;
     }
 
-    /** The newest quote of a contract given directly (a mirror book's engine position has a symbol, no key; V49). */
-    Map<String, Object> latest(String underlying, Contract c, int minutes) {
-        List<Map<String, Object>> last = jdbc.queryForList("select bid_px[1] bid, ask_px[1] ask, bid_qty[1] bid_qty, ltp, "
-                + "delta, recv_ts from md.option_tick where underlying = ? and expiry = ? and strike = ? and option_type = ? "
-                + "and recv_ts > now() - make_interval(mins => ?) and bid_px[1] > 0 order by recv_ts desc limit 1",
-                underlying, c.expiry(), c.strike(), c.type(), minutes);
-        return last.isEmpty() ? null : last.getFirst();
-    }
-
-    /**
-     * The contract of an engine position's symbol ("NIFTY 25150 PE 23 NOV 26": underlying, strike, type, day, month,
-     * two-digit year), or null when it does not read as one.
-     */
-    static Contract ofSymbol(String symbol) {
-        if (symbol == null) {
-            return null;
-        }
-        String[] p = symbol.trim().split("\\s+");
-        if (p.length != 6 || !(p[2].equals("CE") || p[2].equals("PE"))) {
-            return null;
-        }
-        try {
-            java.time.Month month = java.time.Month.valueOf(switch (p[4]) {
-                case "JAN" -> "JANUARY"; case "FEB" -> "FEBRUARY"; case "MAR" -> "MARCH"; case "APR" -> "APRIL";
-                case "MAY" -> "MAY"; case "JUN" -> "JUNE"; case "JUL" -> "JULY"; case "AUG" -> "AUGUST";
-                case "SEP" -> "SEPTEMBER"; case "OCT" -> "OCTOBER"; case "NOV" -> "NOVEMBER"; case "DEC" -> "DECEMBER";
-                default -> throw new IllegalArgumentException(p[4]);
-            });
-            java.time.LocalDate expiry = java.time.LocalDate.of(2000 + Integer.parseInt(p[5]), month, Integer.parseInt(p[3]));
-            return new Contract(java.sql.Date.valueOf(expiry), Double.parseDouble(p[1]), p[2]);
-        } catch (RuntimeException e) {
-            return null;
-        }
-    }
-
     /** The newest quote (bid, ask, ltp, delta, recv_ts) of the last {@code minutes} with a bid, or null. */
     Map<String, Object> latest(String key, String underlying, long token, int minutes) {
         Contract c = contract(key);
