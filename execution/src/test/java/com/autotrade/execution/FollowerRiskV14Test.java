@@ -38,6 +38,6 @@ class FollowerRiskV14Test {
     void aZeroOrNegativeCapIsATypoNotAnOff() {
         FollowerRisk v14 = load("v14");
         assertThatThrownBy(() -> new FollowerRisk(v14.version(), v14.limits(), 3, 50, Double.NaN, 1, 0, v14.orders(), null,
-                v14.live(), true, Double.NaN, 0)).isInstanceOf(IllegalArgumentException.class);
+                v14.live(), true, Double.NaN, 0, false)).isInstanceOf(IllegalArgumentException.class);
     }
 }

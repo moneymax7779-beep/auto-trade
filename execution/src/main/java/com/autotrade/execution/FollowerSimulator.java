@@ -739,8 +739,7 @@ public final class FollowerSimulator {
         }
         if (risk.capsStopRisk() && lots >= 1) {                        // v14 (review 19 Nov 2026): both legs capped
             double perLotRisk = ce.lotSize() * (ceAsk * stopLossShare(ce.stopPct()) + peAsk * stopLossShare(pe.stopPct()));
-            double room = stopRiskCap(day) - stopRisk(day.account.id());
-            long fit = perLotRisk > 0 ? Math.max(0, (long) Math.floor(room / perLotRisk)) : lots;
+            long fit = perLotRisk > 0 ? Math.max(0, (long) Math.floor(stopRiskRoom(day) / perLotRisk)) : lots;
             if (fit < 1) {
                 String why = String.format("the stop-risk cap: open positions could lose %.0f before their broker stops, one "
                         + "lot pair of this straddle %.0f more, the cap is %.0f", stopRisk(day.account.id()), perLotRisk,
@@ -978,13 +977,26 @@ public final class FollowerSimulator {
             return Long.MAX_VALUE;
         }
         double perLot = p.lotSize() * price * stopLossShare(p.stopPct());
-        double room = stopRiskCap(day) - stopRisk(day.account.id());
-        return perLot > 0 ? Math.max(0, (long) Math.floor(room / perLot)) : Long.MAX_VALUE;
+        return perLot > 0 ? Math.max(0, (long) Math.floor(stopRiskRoom(day) / perLot)) : Long.MAX_VALUE;
+    }
+
+    /**
+     * The room left under the cap: the cap less what the open positions could lose to their broker stops and, from v15
+     * (review 19 Nov 2026: a -15K morning left v14 a full 22K of stop risk), less the day's realised loss.
+     */
+    private double stopRiskRoom(Day day) {
+        return stopRiskCap(day) - stopRisk(day.account.id()) - realisedLossToday(day);
+    }
+
+    /** v15: today's realised loss on this account (0 on a day in profit); 0 when the risk file does not count it. */
+    private double realisedLossToday(Day day) {
+        return risk.stopRiskCountsRealised() ? Math.max(0, -day.todayNet()) : 0;
     }
 
     private String stopRiskReason(Day day, Pending p, double price) {
-        return String.format("the stop-risk cap: open positions could lose %.0f before their broker stops, one lot of this "
-                + "entry %.0f more, the cap is %.0f", stopRisk(day.account.id()),
+        return String.format("the stop-risk cap: open positions could lose %.0f before their broker stops%s, one lot of this "
+                + "entry %.0f more, the cap is %.0f", stopRisk(day.account.id()), realisedLossToday(day) > 0
+                ? String.format(" and %.0f is lost today", realisedLossToday(day)) : "",
                 p.lotSize() * price * stopLossShare(p.stopPct()), stopRiskCap(day));
     }
 
