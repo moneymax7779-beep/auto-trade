@@ -104,8 +104,10 @@ class TradingDayIT {
         new FanOut(dataSource).subscribe(group, real, List.of("ma-cross"), 1.0);
         long twin = accounts.ensurePaperTwin(real);
         accounts.syncPaperTwin(real);
-        jdbc.update("update acct.strategy_subscription set enabled_at = now() - interval '30 days' where copy_group_id = ?",
-                group);
+        // subscribed well before the workspace's day: anchored to that day, not to now() (19 Nov 2026: now() - 30 days
+        // fell on DAY itself mid-session, so the fixed-DAY entries came "before" their subscription and never fanned out)
+        jdbc.update("update acct.strategy_subscription set enabled_at = cast(? as timestamptz) - interval '30 days' "
+                + "where copy_group_id = ?", Timestamp.from(ist(day, "00:00:00")), group);
         jdbc.update("update acct.tenant set default_broker_account_id = ? where id = ?", real, tenant);
         // a default the workspace has had all along (V44: a default counts from its change, -infinity for old ones)
         jdbc.update("update acct.tenant set default_since = '-infinity' where id = ?", tenant);
