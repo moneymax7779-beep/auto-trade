@@ -1,16 +1,36 @@
 import { type CSSProperties, Fragment, type ReactNode, useState } from "react";
 
-export function Panel({ title, right, children }: { title?: ReactNode; right?: ReactNode; children: ReactNode }) {
+/**
+ * A titled box. With {@code collapsible} (a short id) the title is a toggle that shows or hides the body; the choice is
+ * remembered in this browser per id ({@code defaultOpen} when nothing is stored).
+ */
+export function Panel({ title, right, children, collapsible, defaultOpen = true }: { title?: ReactNode; right?: ReactNode;
+  children: ReactNode; collapsible?: string; defaultOpen?: boolean }) {
+  const key = collapsible ? `panel-open:${collapsible}` : null;
+  const [open, setOpen] = useState<boolean>(() => {
+    if (!key) return true;
+    try { const v = localStorage.getItem(key); return v == null ? defaultOpen : v === "1"; } catch { return defaultOpen; }
+  });
+  const toggle = () => setOpen((o) => {
+    try { if (key) localStorage.setItem(key, o ? "0" : "1"); } catch { /* storage blocked: only this visit */ }
+    return !o;
+  });
   return (
     // min-w-0: inside a grid a panel may be narrower than its widest table (which then scrolls)
     <section className="min-w-0 rounded-lg border border-line bg-panel">
       {title != null && (
-        <header className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-4 py-2.5">
-          <h2 className="min-w-0 text-sm font-semibold tracking-wide">{title}</h2>
+        <header className={`flex flex-wrap items-center justify-between gap-2 px-4 py-2.5 ${open ? "border-b border-line" : ""}`}>
+          {key ? (
+            <button type="button" onClick={toggle} aria-expanded={open} title={open ? "Collapse" : "Expand"}
+              className="flex min-w-0 items-center gap-2 text-left text-sm font-semibold tracking-wide hover:text-accent">
+              <span aria-hidden className={`inline-block text-xs text-muted transition-transform ${open ? "rotate-90" : ""}`}>▶</span>
+              <h2 className="min-w-0">{title}</h2>
+            </button>
+          ) : <h2 className="min-w-0 text-sm font-semibold tracking-wide">{title}</h2>}
           {right}
         </header>
       )}
-      <div className="p-4">{children}</div>
+      {open && <div className="p-4">{children}</div>}
     </section>
   );
 }

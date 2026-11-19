@@ -35,7 +35,7 @@ export function HouseholdPage() {
           {message.text} <button className="ml-2 text-muted" onClick={() => setMessage(null)}>dismiss</button>
         </div>
       )}
-      <Panel title="Family workspaces today">
+      <Panel title="Family workspaces today" collapsible="family-workspaces">
         {cards.isLoading ? <Loading what="workspaces" /> : cards.error ? <ErrorNote error={cards.error} /> : (
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
             {(cards.data ?? []).length === 0 && <p className="text-sm text-muted">No family workspace yet: add a member below.</p>}
