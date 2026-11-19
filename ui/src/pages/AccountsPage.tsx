@@ -1,5 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState, type ReactNode } from "react";
+import { useNavigate } from "react-router";
+import { useWorkspace } from "../workspace";
 import {
   get, postJson, type AuditRow, type ExecMe, type ExecutionAccount, type GlobalLiveStrategies, type KillSwitch,
   type WorkerStatus,
@@ -313,6 +315,8 @@ export function AccountsPage() {
   const [flattenFor, setFlattenFor] = useState<number | null>(null);
   const [openAccount, setOpenAccount] = useState<number | null>(null);
   const [folded, fold] = useStoredSet("accounts-folded-workspaces");
+  const navigate = useNavigate();
+  const { select: selectWorkspace } = useWorkspace();
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
   const [rawAudit, setRawAudit] = useState(false);
 
@@ -349,6 +353,8 @@ export function AccountsPage() {
   const killedAccounts = new Set((switches.data ?? []).filter((k) => k.scope === "ACCOUNT" && k.accountId != null)
     .map((k) => k.accountId!));
   const ordered = orderAccounts(rows, (id) => [...tenants.keys()].indexOf(id));
+  // workspaces with no broker account yet (e.g. a new member's): listed under the table, else they would not show at all
+  const emptyWorkspaces = [...tenants.values()].filter((t) => !rows.some((r) => r.tenantId === t.id));
   // a VIEWER (user, 11 Nov 2026: "Organize it well"): one panel with their accounts and what they may do, the engine's
   // internals (route, last result, lease) left out, and the account's history in plain words instead of the audit log
   const readOnly = !legacy && !!me.data && !me.data.admin && me.data.tenants.length > 0
@@ -463,9 +469,16 @@ export function AccountsPage() {
               : <span className="text-xs text-muted">{a.enabled ? "not served" : "–"}</span> },
           { key: "r", label: "Route · last result", render: ({ a }) => (
             <div className="max-w-md text-xs" title={[a.lastTurn?.route, a.lastTurn?.lastResult].filter(Boolean).join("\n")}>
+              {a.mirrorOf ? <>
+                {/* V49: the worker's own-book line ("day net ...") is the mirror's own rows, not what it shows */}
+                <div className="line-clamp-2">mirrors {a.mirrorOf}: shows its trades, takes none of its own</div>
+                <div className="line-clamp-2 text-muted">{a.mirrorOf} today {a.today ? `${signed(a.today.net)}, ${a.today.trades} closed`
+                  : "–"}</div>
+              </> : <>
               <div className="line-clamp-2">{a.lastTurn?.route ?? (a.enabled ? "no route: the worker does not serve it now"
                 : "disabled")}</div>
               {a.lastTurn?.lastResult && <div className="line-clamp-2 text-muted">{a.lastTurn.lastResult}</div>}
+              </>}
             </div>
           ) },
           { key: "a", label: "", render: ({ a }) => (
@@ -478,7 +491,8 @@ export function AccountsPage() {
                   rel="noreferrer" href={`/api/execution/accounts/${a.id}/kite/login`}>Log in to Kite</a>
               )}
               {/* a disabled account holding nothing can neither enter nor hold: no stop controls to misclick */}
-              {canStop(a.tenantId) && (a.enabled || a.today == null || a.today.open > 0) && <>
+              {/* a mirror account (V49) opens nothing of its own: Kill and Flatten would do nothing there */}
+              {canStop(a.tenantId) && !a.mirrorOf && (a.enabled || a.today == null || a.today.open > 0) && <>
               {!killedAccounts.has(a.id) && (
               <button className="rounded border border-warn/60 px-2 py-0.5 text-xs text-warn hover:bg-warn/10" disabled={act.isPending}
                 title="Stop new entries and adds on this account (exits still run)"
@@ -495,6 +509,26 @@ export function AccountsPage() {
             </div>
           ) },
         ] as Col[]).filter((c) => !readOnly || (c.key !== "e" && c.key !== "r"))} />
+        {several && emptyWorkspaces.length > 0 && (
+          <div className="mt-1">
+            {emptyWorkspaces.map((t) => (
+              <div key={t.id} className="flex flex-wrap items-baseline gap-x-3 border-b border-line px-2 pb-1 pt-4">
+                <span className="text-sm font-semibold">{t.name}</span>
+                <span className="text-xs text-muted">{t.control === "DAILY_SWITCH" ? "daily-switch workspace" : "own accounts"} ·
+                  {" "}no broker yet</span>
+                {t.control === "DAILY_SWITCH" && (
+                  <button className="rounded border border-accent/60 px-2 py-0.5 text-xs text-accent hover:bg-accent/10"
+                    title={t.manages ? "Open this workspace's Brokers page to add its broker"
+                      : "Open its Brokers page: the member adds the broker, or grants you access first"}
+                    onClick={() => { selectWorkspace(t.id); navigate("/brokers"); }}>
+                    {t.manages ? "Add broker" : "Their Brokers page"}</button>
+                )}
+                {t.control === "DAILY_SWITCH" && !t.manages && <span className="text-xs text-muted">
+                  they add it themselves (or grant you access on their Settings page)</span>}
+              </div>
+            ))}
+          </div>
+        )}
         {flattenFor != null && (
           <div className="mt-3 rounded border border-down/40 p-3">
             <p className="mb-2 text-sm">

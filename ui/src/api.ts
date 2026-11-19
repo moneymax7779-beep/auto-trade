@@ -529,6 +529,8 @@ export interface ExecutionAccount {
   /** the account's own book today (IST): closed net after charges, closed trades, open positions; live* = the part
    *  entered with a LIVE intent (real money), whatever the account's mode is now */
   today?: DayResult & { liveNet: number; liveTrades: number; liveOpen: number };
+  /** V49: the engine account (e.g. PAPER-1) whose trades this paper account shows; it takes none of its own */
+  mirrorOf?: string | null;
 }
 
 /** GET/POST /api/execution/accounts/{id}/live-strategies: the owner's choice of LIVE strategies (V32, 9 Nov 2026) */
