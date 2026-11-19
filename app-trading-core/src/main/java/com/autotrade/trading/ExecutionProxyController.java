@@ -27,7 +27,9 @@ import org.springframework.web.bind.annotation.RestController;
  * ({@link SecurityConfig}), otherwise the configured {@code autotrade.ui.execution-user} (a single local user, not
  * authentication). A caller's own {@code X-Autotrade-User} is ignored (code review 24 Oct 2026: anyone past the password
  * gate could otherwise pick any user); cross-site POSTs are refused by {@link SameOriginFilter}. The workers decide what
- * that user may see and do.
+ * that user may see and do. With {@code AUTOTRADE_PROXY_SECRET} set (the same secret as the workers'), every
+ * forwarded request is signed ({@link com.autotrade.execution.UserSignature}; review 19 Nov 2026), so only this proxy can
+ * name a user to the workers.
  */
 @RestController
 class ExecutionProxyController {
@@ -39,12 +41,15 @@ class ExecutionProxyController {
     private final String target;
     private final String defaultUser;
     private final boolean signedIn;
+    private final String secret;
 
     ExecutionProxyController(@Value("${autotrade.ui.execution-url:http://127.0.0.1:8096}") String target,
-                             @Value("${autotrade.ui.execution-user:local-owner}") String defaultUser, AuthProperties auth) {
+                             @Value("${autotrade.ui.execution-user:local-owner}") String defaultUser, AuthProperties auth,
+                             @Value("${autotrade.proxy-secret:${AUTOTRADE_PROXY_SECRET:}}") String secret) {
         this.target = target.endsWith("/") ? target.substring(0, target.length() - 1) : target;
         this.defaultUser = defaultUser;
         this.signedIn = auth.oidc();
+        this.secret = secret == null || secret.isBlank() ? null : secret.trim();
     }
 
     @RequestMapping(value = {PREFIX, PREFIX + "/**"}, method = {RequestMethod.GET, RequestMethod.POST})
@@ -61,9 +66,17 @@ class ExecutionProxyController {
                     .body("{\"error\":\"bad path\"}".getBytes(StandardCharsets.UTF_8));  // only /api/execution is forwarded
         }
         String query = request.getQueryString();
-        HttpRequest.Builder out = HttpRequest.newBuilder(URI.create(target + path + (query == null ? "" : "?" + query)))
+        String pathAndQuery = path + (query == null ? "" : "?" + query);
+        HttpRequest.Builder out = HttpRequest.newBuilder(URI.create(target + pathAndQuery))
                 .timeout(Duration.ofSeconds(150))                  // a flatten works orders to their end
                 .header(USER, user);                                // never the caller's own header
+        if (secret != null) {
+            long now = java.time.Instant.now().getEpochSecond();
+            byte[] signed = "POST".equals(request.getMethod()) && body != null ? body : new byte[0];
+            out.header(com.autotrade.execution.UserSignature.TS, String.valueOf(now))
+                    .header(com.autotrade.execution.UserSignature.SIG, com.autotrade.execution.UserSignature.sign(secret, user,
+                            now, request.getMethod(), pathAndQuery, signed));
+        }
         if ("POST".equals(request.getMethod())) {
             out.header("Content-Type", MediaType.APPLICATION_JSON_VALUE)
                     .POST(HttpRequest.BodyPublishers.ofByteArray(body == null ? new byte[0] : body));

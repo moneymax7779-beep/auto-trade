@@ -209,9 +209,10 @@ function MoneyBadge() {
     retry: false });
   const daily = new Set((execMe.data?.tenants ?? []).filter((t) => t.control === "DAILY_SWITCH").map((t) => t.id));
   const base = "rounded px-1.5 py-0.5 text-[10px] font-bold tracking-wider";
-  if (!accounts.data) {
+  // review 19 Nov 2026: without /api/execution/me a member's LIVE-eligible broker would count as real money
+  if (!accounts.data || !execMe.data) {
     return <span className={`${base} bg-panel-2 text-muted`} title="accounts could not be read: real money or paper unknown">
-      {accounts.isPending ? "…" : "MODE ?"}</span>;
+      {accounts.isPending || execMe.isPending ? "…" : "MODE ?"}</span>;
   }
   const live = accounts.data.filter((a) => a.enabled && a.paperOf == null && a.broker !== "PAPER"
     && ((a.mode === "LIVE" && !daily.has(a.tenantId)) || (a.today?.liveTrades ?? 0) + (a.today?.liveOpen ?? 0) > 0));

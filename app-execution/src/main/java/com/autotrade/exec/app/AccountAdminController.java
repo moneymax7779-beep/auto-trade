@@ -269,6 +269,19 @@ class AccountAdminController {
 
     // ------------------------------------------------------------------------------------------------- writes
 
+    /**
+     * True (as SQL) when the account {@code idExpr} holds anything a worker must still look after: an open position, an
+     * order still working at the broker ({@link com.autotrade.execution.TradingDay#WORKING_ORDER_STATES}) or an entry not
+     * yet done. Disable and mirror are refused while it is (review 19 Nov 2026: one definition, not one per caller).
+     */
+    private static String exposed(String idExpr) {
+        return "(exists (select 1 from exec.position p where p.broker_account_id = " + idExpr + " and p.status <> 'CLOSED') "
+                + "or exists (select 1 from exec.order_execution e where e.broker_account_id = " + idExpr + " and e.status in "
+                + com.autotrade.execution.TradingDay.WORKING_ORDER_STATES + ") or exists (select 1 from exec.trade_intent i "
+                + "where i.broker_account_id = " + idExpr + " and i.action = 'ENTER' and i.state in ('CREATED', 'VALIDATED', "
+                + "'EXECUTING', 'RECONCILIATION_REQUIRED')))";
+    }
+
     record Mirror(String mirrorOf) {
     }
 
@@ -286,6 +299,8 @@ class AccountAdminController {
         Access.require(user.admin(), "only the platform admin sets a mirror");
         BrokerAccount a = accounts.byId(id).filter(x -> user.sees(x.tenantId()))
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "no such account"));
+        // review 19 Nov 2026: a member's workspace only with their grant, as every other change there
+        Access.require(user.manages(a.tenantId()), "SUPPORT needs the member's grant (their Settings page) to change it");
         require(a.brokerType() == BrokerType.PAPER && a.role().name().equals("FOLLOWER_TRADE") && a.paperOf() == null,
                 "only a PAPER follower account (not a paper twin) can mirror");
         String to = trimmed(body.mirrorOf());
@@ -300,13 +315,8 @@ class AccountAdminController {
         Integer engine = jdbc.queryForObject("select count(*) from trade.session where account = ? and mode = 'PAPER_LIVE'",
                 Integer.class, to);
         require(engine != null && engine > 0, to + " is not an engine account with a live PAPER session");
-        int rows = jdbc.update("update acct.broker_account set mirror_of = ?, updated_at = now() where id = ? "
-                + "and not exists (select 1 from exec.position p where p.broker_account_id = ? and p.status <> 'CLOSED') "
-                + "and not exists (select 1 from exec.order_execution e where e.broker_account_id = ? and e.status in "
-                + "('CREATED', 'SUBMITTED', 'ACKNOWLEDGED', 'OPEN', 'PARTIALLY_FILLED', 'CANCEL_PENDING', 'UNKNOWN', "
-                + "'RECONCILIATION_REQUIRED')) and not exists (select 1 from exec.trade_intent i where i.broker_account_id = ? "
-                + "and i.action = 'ENTER' and i.state in ('CREATED', 'VALIDATED', 'EXECUTING', 'RECONCILIATION_REQUIRED'))",
-                to, id, id, id, id);
+        int rows = jdbc.update("update acct.broker_account set mirror_of = ?, updated_at = now() where id = ? and not "
+                + exposed("acct.broker_account.id"), to, id);
         require(rows == 1, a.displayName() + " holds open positions, orders still working or entries not yet done: "
                 + "flatten it first");
         if (!to.equals(from)) {
@@ -499,12 +509,7 @@ class AccountAdminController {
                     // would get no turns: no exits, no stop bookings, no reconciliation)
                     int rows = jdbc.update("update acct.broker_account set enabled = false, updated_at = now() where id = ? "
                             + "and not exists (select 1 from acct.broker_account x where (x.id = ? or x.paper_of_account_id = ?) "
-                            + "and (exists (select 1 from exec.position p where p.broker_account_id = x.id and p.status <> 'CLOSED') "
-                            + "or exists (select 1 from exec.order_execution e where e.broker_account_id = x.id and e.status in "
-                            + "('CREATED', 'SUBMITTED', 'ACKNOWLEDGED', 'OPEN', 'PARTIALLY_FILLED', 'CANCEL_PENDING', 'UNKNOWN', "
-                            + "'RECONCILIATION_REQUIRED')) or exists (select 1 from exec.trade_intent i where i.broker_account_id = "
-                            + "x.id and i.action = 'ENTER' and i.state in ('CREATED', 'VALIDATED', 'EXECUTING', "
-                            + "'RECONCILIATION_REQUIRED'))))", id, id, id);
+                            + "and " + exposed("x.id") + ")", id, id, id);
                     require(rows == 1, a.displayName() + " holds open positions, orders still working at the broker or "
                             + "entries not yet done (or its paper twin does): flatten it first, or engage its kill switch to "
                             + "stop new entries");
