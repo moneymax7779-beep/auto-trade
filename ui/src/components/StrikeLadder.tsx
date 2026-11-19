@@ -21,7 +21,7 @@ type N = number | null;
  * then, call price, call price then, put price, put price then, call volume in the window, put volume in the window,
  * who traded the calls (by IV), the puts, the calls' gamma × OI, the puts' gamma × OI, [call OI change over 1, 5, 15
  * and 30 minutes, then put], [call volume since the calls' last OI print, the time of that print's step, the same for
- * the puts]] (null = not recorded).
+ * the puts, then the calls' last print's OI change and the puts' (the persistence hint)]] (null = not recorded).
  */
 type Row = [number, N, N, N, N, N?, N?, N?, N?, N?, N?, N?, N?, N?, N?, Who?, Who?, N?, N?, N[]?, (N | string)[]?];
 interface Wall { strike: number; oi: N; change: N; since: string; from: number | null }
@@ -31,12 +31,15 @@ interface Structure { callWall: Wall | null; nearCeiling: Wall | null; nearFloor
  * the last print], JUST_PRINTED (a print just came in), NONE; the check of the latest heads-up resolved: per flag [strike,
  * side, volume, its OI change in that print (null: none), rank by size among its side's changes, who traded by IV], so far
  * until the print's roll-over step is in; and today's tally over complete checks [flags among their side's two largest
- * changes, flags], one heads-up per print.
+ * changes, flags], one heads-up per print. The persistence hint (19 Nov 2026, A-493): each flag also carries its last
+ * print's OI change (the next print's likely direction), each checked flag that change and whether the print kept its
+ * direction (null: not judged), and the tally [.., kept, judged].
  */
 type HeadsSide = "c" | "p";
 interface HeadsUp {
-  state: "BUILDING" | "JUST_PRINTED" | "NONE"; flags: [number, HeadsSide, number][];
-  check: { flagsAt: string; print: string; complete: boolean; cells: [number, HeadsSide, number, N, N, Who][] } | null; today: [number, number];
+  state: "BUILDING" | "JUST_PRINTED" | "NONE"; flags: [number, HeadsSide, number, N?][];
+  check: { flagsAt: string; print: string; complete: boolean; cells: [number, HeadsSide, number, N, N, Who, N?, (boolean | null)?][] } | null;
+  today: [number, number, number?, number?];
 }
 interface StrikesData {
   date: string; underlying: string; at?: string; from?: string; spot?: number | null; atm?: number | null; strikeStep?: number;
@@ -82,10 +85,16 @@ interface Opts {
   walls: boolean; sigma: boolean; gamma: boolean; read: boolean; panel: boolean; multi: boolean;
   /** The next-print heads-up: build-up meters, the update clock, the flags and their check (13 Nov 2026). */
   heads: boolean;
+  /**
+   * The persistence hint (19 Nov 2026, A-493): an arrow on each flagged cell for the direction of its last OI update,
+   * repeated as the likely next one: on 35 past days an ↑ was right 69 % of the time (OI rises at 60 % of updates anyway)
+   * and a ↓ only 54 % (it falls at 40 %).
+   */
+  dir: boolean;
 }
 // the default view (user, 7 Nov 2026): puts left and calls right, units, who traded by IV, the 1 min–open changes, walls
 // and gamma
-const DEFAULTS: Opts = { layout: "mirror", size: "units", who: "iv", walls: true, sigma: false, gamma: true, read: false, panel: false, multi: true, heads: true };
+const DEFAULTS: Opts = { layout: "mirror", size: "units", who: "iv", walls: true, sigma: false, gamma: true, read: false, panel: false, multi: true, heads: true, dir: true };
 const KEY = "oi-strikes-view-v2";   // v2 (7 Nov 2026): the new default view replaces choices saved under v1
 
 /** The display options, remembered in this browser (a private window or blocked storage just starts from the defaults). */
@@ -204,11 +213,11 @@ export function Strikes({ underlying, date, at, pinned, live }: { underlying: st
             <span><span style={{ color: CALL }}>Calls unwound</span> {mv("c", -1)}</span>
             <span><span style={{ color: PUT }}>Puts unwound</span> {mv("p", -1)}</span>
           </div>
-          {hu && d && <HeadsUpLine d={d} hu={hu} underlying={underlying} lastStep={lastStep} tick={!!live && !pinned} />}
+          {hu && d && <HeadsUpLine d={d} hu={hu} underlying={underlying} lastStep={lastStep} tick={!!live && !pinned} dir={opts.dir} />}
           <div className="mt-2">
             {d && rows.length > 0 && (opts.layout === "mirror"
-              ? <Mirror d={d} rows={rows} W={W} opts={opts} whoOf={whoOf} underlying={underlying} huge={huge} pulse={pulse} heavy={heavy} meterMax={meterMax} />
-              : <Stacked d={d} rows={rows} W={W} opts={opts} whoOf={whoOf} underlying={underlying} huge={huge} pulse={pulse} heavy={heavy} meterMax={meterMax} />)}
+              ? <Mirror d={d} rows={rows} W={W} opts={opts} whoOf={whoOf} underlying={underlying} huge={huge} pulse={pulse} heavy={heavy} meterMax={meterMax} dirOn={opts.dir && building} />
+              : <Stacked d={d} rows={rows} W={W} opts={opts} whoOf={whoOf} underlying={underlying} huge={huge} pulse={pulse} heavy={heavy} meterMax={meterMax} dirOn={opts.dir && building} />)}
           </div>
           <Legend d={d} at={at} opts={opts} openIv={typeof back !== "number" || back > 1800} />
         </>
@@ -251,6 +260,7 @@ function OptionsBar({ opts, setOpts }: { opts: Opts; setOpts: (o: Partial<Opts>)
         <Check label="±1σ to close" on={opts.sigma} set={(v) => setOpts({ sigma: v })} title="One standard deviation of the index to 15:30, from the ATM IV" />
         <Check label="gamma" on={opts.gamma} set={(v) => setOpts({ gamma: v })} title="Gamma × OI per strike: where the option writers' short gamma sits" />
         <Check label="next-print heads-up" on={opts.heads} set={(v) => setOpts({ heads: v })} title="Build-up meters (volume since each contract's last OI update), the update clock, the strikes where a big OI change is likely at the next update (its size, not its direction) and how those calls did" />
+        {opts.heads && <Check label="direction hint" on={opts.dir} set={(v) => setOpts({ dir: v })} title={`↑ / ↓ on the flagged strikes: the direction of each one's last OI update, repeated as the likely next one; ${PERSIST_TEXT}`} />}
       </span>
       <button type="button" onClick={() => setOpts({ ...DEFAULTS, panel: true })} className="ml-auto text-muted underline hover:text-text">reset</button>
     </div>
@@ -301,10 +311,30 @@ const nfCr = (v: number) => v.toLocaleString("en-IN", { maximumFractionDigits: v
 const LAST_STEP = "15:29:30";
 
 /** Row 20 of a ladder row from offset {@code o} (0 calls, 2 puts): volume since that side's last OI print and its step. */
-const sincePrint = (v: (N | string)[] | undefined, o: number): SincePrint => ({ vol: typeof v?.[o] === "number" ? v[o] as number : null, at: typeof v?.[o + 1] === "string" ? v[o + 1] as string : null });
+const sincePrint = (v: (N | string)[] | undefined, o: number): SincePrint => ({ vol: typeof v?.[o] === "number" ? v[o] as number : null, at: typeof v?.[o + 1] === "string" ? v[o + 1] as string : null,
+  last: typeof v?.[4 + o / 2] === "number" ? v[4 + o / 2] as number : null });
 const sinceText = (s: SincePrint) => s.vol == null ? "–" : `${big(s.vol)} traded since its last OI print${s.at ? ` (in the step from ${s.at})` : " (none yet today: since the open)"}`;
+/** The persistence hint (A-493, 35 tick days, 171,888 updates near the money): what the arrow means. */
+const PERSIST_TEXT = "the arrow repeats the strike's last OI update. On 35 past days (A-493) an OI ↑ was right 69 % of the time, but OI rises at 60 % of updates anyway; an OI ↓ was right only 54 % (OI falls at 40 %). Premium, IV and who traded between updates did no better than chance (A-493, A-383)";
+const dirArrow = (last: N) => (last == null || last === 0 ? null : last > 0 ? "↑" : "↓");
+/** How often an arrow of this direction was right on A-493's 35 days, against the base rate. */
+const arrowOdds = (last: N) => (last != null && last > 0 ? "an OI ↑ was right 69 % of the time on past days (OI rises at 60 % of updates anyway)"
+  : "an OI ↓ was right only 54 % of the time on past days (OI falls at 40 % of updates): a weak call");
+const dirText = (s: SincePrint) => (dirArrow(s.last) ? `OI likely ${dirArrow(s.last)} (last update ${big(s.last, true)})` : "–");
 
-function rowTitle(r: Strike, spot?: number | null, huge: ReadonlySet<string> = NO_CELLS, heavy: ReadonlySet<string> = NO_CELLS) {
+/** The persistence arrow beside a flagged change cell: the direction of the contract's last OI update. */
+function DirMark({ x, y, last, color }: { x: number; y: number; last: N; color: string }) {
+  const a = dirArrow(last);
+  if (!a) return null;
+  return <text x={x} y={y} className="text-[13px] font-bold" style={{ fill: ink(color) }}>{a}<title>{`Next update: OI likely ${a}, because its last update was ${big(last, true)}; ${arrowOdds(last)}. Not the price's direction.`}</title></text>;
+}
+/** Room the persistence arrow takes from a change cell. */
+const DIR_W = 11;
+/** Whether a cell shows the persistence arrow: the hint is on and the cell is flagged with a last update to go by. */
+const markFor = (dirOn: boolean, heavy: ReadonlySet<string>) => (r: Strike, sd: "c" | "p") =>
+  dirOn && heavy.has(cellKey(r.k, sd)) && dirArrow((sd === "c" ? r.sc : r.sp).last) != null;
+
+function rowTitle(r: Strike, spot?: number | null, huge: ReadonlySet<string> = NO_CELLS, heavy: ReadonlySet<string> = NO_CELLS, dir = false) {
   const one = (name: string, s: Side) => `${name}: OI ${big(s.oi)} (${big(s.d, true)}, ${pctText(s.pct)})`
     + ` · IV ${ivText(s.iv0)} → ${ivText(s.iv)} · premium ${px(s.px0)} → ${px(s.px)} · traded ${big(s.vol)}`
     + (s.who ? ` · ${WHO_HELP[s.who]}` : "");
@@ -313,12 +343,15 @@ function rowTitle(r: Strike, spot?: number | null, huge: ReadonlySet<string> = N
   const heads = (["c", "p"] as const).filter((k) => heavy.has(cellKey(r.k, k))).map((k) => (k === "c" ? "calls" : "puts"));
   return `${strikeText(r.k)}${big2.length ? ` · huge change in the ${big2.join(" and ")}` : ""}${heads.length ? ` · big OI change likely at the next print in the ${heads.join(" and ")}` : ""}\n${one("calls", r.c)}\n${one("puts", r.p)}`
     + (r.sc.vol != null || r.sp.vol != null ? `\nnext print · calls: ${sinceText(r.sc)} · puts: ${sinceText(r.sp)}` : "")
+    + (dir && (dirArrow(r.sc.last) || dirArrow(r.sp.last)) ? `\nnext print · calls: ${dirText(r.sc)} · puts: ${dirText(r.sp)} · ${PERSIST_TEXT}` : "")
     + (r.wc.length ? `\nOI change · calls: ${win(r.wc)} · puts: ${win(r.wp)}` : "")
     + (r.gc != null || r.gp != null ? `\ngamma · calls: ${gammaText(r.gc, r.c.oi, spot)}\ngamma · puts: ${gammaText(r.gp, r.p.oi, spot)}` : "");
 }
 
 /** huge / pulse: the change cells to tint and to blink, keyed "strike:c" / "strike:p" (see oiHuge.ts). */
-interface LadderProps { d: StrikesData; rows: Strike[]; W: number; opts: Opts; whoOf: (s: Side) => Who; underlying: string; huge: ReadonlySet<string>; pulse: ReadonlySet<string>; heavy: ReadonlySet<string>; meterMax: number }
+interface LadderProps { d: StrikesData; rows: Strike[]; W: number; opts: Opts; whoOf: (s: Side) => Who; underlying: string; huge: ReadonlySet<string>; pulse: ReadonlySet<string>; heavy: ReadonlySet<string>; meterMax: number;
+  /** The direction hint is shown: on, and trading is building up towards a next update (not just after one, not at the day's last step). */
+  dirOn: boolean }
 
 /** A huge change's tint behind its number and label, in the side's colour; {@code pulse} blinks it a few times first. */
 function HugeTint({ x, y, w, h, color, pulse }: { x: number; y: number; w: number; h: number; color: string; pulse: boolean }) {
@@ -465,7 +498,7 @@ function Frame({ W, need, label, children }: { W: number; need: number; label: s
 }
 
 /** The ladder as it always was: call (top) and put (bottom) bars from the left, the changes on the right; options add columns. */
-function Stacked({ d, rows, W: box, opts, whoOf, underlying, huge, pulse, heavy, meterMax }: LadderProps) {
+function Stacked({ d, rows, W: box, opts, whoOf, underlying, huge, pulse, heavy, meterMax, dirOn }: LadderProps) {
   const tags = opts.walls ? wallTags(d) : new Map<number, Tag[]>();
   const mx = Math.max(1, ...rows.flatMap((r) => [r.c.oi ?? 0, r.p.oi ?? 0, r.c.oi0 ?? 0, r.p.oi0 ?? 0]));
   const gMax = gammaMax(rows);
@@ -480,6 +513,7 @@ function Stacked({ d, rows, W: box, opts, whoOf, underlying, huge, pulse, heavy,
   const y = d.strikeStep ? priceY(rows[0].k, d.strikeStep, top, rowH) : null;
   const spotY = d.spot != null && y && rows.length > 1 ? y(d.spot) : null;
   const cDx = who ? W - deltaW + dW : W - deltaW / 2 - 4, pDx = who ? W - deltaW / 2 + dW : W - 4, room = who ? dW - 6 : deltaW / 2 - 8;
+  const mark = markFor(dirOn, heavy), cellX = (x: number) => x - (who ? dW - 2 : deltaW / 2 - 4) + 3;
   return (
     <Frame W={box} need={need} label="strike ladder">
     <svg viewBox={`0 0 ${W} ${H}`} width={W > box ? W : "100%"} role="img" aria-label={`${underlying} OI by strike at ${d.at}`}>
@@ -510,11 +544,13 @@ function Stacked({ d, rows, W: box, opts, whoOf, underlying, huge, pulse, heavy,
             {huge.has(cellKey(r.k, "p")) && <HugeTint x={pDx - (who ? dW - 2 : deltaW / 2 - 4)} y={y0 + 1} w={who ? dW + chipW + 4 : deltaW / 2 - 2} h={rowH - 2} color={PUT} pulse={pulse.has(cellKey(r.k, "p"))} />}
             <Meter x={cDx - (who ? dW - 4 : deltaW / 2 - 6)} y={y0 + rowH - 1} room={(who ? dW + chipW : deltaW / 2 - 6)} dir={1} v={r.sc.vol} max={meterMax} flagged={heavy.has(cellKey(r.k, "c"))} color={CALL} />
             <Meter x={pDx - (who ? dW - 4 : deltaW / 2 - 6)} y={y0 + rowH - 1} room={(who ? dW + chipW : deltaW / 2 - 6)} dir={1} v={r.sp.vol} max={meterMax} flagged={heavy.has(cellKey(r.k, "p"))} color={PUT} />
-            <text x={cDx} y={y0 + rowH / 2 + 4.5} textAnchor="end" className={changeClass(huge.has(cellKey(r.k, "c")))} style={changeStyle(changeText(r.c, opts), room, CALL)}>{changeText(r.c, opts)}</text>
-            <text x={pDx} y={y0 + rowH / 2 + 4.5} textAnchor="end" className={changeClass(huge.has(cellKey(r.k, "p")))} style={changeStyle(changeText(r.p, opts), room, PUT)}>{changeText(r.p, opts)}</text>
+            {mark(r, "c") && <DirMark x={cellX(cDx)} y={y0 + rowH / 2 + 4.5} last={r.sc.last} color={CALL} />}
+            {mark(r, "p") && <DirMark x={cellX(pDx)} y={y0 + rowH / 2 + 4.5} last={r.sp.last} color={PUT} />}
+            <text x={cDx} y={y0 + rowH / 2 + 4.5} textAnchor="end" className={changeClass(huge.has(cellKey(r.k, "c")))} style={changeStyle(changeText(r.c, opts), room - (mark(r, "c") ? DIR_W : 0), CALL)}>{changeText(r.c, opts)}</text>
+            <text x={pDx} y={y0 + rowH / 2 + 4.5} textAnchor="end" className={changeClass(huge.has(cellKey(r.k, "p")))} style={changeStyle(changeText(r.p, opts), room - (mark(r, "p") ? DIR_W : 0), PUT)}>{changeText(r.p, opts)}</text>
             {who && <WhoChip x={cDx + 4} y={y0 + (rowH - CHIP_H) / 2} w={chipW} who={whoOf(r.c)} color={CALL} compact={compact} />}
             {who && <WhoChip x={pDx + 4} y={y0 + (rowH - CHIP_H) / 2} w={chipW} who={whoOf(r.p)} color={PUT} compact={compact} />}
-            <title>{rowTitle(r, d.spot, huge, heavy)}</title>
+            <title>{rowTitle(r, d.spot, huge, heavy, dirOn)}</title>
           </g>
         );
       })}
@@ -530,7 +566,7 @@ function Stacked({ d, rows, W: box, opts, whoOf, underlying, huge, pulse, heavy,
 }
 
 /** Puts to the left of the strike, calls to the right, the changes on the outside; wall tags sit at the bar ends. */
-function Mirror({ d, rows, W: box, opts, whoOf, underlying, huge, pulse, heavy, meterMax }: LadderProps) {
+function Mirror({ d, rows, W: box, opts, whoOf, underlying, huge, pulse, heavy, meterMax, dirOn }: LadderProps) {
   const tags = opts.walls ? wallTags(d) : new Map<number, Tag[]>();
   const mx = Math.max(1, ...rows.flatMap((r) => [r.c.oi ?? 0, r.p.oi ?? 0, r.c.oi0 ?? 0, r.p.oi0 ?? 0]));
   const gMax = gammaMax(rows);
@@ -551,6 +587,7 @@ function Mirror({ d, rows, W: box, opts, whoOf, underlying, huge, pulse, heavy, 
   const y = d.strikeStep ? priceY(rows[0].k, d.strikeStep, top, rowH) : null;
   const spotY = d.spot != null && y && rows.length > 1 ? y(d.spot) : null;
   const left = cx - cw / 2, right = cx + cw / 2, outR = W - gW - cols, mL = cols + mW / 2, mR = outR - mW / 2;
+  const mark = markFor(dirOn, heavy);
   return (
     <Frame W={box} need={need} label="strike ladder">
     <svg viewBox={`0 0 ${W} ${H}`} width={W > box ? W : "100%"} role="img" aria-label={`${underlying} OI by strike at ${d.at}, puts left, calls right`}>
@@ -571,7 +608,8 @@ function Mirror({ d, rows, W: box, opts, whoOf, underlying, huge, pulse, heavy, 
             {atm && <rect x={0} y={y0} width={W} height={rowH} fill="var(--color-accent)" opacity={0.08} />}
             {huge.has(cellKey(r.k, "p")) && <HugeTint x={1} y={y0 + 1} w={cols - 2} h={rowH - 2} color={PUT} pulse={pulse.has(cellKey(r.k, "p"))} />}
             <Meter x={cols - 3} y={y0 + rowH - 1} room={cols - 6} dir={-1} v={r.sp.vol} max={meterMax} flagged={heavy.has(cellKey(r.k, "p"))} color={PUT} />
-            <text x={dW - 4} y={y0 + rowH / 2 + 4.5} textAnchor="end" className={changeClass(huge.has(cellKey(r.k, "p")))} style={changeStyle(changeText(r.p, opts), dW - 6, PUT)}>{changeText(r.p, opts)}</text>
+            {mark(r, "p") && <DirMark x={3} y={y0 + rowH / 2 + 4.5} last={r.sp.last} color={PUT} />}
+            <text x={dW - 4} y={y0 + rowH / 2 + 4.5} textAnchor="end" className={changeClass(huge.has(cellKey(r.k, "p")))} style={changeStyle(changeText(r.p, opts), dW - 6 - (mark(r, "p") ? DIR_W : 0), PUT)}>{changeText(r.p, opts)}</text>
             {who && <WhoChip x={dW + 2} y={y0 + (rowH - CHIP_H) / 2} w={chipW} who={whoOf(r.p)} color={PUT} compact={compact} />}
             {opts.multi && <>
               <line x1={mL} x2={mL} y1={y0} y2={y0 + rowH} stroke="var(--color-line)" />
@@ -591,10 +629,11 @@ function Mirror({ d, rows, W: box, opts, whoOf, underlying, huge, pulse, heavy, 
               className="text-[10px] italic" style={{ fill: callTags[0].color }}>{callTags.map((t) => t.text).join(" · ")}<title>{callTags.map((t) => t.title).join("\n")}</title></text>}
             {huge.has(cellKey(r.k, "c")) && <HugeTint x={outR + 1} y={y0 + 1} w={cols - 2} h={rowH - 2} color={CALL} pulse={pulse.has(cellKey(r.k, "c"))} />}
             <Meter x={outR + 3} y={y0 + rowH - 1} room={cols - 6} dir={1} v={r.sc.vol} max={meterMax} flagged={heavy.has(cellKey(r.k, "c"))} color={CALL} />
-            <text x={outR + dW - 4} y={y0 + rowH / 2 + 4.5} textAnchor="end" className={changeClass(huge.has(cellKey(r.k, "c")))} style={changeStyle(changeText(r.c, opts), dW - 6, CALL)}>{changeText(r.c, opts)}</text>
+            {mark(r, "c") && <DirMark x={outR + 3} y={y0 + rowH / 2 + 4.5} last={r.sc.last} color={CALL} />}
+            <text x={outR + dW - 4} y={y0 + rowH / 2 + 4.5} textAnchor="end" className={changeClass(huge.has(cellKey(r.k, "c")))} style={changeStyle(changeText(r.c, opts), dW - 6 - (mark(r, "c") ? DIR_W : 0), CALL)}>{changeText(r.c, opts)}</text>
             {who && <WhoChip x={outR + dW + 2} y={y0 + (rowH - CHIP_H) / 2} w={chipW} who={whoOf(r.c)} color={CALL} compact={compact} />}
             {opts.gamma && <GammaBar x={W - gW + 6} y={y0 + (rowH - 11) / 2} w={gW - 10} gc={r.gc} gp={r.gp} max={gMax} />}
-            <title>{rowTitle(r, d.spot, huge, heavy)}</title>
+            <title>{rowTitle(r, d.spot, huge, heavy, dirOn)}</title>
           </g>
         );
       })}
@@ -640,12 +679,14 @@ const rankText = (r: N) => (r == null ? "" : r === 1 ? "✓ largest" : r === 2 ?
  * live ladder), the heads-up (the flagged strikes, or why there are none) and the check of the last heads-up against the
  * update that followed it, with today's tally.
  */
-function HeadsUpLine({ d, hu, underlying, lastStep, tick }: { d: StrikesData; hu: HeadsUp; underlying: string; lastStep: boolean; tick: boolean }) {
+function HeadsUpLine({ d, hu, underlying, lastStep, tick, dir }: { d: StrikesData; hu: HeadsUp; underlying: string; lastStep: boolean; tick: boolean; dir: boolean }) {
   const [period, clockName] = oiClock(underlying);
   const now = useIstClock(tick);
   const last = d.lastPrint ?? null, next = last ? secsOf(last) + period : null, left = tick && next != null ? next - now : null;
   const name = (k: number, sd: HeadsSide) => <span style={{ color: ink(sideColor(sd)) }}>{strikeText(k)} {sideName(sd)}</span>;
-  const [hits, flagged] = hu.today;
+  const [hits, flagged, kept = 0, judged = 0] = hu.today;
+  const likely = (last: N | undefined) => dir && dirArrow(last ?? null)
+    ? <span className="font-semibold" title={`OI, not price: its last update was ${big(last ?? null, true)}; ${arrowOdds(last ?? null)}.`}> OI likely {dirArrow(last ?? null)}</span> : null;
   return (
     <div className="mt-2 space-y-1 rounded border border-line bg-panel-2 px-3 py-2 text-xs num">
       <div>
@@ -657,8 +698,8 @@ function HeadsUpLine({ d, hu, underlying, lastStep, tick }: { d: StrikesData; hu
       {!lastStep && hu.state === "BUILDING" && (hu.flags.length > 0 ? (
         <div>
           <span className="font-semibold">Big changes likely: </span>
-          {[...hu.flags].sort((a, b) => b[2] - a[2]).map(([k, sd, v], n) => <span key={cellKey(k, sd)} className="whitespace-nowrap">{n > 0 && " · "}{name(k, sd)} {big(v)}</span>)}
-          <span className="text-muted"> traded since their last update · size, not direction</span>
+          {[...hu.flags].sort((a, b) => b[2] - a[2]).map(([k, sd, v, last], n) => <span key={cellKey(k, sd)} className="whitespace-nowrap">{n > 0 && " · "}{name(k, sd)} {big(v)}{likely(last)}</span>)}
+          <span className="text-muted"> traded since their last update · {dir ? "size from the meters; OI ↑ / ↓ only repeats each strike's last update (on past days ↑ right 69 %, ↓ only 54 %)" : "size, not direction"}</span>
         </div>
       ) : <div className="text-muted">No strike stands out yet: trading since the last update is spread across the ladder.</div>)}
       {!lastStep && hu.state === "JUST_PRINTED" && <div className="text-muted">An update came in this step: the meters start again from empty.</div>}
@@ -666,11 +707,12 @@ function HeadsUpLine({ d, hu, underlying, lastStep, tick }: { d: StrikesData; hu
         <div>
           <span className="font-semibold">Last check: </span>
           <span className="text-muted">heads-up at {hhmmss(hu.check.flagsAt)} → update {hhmmss(hu.check.print)}{hu.check.complete ? "" : " (so far)"}: </span>
-          {hu.check.cells.map(([k, sd, , change, rank, who], n) => (
+          {hu.check.cells.map(([k, sd, , change, rank, who, , kept1], n) => (
             <span key={cellKey(k, sd)} className="whitespace-nowrap">{n > 0 && " · "}{name(k, sd)} {change == null ? <span className="text-muted">{hu.check?.complete ? "✗ no change this update" : "not updated yet"}</span>
-              : <>{big(change, true)} <span className={rank != null && rank <= 2 ? "font-semibold" : "text-muted"} style={rank != null && rank <= 2 ? { color: ink("var(--color-up)") } : undefined}>{rankText(rank)}</span>{who ? <span className="text-muted"> ({WHO_TEXT[who]})</span> : null}</>}</span>
+              : <>{big(change, true)} <span className={rank != null && rank <= 2 ? "font-semibold" : "text-muted"} style={rank != null && rank <= 2 ? { color: ink("var(--color-up)") } : undefined}>{rankText(rank)}</span>{who ? <span className="text-muted"> ({WHO_TEXT[who]})</span> : null}{dir && kept1 != null ? <span className={kept1 ? "font-semibold" : "text-muted"} style={kept1 ? { color: ink("var(--color-up)") } : undefined}> · {kept1 ? "✓ direction" : "✗ direction"}</span> : null}</>}</span>
           ))}
           {flagged > 0 && <span className="text-muted"> · today {hits} of {flagged} flags were among their side's two largest changes ({Math.round((100 * hits) / flagged)} %)</span>}
+          {dir && judged > 0 && <span className="text-muted"> · direction kept {kept} of {judged} ({Math.round((100 * kept) / judged)} %)</span>}
         </div>
       )}
     </div>
@@ -687,6 +729,7 @@ function Legend({ d, at, opts, openIv }: { d?: StrikesData; at: string; opts: Op
   parts.push(<> Hover a row for its OI, IV, premium and volume. The highlighted row is the ATM strike.</>);
   parts.push(<> A boxed change is a huge one for this ladder: one of its side's two largest, at least 5 × the median change of all strikes and at least half the largest{opts.size === "pct" ? " (in % of strike, among strikes that held at least a quarter of their side's median OI)" : ""}; it blinks a few times when it first becomes one on a live update.</>);
   if (opts.heads) parts.push(<> The thin bar under each change is its build-up meter: contracts traded since that strike's last OI update, against the ladder's largest; it empties at each update and fills until the next (NSE about every minute, BSE every 2½–3 minutes). A coloured meter is a heads-up: one of its side's two largest, at least 3 × the median and half the largest, so a big OI change is likely there at the next update. On 11 past days 44 % of the flagged cells were among their side's two biggest changes at the next update, against 5 % of the others and about a third of the biggest-OI strikes. It says how big, not whether OI will rise or fall: who is buying or selling between updates did not tell that (A-383). After each update the line above checks the last heads-up: each flag's actual change, its rank on its side (✓ = 1st or 2nd) and who traded by IV, with today's tally.</>);
+  if (opts.heads && opts.dir) parts.push(<> The ↑ / ↓ beside a flagged change is the direction hint for its OI (not the price): {PERSIST_TEXT}. So ↑ adds a little over "OI usually rises", and ↓ is right only slightly more often than wrong. The check line marks whether each flag's update kept its direction, with today's count.</>);
   if (opts.who !== "off") parts.push(<> Who traded is read from the OI change against the change in the strike's IV (OI up and IV down: writers opening; OI down and IV up: writers buying back); blank when either change is small (OI under 0.5 % of the strike, IV under 0.1 point). Not from the premium: it mostly follows the index, so a rally would read as call buying and put writing whoever traded. An inference, not a record of who traded. On a narrow screen the labels are W, B, C and X.{d && fromPreOpen(d) && openIv ? " Over a window from the previous close the IV then is the strike's first IV of today (none is recorded before the open), so the label weighs a day's net OI change against the IV move since the open: many traders' opening and closing netted into one word." : ""}</>);
   if (opts.multi) parts.push(<> Changes 1 min–open: each strike's OI change over the last 1, 5, 15, 30 minutes and 1 hour, and since the day's first OI print, at once, as nested bars from the zero line (right: added, left: cut), 1 min darkest, 1 h palest and since open a dashed outline, one scale for all; the longest bar is drawn first so none hides another; a window reaching back before the open starts from the pre-open OI (the previous close){opts.size === "pct" ? " (as a share of the strike's OI at each window's start)" : ""}; hover a row for the numbers. A 1-minute window holds about one exchange OI update.</>);
   if (opts.walls) parts.push(<> Walls: the largest call OI above spot (call wall: within ATM ± 15; ceiling: within 6 strikes) and the largest put OI below it (put wall, floor); a wall moves only when another strike holds 5 % more OI; ↑ / ↓ and "was" mark a move inside the window.</>);

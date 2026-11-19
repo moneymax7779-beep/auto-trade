@@ -687,17 +687,40 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
      * at step {@code i} (user 13 Nov 2026, after A-383: volume between two prints tells how big the next OI change will be,
      * corr 0.62, but not whether OI will rise or fall). The volume counts from the end of the print's step, so trades in
      * that step after the print are left out (at most 30 s). See {@link #lastPrintStep} for contracts off the clock.
+     * Then [the calls' last print's OI change, the puts'] (user 19 Nov 2026, A-493: neither premium nor IV between prints
+     * tells the next print's direction; after a rise the next print rose 69 % of the time against a 60 % base rate, after
+     * a fall it fell 54 % against 40 %); null when there is none recent enough (see {@link #printChange}).
      */
     private static List<Object> sincePrint(Map<Double, double[]> calls, Map<Double, float[]> callVol,
                                            Map<Double, double[]> puts, Map<Double, float[]> putVol, double k, int i) {
-        List<Object> out = new ArrayList<>(4);
+        List<Object> out = new ArrayList<>(6);
+        Double[] change = new Double[2];
         for (int side = 0; side < 2; side++) {
-            Map<Double, double[]> oi = side == 0 ? calls : puts;
-            int last = lastPrintStep(oi.get(k), i);
-            out.add(num(volumeSince(oi, side == 0 ? callVol : putVol, k, i)));
+            double[] carried = (side == 0 ? calls : puts).get(k);
+            int last = lastPrintStep(carried, i);
+            out.add(num(last == Integer.MIN_VALUE ? Double.NaN : windowVolume(side == 0 ? callVol : putVol, k, i, last)));
             out.add(last < 0 ? null : time(last));
+            change[side] = printChange(carried, last, i);
         }
+        out.add(change[0]);
+        out.add(change[1]);
         return out;
+    }
+
+    /** How old a contract's last print may be to give the persistence hint: A-493 measured prints at most 400 s apart. */
+    static final int PERSIST_MAX_AGE = 400 / STEP;
+
+    /** The OI change of a contract's last print up to step {@code i} (the persistence hint; see {@link #printChange}). */
+    static Double lastPrintChange(double[] carried, int i) {
+        return printChange(carried, lastPrintStep(carried, i), i);
+    }
+
+    /**
+     * The OI change of the print in step {@code last} (from {@link #lastPrintStep}), read at step {@code i}: the next
+     * print's likely direction (A-493); null when there is none, or it is more than {@link #PERSIST_MAX_AGE} steps old.
+     */
+    private static Double printChange(double[] carried, int last, int i) {
+        return last < 0 || i - last > PERSIST_MAX_AGE ? null : carried[last + 1] - carried[last];
     }
 
     /**
@@ -786,14 +809,18 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
     }
 
     /**
-     * The heads-up at step {@code i} and how it has done today: its state and flags [strike, "c"/"p", volume]; the check
+     * The heads-up at step {@code i} and how it has done today: its state and flags [strike, "c"/"p", volume, last
+     * print's change]; the check
      * of the latest one: the flags of the last step before a print against that print, read as each judged cell's OI
      * change in the print's step and the next ({@value #HEADS_RESOLVE_STEPS} steps: a print rolls across the strikes over
      * about 10 s, so it can run into the next step; a longer span would reach the following print), per flag [strike, side,
      * volume, change (null: no change in this print), its rank by size among its side's changes, who traded by IV], and
      * "complete" once both steps are in (before that the check is so far); and today's tally up to {@code i} over complete
      * checks only, so it does not move as later steps come in: [flags among their side's two largest changes, flags], one
-     * heads-up per print (the steps between two prints repeat the same build-up).
+     * heads-up per print (the steps between two prints repeat the same build-up). The persistence hint (19 Nov 2026,
+     * A-493): each flag also carries its contract's last print's OI change (the likely direction of the next one), each
+     * checked flag [.., that change at the flag's step, whether the print kept its direction (null: no direction to judge)],
+     * and the tally adds [direction kept, judged] over complete checks.
      */
     static Map<String, Object> headsUp(Day d, Map<Double, double[]> calls, Map<Double, double[]> puts, double[] spots,
                                        double step, int i) {
@@ -801,7 +828,7 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
         for (int s = 0; s <= i; s++) {
             h[s] = heads(d, calls, puts, spots, step, s);
         }
-        int hits = 0, flagged = 0;
+        int hits = 0, flagged = 0, dirHits = 0, dirJudged = 0;
         Map<String, Object> check = null;
         for (int p = 1; p <= i; p++) {
             if (h[p].state() != HeadsState.JUST_PRINTED || h[p - 1].state() != HeadsState.BUILDING || h[p - 1].flags().isEmpty()) {
@@ -833,13 +860,22 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
                     Map<Double, float[]> iv = c.call() ? d.callIv : d.putIv;
                     who = who(oi[t + 1], oi[t], at(iv, c.strike(), t), at(iv, c.strike(), f), MIN_IV_CHANGE);
                 }
+                // the persistence hint at the flag's step: the direction of the contract's last print before it
+                Double before = lastPrintChange((c.call() ? calls : puts).get(c.strike()), f);
+                Boolean dirHit = before == null || before == 0 || n == null || n[0] == 0 ? null : (before > 0) == (n[0] > 0);
                 if (complete) {
                     flagged++;
                     if (rank != null && rank <= HEADS_PER_SIDE) {
                         hits++;
                     }
+                    if (dirHit != null) {
+                        dirJudged++;
+                        if (dirHit) {
+                            dirHits++;
+                        }
+                    }
                 }
-                cells.add(Arrays.asList(c.strike(), c.call() ? "c" : "p", c.volume(), n == null ? null : n[0], rank, who));
+                cells.add(Arrays.asList(c.strike(), c.call() ? "c" : "p", c.volume(), n == null ? null : n[0], rank, who, before, dirHit));
             }
             check = new LinkedHashMap<>();
             check.put("flagsAt", time(f));
@@ -849,9 +885,10 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
         }
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("state", h[i].state().name());
-        out.put("flags", h[i].flags().stream().map(c -> (Object) Arrays.asList(c.strike(), c.call() ? "c" : "p", c.volume())).toList());
+        out.put("flags", h[i].flags().stream().map(c -> (Object) Arrays.asList(c.strike(), c.call() ? "c" : "p", c.volume(),
+                lastPrintChange((c.call() ? calls : puts).get(c.strike()), i))).toList());
         out.put("check", check);
-        out.put("today", List.of(hits, flagged));
+        out.put("today", List.of(hits, flagged, dirHits, dirJudged));
         return out;
     }
 
