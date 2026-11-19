@@ -598,6 +598,8 @@ export interface AuditRow {
 export interface AccountDetails {
   id: number;
   name: string;
+  /** V49: the engine session account (e.g. PAPER-1) whose trades every view of this account shows; it takes none */
+  mirrorOf?: string | null;
   broker: string;
   mode: string;
   enabled: boolean;

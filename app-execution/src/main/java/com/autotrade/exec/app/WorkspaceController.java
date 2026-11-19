@@ -495,15 +495,13 @@ class WorkspaceController {
             r.put("open", 0);
             return r;
         }
-        String mirrorOf = LiveBookController.mirrorOf(jdbc, accountId);
-        if (mirrorOf != null) {             // a mirror account (V49): the mirrored engine account's PAPER_LIVE trades of the day
-            Map<String, Object> m = jdbc.queryForMap("select coalesce(sum(p.net) filter (where p.closed_at is not null), 0)::float8 "
-                    + "net, count(*) filter (where p.closed_at is not null) trades, count(*) filter (where p.closed_at is null) "
-                    + "open from trade.position p join trade.session s on s.id = p.session_id where s.account = ? "
-                    + "and s.mode = 'PAPER_LIVE' and s.session_date = ?", mirrorOf, java.sql.Date.valueOf(day));
+        if (Mirrors.of(jdbc, accountId) != null) {   // a mirror account (V49): the mirrored account's trades closed that day
+            Map<String, Object> m = jdbc.queryForMap("select coalesce(sum(realised_gross - charges), 0)::float8 net, count(*) "
+                    + "trades from " + Mirrors.SOURCE + " m where (closed_at at time zone 'Asia/Kolkata')::date = ?",
+                    accountId, java.sql.Date.valueOf(day));
             r.put("net", round(((Number) m.get("net")).doubleValue()));
             r.put("trades", ((Number) m.get("trades")).intValue());
-            r.put("open", ((Number) m.get("open")).intValue());
+            r.put("open", 0);                                   // the running session's: the UI reads them from /api/status
             return r;
         }
         Map<String, Object> row = jdbc.queryForMap("select coalesce(sum(realised_gross - coalesce(charges, 0)) filter "

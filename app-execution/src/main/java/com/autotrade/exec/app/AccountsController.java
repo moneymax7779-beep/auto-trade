@@ -112,6 +112,16 @@ class AccountsController {
                             live ? cents(b.liveNet() + net) : b.liveNet(), b.liveTrades() + (live ? trades : 0),
                             b.liveOpen() + (live ? open : 0)));
                 }, tenant, from);
+        // a mirror account (V49) shows the mirrored engine account's closed trades of the day, never its own (it takes
+        // none); its open positions live in the running session only (the UI shows them from /api/status)
+        for (java.util.Map<String, Object> m : jdbc.queryForList("select id, mirror_of from acct.broker_account where "
+                + "tenant_id = ? and mirror_of is not null", tenant)) {
+            java.util.Map<String, Object> r = jdbc.queryForMap("select coalesce(sum(realised_gross - coalesce(charges, 0)) "
+                    + "filter (where status = 'CLOSED'), 0)::float8 net, count(*) filter (where status = 'CLOSED') trades, "
+                    + "0 open from " + Mirrors.SOURCE + " m where closed_at >= ?", ((Number) m.get("id")).longValue(), from);
+            books.put(((Number) m.get("id")).longValue(), new DayBook(cents(((Number) r.get("net")).doubleValue()),
+                    ((Number) r.get("trades")).intValue(), ((Number) r.get("open")).intValue(), 0, 0, 0));
+        }
         return books;
     }
 

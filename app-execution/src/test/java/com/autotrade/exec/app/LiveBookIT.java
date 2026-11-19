@@ -302,9 +302,10 @@ class LiveBookIT {
     }
 
     /**
-     * V49 (19 Nov 2026, user on DEMO-1: "it should be as same as PAPER-1"): a mirror account takes no entry of its own (an
-     * EXIT still reaches it), and its book and today's totals are the mirrored engine account's PAPER_LIVE trades:
-     * the closed one at its own net, the open one at the newest captured bid; read-only.
+     * V49 (19 Nov 2026, user on DEMO-1: "it should be as same as PAPER-1"; review the same day): a mirror account takes no
+     * entry of its own and an EXIT reaches it only while it still holds a position; a manual buy is refused; every view
+     * of its trades (book, Today, details, positions, P&L, ledger, My accounts) is the mirrored engine account's closed
+     * PAPER_LIVE trades from the mirror account's own start (the open ones come from /api/status in the UI).
      */
     @Test
     @SuppressWarnings("unchecked")
@@ -315,13 +316,12 @@ class LiveBookIT {
         accounts.ensureMembership(tenant, member, "OWNER");
         long demo = accounts.ensureFollowerAccount(tenant, member, "DEMO-M", BrokerType.PAPER, TradeMode.PAPER,
                 500_000, EquityMode.COMPOUNDING, LocalDate.now(), "config/risk/follower-risk.v3.yaml", 100);
-        jdbc.update("update acct.broker_account set mirror_of = 'PAPER-M' where id = ?", demo);
         long real = accounts.ensureFollowerAccount(tenant, member, "REAL-M", BrokerType.ZERODHA, TradeMode.DRY_RUN,
                 100_000, EquityMode.FIXED, LocalDate.now(), "config/risk/follower-risk.v7.yaml", 0);
         assertThatThrownBy(() -> jdbc.update("update acct.broker_account set mirror_of = 'PAPER-M' where id = ?", real))
                 .hasMessageContaining("broker_account_mirror_paper");             // only a paper account mirrors
 
-        // the fan-out: no entry for the mirror, an exit still reaches it
+        // the fan-out: no entry and no exit while it holds nothing; an exit once it holds a position from before
         long signal = accounts.ensureSignalSourceAccount(tenant, member, "SIG-M", 500_000, LocalDate.now(),
                 "config/risk/signal-source.v2.yaml");
         long group = accounts.ensureCopyGroup(tenant, "G-M", signal);
@@ -330,48 +330,91 @@ class LiveBookIT {
         long sigSession = jdbc.queryForObject("insert into trade.session (account, mode, session_date, feed, strategy_id, "
                 + "strategy_hash, configs, code_version, status) values ('SIG-M', 'PAPER_LIVE', current_date, 'it', 'live-set', "
                 + "'sha256:it', '{}'::jsonb, 'it', 'RUNNING') returning id", Long.class);
-        for (SignalDecision.Action action : List.of(SignalDecision.Action.ENTER, SignalDecision.Action.EXIT)) {
+        java.util.function.Consumer<String> decide = key -> {
             new SignalDecisionStore(dataSource).insert(new SignalDecision(group, sigSession, LocalDate.now(), Instant.now(),
-                    "oi-burst-cross", 2, "NIFTY", action, "CE", null, "CONFIRMED", "IT", TOKEN, "NSE_FO|40009",
-                    "NIFTY 24650 CE 09 NOV 26", 65, 146, 9_500, 500_000, 0, "M:" + action, Map.of()));
+                    "oi-burst-cross", 2, "NIFTY", key.startsWith("ENTER") ? SignalDecision.Action.ENTER
+                    : SignalDecision.Action.EXIT, "CE", null, "CONFIRMED", "IT", TOKEN, "NSE_FO|40009",
+                    "NIFTY 24650 CE 09 NOV 26", 65, 146, 9_500, 500_000, 0, "M:" + key, Map.of()));
             new FanOut(dataSource).fanOut(group, LocalDate.now());
-        }
-        assertThat(jdbc.queryForList("select action from exec.trade_intent where broker_account_id = ?", String.class, demo))
-                .containsExactly("EXIT");
+        };
+        // a position it bought before it became a mirror
+        decide.accept("ENTER-0");
+        long held = jdbc.queryForObject("select id from exec.trade_intent where broker_account_id = ?", Long.class, demo);
+        jdbc.update("insert into exec.position (tenant_id, broker_account_id, entry_trade_intent_id, strategy_id, underlying, "
+                + "option_side, instrument_token, instrument_key, symbol, quantity_open, average_entry, opened_at, status) "
+                + "values (?, ?, ?, 'oi-burst-cross', 'NIFTY', 'CE', ?, 'NSE_FO|40009', 'NIFTY 24650 CE 09 NOV 26', 65, "
+                + "146, now() - interval '1 day', 'OPEN')", tenant, demo, held, TOKEN);
+        jdbc.update("update acct.broker_account set mirror_of = 'PAPER-M' where id = ?", demo);
+        assertThatThrownBy(() -> com.autotrade.execution.ManualOrders.refuseMirror(jdbc, accounts.byId(demo).orElseThrow()))
+                .hasMessageContaining("mirrors PAPER-M");                        // no manual buy or chart order on it
+        decide.accept("ENTER-1");                           // a mirror: no entry
+        decide.accept("EXIT-1");                            // ... but the exit of what it still holds
+        assertThat(jdbc.queryForList("select action from exec.trade_intent where broker_account_id = ? order by id",
+                String.class, demo)).containsExactly("ENTER", "EXIT");
+        jdbc.update("update exec.position set status = 'CLOSED', quantity_open = 0, closed_at = now() - interval '23 hours', "
+                + "realised_gross = 0, charges = 0 where broker_account_id = ?", demo);   // closed before today: not in today's views
+        decide.accept("EXIT-2");                            // holding nothing: no exit intent (no NOT_HELD noise)
+        assertThat(jdbc.queryForList("select action from exec.trade_intent where broker_account_id = ? order by id",
+                String.class, demo)).containsExactly("ENTER", "EXIT");
 
-        // the mirrored engine account: one trade closed today, one open (priced at the newest bid), one of another account
+        // the mirrored engine account: one trade closed today, one closed before the mirror account's start (not shown),
+        // and one of another account; an open engine position is never in the database (written when it closes)
         long mine = jdbc.queryForObject("insert into trade.session (account, mode, session_date, feed, strategy_id, "
                 + "strategy_hash, configs, code_version, status) values ('PAPER-M', 'PAPER_LIVE', current_date, 'it', 'live-set', "
                 + "'sha256:it', '{}'::jsonb, 'it', 'RUNNING') returning id", Long.class);
+        long before = jdbc.queryForObject("insert into trade.session (account, mode, session_date, feed, strategy_id, "
+                + "strategy_hash, configs, code_version, status) values ('PAPER-M', 'PAPER_LIVE', current_date - 3, 'it', "
+                + "'live-set', 'sha256:it', '{}'::jsonb, 'it', 'DONE') returning id", Long.class);
         String insert = "insert into trade.position (session_id, underlying, option_side, symbol, opened_at, closed_at, stages, "
                 + "exit_reason, realised, costs, net, strategy_id, quantity, lot_size, average_cost, average_exit) values "
-                + "(?, 'NIFTY', 'CE', ?, now() - interval '40 minutes', ?, '{CONFIRMED}', ?, ?, ?, ?, 'session-break-retest', ?, 65, "
-                + "?, ?)";
-        jdbc.update(insert, mine, "NIFTY 25350 CE 23 NOV 26", java.sql.Timestamp.from(Instant.now().minusSeconds(600)),
+                + "(?, 'NIFTY', 'CE', ?, ?, ?, '{CONFIRMED}', ?, ?, ?, ?, 'session-break-retest', ?, 65, ?, ?)";
+        java.sql.Timestamp opened = java.sql.Timestamp.from(Instant.now().minusSeconds(2400));
+        jdbc.update(insert, mine, "NIFTY 25350 CE 23 NOV 26", opened, java.sql.Timestamp.from(Instant.now().minusSeconds(600)),
                 "LEVEL_REJECT", 38_844.0, 291.0, 38_553.0, 585, 151.70, 218.10);
-        jdbc.update(insert, mine, "NIFTY 24700 CE 09 NOV 26", null, null, 0.0, 0.0, 0.0, 130, 146.0, null);
-        jdbc.update(insert, sigSession, "NIFTY 24650 CE 09 NOV 26", java.sql.Timestamp.from(Instant.now().minusSeconds(60)),
+        jdbc.update(insert, before, "NIFTY 25000 CE 23 NOV 26", java.sql.Timestamp.from(Instant.now().minusSeconds(3 * 86_400)),
+                java.sql.Timestamp.from(Instant.now().minusSeconds(3 * 86_400 - 600)), "STOP", -5_000.0, 100.0, -5_100.0, 65,
+                100.0, 23.08);
+        jdbc.update(insert, mine, "NIFTY 25400 CE 23 NOV 26", opened, java.sql.Timestamp.from(Instant.now().minusSeconds(300)),
+                "ENTRY_NOT_FILLED", 0.0, 0.0, 0.0, 0, null, null);        // never filled: not a trade
+        jdbc.update(insert, sigSession, "NIFTY 24650 CE 09 NOV 26", opened, java.sql.Timestamp.from(Instant.now().minusSeconds(60)),
                 "STOP", -9_999.0, 1.0, -10_000.0, 65, 146.0, 0.0);
-        jdbc.update("insert into md.option_tick (manifest_id, session_date, underlying, recv_ts, src_seq, instrument_token, "
-                + "symbol, expiry, strike, option_type, ltp, bid_px, bid_qty, bid_orders, ask_px, ask_qty, ask_orders, "
-                + "analytics_complete, depth_complete) values (1, current_date, 'NIFTY', now() - interval '20 seconds', 1, ?, "
-                + "'NIFTY 24700 CE 09 NOV 26', date '2026-11-09', 24700, 'CE', 150.05, '{150.0}', '{650}', '{3}', '{150.1}', "
-                + "'{650}', '{3}', false, true)", TOKEN + 50);
 
         Map<String, Object> book = new LiveBookController(new Access(dataSource), dataSource).liveBook("kc-mirror", demo, 7);
         assertThat(book).containsEntry("mirrorOf", "PAPER-M").containsEntry("bookMode", "PAPER")
-                .containsEntry("canAct", false).containsEntry("canStop", false);
-        List<Map<String, Object>> open = (List<Map<String, Object>>) book.get("open");
-        assertThat(open).singleElement().satisfies(p -> assertThat(p).containsEntry("symbol", "NIFTY 24700 CE 09 NOV 26")
-                .containsEntry("quantity", 130L).containsEntry("bid", 150.0).containsEntry("pnl", 520.0));
+                .containsEntry("canAct", false).containsEntry("canStop", false).containsEntry("open", List.of());
         List<Map<String, Object>> closed = (List<Map<String, Object>>) book.get("closed");
         assertThat(closed).singleElement().satisfies(c -> assertThat(c).containsEntry("net", 38_553.0)
-                .containsEntry("charges", 291.0).containsEntry("exit", 218.1).containsEntry("exitReason", "LEVEL_REJECT"));
+                .containsEntry("charges", 291.0).containsEntry("exit", 218.1).containsEntry("exitReason", "LEVEL_REJECT")
+                .containsEntry("quantity", 585L));
         Map<String, Object> summary = (Map<String, Object>) book.get("summary");
-        assertThat(summary).containsEntry("realisedToday", 38_553.0).containsEntry("openPnl", 520.0)
+        assertThat(summary).containsEntry("realisedToday", 38_553.0).containsEntry("openPnl", 0.0)
                 .containsEntry("sinceLiveNet", 38_553.0).containsEntry("sinceLiveTrades", 1);
-        assertThat(ContractQuotes.ofSymbol("SENSEX 81900 PE 19 NOV 26"))
-                .isEqualTo(new ContractQuotes.Contract(java.sql.Date.valueOf("2026-11-19"), 81900, "PE"));
-        assertThat(ContractQuotes.ofSymbol("not a symbol")).isNull();
+
+        // the Brokers page's account panel and My accounts read the same trades (review: they still showed its own)
+        org.springframework.transaction.support.TransactionTemplate tx = new org.springframework.transaction.support
+                .TransactionTemplate(new org.springframework.jdbc.datasource.DataSourceTransactionManager(dataSource));
+        ExecutionProperties properties = new ExecutionProperties(null, "*", 1000, null, 0, "it", null);
+        AccountAdminController admin = new AccountAdminController(new Access(dataSource), dataSource, tx, properties,
+                TestBrokers.live(dataSource));
+        Map<String, Object> details = admin.details("kc-mirror", demo);
+        assertThat(details).containsEntry("mirrorOf", "PAPER-M");
+        assertThat((Map<String, Object>) details.get("today")).satisfies(t -> {
+            assertThat(((Number) t.get("open")).intValue()).isZero();
+            assertThat(((Number) t.get("closed")).intValue()).isEqualTo(1);
+            assertThat(((Number) t.get("net")).doubleValue()).isEqualTo(38_553.0);
+        });
+        assertThat(admin.positions("kc-mirror", demo, null)).extracting(p -> p.get("symbol"))
+                .containsExactly("NIFTY 25350 CE 23 NOV 26");
+        assertThat(admin.ledger("kc-mirror", demo, 60)).singleElement().satisfies(r -> assertThat(r)
+                .containsEntry("trades", 1).containsEntry("open", 0).containsEntry("net", 38_553.0)
+                .containsEntry("openingEquity", 500_000.0).containsEntry("closingEquity", 538_553.0));
+        assertThat(admin.pnl("kc-mirror", demo, 30)).singleElement()
+                .satisfies(r -> assertThat(((Number) r.get("net")).doubleValue()).isEqualTo(38_553.0));
+        AccountsController.DayBook card = new AccountsController(new Access(dataSource), dataSource,
+                new ExecutionService(dataSource, properties)).accounts("kc-mirror").stream()
+                .filter(v -> v.id() == demo).findFirst().orElseThrow().today();
+        assertThat(card.net()).isEqualTo(38_553.0);
+        assertThat(card.trades()).isEqualTo(1);
+        assertThat(card.open()).isZero();
     }
 }

@@ -129,10 +129,12 @@ class AccountAdminController {
                 + "where s.broker_account_id = ? and s.strategy_id not in (select strategy from acct.strategy_off) "
                 + "order by s.strategy_id", id));
         LocalDate today = LocalDate.now(IST);
+        String mirrorOf = Mirrors.of(jdbc, id);
+        out.put("mirrorOf", mirrorOf);                        // V49: its views show this engine account's trades
         out.put("today", jdbc.queryForMap("select count(*) filter (where status = 'OPEN') open, "
                 + "count(*) filter (where status = 'CLOSED') closed, coalesce(sum(realised_gross - coalesce(charges, 0)) "
-                + "filter (where status = 'CLOSED'), 0) net from exec.position where broker_account_id = ? "
-                + "and (opened_at at time zone 'Asia/Kolkata')::date = ?", id, today));
+                + "filter (where status = 'CLOSED'), 0) net from " + source(mirrorOf)
+                + " and (opened_at at time zone 'Asia/Kolkata')::date = ?", id, today));
         return out;
     }
 
@@ -141,10 +143,11 @@ class AccountAdminController {
                                         @PathVariable long id, @RequestParam(required = false) String day) {
         visible(access.user(subject), id);
         LocalDate date = day == null || day.isBlank() ? LocalDate.now(IST) : LocalDate.parse(day);
+        String mirrorOf = Mirrors.of(jdbc, id);
         return jdbc.queryForList("select id, strategy_id, underlying, option_side, symbol, quantity_open, average_entry, "
                 + "to_char(opened_at at time zone 'Asia/Kolkata', 'HH24:MI:SS') opened, "
                 + "to_char(closed_at at time zone 'Asia/Kolkata', 'HH24:MI:SS') closed, exit_reason, realised_gross, charges, "
-                + "status from exec.position where broker_account_id = ? and (opened_at at time zone 'Asia/Kolkata')::date = ? "
+                + "status from " + source(mirrorOf) + " and (opened_at at time zone 'Asia/Kolkata')::date = ? "
                 + "order by opened_at", id, date);
     }
 
@@ -155,8 +158,9 @@ class AccountAdminController {
         int n = Math.max(1, Math.min(days, 366));
         return jdbc.queryForList("select (closed_at at time zone 'Asia/Kolkata')::date::text as day, count(*) as trades, "
                 + "count(*) filter (where realised_gross - coalesce(charges, 0) > 0) wins, "
-                + "sum(realised_gross - coalesce(charges, 0)) net from exec.position where broker_account_id = ? "
-                + "and status = 'CLOSED' and closed_at > now() - make_interval(days => ?) group by 1 order by 1 desc", id, n);
+                + "sum(realised_gross - coalesce(charges, 0)) net from " + source(Mirrors.of(jdbc, id)) + " "
+                + "and status = 'CLOSED' and closed_at > now() - make_interval(days => ?) group by 1 order by 1 desc",
+                id, n);
     }
 
     /**
@@ -175,7 +179,7 @@ class AccountAdminController {
                 + "count(*) filter (where status <> 'CLOSED') open, "
                 + "coalesce(sum(realised_gross) filter (where status = 'CLOSED'), 0) gross, "
                 + "coalesce(sum(charges) filter (where status = 'CLOSED'), 0) charges "
-                + "from exec.position where broker_account_id = ? group by 1 order by 1", id);
+                + "from " + source(Mirrors.of(jdbc, id)) + " group by 1 order by 1", id);
         Map<LocalDate, Map<String, Object>> broker = new LinkedHashMap<>();
         jdbc.queryForList("select session_date, broker_net, difference from acct.ledger_day where broker_account_id = ?", id)
                 .forEach(r -> broker.put(((java.sql.Date) r.get("session_date")).toLocalDate(), r));
@@ -211,6 +215,14 @@ class AccountAdminController {
 
     private static double round(double v) {
         return Math.round(v * 100) / 100.0;
+    }
+
+    /**
+     * The rows an account's trade views read, ending in a where clause with one parameter, the account's id: its own
+     * exec.position rows, or a mirror account's (V49) mirrored engine trades ({@link Mirrors#SOURCE}).
+     */
+    private static String source(String mirrorOf) {
+        return mirrorOf != null ? Mirrors.SOURCE + " m where true" : "exec.position where broker_account_id = ?";
     }
 
     @GetMapping("/api/execution/credential-profiles")

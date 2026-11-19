@@ -104,6 +104,7 @@ public final class ChartOrders {
         if (account.role() != AccountRole.FOLLOWER_TRADE || !account.enabled()) {
             throw new IllegalArgumentException(account.displayName() + " is not an enabled follower account");
         }
+        ManualOrders.refuseMirror(jdbc, account);                   // V49: a mirror account takes no trades of its own
         if (account.tradeMode() != TradeMode.PAPER) {
             throw new IllegalArgumentException("chart orders are PAPER only in this first version; " + account.displayName()
                     + " is " + account.tradeMode());
