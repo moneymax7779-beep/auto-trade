@@ -69,6 +69,9 @@ public final class FanOut {
                 + "join acct.strategy_subscription s on s.copy_group_id = d.copy_group_id and s.strategy_id = d.strategy_id "
                 + "and s.enabled join acct.broker_account a on a.id = s.broker_account_id "
                 + "where d.copy_group_id = ? and d.session_date = ? and a.account_role = 'FOLLOWER_TRADE' and a.enabled "
+                // a mirror account (V49, 19 Nov 2026) shows another account's trades and opens none of its own; an EXIT
+                // still reaches it, so a position held from before the mirror was set can close
+                + "and (a.mirror_of is null or d.action = 'EXIT') "
                 // a trader's manual order is never copied: its own batch and intent are written by ManualOrders
                 + "and d.strategy_id <> '" + ManualOrders.STRATEGY + "' "
                 + "and a.tenant_id = b.tenant_id "

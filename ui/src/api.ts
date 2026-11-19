@@ -649,6 +649,8 @@ export interface LiveBook {
   closed: LiveClosedPosition[];
   /** PAPER: a paper account's book (its PAPER entries); LIVE: a broker account's LIVE entries */
   bookMode?: "LIVE" | "PAPER";
+  /** V49: the engine session account (e.g. PAPER-1) whose trades this paper account shows instead of its own; read-only */
+  mirrorOf?: string | null;
   /** the account's end-of-day square-off, "HH:MM" (IST) */
   squareOff?: string | null;
   /** SUPPORT may exit without a grant */
