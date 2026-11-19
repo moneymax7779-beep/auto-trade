@@ -269,6 +269,55 @@ class AccountAdminController {
 
     // ------------------------------------------------------------------------------------------------- writes
 
+    record Mirror(String mirrorOf) {
+    }
+
+    /**
+     * Sets or clears a PAPER account's mirror (V49; account-management review 19 Nov 2026: it was set by SQL only). The
+     * platform admin only; a PAPER follower account; {@code mirrorOf} an engine account with a live PAPER session
+     * (trade.session PAPER_LIVE, e.g. PAPER-1), or blank to clear. Setting it is refused while the account holds open
+     * positions, orders still working or entries not yet done (it would then hold trades its own views no longer show),
+     * checked in the update itself. Audited ACCOUNT_MIRROR_SET / ACCOUNT_MIRROR_CLEARED.
+     */
+    @PostMapping("/api/execution/accounts/{id}/mirror")
+    Map<String, Object> mirror(@RequestHeader(value = Access.HEADER, required = false) String subject, @PathVariable long id,
+                               @RequestBody Mirror body) {
+        Access.User user = access.user(subject);
+        Access.require(user.admin(), "only the platform admin sets a mirror");
+        BrokerAccount a = accounts.byId(id).filter(x -> user.sees(x.tenantId()))
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "no such account"));
+        require(a.brokerType() == BrokerType.PAPER && a.role().name().equals("FOLLOWER_TRADE") && a.paperOf() == null,
+                "only a PAPER follower account (not a paper twin) can mirror");
+        String to = trimmed(body.mirrorOf());
+        String from = Mirrors.of(jdbc, id);
+        if (to == null) {
+            jdbc.update("update acct.broker_account set mirror_of = null, updated_at = now() where id = ?", id);
+            if (from != null) {
+                audit.audit(a, user.subject(), "ACCOUNT_MIRROR_CLEARED", Map.of("mirrorOf", from));
+            }
+            return Map.of("id", id, "mirrorOf", "");
+        }
+        Integer engine = jdbc.queryForObject("select count(*) from trade.session where account = ? and mode = 'PAPER_LIVE'",
+                Integer.class, to);
+        require(engine != null && engine > 0, to + " is not an engine account with a live PAPER session");
+        int rows = jdbc.update("update acct.broker_account set mirror_of = ?, updated_at = now() where id = ? "
+                + "and not exists (select 1 from exec.position p where p.broker_account_id = ? and p.status <> 'CLOSED') "
+                + "and not exists (select 1 from exec.order_execution e where e.broker_account_id = ? and e.status in "
+                + "('CREATED', 'SUBMITTED', 'ACKNOWLEDGED', 'OPEN', 'PARTIALLY_FILLED', 'CANCEL_PENDING', 'UNKNOWN', "
+                + "'RECONCILIATION_REQUIRED')) and not exists (select 1 from exec.trade_intent i where i.broker_account_id = ? "
+                + "and i.action = 'ENTER' and i.state in ('CREATED', 'VALIDATED', 'EXECUTING', 'RECONCILIATION_REQUIRED'))",
+                to, id, id, id, id);
+        require(rows == 1, a.displayName() + " holds open positions, orders still working or entries not yet done: "
+                + "flatten it first");
+        if (!to.equals(from)) {
+            Map<String, Object> detail = new LinkedHashMap<>();
+            detail.put("mirrorOf", to);
+            detail.put("before", from);
+            audit.audit(a, user.subject(), "ACCOUNT_MIRROR_SET", detail);
+        }
+        return Map.of("id", id, "mirrorOf", to);
+    }
+
     record NewAccount(String name, String broker, String mode, String clientId, String credentialProfile,
                       Double allocation, String equityMode, String equityFrom, Double dailyLossLimit, List<String> strategies,
                       Boolean enabled, Long tenantId) {
@@ -318,9 +367,7 @@ class AccountAdminController {
             Integer taken = jdbc.queryForObject("select count(*) from acct.broker_account where tenant_id = ? and display_name = ?",
                     Integer.class, tenant, name);
             require(taken != null && taken == 0, "an account named " + name + " already exists");
-            if (daily && clientId != null) {
-                sameClient(tenant, broker, clientId, null);
-            }
+            sameClient(tenant, broker, clientId, null);                      // review 19 Nov 2026: every workspace
             if (daily && broker != BrokerType.PAPER) {
                 Integer twinName = jdbc.queryForObject("select count(*) from acct.broker_account where tenant_id = ? "
                         + "and display_name = ?", Integer.class, tenant, name + " paper");
@@ -358,12 +405,6 @@ class AccountAdminController {
         detail.put("strategies", strategies);
         audit.audit(account, user.subject(), "ACCOUNT_CREATED", detail);
         return Map.of("id", id, "name", name);
-    }
-
-    private int openPositions(long accountId, String strategy) {
-        Integer n = jdbc.queryForObject("select count(*) from exec.position where broker_account_id = ? and status <> 'CLOSED' "
-                + "and (?::text is null or strategy_id = ?)", Integer.class, accountId, strategy, strategy);
-        return n == null ? 0 : n;
     }
 
     /**
@@ -446,10 +487,28 @@ class AccountAdminController {
             if (body.enabled() != null) {
                 // code review 3 Nov 2026: a disabled account gets no turns, so its open positions would get no exits,
                 // stop bookings or reconciliation (only the broker stop and MIS square-off would be left)
-                require(body.enabled() || openPositions(id, null) == 0 && (twin == null || openPositions(twin, null) == 0),
-                        a.displayName() + " holds open positions (or its paper twin does): flatten them first, or engage its "
-                        + "kill switch to stop new entries");
-                jdbc.update("update acct.broker_account set enabled = ?, updated_at = now() where id = ?", body.enabled(), id);
+                if (body.enabled()) {
+                    Object client = before.get("clientId");
+                    if (!a.enabled() && client != null) {
+                        sameClient(a.tenantId(), a.brokerType(), client.toString(), id);       // back on: still unique
+                    }
+                    jdbc.update("update acct.broker_account set enabled = true, updated_at = now() where id = ?", id);
+                } else {
+                    // review 19 Nov 2026: open positions, orders still working at the broker and entries not yet done, on
+                    // the account or its paper twin, checked in the update itself (an entry that fills after a disable
+                    // would get no turns: no exits, no stop bookings, no reconciliation)
+                    int rows = jdbc.update("update acct.broker_account set enabled = false, updated_at = now() where id = ? "
+                            + "and not exists (select 1 from acct.broker_account x where (x.id = ? or x.paper_of_account_id = ?) "
+                            + "and (exists (select 1 from exec.position p where p.broker_account_id = x.id and p.status <> 'CLOSED') "
+                            + "or exists (select 1 from exec.order_execution e where e.broker_account_id = x.id and e.status in "
+                            + "('CREATED', 'SUBMITTED', 'ACKNOWLEDGED', 'OPEN', 'PARTIALLY_FILLED', 'CANCEL_PENDING', 'UNKNOWN', "
+                            + "'RECONCILIATION_REQUIRED')) or exists (select 1 from exec.trade_intent i where i.broker_account_id = "
+                            + "x.id and i.action = 'ENTER' and i.state in ('CREATED', 'VALIDATED', 'EXECUTING', "
+                            + "'RECONCILIATION_REQUIRED'))))", id, id, id);
+                    require(rows == 1, a.displayName() + " holds open positions, orders still working at the broker or "
+                            + "entries not yet done (or its paper twin does): flatten it first, or engage its kill switch to "
+                            + "stop new entries");
+                }
                 if (body.enabled() && !a.enabled()) {
                     // switched back on: it follows from now, not the entries it missed while off (code review 29 Oct)
                     jdbc.update("update acct.strategy_subscription set enabled_at = now() where broker_account_id = ? "
@@ -460,9 +519,7 @@ class AccountAdminController {
             if (body.clientId() != null) {
                 String clientId = clientId(a.brokerType(), body.clientId());
                 require(clientId != null, "client id: required");
-                if (daily) {
-                    sameClient(a.tenantId(), a.brokerType(), clientId, id);
-                }
+                sameClient(a.tenantId(), a.brokerType(), clientId, id);         // review 19 Nov 2026: every workspace
                 Integer sessions = jdbc.queryForObject("select count(*) from acct.broker_session where broker_account_id = ? "
                         + "and status = 'ACTIVE'", Integer.class, id);
                 require(sessions == null || sessions == 0 || clientId.equals(before.get("clientId")),
@@ -640,12 +697,22 @@ class AccountAdminController {
         return all;
     }
 
-    /** One broker account per broker client in a member's workspace (two Kotak rows for V502G, user 8 Nov 2026). */
+    /**
+     * One account per broker client (two Kotak rows for V502G in one workspace, user 8 Nov 2026; account-management review
+     * 19 Nov 2026: across workspaces too, an admin-workspace and a member-workspace copy of one client would place every
+     * LIVE order twice and each would see the other's positions at reconciliation). Refused: the same client on any
+     * account of this workspace, or on an enabled real account of any workspace (V50's unique index enforces the latter).
+     */
     private void sameClient(long tenant, BrokerType broker, String clientId, Long except) {
-        List<String> taken = jdbc.queryForList("select display_name from acct.broker_account where tenant_id = ? and broker_type = ? "
-                + "and upper(external_broker_user_id) = ? and id <> coalesce(?, -1)", String.class, tenant, broker.name(),
-                clientId, except);
-        require(taken.isEmpty(), (taken.isEmpty() ? "" : taken.getFirst()) + " already uses " + broker + " client " + clientId);
+        if (broker == BrokerType.PAPER || clientId == null) {
+            return;
+        }
+        List<String> taken = jdbc.queryForList("select a.display_name || ' (' || t.name || ')' from acct.broker_account a "
+                + "join acct.tenant t on t.id = a.tenant_id where a.broker_type = ? and upper(a.external_broker_user_id) = ? "
+                + "and a.id <> coalesce(?, -1) and a.paper_of_account_id is null and (a.tenant_id = ? or a.enabled)",
+                String.class, broker.name(), clientId.toUpperCase(java.util.Locale.ROOT), except, tenant);
+        require(taken.isEmpty(), (taken.isEmpty() ? "" : taken.getFirst()) + " already uses " + broker + " client " + clientId
+                + ": one account per broker client");
     }
 
     private boolean dailySwitch(long tenant) {

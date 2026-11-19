@@ -65,6 +65,9 @@ class AccountAdminIT {
         otherTenantAccount = accounts.ensureFollowerAccount(other, stranger, "OTHER-1",
                 com.autotrade.account.BrokerType.PAPER, com.autotrade.account.TradeMode.PAPER, 100_000,
                 com.autotrade.account.EquityMode.FIXED, day, "../config/risk/follower-risk.v3.yaml", 100);
+        jdbc.update("insert into acct.broker_credential_profile (tenant_id, broker_type, scope, name, api_key_ref, api_secret_ref) "
+                + "values (?, 'ZERODHA', 'TENANT_SHARED', 'KITE-O', 'env:KITE_API_KEY', 'env:KITE_API_SECRET')", other);
+        accounts.ensureMembership(tenant, accounts.ensureUser("kc-admin", "admin"), "ADMIN");
         api = new AccountAdminController(new Access(dataSource), dataSource,
                 new TransactionTemplate(new DataSourceTransactionManager(dataSource)),
                 new ExecutionProperties("owner", "LIVE-SET", 0, null, 0, "it", null), TestBrokers.live(dataSource));
@@ -88,6 +91,87 @@ class AccountAdminIT {
     private static AccountAdminController.NewAccount zerodha(String name, String clientId, double allocation, Double loss) {
         return new AccountAdminController.NewAccount(name, "ZERODHA", "DRY_RUN", clientId, null, allocation, "FIXED", null, loss,
                 List.of("ma-cross", "early-confirm-runner"), true, null);
+    }
+
+    private static String reason(Runnable call) {
+        try {
+            call.run();
+            return "";
+        } catch (ResponseStatusException e) {
+            return String.valueOf(e.getReason());
+        }
+    }
+
+    private static long idOf(Map<String, Object> created) {
+        return ((Number) created.get("id")).longValue();
+    }
+
+    /** Review 19 Nov 2026: one account per broker client across workspaces (it was per member workspace only). */
+    @Test
+    void oneEnabledAccountPerBrokerClientAcrossWorkspaces() {
+        AccountStore store = new AccountStore(dataSource);
+        long group = jdbc.queryForObject("select id from acct.copy_group where name = 'LIVE-SET'", Long.class);
+        store.shareCopyGroup(group, store.ensureTenant("t-other"), store.ensureUser("local-owner", "me"));
+        long ours = idOf(api.create("local-owner", zerodha("ONE-CLIENT", "QZ1111", 100_000, null)));
+        AccountAdminController.NewAccount copy = new AccountAdminController.NewAccount("COPY", "ZERODHA", "DRY_RUN", "qz1111",
+                "KITE-O", 100_000.0, "FIXED", null, null, List.of(), true, null);
+        assertThat(reason(() -> api.create("kc-other", copy))).contains("ONE-CLIENT (owner)")
+                .contains("one account per broker client");
+        assertThat(reason(() -> api.create("local-owner", zerodha("SAME-WS", "QZ1111", 100_000, null))))
+                .as("the same workspace").contains("one account per broker client");
+        api.settings("local-owner", ours, new AccountAdminController.Settings(null, null, null, null, null, false, null, null,
+                null));
+        long theirs = idOf(api.create("kc-other", copy));                     // ours is disabled: history only
+        assertThat(reason(() -> api.settings("local-owner", ours, new AccountAdminController.Settings(null, null, null, null,
+                null, true, null, null, null)))).as("back on while theirs is enabled").contains("COPY (t-other)");
+        assertThat(reason(() -> api.settings("kc-other", theirs, new AccountAdminController.Settings(null, null, null, null,
+                null, null, "QZ1111", null, null)))).as("an edit to the same client is still its own").isEmpty();
+        // the database holds it too (V50): two enabled real accounts on one client cannot be written
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> jdbc.update("update acct.broker_account set enabled = true "
+                + "where id = ?", ours)).isInstanceOf(org.springframework.dao.DataIntegrityViolationException.class);
+    }
+
+    /** Review 19 Nov 2026: disable is refused while an entry is not yet done (the check is in the update itself). */
+    @Test
+    void anAccountWithAnEntryNotYetDoneIsNotDisabled() {
+        long id = idOf(api.create("local-owner", zerodha("PENDING-1", "QZ2222", 100_000, null)));
+        long tenant = jdbc.queryForObject("select tenant_id from acct.broker_account where id = ?", Long.class, id);
+        long batch = jdbc.queryForObject("insert into exec.trade_batch (tenant_id, source, idempotency_key, status) values "
+                + "(?, 'MANUAL', 'it-pending', 'CREATED') returning id", Long.class, tenant);
+        long intent = jdbc.queryForObject("insert into exec.trade_intent (tenant_id, trade_batch_id, broker_account_id, "
+                + "broker_type, execution_mode, strategy_id, priority, underlying, action, option_side, state, idempotency_key) "
+                + "values (?, ?, ?, 'ZERODHA', 'DRY_RUN', 'ma-cross', 1, 'NIFTY', 'ENTER', 'CE', 'CREATED', 'it-pending') "
+                + "returning id", Long.class, tenant, batch, id);
+        AccountAdminController.Settings off = new AccountAdminController.Settings(null, null, null, null, null, false, null,
+                null, null);
+        assertThat(reason(() -> api.settings("local-owner", id, off))).contains("entries not yet done");
+        jdbc.update("update exec.trade_intent set state = 'EXECUTED' where id = ?", intent);
+        assertThat(reason(() -> api.settings("local-owner", id, off))).isEmpty();
+        assertThat(jdbc.queryForObject("select enabled from acct.broker_account where id = ?", Boolean.class, id)).isFalse();
+    }
+
+    /** Review 19 Nov 2026: a PAPER account's mirror is set and cleared in the app (it was SQL only), by the admin only. */
+    @Test
+    void theAdminSetsAndClearsAPaperAccountsMirror() {
+        long paper = idOf(api.create("local-owner", new AccountAdminController.NewAccount("MIRROR-1", "PAPER", null, null, null,
+                500_000.0, "FIXED", null, null, List.of(), true, null)));
+        long zerodha = idOf(api.create("local-owner", zerodha("NOT-PAPER", "QZ3333", 100_000, null)));
+        jdbc.update("insert into trade.session (account, mode, session_date, feed, strategy_id, strategy_hash, configs, "
+                + "code_version, status) values ('PAPER-1', 'PAPER_LIVE', ?, 'it', 'live-set', 'sha256:it', '{}'::jsonb, 'it', "
+                + "'DONE')", LocalDate.of(2026, 11, 19));
+        assertThat(status(() -> api.mirror("local-owner", paper, new AccountAdminController.Mirror("PAPER-1"))))
+                .as("an OWNER is not the platform admin").isEqualTo(403);
+        assertThat(reason(() -> api.mirror("kc-admin", zerodha, new AccountAdminController.Mirror("PAPER-1"))))
+                .contains("only a PAPER follower");
+        assertThat(reason(() -> api.mirror("kc-admin", paper, new AccountAdminController.Mirror("NOPE-9"))))
+                .contains("not an engine account");
+        assertThat(api.mirror("kc-admin", paper, new AccountAdminController.Mirror("PAPER-1"))).containsEntry("mirrorOf", "PAPER-1");
+        assertThat(jdbc.queryForObject("select mirror_of from acct.broker_account where id = ?", String.class, paper))
+                .isEqualTo("PAPER-1");
+        assertThat(api.mirror("kc-admin", paper, new AccountAdminController.Mirror(" "))).containsEntry("mirrorOf", "");
+        assertThat(jdbc.queryForList("select action from exec.audit_log where broker_account_id = ? and action like "
+                + "'ACCOUNT_MIRROR%' order by id", String.class, paper))
+                .containsExactly("ACCOUNT_MIRROR_SET", "ACCOUNT_MIRROR_CLEARED");
     }
 
     @Test

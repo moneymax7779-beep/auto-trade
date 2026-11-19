@@ -91,8 +91,9 @@ class TradingDayIT {
         long profile = jdbc.queryForObject("insert into acct.broker_credential_profile (tenant_id, broker_type, scope, name, "
                 + "api_key_ref, api_secret_ref) values (?, 'ZERODHA', 'USER_PRIVATE', ?, 'env:KITE_K', 'env:KITE_S') "
                 + "returning id", Long.class, tenant, "app-" + name);
-        jdbc.update("update acct.broker_account set credential_profile_id = ?, external_broker_user_id = 'AB1234' "
-                + "where id = ?", profile, real);
+        // one enabled account per broker client (V50): each workspace its own client id
+        jdbc.update("update acct.broker_account set credential_profile_id = ?, external_broker_user_id = ? "
+                + "where id = ?", profile, String.format("AB%04d", real % 10_000), real);
         if (liveEligible) {
             jdbc.update("update acct.broker_account set trade_mode = 'LIVE', live_trading_enabled = true, "
                     + "connection_status = 'ACTIVE' where id = ?", real);
