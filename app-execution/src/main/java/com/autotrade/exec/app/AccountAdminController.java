@@ -62,7 +62,7 @@ class AccountAdminController {
 
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     private static final Pattern NAME = Pattern.compile("[A-Za-z0-9][A-Za-z0-9 _-]{1,39}");
-    private static final Pattern CLIENT_ID = Pattern.compile("[A-Z]{2}[0-9]{4,6}");
+    private static final Pattern CLIENT_ID = Pattern.compile("[A-Z]{2,3}[0-9]{3,6}");
     /** Upstox, Kotak Neo and Groww client codes (UCC): letters and digits. */
     private static final Pattern UCC = Pattern.compile("[A-Z0-9]{4,12}");
     private static final Pattern STRATEGY = Pattern.compile("[a-z0-9][a-z0-9-]{1,59}");
@@ -787,7 +787,7 @@ class AccountAdminController {
         return Math.round(value * 100) / 100.0;
     }
 
-    /** The broker's client id: Zerodha's two letters and 4-6 digits, the others' client code (UCC) of letters and digits. */
+    /** The broker's client id: Zerodha's 2-3 letters then 3-6 digits (AB1234, EWN787), the others' client code (UCC) of letters and digits. */
     static String clientId(BrokerType broker, String value) {
         String v = trimmed(value);
         if (v == null) {
@@ -795,7 +795,7 @@ class AccountAdminController {
         }
         v = v.toUpperCase(Locale.ROOT);
         if (broker == BrokerType.ZERODHA || broker == BrokerType.PAPER) {
-            require(CLIENT_ID.matcher(v).matches(), "client id: two letters and 4-6 digits (e.g. AB1234)");
+            require(CLIENT_ID.matcher(v).matches(), "client id: 2-3 letters then 3-6 digits (e.g. AB1234, EWN787)");
         } else {
             require(UCC.matcher(v).matches(), broker + " client code: 4-12 letters and digits");
         }
