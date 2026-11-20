@@ -9,7 +9,7 @@ import {
 } from "./levels";
 import { presetView, useChartView, useLinkedTime, type View, useMoment } from "./chartView";
 import { compactRupees, type ChartTrade } from "./TimelineChart";
-import { MomentInspector, TradeDetail, useTradeContext, type TradeContext } from "./TradeInspector";
+import { TradeDetail, useTradeContext, type TradeContext } from "./TradeInspector";
 import { useLiveBars, withLiveCloses } from "./liveTicks";
 import { strategyShort } from "./strategies";
 import {
@@ -288,7 +288,7 @@ function UnderlyingSurgesPanel({ date, data: polled, live, until, sessionId, fil
               ? `The trade's data is not available here (${String(contexts.error)}).` : "No stored data for this trade yet."}</p>}
         </div>
       )}
-      {sessionId != null && <div className="mt-3"><MomentInspector sessionId={sessionId} date={date} underlying={data.underlying} replayTime={until} /></div>}
+      {/* the pinned minute's panel (strategies, positions, features at that minute) is not shown (user 20 Nov 2026) */}
       <button type="button" aria-expanded={tableOpen || selected != null} onClick={() => setTableOpen(!(tableOpen || selected != null))}
         className="mt-3 flex items-center gap-1.5 text-sm font-semibold hover:text-accent">
         <span className="inline-block w-3 text-xs">{tableOpen || selected != null ? "▾" : "▸"}</span>
