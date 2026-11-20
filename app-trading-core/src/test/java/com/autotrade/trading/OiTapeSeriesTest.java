@@ -320,6 +320,28 @@ class OiTapeSeriesTest {
     }
 
     @Test
+    void theAtmIvFifteenMinutesBeforeIsTheStrikeThatWasAtTheMoneyThen() {
+        OiTapeController.Day d = new OiTapeController.Day(LocalDate.of(2026, 11, 20), LocalDate.of(2026, 11, 24));
+        d.steps = 32;
+        for (int s = 0; s < 32; s++) {
+            d.spot[s] = s < 30 ? 23_010 : 23_060;                       // ATM 23,000 for 15 minutes, then 23,050
+        }
+        d.calls.put(23_000.0, steps(1_000));
+        d.calls.put(23_050.0, steps(1_000));
+        d.callIv.put(23_000.0, fsteps(0.14));                           // carried: strike IV (0.14 + 0.16) / 2 = 0.15
+        d.putIv.put(23_000.0, fsteps(0.16));
+        d.callIv.put(23_050.0, fsteps(0.13));                           // strike IV 0.14
+        d.putIv.put(23_050.0, fsteps(0.15));
+        @SuppressWarnings("unchecked") java.util.Map<String, Object> st =
+                (java.util.Map<String, Object>) OiTapeController.ladder(d, 31, 30, 50, t -> true).get("structure");
+        assertThat((Double) st.get("atmIv")).isCloseTo(0.14, org.assertj.core.data.Offset.offset(1e-6));
+        assertThat((Double) st.get("atmIv15")).isCloseTo(0.15, org.assertj.core.data.Offset.offset(1e-6));   // step 1: 23,000
+        @SuppressWarnings("unchecked") java.util.Map<String, Object> early =
+                (java.util.Map<String, Object>) OiTapeController.ladder(d, 10, 9, 50, t -> true).get("structure");
+        assertThat(early.get("atmIv15")).isNull();                                       // not 15 minutes into the day yet
+    }
+
+    @Test
     void aWallThatLeavesItsZoneKeepsItsPastWhenItComesBack() {
         OiTapeController.Day d = new OiTapeController.Day(LocalDate.of(2026, 11, 5), LocalDate.of(2026, 11, 10));
         d.steps = 5;

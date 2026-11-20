@@ -428,12 +428,29 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
         structure.put("nearCeiling", wall(calls, spots, step, i, j, true, true));
         structure.put("nearFloor", wall(puts, spots, step, i, j, false, true));
         structure.put("putWall", wall(puts, spots, step, i, j, false, false));
-        double cAtm = at(d.callIv, atm, i), pAtm = at(d.putIv, atm, i);
-        double atmIv = Double.isNaN(cAtm) ? pAtm : Double.isNaN(pAtm) ? cAtm : (cAtm + pAtm) / 2;
+        double atmIv = atmIv(d, spots, step, i);
         structure.put("atmIv", num(atmIv));
+        // the ATM IV 15 minutes before (user 20 Nov 2026): whether options are getting dearer or cheaper as a whole
+        structure.put("atmIv15", num(i >= ATM_IV_BACK ? atmIv(d, spots, step, i - ATM_IV_BACK) : Double.NaN));
         structure.put("sigmaClose", num(sigmaToClose(spot, atmIv, d.date, d.expiry, i, tradingDay)));
         out.put("structure", structure);
         return out;
+    }
+
+    /** Steps back for the header's ATM IV change: 15 minutes. */
+    static final int ATM_IV_BACK = 900 / STEP;
+
+    /**
+     * The ATM strike's IV at step {@code s} ({@link #strikeIv}: the call's and the put's averaged), the ATM taken from the
+     * index at that step; NaN before the index or the strike's IV is known.
+     */
+    static double atmIv(Day d, double[] spots, double step, int s) {
+        double spot = s < 0 ? Double.NaN : spots[s];
+        if (Double.isNaN(spot)) {
+            return Double.NaN;
+        }
+        double k = Math.round(spot / step) * step;
+        return strikeIv(at(d.callIv, k, s), at(d.putIv, k, s));
     }
 
     /**
