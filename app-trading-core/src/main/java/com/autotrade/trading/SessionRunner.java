@@ -92,6 +92,10 @@ class SessionRunner implements ApplicationRunner {
     /** Days on which the Upstox feed failed; later starts that day use the zt-tiger-v2 tail. */
     private final java.util.Set<LocalDate> upstoxFailed = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private Instant lastStart;
+    /** The day a valid Upstox token was seen before the start (waitForToken), and when it was last looked for. */
+    private LocalDate tokenSeenOn;
+    private Instant lastTokenLook;
+    private Instant lastTokenWaitLog;
 
     private final AlertService alerts;
     private volatile Thread shadowThread;
@@ -400,6 +404,9 @@ class SessionRunner implements ApplicationRunner {
         if (todayDone || starts >= MAX_STARTS_PER_DAY || backoff) {
             return;
         }
+        if (waitForToken(today, time)) {
+            return;                                         // not an attempt: the start waits for the token
+        }
         startsPerDay.merge(today, 1, Integer::sum);
         lastStart = Instant.now();
         log.info("scheduler: starting today's live session (attempt {} of {})", starts + 1, MAX_STARTS_PER_DAY);
@@ -408,6 +415,51 @@ class SessionRunner implements ApplicationRunner {
         } catch (Exception e) {
             log.error("scheduler: could not start today's session: {}", e.getMessage(), e);
         }
+    }
+
+    /** Until when an early start waits for zt-tiger-v2's Upstox token; from then it starts as before (the zt tail). */
+    static final LocalTime TOKEN_WAIT_UNTIL = LocalTime.of(9, 0);
+    /** How often the waiting start looks for the token (one short zt connection and one Upstox profile call each). */
+    static final Duration TOKEN_LOOK_EVERY = Duration.ofMinutes(1);
+
+    /**
+     * Whether an early start (start-at before 09:00) still waits for the Upstox token (user 20 Nov 2026, start at 07:30):
+     * a session started without a valid token runs the whole day on the zt-tiger-v2 tail ({@link #start}), and zt's
+     * Upstox sign-in is done by hand in the morning, often after 07:30. Waits only before {@link #TOKEN_WAIT_UNTIL}
+     * and only for the Upstox feed; a failed look counts as no token (zt not up yet).
+     */
+    static boolean waitsForToken(String feed, LocalTime time, boolean tokenSeenToday) {
+        return "upstox".equals(feed) && time.isBefore(TOKEN_WAIT_UNTIL) && !tokenSeenToday;
+    }
+
+    private boolean waitForToken(LocalDate today, LocalTime time) {
+        if (!waitsForToken(properties.trading().feed(), time, today.equals(tokenSeenOn))) {
+            return false;
+        }
+        Instant now = Instant.now();
+        if (lastTokenLook != null && Duration.between(lastTokenLook, now).compareTo(TOKEN_LOOK_EVERY) < 0) {
+            return true;
+        }
+        lastTokenLook = now;
+        boolean valid = false;
+        try (HikariDataSource zt = ZtReadOnlyDataSource.open(new ZtReadOnlyDataSource.Settings(
+                properties.source().url(), properties.source().username(), properties.source().password(),
+                properties.source().passwordFile(), properties.source().passwordKey(), "autotrade-token-wait", 1))) {
+            valid = upstoxToken(zt).isPresent();
+        } catch (Exception e) {
+            log.warn("scheduler: the Upstox token look failed ({})", e.getMessage());
+        }
+        if (valid) {
+            tokenSeenOn = today;
+            log.info("scheduler: Upstox token valid; starting today's live session");
+            return false;
+        }
+        if (lastTokenWaitLog == null || Duration.between(lastTokenWaitLog, now).compareTo(Duration.ofMinutes(10)) >= 0) {
+            lastTokenWaitLog = now;
+            log.info("scheduler: waiting for zt-tiger-v2's Upstox token (sign in to Upstox in zt); starts anyway at {}",
+                    TOKEN_WAIT_UNTIL);
+        }
+        return true;
     }
 
     /**

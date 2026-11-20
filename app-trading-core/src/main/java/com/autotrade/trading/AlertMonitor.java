@@ -158,7 +158,7 @@ class AlertMonitor implements ApplicationRunner {
         }
         try {
             if (runner.upstoxToken(zt).isPresent()) {
-                alerts.clear("token", time.isBefore(OPEN) ? "Upstox token valid: today's live session can start at 09:00."
+                alerts.clear("token", time.isBefore(OPEN) ? "Upstox token valid: today's live session can start."
                         : "Upstox token valid now (signed in after the last check before 09:00).");
             } else if (time.isBefore(OPEN)) {
                 alerts.raise("token", AlertService.Level.CRITICAL,
@@ -202,7 +202,8 @@ class AlertMonitor implements ApplicationRunner {
         String status = row == null ? null : (String) row.get("status");
         if (inWindow && !"RUNNING".equals(status) && !"DONE".equals(status)) {
             alerts.raise("session", AlertService.Level.CRITICAL, row == null
-                    ? "Today's live session has not started (it should start at 09:00)."
+                    ? "Today's live session has not started (it should start at " + trading.trading().startAt()
+                            + ", at the latest 09:00)."
                     : "Today's live session is " + status + " (session " + row.get("id") + "). Check the service log.");
         } else if ("RUNNING".equals(status)) {
             alerts.clear("session", "Live session " + row.get("id") + " is running.");
