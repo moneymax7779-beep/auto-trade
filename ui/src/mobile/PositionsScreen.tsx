@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
-import { get, postJson, type ExecutionAccount, type ExitPreview, type LiveBook, type LiveOpenPosition } from "../api";
+import { get, postJson, type ExecutionAccount, type ExitCheck, type ExitPreview, type LiveBook,
+  type LiveOpenPosition } from "../api";
 import { activeAccounts, Big, Card, ErrorLine, Freshness, istTime, ModeBadge, Sheet, signed, tone, useAccess,
   useAccounts } from "./common";
 
@@ -57,7 +58,8 @@ function AccountBook({ account }: { account: ExecutionAccount }) {
           <div className="mt-1 text-xs text-muted">booked today {signed(b.summary.realisedToday)}
             {b.squareOff ? ` · square-off ${b.squareOff}` : ""}</div>
           <ul className="mt-2 flex flex-col gap-2">
-            {b.open.map((p) => <OpenCard key={p.id} accountId={account.id} p={p} mode={mode} canAct={b.canAct || !!b.canStop} />)}
+            {b.open.map((p) => <OpenCard key={p.id} accountId={account.id} p={p} mode={mode} canAct={b.canAct || !!b.canStop}
+              reasonRequired={b.reasonRequired} />)}
           </ul>
           {b.open.length === 0 && <p className="mt-2 text-sm text-muted">Nothing open.</p>}
           {b.closed.length > 0 && (
@@ -86,7 +88,8 @@ function AccountBook({ account }: { account: ExecutionAccount }) {
   );
 }
 
-function OpenCard({ accountId, p, mode, canAct }: { accountId: number; p: LiveOpenPosition; mode: string; canAct: boolean }) {
+function OpenCard({ accountId, p, mode, canAct, reasonRequired }: { accountId: number; p: LiveOpenPosition; mode: string;
+  canAct: boolean; reasonRequired?: boolean }) {
   const [exiting, setExiting] = useState(false);
   const lots = p.lotSize ? Math.round(p.quantity / p.lotSize) : null;
   const pnl = p.pnl ?? (p.bid != null ? (p.bid - p.entry) * p.quantity : null);
@@ -108,7 +111,8 @@ function OpenCard({ accountId, p, mode, canAct }: { accountId: number; p: LiveOp
       {canAct && !p.notAtBroker && (
         <div className="mt-2 flex justify-end"><Big kind="danger" onClick={() => setExiting(true)}>Exit…</Big></div>
       )}
-      {exiting && <ExitSheet accountId={accountId} p={p} mode={mode} onClose={() => setExiting(false)} />}
+      {exiting && <ExitSheet accountId={accountId} p={p} mode={mode} reasonRequired={reasonRequired}
+        onClose={() => setExiting(false)} />}
     </li>
   );
 }
@@ -118,9 +122,12 @@ function OpenCard({ accountId, p, mode, canAct }: { accountId: number; p: LiveOp
  * server's warnings; a big or risky sale, or one without a preview, needs EXIT typed. One key per opened sheet: a double
  * tap or a retry after a timeout returns the first result and sells nothing more.
  */
-function ExitSheet({ accountId, p, mode, onClose }: { accountId: number; p: LiveOpenPosition; mode: string;
-  onClose: () => void }) {
+export function ExitSheet({ accountId, p, mode, onClose, reasonRequired, title, onDone }: { accountId: number;
+  p: Pick<LiveOpenPosition, "id" | "symbol" | "quantity" | "lotSize">; mode: string; onClose: () => void;
+  /** admin exit desk (20 Nov 2026): the caller is not the account's owner, so the exit says why (server-enforced) */
+  reasonRequired?: boolean; title?: string; onDone?: () => void }) {
   const client = useQueryClient();
+  const [reason, setReason] = useState("");
   const allLots = p.lotSize ? Math.max(1, Math.round(p.quantity / p.lotSize)) : 1;
   const [lots, setLots] = useState(allLots);
   const [typed, setTyped] = useState("");
@@ -138,24 +145,29 @@ function ExitSheet({ accountId, p, mode, onClose }: { accountId: number; p: Live
   const preview = useQuery({ queryKey: ["exit-preview", accountId, p.id, qty ?? "all"], enabled: done == null,
     queryFn: () => get<ExitPreview>(`${base}/exit-preview${qty != null ? `?quantity=${qty}` : ""}`), refetchInterval: 3_000 });
   const exit = useMutation({
-    mutationFn: () => postJson<{ result: string[]; repeat?: boolean }>(`${base}/exit`, { confirm: "EXIT", quantity: qty ?? null, key }),
+    mutationFn: () => postJson<{ result: string[]; repeat?: boolean }>(`${base}/exit`, { confirm: "EXIT", quantity: qty ?? null,
+      key, reason: reason.trim() || null }),
     onSuccess: (r) => setDone((r.repeat ? "Already sent: " : "") + r.result.join(" · ")),
     // a refusal (4xx) sold nothing: the next tap is a new attempt; anything else may have sold, so it keeps its key
     onError: (e) => { if (/^4\d\d:/.test((e as Error).message)) setKey(newKey()); else setUnknown(true); },
-    onSettled: () => { sending.current = false; client.invalidateQueries({ queryKey: ["live-book", accountId] }); },
+    onSettled: () => { sending.current = false; client.invalidateQueries({ queryKey: ["live-book", accountId] }); onDone?.(); },
   });
   const send = () => { if (sending.current) return; sending.current = true; exit.mutate(); };
   const pv = preview.data;
   const mustType = preview.error != null || (pv != null && (pv.typeToConfirm || pv.warnings.length > 0));
   // review 17 Nov: not before the preview has answered (or failed), or a risky sale would skip its typed EXIT
   const previewed = pv != null || preview.error != null;
-  const ready = !exit.isPending && (previewed || unknown) && (!mustType || typed.trim().toUpperCase() === "EXIT");
+  const needsReason = reasonRequired === true || pv?.reasonRequired === true;
+  // a paper exit the server would refuse (no fresh quote) is not sent; a LIVE one with its broker down cannot reach it
+  const blocked = pv?.refusal != null && !unknown;
+  const ready = !exit.isPending && !blocked && (previewed || unknown) && (!mustType || typed.trim().toUpperCase() === "EXIT")
+    && (!needsReason || reason.trim().length > 0);
   const choose = (n: number) => {
     if (unknown) return;                                           // the first sale may have gone through
     setLots(Math.max(1, Math.min(allLots, n))); setTyped(""); exit.reset(); setKey(newKey());
   };
   return (
-    <Sheet title={`Exit ${p.symbol}`} onClose={onClose}>
+    <Sheet title={title ?? `Exit ${p.symbol}`} onClose={onClose}>
       {done ? (
         <div className="flex flex-col gap-3"><p className="text-sm">{done}</p><Big onClick={onClose}>Done</Big></div>
       ) : (
@@ -180,12 +192,19 @@ function ExitSheet({ accountId, p, mode, onClose }: { accountId: number; p: Live
           {pv && (
             <dl className="num grid grid-cols-2 gap-x-3 gap-y-1 rounded-lg bg-panel-2 p-3 text-sm">
               <dt className="text-muted">Selling</dt><dd className="text-right">{pv.quantity} qty ({pv.lots} lot{pv.lots === 1 ? "" : "s"})</dd>
-              <dt className="text-muted">At about</dt><dd className="text-right">{pv.price.toFixed(2)} ({pv.priceFrom})</dd>
+              <dt className="text-muted">At about</dt><dd className="text-right">{pv.price.toFixed(2)} ({pv.priceNote ?? pv.priceFrom})</dd>
               <dt className="text-muted">Estimate</dt><dd className={`text-right font-semibold ${tone(pv.net ?? pv.gross)}`}>{signed(pv.net ?? pv.gross)}</dd>
               {pv.orders > 1 && <><dt className="text-muted">Orders</dt><dd className="text-right">{pv.orders} (freeze limit)</dd></>}
             </dl>
           )}
           {pv?.warnings.map((w) => <p key={w} className="text-xs font-semibold text-warn">{w}</p>)}
+          {pv?.preconditions && <Preconditions checks={pv.preconditions} />}
+          {pv?.brokerDown && <p className="text-sm font-semibold text-down">{pv.brokerDown}</p>}
+          {pv?.refusal && <p className="text-sm font-semibold text-down">Not possible now: {pv.refusal}</p>}
+          {needsReason && (
+            <input className="min-h-11 rounded-lg border border-line bg-bg px-3 text-base" placeholder="Reason (the member is told)"
+              value={reason} maxLength={300} onChange={(e) => setReason(e.target.value)} aria-label="Reason for this exit" />
+          )}
           {preview.error && <p className="text-xs text-down">No preview ({(preview.error as Error).message}). You can still exit: type EXIT.</p>}
           {mustType && (
             <input className="min-h-11 rounded-lg border border-line bg-bg px-3 text-base uppercase" placeholder="Type EXIT to confirm"
@@ -201,6 +220,24 @@ function ExitSheet({ accountId, p, mode, onClose }: { accountId: number; p: Live
         </div>
       )}
     </Sheet>
+  );
+}
+
+/** A LIVE exit's preconditions (admin exit desk phase D2): session, static IP, lease, minutes to the MIS square-off. */
+export function Preconditions({ checks }: { checks: Partial<Record<string, ExitCheck | undefined>> }) {
+  const labels: [string, string][] = [["session", "Broker login"], ["staticIp", "Static IP"], ["lease", "Worker"],
+    ["squareOff", "Square-off"]];
+  return (
+    <ul className="flex flex-col gap-0.5 rounded-lg border border-line p-2 text-xs">
+      {labels.filter(([k]) => checks[k]).map(([k, label]) => {
+        const c = checks[k]!;
+        return (
+          <li key={k} className={c.ok === false ? "font-semibold text-down" : c.ok ? "text-up" : "text-muted"}>
+            {c.ok === false ? "✗" : c.ok ? "✓" : "·"} {label}: {c.text}
+          </li>
+        );
+      })}
+    </ul>
   );
 }
 

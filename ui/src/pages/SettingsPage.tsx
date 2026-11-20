@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { get, postJson, type SupportGrant } from "../api";
+import { get, postJson, type AdminExitConsent, type SupportGrant } from "../api";
 import { ErrorNote, Panel, Table } from "../components/ui";
 import { SupportBanner, useWorkspace } from "../workspace";
 
@@ -43,6 +43,15 @@ export function SettingsPage() {
   const grants = useQuery({ queryKey: ["ws-support", current?.id], enabled: current != null, refetchInterval: 30000,
     queryFn: () => get<SupportGrant[]>(`/api/execution/workspaces/${current!.id}/support`) });
   const owner = current?.role === "OWNER";
+  // admin exit desk (user 20 Nov 2026, decision 5): the member's one-time standing consent to admin exits
+  const consent = useQuery({ queryKey: ["ws-exit-consent", current?.id], enabled: current != null,
+    queryFn: () => get<AdminExitConsent>(`/api/execution/workspaces/${current!.id}/admin-exit-consent`) });
+  const setConsent = useMutation({
+    mutationFn: (on: boolean) => postJson<AdminExitConsent>(`/api/execution/workspaces/${current!.id}/admin-exit-consent`, { on }),
+    onSuccess: (r) => { client.setQueryData(["ws-exit-consent", current?.id], r);
+      setMessage({ ok: true, text: r.given ? "consent recorded" : "consent withdrawn" }); },
+    onError: fail,
+  });
 
   return (
     <div className="space-y-4">
@@ -70,6 +79,24 @@ export function SettingsPage() {
           </div>
         )}
       </Panel>
+
+      {current && (
+        <Panel title={`Admin exits: ${current.name}`}>
+          <p className="text-sm text-muted">The platform admin can always exit a position or flatten an account to stop trouble
+            (an exit only reduces risk); you are told each time on Telegram, on your phone and here, with their reason.</p>
+          {consent.error ? <ErrorNote error={consent.error} /> : consent.data && (
+            <label className="mt-3 flex items-start gap-2 text-sm">
+              <input type="checkbox" className="mt-0.5 h-4 w-4" checked={consent.data.given}
+                disabled={!consent.data.canChange || setConsent.isPending}
+                onChange={(e) => setConsent.mutate(e.target.checked)} />
+              <span>I agree that the platform admin may exit positions on my LIVE accounts when they judge it necessary.
+                {consent.data.given && consent.data.at ? <span className="text-muted"> Given {when(consent.data.at)}
+                  {consent.data.by ? ` by ${consent.data.by}` : ""}.</span> : <span className="text-muted"> Not given.</span>}
+                {!consent.data.canChange && <span className="text-muted"> Only the workspace's owner sets this.</span>}</span>
+            </label>
+          )}
+        </Panel>
+      )}
 
       {current && (
         <Panel title={`Support access: ${current.name}`}>

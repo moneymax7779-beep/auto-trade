@@ -289,12 +289,15 @@ class LiveBookIT {
         Map<String, Object> m = open.stream().filter(p -> p != s).findFirst().orElseThrow();
         assertThat(m).doesNotContainKeys("strategyExitedAt", "lateJoin");
 
-        // its preview: no quote captured, so the signal's price; paper never asks for typing
+        // its preview: no quote captured and no signal after it was bought (the strategy had exited before this late
+        // join), so a person's paper exit is refused rather than booked at a signal's price (principal review 20 Nov
+        // 2026: never the entry's own price); paper never asks for typing
         Map<String, Object> preview = new LiveBookController(new Access(dataSource), dataSource)
                 .exitPreview("kc-paper", twin, ((Number) s.get("id")).longValue(), null);
-        assertThat(preview).containsEntry("mode", "PAPER").containsEntry("quantity", 65L).containsEntry("price", 64.25)
-                .containsEntry("priceFrom", "signal").containsEntry("orders", 1L).containsEntry("typeToConfirm", false)
+        assertThat(preview).containsEntry("mode", "PAPER").containsEntry("quantity", 65L)
+                .containsEntry("priceFrom", "none").containsEntry("orders", 1L).containsEntry("typeToConfirm", false)
                 .doesNotContainKeys("charges", "rest");
+        assertThat((String) preview.get("refusal")).contains("no signal since the entry");
         assertThat((List<String>) preview.get("warnings")).singleElement().asString().contains("no quote");
         // Telegram's line for it says the same as the book
         String line = new PositionFacts(dataSource).line(((Number) s.get("id")).longValue());

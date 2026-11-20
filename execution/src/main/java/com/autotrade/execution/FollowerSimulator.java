@@ -384,7 +384,7 @@ public final class FollowerSimulator {
             }
             day.lossFlattenAt = now;
             day.lossFlattenTries++;
-            flatten(day.account, day.date, this::markOrEntry, "DAILY_LOSS_STOP");
+            flatten(day.account, day.date, this::markOrEntry, "DAILY_LOSS_STOP", null, null, Map.of());
             return "DAILY_LOSS_STOP_SELL_AGAIN";
         }
         if (day.lossCheckedAt != null && now.isBefore(day.lossCheckedAt.plus(DAILY_LOSS_MARK_EVERY))) {
@@ -459,7 +459,7 @@ public final class FollowerSimulator {
                 + "position, no entries today", day.account.id(), day.account.displayName(), accountHit ? "the account's"
                 : "the member workspace's", Math.round(accountHit ? closedNet + openNet : memberDay), Math.round(closedNet),
                 Math.round(openNet), Math.round(accountHit ? limit : memberLimit));
-        flatten(day.account, day.date, this::markOrEntry, "DAILY_LOSS_STOP");
+        flatten(day.account, day.date, this::markOrEntry, "DAILY_LOSS_STOP", null, null, Map.of());
         return "DAILY_LOSS_STOP";
     }
 
@@ -481,8 +481,11 @@ public final class FollowerSimulator {
         return quoted > 0 ? quoted : bid != null ? bid : Double.NaN;
     }
 
-    /** The simulated sale price of a flatten (a broker venue prices from the broker): the mark, else the entry. */
-    private double markOrEntry(Map<String, Object> pos) {
+    /**
+     * The simulated sale price of a flatten (a broker venue prices from the broker): the mark, else the entry. An automated
+     * exit (the daily loss stop) keeps this; its source is recorded in the audit detail (user 20 Nov 2026).
+     */
+    private ExitPrice markOrEntry(Map<String, Object> pos) {
         double bid;
         try {
             bid = jdbc.queryForList("select bid_px[1] from md.option_tick where instrument_token = ? and bid_px[1] > 0 "
@@ -491,7 +494,8 @@ public final class FollowerSimulator {
         } catch (RuntimeException e) {
             bid = Double.NaN;
         }
-        return bid > 0 ? bid : ((Number) pos.get("average_entry")).doubleValue();
+        return bid > 0 ? new ExitPrice(bid, "mark", null)
+                : new ExitPrice(((Number) pos.get("average_entry")).doubleValue(), "entry", null);
     }
 
     /** A day met again after a restart: the latched daily loss and the adds still waiting for capital. */
@@ -1467,19 +1471,73 @@ public final class FollowerSimulator {
      */
     public List<String> flatten(BrokerAccount account, LocalDate date, java.util.function.ToDoubleFunction<Map<String, Object>> price,
                                 String reason, Long onlyPosition, Long quantity) {
+        return flatten(account, date, pos -> new ExitPrice(price.applyAsDouble(pos), "given", null), reason, onlyPosition,
+                quantity, Map.of());
+    }
+
+    /**
+     * A simulated exit's price and where it came from ({@code source}: bid, stale-bid, signal, entry, mark, given; {@code
+     * note}: what the line and the audit say of it, e.g. "last bid 14 min old"), recorded in the
+     * audit detail (admin exit desk, user 20 Nov 2026: an automated exit keeps its price and says where it came from).
+     * {@code refusal} non-null: a simulated venue sells nothing and says why (a person's paper exit without a fresh
+     * quote is refused, never booked at the entry price); a broker venue prices from the broker and ignores it.
+     */
+    public record ExitPrice(double price, String source, String refusal, String note) {
+        public ExitPrice(double price, String source, String refusal) {
+            this(price, source, refusal, null);
+        }
+    }
+
+    /**
+     * As above, priced by {@code price}, with {@code audit} added to the audit row's detail (who asked, whether it was
+     * the platform admin, their reason and the member's consent; admin exit desk, user 20 Nov 2026).
+     */
+    public List<String> flatten(BrokerAccount account, LocalDate date,
+                                java.util.function.Function<Map<String, Object>, ExitPrice> price, String reason,
+                                Long onlyPosition, Long quantity, Map<String, ?> audit) {
         if (quantity != null && (onlyPosition == null || quantity <= 0)) {
             throw new IllegalArgumentException("a quantity needs one position and must be above 0");
         }
         Day day = new Day(account, date);
         List<String> lines = new ArrayList<>();
+        List<String> sources = new ArrayList<>();
         for (Map<String, Object> pos : jdbc.queryForList("select p.id, p.entry_trade_intent_id, p.strategy_id, p.underlying, "
-                + "p.option_side, p.instrument_token, p.instrument_key, p.symbol, p.quantity_open, p.average_entry, "
+                + "p.option_side, p.instrument_token, p.instrument_key, p.symbol, p.quantity_open, p.average_entry, p.opened_at, "
                 + "d.lot_size, i.execution_mode from exec.position p join exec.trade_intent i on i.id = p.entry_trade_intent_id "
                 + "join exec.trade_batch b on b.id = i.trade_batch_id join exec.signal_decision d on d.id = b.signal_decision_id "
                 + "where p.broker_account_id = ? and p.status = 'OPEN' and (?::bigint is null or p.id = ?) order by p.id", account.id(),
                 onlyPosition, onlyPosition)) {
             long positionId = ((Number) pos.get("id")).longValue();
             String symbol = (String) pos.get("symbol");
+            ExitPrice priced;
+            if (venue.broker()) {
+                // second review 20 Nov 2026: a broker prices the sale from its own quote; the estimate only stands in for a
+                // DRY_RUN replay's missing quote, so an estimate that fails or has no price never stops a real exit (the
+                // entry price stands in, as before this change)
+                try {
+                    priced = price.apply(pos);
+                } catch (RuntimeException e) {
+                    log.warn("account {}: exit estimate of {} not read ({}): the broker prices it", account.id(), symbol,
+                            e.getMessage());
+                    priced = null;
+                }
+                if (priced == null || priced.refusal() != null || !(priced.price() > 0)) {
+                    priced = new ExitPrice(((Number) pos.get("average_entry")).doubleValue(), "entry", null);
+                }
+            } else {
+                priced = price.apply(pos);
+            }
+            if (!venue.broker() && priced.refusal() != null) {
+                // admin exit desk, user 20 Nov 2026: a person's paper exit without a fresh quote is refused (it used to be
+                // booked at the entry price, a fake zero P&L); nothing is sold, the position stays open
+                lines.add(symbol + ": NOT exited, " + priced.refusal());
+                sources.add(symbol + ": refused (" + priced.source() + ")");
+                continue;
+            }
+            sources.add(symbol + ": " + (venue.broker() ? "broker" : priced.source()
+                    + (priced.note() == null ? "" : " (" + priced.note() + ")")));
+            // a simulated sale not at a fresh bid says what it was priced at (review 20 Nov 2026: "last bid 14 min old")
+            String priceNote = venue.broker() || priced.note() == null ? "" : " (" + priced.note() + ")";
             String unresolved = venue.unresolvedSell(account, positionId, null);
             if (unresolved != null) {
                 // review 8 Nov 2026: an earlier sell of the contract may have sold it already: its stop stays, nothing sold
@@ -1520,7 +1578,7 @@ public final class FollowerSimulator {
             FollowerVenue.Fill fill = venue.execute(new FollowerVenue.OrderSpec(account, intent,
                     (String) pos.get("execution_mode"), "EMERGENCY_EXIT", "SELL", (String) pos.get("underlying"), token,
                     InstrumentKeys.normalize((String) pos.get("instrument_key"), token), symbol,
-                    lotSize, sell, price.applyAsDouble(pos), java.time.Instant.now(),
+                    lotSize, sell, priced.price(), java.time.Instant.now(),
                     attempt, leaseEpoch));
             if (fill.quantity() > 0) {
                 book(day, positionId, fill.parts(), fill.at(), reason);
@@ -1533,16 +1591,25 @@ public final class FollowerSimulator {
                         : ", their broker stop NOT placed yet (retried; the account takes no new entries until it is)";
                 lines.add(fill.quantity() == sell && sell < open
                         ? symbol + ": " + sell + " of " + open + " sold at " + String.format(java.util.Locale.ROOT, "%.2f",
-                                fill.price()) + "; " + (open - sell) + " stay open" + rest
+                                fill.price()) + priceNote + "; " + (open - sell) + " stay open" + rest
                         : symbol + ": " + fill.quantity() + " of " + sell + " sold (" + fill.code() + " " + fill.reason()
                                 + "); " + (open - fill.quantity()) + " stay open" + rest);
             } else {
-                lines.add(symbol + ": " + open + " sold at " + String.format(java.util.Locale.ROOT, "%.2f", fill.price()));
+                lines.add(symbol + ": " + open + " sold at " + String.format(java.util.Locale.ROOT, "%.2f", fill.price())
+                        + priceNote);
             }
         }
-        kills.audit(account, "flatten", onlyPosition == null ? "FLATTEN" : "POSITION_EXIT", quantity == null
-                ? Map.of("reason", reason, "positions", lines)
-                : Map.of("reason", reason, "positions", lines, "quantity", quantity));
+        Map<String, Object> detail = new LinkedHashMap<>();
+        detail.put("reason", reason);
+        detail.put("positions", lines);
+        if (quantity != null) {
+            detail.put("quantity", quantity);
+        }
+        if (!sources.isEmpty()) {
+            detail.put("price_source", sources);
+        }
+        audit.forEach((k, v) -> detail.putIfAbsent(k, v));
+        kills.audit(account, "flatten", onlyPosition == null ? "FLATTEN" : "POSITION_EXIT", detail);
         return lines;
     }
 

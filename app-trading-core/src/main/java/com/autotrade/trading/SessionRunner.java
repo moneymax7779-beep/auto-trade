@@ -108,6 +108,8 @@ class SessionRunner implements ApplicationRunner {
     private volatile Instant shadowRetryAt;
 
     private volatile Thread signalWorker;                 // live execution L1: the signal source alongside, if any
+    /** The signal source's session alongside (SIGNAL-1), for the admin exit desk's read-only engine rows (20 Nov 2026). */
+    private volatile TradingSession signalSession;
     /** A paced replay's pause / speed controls (one replay runs at a time in this service). */
     private final com.autotrade.md.live.ReplayControl replayControl = new com.autotrade.md.live.ReplayControl();
 
@@ -126,6 +128,22 @@ class SessionRunner implements ApplicationRunner {
 
     TradingSession current() {
         return current;
+    }
+
+    /**
+     * The sessions running now (admin exit desk, user 20 Nov 2026): the current one (PAPER-1) and the signal source
+     * alongside it (SIGNAL-1), when there is one; the engine's own positions are read from their status.
+     */
+    List<TradingSession> sessions() {
+        List<TradingSession> out = new java.util.ArrayList<>();
+        TradingSession main = current, signal = signalSession;
+        if (main != null) {
+            out.add(main);
+        }
+        if (signal != null && signal != main) {
+            out.add(signal);
+        }
+        return out;
     }
 
     /**
@@ -890,6 +908,7 @@ class SessionRunner implements ApplicationRunner {
                 t.underlyings(), t.tradeUnderlyingList(), features, history, strategies, risk, CostModel.from(costsFile),
                 FillModel.from(costsFile, t.fillModel()), instruments, signalHashes, CodeVersion.current());
         TradingSession signalSession = new TradingSession(settings, feed, new TradeStore(target));
+        this.signalSession = signalSession;
         if (!replay) {
             signalSession.strategySwitch(com.autotrade.execution.LiveStrategies.offReader(target, OFF_READ_EVERY));   // V35
         }

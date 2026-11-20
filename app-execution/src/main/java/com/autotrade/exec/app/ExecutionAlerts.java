@@ -84,7 +84,8 @@ class ExecutionAlerts {
         }
         List<Alert> out = new java.util.ArrayList<>();
         for (Map<String, Object> r : jdbc.queryForList("select l.id, l.action, l.detail::text detail, a.display_name, "
-                + "a.trade_mode, case when t.trading_control = 'DAILY_SWITCH' then t.id end member_tenant "
+                + "a.trade_mode, case when t.trading_control = 'DAILY_SWITCH' then t.id end member_tenant, "
+                + "coalesce(l.detail ->> 'by_admin', '') = 'true' by_admin "
                 + "from exec.audit_log l join acct.broker_account a on a.id = l.broker_account_id "
                 + "join acct.tenant t on t.id = a.tenant_id "
                 + "where l.id > ? and l.action = any(?) and (a.trade_mode in ('LIVE', 'DRY_RUN') "
@@ -100,7 +101,10 @@ class ExecutionAlerts {
             if (action.equals("KILL_ACCOUNT_ALREADY_ENGAGED") && !sent.add(text)) {
                 continue;
             }
-            Long member = r.get("member_tenant") == null ? null : ((Number) r.get("member_tenant")).longValue();
+            // admin exit desk review (20 Nov 2026): an admin's flatten tells the members once, with the admin's reason,
+            // through AdminExits; here it goes to the admin chat only (never a second message to the members)
+            Long member = r.get("member_tenant") == null || Boolean.TRUE.equals(r.get("by_admin")) ? null
+                    : ((Number) r.get("member_tenant")).longValue();
             out.add(new Alert(text + (action.startsWith("KILL_ACCOUNT") ? "\nNew entries stop; exits continue. Check the "
                     + "Accounts page and release the switch there once it is understood."
                     : action.equals("MODE_PAPER_SESSION_LOST") ? "\nThe broker session was lost while LIVE: new signals "

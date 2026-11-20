@@ -80,6 +80,28 @@ class LiveBookController {
         this(access, dataSource, null);
     }
 
+    /** The static-IP gate (null in tests: no LIVE precondition for it is shown). */
+    private com.autotrade.execution.AccountEgress egress;
+    /** This worker's id, whose account leases the exit preview reads (null in tests). */
+    private String workerId;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void egress(com.autotrade.execution.AccountEgress egress) {
+        this.egress = egress;
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void worker(ExecutionProperties properties) {
+        this.workerId = properties == null ? null : properties.workerId();
+    }
+
+    /** Tests: the static-IP gate and this worker's id. */
+    LiveBookController withLive(com.autotrade.execution.AccountEgress egress, String workerId) {
+        this.egress = egress;
+        this.workerId = workerId;
+        return this;
+    }
+
     @org.springframework.beans.factory.annotation.Autowired
     LiveBookController(Access access, DataSource dataSource, com.autotrade.execution.BrokerRules rules) {
         this.access = access;
@@ -265,6 +287,7 @@ class LiveBookController {
         out.put("squareOff", rule == null || rule.squareOff() == null ? null : rule.squareOff().toString());
         out.put("canAct", user.mayAct(a.tenantId()));
         out.put("canStop", user.emergency(a.tenantId()));     // SUPPORT: Exit and Flatten without a grant (V29)
+        out.put("reasonRequired", user.byAdmin(a.tenantId()));   // admin exit desk (20 Nov 2026): SUPPORT says why
         out.put("killSwitches", kills);
         out.put("summary", summary);
         out.put("open", open);
@@ -363,10 +386,11 @@ class LiveBookController {
                                     @PathVariable long id, @PathVariable long positionId,
                                     @RequestParam(required = false) Long quantity) {
         Access.User user = access.user(subject);
-        BrokerAccount a = accounts.byId(id).filter(x -> user.sees(x.tenantId()))
+        // the platform admin previews any tenant's exit (admin exit desk, user 20 Nov 2026, decision 4)
+        BrokerAccount a = accounts.byId(id).filter(x -> user.sees(x.tenantId()) || user.admin())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "no such account"));
         Map<String, Object> p = jdbc.queryForList("select p.id, p.underlying, p.symbol, p.instrument_token, p.instrument_key, "
-                + "p.quantity_open, p.average_entry, d.lot_size from exec.position p join exec.trade_intent i on "
+                + "p.quantity_open, p.average_entry, p.opened_at, d.lot_size from exec.position p join exec.trade_intent i on "
                 + "i.id = p.entry_trade_intent_id join exec.trade_batch b on b.id = i.trade_batch_id join exec.signal_decision d "
                 + "on d.id = b.signal_decision_id where p.id = ? and p.broker_account_id = ? and p.status = 'OPEN' "
                 + "and p.quantity_open > 0", positionId, id).stream().findFirst()
@@ -381,8 +405,10 @@ class LiveBookController {
         double entry = num(p.get("average_entry"));
         long token = ((Number) p.get("instrument_token")).longValue();
         String underlying = (String) p.get("underlying");
-        boolean paper = a.brokerType() == com.autotrade.account.BrokerType.PAPER;
-        String mode = paper ? "PAPER" : a.tradeMode().name();
+        // review 20 Nov 2026: paper or broker by the route the exit really takes (a PAPER-mode Zerodha account fills in
+        // the simulation, never at the broker), not by the broker type
+        boolean paper = simulated(a);
+        String mode = a.brokerType() == com.autotrade.account.BrokerType.PAPER ? "PAPER" : a.tradeMode().name();
 
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("positionId", positionId);
@@ -423,20 +449,48 @@ class LiveBookController {
                 warnings.add("the best bid is for " + bidQty + " only: the rest sells lower");
             }
         }
-        // the price the exit itself uses (ExecutionLoop.flattenPrice): the bid of the last 5 minutes, else the signal's
+        // the price the exit itself uses (ExecutionLoop.flattenPrice). A broker sale is priced by the broker (the signal's
+        // price is only the estimate shown). A paper sale (review 20 Nov 2026): the bid of the last 5 minutes, else today's
+        // newest bid however old (its age said), else the contract's signal price today, else refused; never the entry
         double price;
         String priceFrom;
         if (bid != null && age <= 300) {
             price = bid;
             priceFrom = "bid";
-        } else {
+        } else if (!paper) {
             List<Double> ref = jdbc.queryForList("select reference_price from exec.signal_decision where instrument_token = ? "
                     + "and reference_price > 0 order by decided_at desc limit 1", Double.class, token);
             price = !ref.isEmpty() && ref.getFirst() != null ? ref.getFirst() : entry;
             priceFrom = !ref.isEmpty() && ref.getFirst() != null ? "signal" : "entry";
+        } else {
+            java.time.ZonedDateTime midnight = LocalDate.now(IST).atStartOfDay(IST);
+            int sinceMidnight = (int) java.time.Duration.between(midnight, java.time.ZonedDateTime.now(IST)).toMinutes() + 1;
+            Map<String, Object> today = quotes.latest((String) p.get("instrument_key"), underlying, token, sinceMidnight);
+            // as the exit: only a signal decided after the position opened, never its own entry (review 20 Nov 2026)
+            Timestamp dayStart = Timestamp.from(midnight.toInstant());
+            Timestamp after = p.get("opened_at") instanceof Timestamp t && t.after(dayStart) ? t : dayStart;
+            List<Double> ref = jdbc.queryForList("select reference_price from exec.signal_decision where instrument_token = ? "
+                    + "and reference_price > 0 and decided_at > ? order by decided_at desc limit 1", Double.class, token, after);
+            if (today != null) {
+                price = num(today.get("bid"));
+                priceFrom = "stale-bid";
+                long staleSec = Math.max(0, (System.currentTimeMillis() - ((Timestamp) today.get("recv_ts")).getTime()) / 1000);
+                out.put("bidAgeSec", staleSec);
+                out.put("priceNote", "last bid " + staleSec / 60 + " min old");
+            } else if (!ref.isEmpty() && ref.getFirst() != null) {
+                price = ref.getFirst();
+                priceFrom = "signal";
+                out.put("priceNote", "no bid today: the price of a signal after the entry");
+            } else {
+                price = entry;
+                priceFrom = "none";
+                out.put("refusal", "no bid today and no signal since the entry: a paper exit is refused (never "
+                        + "booked at the entry price)");
+            }
         }
         out.put("price", price);
         out.put("priceFrom", priceFrom);
+        out.put("reasonRequired", user.byAdmin(a.tenantId()));
         double gross = (price - entry) * sell;
         out.put("gross", round(gross));
         CostModel costs = rules == null ? null : rules.costs(a.brokerType());
@@ -458,10 +512,103 @@ class LiveBookController {
         if (!paper && open - sell > 0) {
             out.put("rest", (open - sell) + " stay open with a new stop at the broker");
         }
+        if (!paper) {
+            Map<String, Object> pre = preconditions(a);
+            out.put("preconditions", pre);
+            if (Boolean.FALSE.equals(((Map<?, ?>) pre.get("session")).get("ok"))) {
+                // the sheet says it in place of the price warnings (the exit cannot reach the broker)
+                out.put("brokerDown", "the broker session is not logged in: ask the holder to exit in the broker app, then "
+                        + "book a hand exit here");
+            }
+        }
         out.put("warnings", warnings);
         boolean typed = !paper && (sell / lot > PREVIEW_TYPED_ABOVE_LOTS || !warnings.isEmpty());
         out.put("typeToConfirm", typed);
         return out;
+    }
+
+    /**
+     * A broker account's exit preconditions (admin exit desk, user 20 Nov 2026, phase D2): its broker session logged in
+     * today, the static-IP gate for brokers that need one, which worker holds its lease (this one, nobody: this worker
+     * borrows it for the exit, or another: the exit is refused here), and the minutes left to its broker's MIS square-off.
+     * Each is {@code ok} (true, false, or null when not known here) and a {@code text}.
+     */
+    Map<String, Object> preconditions(BrokerAccount a) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        Map<String, Object> row = jdbc.queryForMap("select a.connection_status, (select max(x.expires_at) from "
+                + "acct.broker_session x where x.broker_account_id = a.id and x.status = 'ACTIVE' and x.expires_at > now()) "
+                + "until from acct.broker_account a where a.id = ?", a.id());
+        String connection = (String) row.get("connection_status");
+        Timestamp until = (Timestamp) row.get("until");
+        boolean lost = "TOKEN_EXPIRED".equals(connection) || "TOKEN_REJECTED".equals(connection)
+                || "DISCONNECTED".equals(connection);
+        boolean in = until != null && !lost;
+        out.put("session", check(in, in ? "logged in until " + ist(until).substring(11, 16) + " IST"
+                : until == null ? "no broker session today: not logged in" : "the broker session was lost (" + connection
+                        + ")"));
+        if (egress != null && egress.required(a.brokerType())) {
+            String refusal = egress.liveRefusal(a);
+            out.put("staticIp", check(refusal == null, refusal == null ? "its static IP is set" : refusal));
+        } else {
+            out.put("staticIp", check(null, egress == null ? "not checked here" : a.brokerType()
+                    + " needs no static IP of its own"));
+        }
+        List<Map<String, Object>> lease = jdbc.queryForList("select owner, heartbeat_at > now() - interval '2 minutes' "
+                + "fresh from exec.account_lease where broker_account_id = ?", a.id());
+        if (lease.isEmpty() || !Boolean.TRUE.equals(lease.getFirst().get("fresh"))) {
+            out.put("lease", check(true, "no worker holds it: this worker takes it for the exit"));
+        } else if (workerId != null && workerId.equals(lease.getFirst().get("owner"))) {
+            out.put("lease", check(true, "held by this worker"));
+        } else {
+            out.put("lease", check(workerId == null ? null : false, "held by " + lease.getFirst().get("owner")
+                    + (workerId == null ? "" : ": the exit is refused here (exit on that worker)")));
+        }
+        com.autotrade.execution.BrokerRules.Rule rule = rules == null ? null : rules.rule(a.brokerType());
+        if (rule != null && (rule.brokerAutoSquareOff() != null || rule.squareOff() != null)) {
+            // the broker's own MIS auto square-off (it charges for it); ours runs a few minutes before it
+            java.time.LocalTime mis = rule.brokerAutoSquareOff() != null ? rule.brokerAutoSquareOff() : rule.squareOff();
+            long left = java.time.Duration.between(java.time.LocalTime.now(IST), mis).toMinutes();
+            Map<String, Object> sq = new LinkedHashMap<>(check(left > 0, (left > 0 ? left + " min to " + a.brokerType()
+                    + "'s " + mis + " MIS square-off" : "past " + a.brokerType() + "'s " + mis + " MIS square-off")
+                    + (rule.squareOff() == null ? "" : " (ours " + rule.squareOff() + ")")));
+            sq.put("at", mis.toString());
+            sq.put("ours", rule.squareOff() == null ? null : rule.squareOff().toString());
+            sq.put("minutesLeft", left);
+            out.put("squareOff", sq);
+        }
+        return out;
+    }
+
+    private static Map<String, Object> check(Boolean ok, String text) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("ok", ok);
+        m.put("text", text);
+        return m;
+    }
+
+    /** Whether a risk file has order rules (files are versioned: read once each). */
+    private final java.util.Map<String, Boolean> ordered = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * Whether the account's exit fills in the simulation (BrokerConnections.route: a paper account, PAPER mode, or a risk
+     * file without order rules), i.e. the server's {@code !venue.broker()}; a file that cannot be read counts as broker.
+     */
+    boolean simulated(BrokerAccount a) {
+        if (a.brokerType() == com.autotrade.account.BrokerType.PAPER || a.tradeMode() == com.autotrade.account.TradeMode.PAPER) {
+            return true;
+        }
+        if (a.tradeMode() == com.autotrade.account.TradeMode.LIVE) {
+            // second review 20 Nov 2026: a LIVE account never fills in the simulation (BrokerConnections.live: without
+            // order rules its route is refused, nothing is booked), so its preview is a broker one with its preconditions
+            return false;
+        }
+        return !ordered.computeIfAbsent(a.riskFile(), f -> {
+            try {
+                return com.autotrade.execution.FollowerRisk.load(java.nio.file.Path.of(f)).orders() != null;
+            } catch (RuntimeException e) {
+                return true;
+            }
+        });
     }
 
     /** How the account's sell is worked at the broker (its risk file's order rules; files are versioned: read once each). */

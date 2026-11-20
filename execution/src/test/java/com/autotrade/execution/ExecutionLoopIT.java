@@ -557,7 +557,7 @@ class ExecutionLoopIT {
                     () -> loop.squareOff(today));
             try {
                 awaitState(k.follower(), "CLOSED:EOD_SQUARE_OFF");
-                assertThat(eodAudits(k.follower())).isEqualTo(1);
+                awaitEodAudits(k.follower(), 1);            // written just after the position closes (20 Nov 2026: raced)
                 assertThat(positionState(slow)).as("still waiting for its lane").isEqualTo("OPEN");
                 assertThat(run).as("the square-off waits for the slow account; the fast one did not").isNotDone();
             } finally {
@@ -572,7 +572,7 @@ class ExecutionLoopIT {
             loop.squareOffRetry(java.time.Duration.ZERO);
             loop.tick(today, 20_000);
             awaitState(slow, "CLOSED:EOD_SQUARE_OFF");                     // retried off the tick until flat
-            assertThat(eodAudits(slow)).isEqualTo(2);
+            awaitEodAudits(slow, 2);
             assertThat(eodAudits(k.follower())).as("flat: not squared off again").isEqualTo(1);
         } finally {
             jdbc.update("update acct.copy_group set enabled = false where id = ?", k.group());
@@ -647,6 +647,15 @@ class ExecutionLoopIT {
         }
     }
 
+    /** The square-off's audit row is written after its position closes: waited for, not read at once. */
+    private static void awaitEodAudits(long follower, int count) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 30_000;
+        while (eodAudits(follower) < count && System.currentTimeMillis() < deadline) {
+            Thread.sleep(50);
+        }
+        assertThat(eodAudits(follower)).isEqualTo(count);
+    }
+
     private static void awaitState(long follower, String state) throws InterruptedException {
         long deadline = System.currentTimeMillis() + 30_000;
         while (!state.equals(positionState(follower)) && System.currentTimeMillis() < deadline) {
@@ -673,6 +682,133 @@ class ExecutionLoopIT {
                     .isLessThan(1.5);
         } finally {
             jdbc.update("update acct.copy_group set enabled = false where id = ?", k.group());
+        }
+    }
+
+    /** A captured quote of {@code token} with {@code bid}, {@code ago} old (an interval: "20 seconds"). */
+    private static void tick(long token, String symbol, double bid, String ago) {
+        jdbc.update("insert into md.option_tick (manifest_id, session_date, underlying, recv_ts, src_seq, instrument_token, "
+                + "symbol, expiry, strike, option_type, ltp, bid_px, bid_qty, bid_orders, ask_px, ask_qty, ask_orders, "
+                + "analytics_complete, depth_complete) values (1, current_date, 'NIFTY', now() - ?::interval, 1, ?, ?, "
+                + "current_date + 4, 23150, 'PE', ?, array[?]::float8[], '{650}', '{3}', array[?]::float8[], '{650}', '{3}', "
+                + "false, true)", ago, token, symbol, bid, bid, bid + 0.5);
+    }
+
+    /**
+     * Admin exit desk (user 20 Nov 2026, phase D1, as the review of the same day set it): a person's paper exit (the
+     * trader's Exit, an admin's, a flatten) is never booked at the entry price: the bid of the last 5 minutes, else today's
+     * newest bid however old (its age said in the line and the audit), else the contract's signal price today, else
+     * refused. An admin's exit closes as ADMIN_EXIT with by_admin and the reason in the audit. The automated end-of-day
+     * square-off keeps its old fallback and records where its price came from. The batch's lane-judged exit answers
+     * SOLD, REFUSED and ALREADY_CLOSED from the position as read on the lane.
+     */
+    @Test
+    void aPersonsPaperExitNeverBooksAtTheEntryPriceAndTheSquareOffSaysWhereItsPriceCameFrom() throws Exception {
+        LocalDate today = LocalDate.now(ZoneId.of("Asia/Kolkata"));
+        AccountStore accounts = new AccountStore(dataSource);
+        CostModel costs = CostModel.from(ThresholdConfig.load(Path.of("..", "config", "costs",
+                "india-index-options-costs.v2.yaml")));
+        long tenant = accounts.ensureTenant("t-quin");
+        long user = accounts.ensureUser("kc-quin", "quin");
+        accounts.ensureMembership(tenant, user, "OWNER");
+        long[] groups = new long[3], papers = new long[3], tokens = {3000047170L, 3000047171L, 3000047172L};
+        String[] names = new String[3];
+        for (int i = 0; i < 3; i++) {
+            long signal = accounts.ensureSignalSourceAccount(tenant, user, "SIG-quin-" + i, 500_000, today,
+                    "config/risk/signal-source.v2.yaml");
+            groups[i] = accounts.ensureCopyGroup(tenant, "SET-quin-" + i, signal);
+            papers[i] = accounts.ensureFollowerAccount(tenant, user, "QUIN-PAPER-" + i, BrokerType.PAPER, TradeMode.PAPER,
+                    500_000, EquityMode.FIXED, today, "../config/risk/follower-risk.v3.yaml", 100);
+            new FanOut(dataSource).subscribe(groups[i], papers[i], List.of("opening-drive"), 1.0);
+            jdbc.update("update acct.strategy_subscription set enabled_at = now() - interval '1 hour' where copy_group_id = ?",
+                    groups[i]);
+            new SignalDecisionStore(dataSource).insert(new SignalDecision(groups[i], 9402 + i, today,
+                    Instant.now().minusSeconds(120), "opening-drive", 2, "NIFTY", SignalDecision.Action.ENTER, "PE", null,
+                    "CONFIRMED", "IT", tokens[i], "NSE_FO|" + (47170 + i), "NIFTY 2315" + i + " PE", 65, 100, 130_000,
+                    500_000, 20, "Q:" + i, Map.of("strategy_lots", 1.0, "intended_lots", 1.0, "stop_pct", 25.0)));
+            names[i] = "NIFTY 2315" + i + " PE";
+        }
+        QuoteSource none = (d, u, t, at) -> Double.NaN;
+        try (ExecutionLoop loop = new ExecutionLoop(dataSource, "t-quin", "SET-quin-0,SET-quin-1,SET-quin-2", "worker-Q",
+                costs, none, 1e9)) {
+            loop.tick(today, 20_000);
+            long[] ids = new long[3];
+            for (int i = 0; i < 3; i++) {
+                ids[i] = jdbc.queryForObject("select id from exec.position where broker_account_id = ? and status = 'OPEN'",
+                        Long.class, papers[i]);
+            }
+
+            // 0: only a 6-minute-old bid today: the admin's exit sells there and says how old it is; ADMIN_EXIT, audited
+            tick(tokens[0], names[0], 77.0, "6 minutes");
+            assertThat(loop.exitPosition(papers[0], ids[0], "kc-admin", today, null, true, Map.of("by_admin", true,
+                    "admin_reason", "drill", "consent", "not given"))).singleElement().asString()
+                    .contains("sold at").contains("(last bid 6 min old)");
+            assertThat(jdbc.queryForObject("select status || ':' || exit_reason from exec.position where id = ?",
+                    String.class, ids[0])).isEqualTo("CLOSED:ADMIN_EXIT");
+            Map<String, Object> audit = jdbc.queryForMap("select detail ->> 'actor' actor, detail ->> 'by_admin' by_admin, "
+                    + "detail ->> 'admin_reason' reason, detail ->> 'consent' consent, detail ->> 'price_source' source "
+                    + "from exec.audit_log where broker_account_id = ? and action = 'POSITION_EXIT' order by id desc limit 1",
+                    papers[0]);
+            assertThat(audit).containsEntry("actor", "kc-admin").containsEntry("by_admin", "true")
+                    .containsEntry("reason", "drill").containsEntry("consent", "not given");
+            assertThat((String) audit.get("source")).contains("stale-bid").contains("last bid 6 min old");
+            // the lane-judged exit of a position closed by then: ALREADY_CLOSED, nothing sent
+            ExitOutcome again = loop.exitPositionOutcome(papers[0], ids[0], "kc-admin", today, true, Map.of());
+            assertThat(again.outcome()).isEqualTo(ExitOutcome.ALREADY_CLOSED);
+
+            // 1a: no bid today and only the position's own ENTER signal: refused, never booked at (about) the entry price
+            // (principal review 20 Nov 2026: the latest signal of the day is usually the entry itself)
+            ExitOutcome entryOnly = loop.exitPositionOutcome(papers[1], ids[1], "kc-quin", today, false, Map.of());
+            assertThat(entryOnly.outcome()).isEqualTo(ExitOutcome.REFUSED);
+            assertThat(entryOnly.lines()).singleElement().asString().contains("no signal since the entry");
+            // 1b: a signal of the contract decided after the position opened (an EXIT): sold at its price, said so
+            jdbc.update("insert into exec.signal_decision (copy_group_id, signal_session_id, session_date, decided_at, "
+                    + "strategy_id, priority, underlying, action, option_side, reason, instrument_token, instrument_key, "
+                    + "symbol, lot_size, reference_price, idempotency_key) select copy_group_id, signal_session_id, "
+                    + "session_date, now(), strategy_id, priority, underlying, 'EXIT', option_side, 'test exit', "
+                    + "instrument_token, instrument_key, symbol, lot_size, 91.0, idempotency_key || '-exit' "
+                    + "from exec.signal_decision where instrument_token = ? order by id limit 1", tokens[1]);
+            ExitOutcome sold = loop.exitPositionOutcome(papers[1], ids[1], "kc-quin", today, false, Map.of());
+            assertThat(sold.outcome()).isEqualTo(ExitOutcome.SOLD);
+            assertThat(sold.before()).isPositive();
+            assertThat(sold.after()).isZero();
+            assertThat(sold.lines()).singleElement().asString().contains("(no bid today: the price of a signal after the entry)");
+
+            // 2: no bid and no signal today (its signal moved to yesterday): refused, open, never at the entry price
+            jdbc.update("update exec.signal_decision set decided_at = decided_at - interval '1 day' where instrument_token = ?",
+                    tokens[2]);
+            ExitOutcome refused = loop.exitPositionOutcome(papers[2], ids[2], "kc-quin", today, false, Map.of());
+            assertThat(refused.outcome()).isEqualTo(ExitOutcome.REFUSED);
+            assertThat(refused.lines()).singleElement().asString().contains("NOT exited, no bid today and no signal since the entry");
+            assertThat(loop.flatten(papers[2], "kc-quin", "drill", today)).singleElement().asString()
+                    .contains("NOT exited, no bid");
+            assertThat(jdbc.queryForObject("select status from exec.position where id = ?", String.class, ids[2]))
+                    .isEqualTo("OPEN");
+            assertThat(jdbc.queryForObject("select count(*) from exec.order_execution where broker_account_id = ? "
+                    + "and role = 'EMERGENCY_EXIT'", Integer.class, papers[2])).isZero();
+            // second review 20 Nov 2026: an admin's flatten marks its kill by_admin (its alert goes to the admin chat
+            // only; the member is told once by AdminExits)
+            loop.flatten(papers[2], "kc-admin", "storm", today, Map.of("by_admin", true));
+            assertThat(jdbc.queryForObject("select detail ->> 'by_admin' from exec.audit_log where broker_account_id = ? and "
+                    + "action like 'KILL_ACCOUNT%' order by id desc limit 1", String.class, papers[2])).isEqualTo("true");
+            // a position whose record needs reconciliation is not sold by an exit: said so, never a blank REFUSED
+            jdbc.update("update exec.position set status = 'RECONCILIATION_REQUIRED' where id = ?", ids[2]);
+            ExitOutcome reconcile = loop.exitPositionOutcome(papers[2], ids[2], "kc-admin", today, true, Map.of());
+            assertThat(reconcile.outcome()).isEqualTo(ExitOutcome.REFUSED);
+            assertThat(reconcile.detail()).contains("RECONCILIATION_REQUIRED").contains("nothing sent");
+            jdbc.update("update exec.position set status = 'OPEN' where id = ?", ids[2]);
+
+            // the automated square-off keeps its fallback (the signal's price, of any day) and records where it came from
+            assertThat(loop.squareOff(today)).singleElement().asString().startsWith("QUIN-PAPER-2: ").contains("sold at");
+            assertThat(jdbc.queryForObject("select exit_reason from exec.position where id = ?", String.class, ids[2]))
+                    .isEqualTo("EOD_SQUARE_OFF");
+            assertThat(jdbc.queryForObject("select detail ->> 'price_source' from exec.audit_log where broker_account_id = ? "
+                    + "and action = 'FLATTEN' and detail ->> 'reason' = 'EOD_SQUARE_OFF' order by id desc limit 1",
+                    String.class, papers[2])).contains("signal");
+        } finally {
+            for (long g : groups) {
+                jdbc.update("update acct.copy_group set enabled = false where id = ?", g);
+            }
         }
     }
 
@@ -705,6 +841,8 @@ class ExecutionLoopIT {
                     + "and status = 'OPEN'", paper);
             long id = ((Number) pos.get("id")).longValue(), held = ((Number) pos.get("quantity_open")).longValue();
             assertThat(held).isGreaterThan(130);
+            // 20 Nov 2026: a person's paper exit sells at a bid of the last 5 minutes only (never the entry price)
+            tick(3000047169L, "NIFTY 23150 PE", 101.5, "20 seconds");
 
             assertThatThrownBy(() -> loop.exitPosition(paper, id, "kc-pia", today, 100L))
                     .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("whole number of lots");

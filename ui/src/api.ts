@@ -659,6 +659,8 @@ export interface LiveBook {
   squareOff?: string | null;
   /** SUPPORT may exit without a grant */
   canStop?: boolean;
+  /** admin exit desk (20 Nov 2026): the caller is not the workspace's own (SUPPORT): an exit needs a reason */
+  reasonRequired?: boolean;
 }
 
 interface LiveBookRow {
@@ -721,7 +723,11 @@ export interface ExitPreview {
   bidQuantity?: number | null;
   /** the estimate's price and where it came from: the captured bid, else the signal's or the entry's */
   price: number;
-  priceFrom: "bid" | "signal" | "entry";
+  priceFrom: "bid" | "signal" | "entry" | "stale-bid" | "none";
+  /** a paper sale at today's older bid: its age (review 20 Nov 2026) */
+  bidAgeSec?: number;
+  /** what the paper price is when it is not a fresh bid ("last bid 14 min old") */
+  priceNote?: string;
   gross: number;
   charges?: number;
   net?: number;
@@ -732,7 +738,71 @@ export interface ExitPreview {
   rest?: string;
   warnings: string[];
   typeToConfirm: boolean;
+  /** a paper exit the server would refuse now (no quote in the last 5 minutes; never booked at the entry price) */
+  refusal?: string;
+  /** the caller is not the account's owner: the exit needs a reason (admin exit desk, 20 Nov 2026) */
+  reasonRequired?: boolean;
+  /** a broker account's LIVE preconditions (phase D2) */
+  preconditions?: Record<"session" | "staticIp" | "lease" | "squareOff", ExitCheck | undefined>;
+  /** the broker session is down: what to do instead */
+  brokerDown?: string;
 }
+
+/** One exit precondition: ok (null: not known here) and what it says. */
+export interface ExitCheck { ok: boolean | null; text: string; at?: string; ours?: string | null; minutesLeft?: number }
+
+// ---------------------------------------------------------------- admin exit desk (20 Nov 2026)
+
+/** The member's standing consent to admin exits (V51). */
+export interface AdminExitConsent { given: boolean; at: string | null; by: string | null; canChange?: boolean }
+
+/** One open position on the desk (GET /api/execution/admin/open-positions). */
+export interface DeskPosition {
+  group: "LIVE" | "PAPER";
+  tenantId: number; tenant: string; accountId: number; account: string;
+  mode: "PAPER" | "DRY_RUN" | "LIVE"; accountMode: string; broker: string; brokerApp: string | null;
+  connection: string | null; loggedIn: boolean | null; sessionUntil: string | null; lease: string | null;
+  positionId: number;
+  /** OPEN, or RECONCILIATION_REQUIRED (our record and the broker's disagree: an exit sends nothing) */
+  status?: string;
+  strategy: string; source: string | null; underlying: string; side: string; symbol: string;
+  lotSize: number | null; quantity: number; lots: number | null; entry: number;
+  /** IST wall time, ISO local date-time */
+  opened: string;
+  bid: number | null; ask: number | null; quoteAt: string | null; quoteAgeSec: number | null; quoteStale: boolean;
+  pnl: number | null; premiumAtRisk: number; stop: number | null; stopStatus: string | null;
+  consent: AdminExitConsent;
+}
+
+export interface DeskOpenPositions {
+  at: string;
+  staleQuoteSec: number;
+  positions: DeskPosition[];
+  mirrors: { account_id: number; account: string; tenant_id: number; tenant: string; mirror_of: string }[];
+}
+
+/** One engine session's open positions (trading-core GET /api/sessions/open-positions), read-only. */
+export interface EngineSessionPositions {
+  session: number; account: string; mode: string; date: string; status: string; lastEvent: string | null;
+  positions: PositionRow[];
+}
+
+export interface BatchResultRow {
+  accountId: number; account: string | null; positionId: number; symbol: string | null; mode: string | null;
+  outcome: "PENDING" | "RUNNING" | "SOLD" | "PARTLY" | "REFUSED" | "ALREADY_CLOSED" | "UNKNOWN"; detail: string | null;
+  lines: string[]; mirrorOf?: string; before?: number | null; after?: number | null;
+}
+
+/** A batch running in the background (POST answers 202 at once; GET .../exit-batch/{batchId} follows it). */
+export interface BatchResult {
+  batchId: string; status: "RUNNING" | "DONE"; count: number; answered: number; killAfter: boolean; killed: string[];
+  killFailed: Record<string, string>; order: number[]; results: (BatchResultRow | null)[]; repeat?: boolean;
+  startedAt: string; finishedAt: string | null;
+}
+
+/** An admin exit on one of the caller's accounts (the in-app banner). */
+export interface AdminExitNotice { id: number; at: string; action: string; account: string; reason: string | null;
+  positions: string | null }
 
 export interface LiveClosedPosition extends LiveBookRow {
   /** best and worst captured bid while it was held; missed: left vs the best, saved: kept vs the worst (rupees) */

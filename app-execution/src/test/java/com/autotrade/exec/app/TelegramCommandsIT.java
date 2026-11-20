@@ -157,6 +157,14 @@ class TelegramCommandsIT {
             }
 
             @Override
+            public List<String> exitPosition(long accountId, long positionId, String actor, Long quantity, boolean byAdmin,
+                                             Map<String, ?> audit) {
+                actions.add("admin-exit " + accountId + " " + positionId + " " + actor + " " + byAdmin + " "
+                        + audit.get("by_admin") + " " + audit.get("actor_role") + " " + audit.get("via"));
+                return List.of("NIFTY #" + positionId + ": 75 sold at 58.20");      // the engine's wording of a sale
+            }
+
+            @Override
             public Instant lastTick() {
                 return Instant.now();
             }
@@ -700,8 +708,47 @@ class TelegramCommandsIT {
         assertThat(TelegramBot.fit("short")).isEqualTo("short");
     }
 
+    /**
+     * Review 20 Nov 2026: SUPPORT (the platform admin in a member's workspace) exiting over Telegram is the admin's exit as
+     * on the web: it closes as ADMIN_EXIT (byAdmin), is audited by_admin with the role, and the members are told once.
+     */
+    @Test
+    void supportsExitOverTelegramIsTheAdminsExitAndTheMembersAreToldOnce() {
+        long supportChat = 4455;
+        AccountStore accounts = new AccountStore(dataSource);
+        long own = accounts.ensureTenant("t-platform-tg");
+        long support = accounts.ensureUser("kc-support", "support");
+        accounts.ensureMembership(own, support, "ADMIN");
+        accounts.ensureMembership(aliceTenant, support, "SUPPORT");
+        jdbc.update("update acct.app_user set telegram_chat_id = ? where id = ?", Long.toString(supportChat), support);
+        List<String> told = new ArrayList<>();
+        commands.withAdminExits(new AdminExits(dataSource, null) {
+            @Override
+            void exited(com.autotrade.account.BrokerAccount account, String actor, String reason, List<String> lines) {
+                told.add(account.displayName() + "|" + actor + "|" + String.join(";", lines));
+            }
+        });
+        try {
+            String out = deliver(message(supportChat, supportChat, "private", "/exit " + position, 0));
+            assertThat(out).startsWith("CARD T");
+            JsonNode card = lastCall("sendMessage");
+            deliver(callback(supportChat, supportChat,
+                    card.path("reply_markup").path("inline_keyboard").get(0).get(0).path("callback_data").asString()));
+            assertThat(actions).containsExactly("admin-exit " + aliceAccount + " " + position
+                    + " telegram:kc-support true true SUPPORT telegram");
+            assertThat(told).containsExactly("ALICE-1|telegram:kc-support|NIFTY #" + position + ": 75 sold at 58.20");
+        } finally {
+            commands.withAdminExits(null);
+            jdbc.update("delete from acct.tenant_membership where app_user_id = ?", support);
+        }
+    }
+
     @Test
     void theIncompleteWordingMatchesTheEngines() {
+        // review 20 Nov 2026: a refused paper exit sold nothing; a sale at an old bid is a sale
+        assertThat(TelegramCommands.incomplete(List.of("X: NOT exited, no bid and no signal price for this contract today")))
+                .isTrue();
+        assertThat(TelegramCommands.incomplete(List.of("X: 130 sold at 77.00 (last bid 14 min old)"))).isFalse();
         assertThat(TelegramCommands.incomplete(List.of("NIFTY: 75 sold at 58.20"))).isFalse();
         assertThat(TelegramCommands.incomplete(List.of("not flattened: no broker session"))).isTrue();
         assertThat(TelegramCommands.incomplete(List.of("X: 25 of 75 sold (PARTIAL x); the rest keeps its broker stop")))

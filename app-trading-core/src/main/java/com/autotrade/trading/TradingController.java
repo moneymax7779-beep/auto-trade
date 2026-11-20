@@ -55,6 +55,29 @@ class TradingController {
         return ResponseEntity.ok(status);
     }
 
+    /**
+     * The engine's own open positions (admin exit desk, user 20 Nov 2026, phase A): every live session running now (PAPER-1
+     * and the signal source SIGNAL-1 alongside it), each with its account, day, status and open positions, read-only
+     * (no per-position engine exit yet: phase C). Replays are left out. Operator only (SecurityConfig: /api/**).
+     */
+    @GetMapping("/sessions/open-positions")
+    List<Map<String, Object>> openPositions() {
+        List<Map<String, Object>> out = new java.util.ArrayList<>();
+        for (TradingSession session : runner.sessions()) {
+            Map<String, Object> status = session.status();
+            if (!"PAPER_LIVE".equals(String.valueOf(status.get("mode")))) {
+                continue;                                   // a replay's positions are not money anyone holds
+            }
+            Map<String, Object> s = new LinkedHashMap<>();
+            for (String key : List.of("session", "account", "mode", "date", "status", "lastEvent")) {
+                s.put(key, status.get(key));
+            }
+            s.put("positions", status.getOrDefault("openPositions", List.of()));
+            out.add(s);
+        }
+        return out;
+    }
+
     @GetMapping("/orders")
     ResponseEntity<List<Map<String, Object>>> orders() {
         TradingSession session = runner.current();
