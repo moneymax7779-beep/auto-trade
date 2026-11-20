@@ -72,6 +72,23 @@ class Access {
             return roles.containsValue("ADMIN");
         }
 
+        /**
+         * Exiting a position or flattening an account of {@code tenantId} (admin exit desk, user 20 Nov 2026, decision 4):
+         * whoever may stop trouble there ({@link #emergency}), and the platform admin in every tenant, a member of it or not.
+         */
+        boolean mayExit(long tenantId) {
+            return emergency(tenantId) || admin();
+        }
+
+        /**
+         * An exit by someone other than the workspace's own people (admin exit desk, user 20 Nov 2026): SUPPORT (the platform
+         * admin in a member's workspace, with or without a grant) or no membership at all (the admin from the desk). They
+         * give a reason, the audit says {@code by_admin}, the members are told. OWNER, ADMIN and TRADER act as before.
+         */
+        boolean byAdmin(long tenantId) {
+            return !roles.containsKey(tenantId) || support(tenantId);
+        }
+
         List<Long> tenants() {
             return List.copyOf(roles.keySet());
         }

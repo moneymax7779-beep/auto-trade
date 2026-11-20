@@ -235,16 +235,30 @@ class AccountsController {
                                 @PathVariable long id, @RequestBody Flatten f) throws Exception {
         Access.User user = access.user(subject);
         Access.require("FLATTEN".equals(f.confirm()), "confirm with \"FLATTEN\"");
-        BrokerAccount a = own(user, id, true);
-        return Map.of("account", a.displayName(), "result", service.flatten(a.id(), user.subject(),
-                f.reason() == null ? "manual" : f.reason(), LocalDate.now(IST)));
+        BrokerAccount a = exitable(user, id);
+        if (!user.byAdmin(a.tenantId())) {
+            return Map.of("account", a.displayName(), "result", service.flatten(a.id(), user.subject(),
+                    f.reason() == null ? "manual" : f.reason(), LocalDate.now(IST)));
+        }
+        // admin exit desk (user 20 Nov 2026): the platform admin on someone else's account says why, it is audited as
+        // theirs (by_admin, consent) and the members are told
+        String reason = AdminExits.requireReason(f.reason());
+        List<String> result = service.flatten(a.id(), user.subject(), reason, LocalDate.now(IST),
+                adminExits == null ? Map.of("by_admin", true, "admin_reason", reason) : adminExits.audit(user, a, reason));
+        if (adminExits != null) {
+            adminExits.exited(a, user.subject(), reason, AdminExits.news(result, true));
+        }
+        return Map.of("account", a.displayName(), "result", result);
     }
 
     /**
      * {@code quantity}: whole lots to sell, the rest stays open (null: all); {@code key}: the click's own id, so a repeated
      * request (a double click, a retry after a timeout) returns the first one's result and sells nothing more.
      */
-    record PositionExit(String confirm, Long quantity, String key) {
+    record PositionExit(String confirm, Long quantity, String key, String reason) {
+        PositionExit(String confirm, Long quantity, String key) {
+            this(confirm, quantity, key, null);
+        }
     }
 
     /** An exit already asked for with a key: its result (or the failure) for every repeat within {@link #EXIT_KEY_TTL}. */
@@ -258,11 +272,38 @@ class AccountsController {
         List<String> run(long accountId, long positionId, String actor, LocalDate day, Long quantity) throws Exception;
     }
 
-    private ExitRunner exitRunner;
+    /** As {@link ExitRunner}, with who asked ({@code byAdmin}) and the audit detail (admin exit desk, 20 Nov 2026). */
+    interface AuditedExitRunner {
+        List<String> run(long accountId, long positionId, String actor, LocalDate day, Long quantity, boolean byAdmin,
+                         Map<String, Object> audit) throws Exception;
+    }
+
+    private AuditedExitRunner exitRunner;
 
     /** Tests: the exit is run by {@code runner} instead of the worker. */
     AccountsController withExitRunner(ExitRunner runner) {
+        this.exitRunner = (account, position, actor, day, quantity, byAdmin, audit) -> runner.run(account, position, actor,
+                day, quantity);
+        return this;
+    }
+
+    /** Tests: as above, seeing who asked and the audit detail. */
+    AccountsController withExitRunner(AuditedExitRunner runner) {
         this.exitRunner = runner;
+        return this;
+    }
+
+    /** The admin exits' reason, audit detail and member notices (null in tests that never exit as the admin). */
+    private AdminExits adminExits;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void adminExits(AdminExits adminExits) {
+        this.adminExits = adminExits;
+    }
+
+    /** Tests: the admin exits' helper (a recording one). */
+    AccountsController withAdminExits(AdminExits adminExits) {
+        this.adminExits = adminExits;
         return this;
     }
     private final Map<String, KeyedExit> exitsByKey = new java.util.concurrent.ConcurrentHashMap<>();
@@ -277,12 +318,20 @@ class AccountsController {
             throws Exception {
         Access.User user = access.user(subject);
         Access.require("EXIT".equals(e.confirm()), "confirm with \"EXIT\"");
-        BrokerAccount a = own(user, id, true);
+        BrokerAccount a = exitable(user, id);
         if (e.quantity() != null && e.quantity() <= 0) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "quantity must be above 0");
         }
+        String mirror = Mirrors.of(jdbc, a.id());
+        if (mirror != null) {
+            // V49: a mirror holds none of its own; the positions it shows are the engine account's (admin exit desk)
+            throw new ResponseStatusException(HttpStatus.CONFLICT, a.displayName() + " is a mirror of " + mirror
+                    + ": it holds no positions of its own; exit at the source (" + mirror + ")");
+        }
+        // admin exit desk (user 20 Nov 2026): someone other than the workspace's own people gives a reason (server-side)
+        String reason = user.byAdmin(a.tenantId()) ? AdminExits.requireReason(e.reason()) : null;
         if (e.key() == null || e.key().isBlank()) {
-            return exitNow(a, positionId, user, e.quantity());
+            return exitNow(a, positionId, user, e.quantity(), reason);
         }
         if (e.key().length() > 100) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "key: at most 100 characters");
@@ -311,7 +360,7 @@ class AccountsController {
             }
         }
         try {
-            Map<String, Object> result = exitNow(a, positionId, user, e.quantity());
+            Map<String, Object> result = exitNow(a, positionId, user, e.quantity(), reason);
             mine.result().complete(result);
             return result;
         } catch (ResponseStatusException ex) {
@@ -327,14 +376,25 @@ class AccountsController {
         }
     }
 
-    private Map<String, Object> exitNow(BrokerAccount a, long positionId, Access.User user, Long quantity) throws Exception {
+    private Map<String, Object> exitNow(BrokerAccount a, long positionId, Access.User user, Long quantity, String reason)
+            throws Exception {
+        boolean byAdmin = user.byAdmin(a.tenantId());
+        Map<String, Object> audit = byAdmin && adminExits != null ? adminExits.audit(user, a, reason)
+                : new LinkedHashMap<>(Map.of("by_admin", byAdmin));
+        List<String> result;
         try {
-            ExitRunner runner = exitRunner != null ? exitRunner : service::exitPosition;
-            return Map.of("account", a.displayName(), "result", runner.run(a.id(), positionId, user.subject(),
-                    LocalDate.now(IST), quantity));
+            AuditedExitRunner runner = exitRunner != null ? exitRunner : service::exitPosition;
+            result = runner.run(a.id(), positionId, user.subject(), LocalDate.now(IST), quantity, byAdmin, audit);
         } catch (IllegalArgumentException ex) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, ex.getMessage());
         }
+        // Telegram + push to the members (decision 3), only of what it sold or may have (second review 20 Nov 2026: a
+        // position closed by its strategy first, "position 7 is not open", is not an exit by the admin)
+        List<String> news = AdminExits.news(result, false);
+        if (byAdmin && adminExits != null && !news.isEmpty()) {
+            adminExits.exited(a, user.subject(), reason, news);
+        }
+        return Map.of("account", a.displayName(), "result", result);
     }
 
     /** {@code at}: ISO local date-time in IST (e.g. 2026-11-06T09:57:30); {@code unchecked}: book without a broker read. */
@@ -367,20 +427,62 @@ class AccountsController {
         }
     }
 
+    /** Flattens one account for flatten-all (the worker's; tests give their own to see one account fail). */
+    interface Flattener {
+        List<String> flatten(long accountId, String actor, String reason, LocalDate day, Map<String, ?> audit)
+                throws Exception;
+    }
+
+    private Flattener flattener;
+
+    /** Tests: flatten-all's accounts flattened by {@code f} instead of the worker. */
+    AccountsController withFlattener(Flattener f) {
+        this.flattener = f;
+        return this;
+    }
+
+    /**
+     * Flatten every enabled trading account the caller may stop: for the platform admin every tenant's, a member of it
+     * or not (admin exit desk, user 20 Nov 2026); never a mirror (V49: it holds nothing of its own) nor a view-only or
+     * signal-source account (FOLLOWER_TRADE only, as before). Review 20 Nov 2026: the platform admin and SUPPORT give a
+     * reason (400 without), passed to each account's audit and its members' message; one account that fails is reported
+     * FAILED with why and the others are still flattened.
+     */
     @PostMapping("/api/execution/flatten-all")
     Map<String, Object> flattenAll(@RequestHeader(value = Access.HEADER, required = false) String subject,
                                    @RequestBody Flatten f) throws Exception {
         Access.User user = access.user(subject);
         Access.require("FLATTEN ALL".equals(f.confirm()), "confirm with \"FLATTEN ALL\"");
+        boolean admins = user.admin() || user.roles().containsValue("SUPPORT");
+        String reason = admins ? AdminExits.requireReason(f.reason())
+                : f.reason() == null || f.reason().isBlank() ? "flatten all" : f.reason().trim();
+        List<Long> tenants = user.admin()
+                ? jdbc.queryForList("select id from acct.tenant order by id", Long.class) : user.tenants();
+        java.util.Set<Long> mirrors = new java.util.HashSet<>(jdbc.queryForList("select id from acct.broker_account "
+                + "where mirror_of is not null", Long.class));
+        Flattener run = flattener != null ? flattener
+                : (id, actor, why, day, audit) -> service.flatten(id, actor, why, day, audit);
         Map<String, Object> out = new LinkedHashMap<>();
-        for (long tenant : user.tenants()) {
-            if (!user.emergency(tenant)) {
+        for (long tenant : tenants) {
+            if (!user.mayExit(tenant)) {
                 continue;
             }
             for (BrokerAccount a : accounts.ofTenant(tenant)) {
-                if (a.enabled() && a.role().name().equals("FOLLOWER_TRADE")) {
-                    out.put(a.displayName(), service.flatten(a.id(), user.subject(), f.reason() == null ? "flatten all"
-                            : f.reason(), LocalDate.now(IST)));
+                if (!a.enabled() || !a.role().name().equals("FOLLOWER_TRADE") || mirrors.contains(a.id())) {
+                    continue;
+                }
+                boolean byAdmin = user.byAdmin(tenant) && adminExits != null;
+                try {
+                    List<String> lines = run.flatten(a.id(), user.subject(), reason, LocalDate.now(IST),
+                            byAdmin ? adminExits.audit(user, a, reason) : Map.of());
+                    if (byAdmin) {
+                        adminExits.exited(a, user.subject(), reason, AdminExits.news(lines, true));
+                    }
+                    out.put(a.displayName(), lines);
+                } catch (Exception e) {
+                    org.slf4j.LoggerFactory.getLogger(AccountsController.class).error("flatten all: {} failed",
+                            a.displayName(), e);
+                    out.put(a.displayName(), List.of("FAILED: " + e.getMessage()));
                 }
             }
         }
@@ -434,6 +536,21 @@ class AccountsController {
         BrokerAccount a = accounts.byId(accountId).filter(x -> user.sees(x.tenantId()))
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "no account " + accountId));
         Access.require(emergency ? user.emergency(a.tenantId()) : user.mayAct(a.tenantId()), user.support(a.tenantId())
+                ? "SUPPORT needs the member's grant for this" : "read-only role for this account");
+        return a;
+    }
+
+    /**
+     * An account whose positions the caller may exit or flatten (admin exit desk, user 20 Nov 2026, decision 4): as
+     * {@link #own} with stopping rights, and the platform admin in every tenant; 404 for anyone else's.
+     */
+    private BrokerAccount exitable(Access.User user, Long accountId) {
+        if (accountId == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "accountId is required");
+        }
+        BrokerAccount a = accounts.byId(accountId).filter(x -> user.sees(x.tenantId()) || user.admin())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "no account " + accountId));
+        Access.require(user.mayExit(a.tenantId()), user.support(a.tenantId())
                 ? "SUPPORT needs the member's grant for this" : "read-only role for this account");
         return a;
     }

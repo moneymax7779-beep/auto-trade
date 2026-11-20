@@ -66,6 +66,17 @@ class TelegramCommands {
         /** {@code quantity}: whole lots of it to sell, the rest stays open; null: all of it. */
         List<String> exitPosition(long accountId, long positionId, String actor, Long quantity) throws Exception;
 
+        /** An admin's flatten (admin exit desk review, 20 Nov 2026): {@code audit} added to its audit detail. */
+        default List<String> flatten(long accountId, String actor, String reason, Map<String, ?> audit) throws Exception {
+            return flatten(accountId, actor, reason);
+        }
+
+        /** An admin's exit: closes as ADMIN_EXIT when {@code byAdmin}, {@code audit} added to its audit detail. */
+        default List<String> exitPosition(long accountId, long positionId, String actor, Long quantity, boolean byAdmin,
+                                          Map<String, ?> audit) throws Exception {
+            return exitPosition(accountId, positionId, actor, quantity);
+        }
+
         /** The worker's last finished tick (null: none yet). */
         Instant lastTick();
     }
@@ -118,6 +129,18 @@ class TelegramCommands {
             }
 
             @Override
+            public List<String> flatten(long accountId, String actor, String reason, Map<String, ?> audit)
+                    throws Exception {
+                return service.flatten(accountId, actor, reason, service.day(), audit);
+            }
+
+            @Override
+            public List<String> exitPosition(long accountId, long positionId, String actor, Long quantity,
+                                             boolean byAdmin, Map<String, ?> audit) throws Exception {
+                return service.exitPosition(accountId, positionId, actor, service.day(), quantity, byAdmin, audit);
+            }
+
+            @Override
             public Instant lastTick() {
                 return service.lastTick();
             }
@@ -140,6 +163,60 @@ class TelegramCommands {
 
     TelegramBot bot() {
         return bot;
+    }
+
+    /** The admin exits' audit detail and member message (null: none in tests that do not need them). */
+    private AdminExits adminExits;
+
+    @Autowired(required = false)
+    void adminExits(AdminExits adminExits) {
+        this.adminExits = adminExits;
+    }
+
+    /** Tests: a recording one. */
+    TelegramCommands withAdminExits(AdminExits adminExits) {
+        this.adminExits = adminExits;
+        return this;
+    }
+
+    /**
+     * The audit detail of an exit or flatten by {@code c} on {@code a} (admin exit desk review, 20 Nov 2026): when the
+     * caller is SUPPORT or the platform admin outside the workspace it is marked by_admin with their role, as on the web.
+     * Telegram has no reason prompt, so the reason is the command's own text ("Telegram exit T12 by ..."), standing for
+     * "telegram". Null when it is the workspace's own people (nothing to add).
+     */
+    private Map<String, Object> adminAudit(Caller c, BrokerAccount a, String reason) {
+        if (!c.user().byAdmin(a.tenantId())) {
+            return null;
+        }
+        Map<String, Object> audit;
+        try {
+            audit = adminExits != null ? new java.util.LinkedHashMap<>(adminExits.audit(c.user(), a, reason))
+                    : new java.util.LinkedHashMap<>(Map.of("by_admin", true, "admin_reason", reason));
+        } catch (RuntimeException e) {
+            audit = new java.util.LinkedHashMap<>(Map.of("by_admin", true, "admin_reason", reason, "consent",
+                    "unknown (" + e.getMessage() + ")"));
+        }
+        audit.putIfAbsent("actor_role", c.user().roles().getOrDefault(a.tenantId(), "PLATFORM_ADMIN"));
+        audit.put("via", "telegram");
+        return audit;
+    }
+
+    /**
+     * One message to the account's members after an admin's exit or flatten (the web's, AdminExits): only what it sold or
+     * may have, and whether the account's entries were stopped ({@code stopped}); nothing when there is neither (second
+     * review 20 Nov 2026: "position 7 is not open" is not an exit by the admin).
+     */
+    private void tellMembers(Caller c, BrokerAccount a, String reason, List<String> lines, boolean stopped) {
+        List<String> news = AdminExits.news(lines, stopped);
+        if (adminExits != null && c.user().byAdmin(a.tenantId()) && !news.isEmpty()) {
+            adminExits.exited(a, c.actor(), reason, news);
+        }
+    }
+
+    /** The kill's audit extra: by_admin when the caller is not the workspace's own (its alert then goes to the admin only). */
+    private static Map<String, ?> killExtra(Caller c, BrokerAccount a) {
+        return c.user().byAdmin(a.tenantId()) ? Map.of("by_admin", true) : Map.of();
     }
 
     /** Whether taps on this bot's buttons are read (the commands are on). */
@@ -648,12 +725,19 @@ class TelegramCommands {
             if (a == null || a.role() != com.autotrade.account.AccountRole.FOLLOWER_TRADE) {
                 continue;
             }
-            kills.engageAccount(a, "FLATTEN ALL by " + c.actor() + ": " + reason, c.actor());
+            kills.engageAccount(a, "FLATTEN ALL by " + c.actor() + ": " + reason, c.actor(), killExtra(c, a));
             if (a.tradeMode() == TradeMode.LIVE && !props.liveExits()) {
+                tellMembers(c, a, reason, List.of(), true);           // stopped only: the members are told that much
                 lines.add(a.displayName() + ": LIVE, stopped only (exit it on the web or in the broker's app)");
                 continue;
             }
-            for (String line : actions.flatten(a.id(), c.actor(), reason)) {
+            Map<String, Object> audit = adminAudit(c, a, reason);
+            List<String> done = audit == null ? actions.flatten(a.id(), c.actor(), reason)
+                    : actions.flatten(a.id(), c.actor(), reason, audit);
+            if (audit != null) {
+                tellMembers(c, a, reason, done, true);
+            }
+            for (String line : done) {
                 lines.add(a.displayName() + ": " + line);
             }
         }
@@ -860,7 +944,9 @@ class TelegramCommands {
      */
     static boolean incomplete(List<String> lines) {
         // a short fill reads "N of M sold (CODE reason); K stay open ..." (17 Nov 2026), a stop not re-placed "NOT placed"
+        // review 20 Nov 2026: "NOT exited, no quote ..." (a refused paper exit) sold nothing either
         return lines.stream().map(l -> l.toLowerCase(Locale.ROOT)).anyMatch(l -> l.contains("not flattened")
+                || l.contains("not exited")
                 || l.contains("has not started") || l.contains("keeps its broker stop") || l.contains("unknown outcome")
                 || l.contains(" sold (") || l.contains("not placed yet"));
     }
@@ -904,10 +990,26 @@ class TelegramCommands {
                     case "FLATTEN" -> {
                         // review 16 Nov 2026: the switch first, here (idempotent), so entries stop even when the worker
                         // has not started and the flatten itself can do nothing yet
-                        kills.engageAccount(a, "FLATTEN by " + c.actor() + ": " + reason, c.actor());
-                        yield actions.flatten(a.id(), c.actor(), reason);
+                        kills.engageAccount(a, "FLATTEN by " + c.actor() + ": " + reason, c.actor(), killExtra(c, a));
+                        Map<String, Object> audit = adminAudit(c, a, reason);
+                        if (audit == null) {
+                            yield actions.flatten(a.id(), c.actor(), reason);
+                        }
+                        List<String> done = actions.flatten(a.id(), c.actor(), reason, audit);
+                        tellMembers(c, a, reason, done, true);
+                        yield done;
                     }
-                    case "EXIT" -> actions.exitPosition(a.id(), positionId, c.actor(), quantity);
+                    case "EXIT" -> {
+                        // admin exit desk review (20 Nov 2026): SUPPORT or the platform admin closes as ADMIN_EXIT, audited
+                        // by_admin with their role, the members told, as the web's Exit does
+                        Map<String, Object> audit = adminAudit(c, a, reason);
+                        if (audit == null) {
+                            yield actions.exitPosition(a.id(), positionId, c.actor(), quantity);
+                        }
+                        List<String> done = actions.exitPosition(a.id(), positionId, c.actor(), quantity, true, audit);
+                        tellMembers(c, a, reason, done, false);
+                        yield done;
+                    }
                     default -> throw new IllegalStateException(verb);
                 };
                 status = incomplete(lines) ? "INCOMPLETE" : "DONE";

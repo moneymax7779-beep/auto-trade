@@ -271,6 +271,7 @@ class PositionAlerts {
         }
         return switch (code) {
             case "TRADER_EXIT" -> "exited by you";
+            case "ADMIN_EXIT" -> "exited by the admin";                // admin exit desk, 20 Nov 2026
             case "MANUAL" -> "sold by hand";
             case "EOD_SQUARE_OFF" -> "square-off";
             case "BROKER_STOP", "STOP" -> "stop";

@@ -475,15 +475,38 @@ public final class ExecutionLoop implements AutoCloseable {
 
     /**
      * Flatten one account now (UI / API, with a confirmation): its kill switch is engaged, then on the account's own lane
-     * and under its lease, every open position is exited (broker stops off first). A simulated venue exits at the
-     * latest stored bid (own capture, last 5 minutes), else the contract's last signal price today, else the entry price.
+     * and under its lease, every open position is exited (broker stops off first). A simulated venue prices it as a
+     * person's exit ({@link #flattenPrice}: never the entry price; refused without a bid or a signal price today).
      */
     public List<String> flatten(long accountId, String actor, String reason, LocalDate day) throws Exception {
+        return flatten(accountId, actor, reason, day, Map.of());
+    }
+
+    /** As above, with {@code audit} added to the FLATTEN audit detail (an admin's flatten: by_admin, consent). */
+    public List<String> flatten(long accountId, String actor, String reason, LocalDate day, Map<String, ?> audit)
+            throws Exception {
         BrokerAccount account = accounts.byId(accountId).orElseThrow(() -> new IllegalArgumentException("no account "
                 + accountId));
-        new KillSwitches(dataSource).engageAccount(account, "FLATTEN by " + actor + ": " + reason, actor);
-        return flattenOnLane(account, day, "FLATTEN");
+        // second review 20 Nov 2026: an admin's flatten marks its kill by_admin too (the member is told once, by AdminExits)
+        new KillSwitches(dataSource).engageAccount(account, "FLATTEN by " + actor + ": " + reason, actor,
+                Boolean.TRUE.equals(audit.get("by_admin")) ? Map.of("by_admin", true) : Map.of());
+        return flattenOnLane(account, day, "FLATTEN", null, null, withActor(actor, audit));
     }
+
+    /** The audit detail of a person's exit: who asked (the simulator's audit row is written as "flatten"). */
+    private static Map<String, Object> withActor(String actor, Map<String, ?> audit) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("actor", actor);
+        out.putAll(audit);
+        return out;
+    }
+
+    /**
+     * The exits a person asked for (admin exit desk, user 20 Nov 2026): a simulated venue sells these only at a bid of the
+     * last 5 minutes and refuses without one (never at the entry price). The automated ones (the end-of-day square-off)
+     * keep the old fallback; every exit records where its price came from in the audit detail.
+     */
+    static final java.util.Set<String> PERSON_EXITS = java.util.Set.of("TRADER_EXIT", "ADMIN_EXIT", "FLATTEN");
 
     /**
      * The square-off of every broker whose time ({@link BrokerRules#squareOff}) has come at {@code now} (IST) and that was
@@ -645,12 +668,23 @@ public final class ExecutionLoop implements AutoCloseable {
     /** {@code quantity}: sell this many (whole lots) and keep the rest open; null: all of it (17 Nov 2026). */
     public List<String> exitPosition(long accountId, long positionId, String actor, LocalDate day, Long quantity)
             throws Exception {
+        return exitPosition(accountId, positionId, actor, day, quantity, false, Map.of());
+    }
+
+    /**
+     * As above; {@code byAdmin} (admin exit desk, user 20 Nov 2026): someone other than the account's owner asked (the
+     * platform admin), so the position closes as ADMIN_EXIT instead of TRADER_EXIT ("exited by you" would be wrong on the
+     * member's page); {@code audit} is added to the POSITION_EXIT audit detail (reason, consent, batch).
+     */
+    public List<String> exitPosition(long accountId, long positionId, String actor, LocalDate day, Long quantity,
+                                     boolean byAdmin, Map<String, ?> audit) throws Exception {
         BrokerAccount account = accounts.byId(accountId).orElseThrow(() -> new IllegalArgumentException("no account "
                 + accountId));
         if (account.role() == com.autotrade.account.AccountRole.SIGNAL_SOURCE) {
             throw new IllegalArgumentException(account.displayName() + " is a signal source: its positions are not orders");
         }
-        List<String> lines = flattenOnLane(account, day, "TRADER_EXIT", positionId, quantity);
+        List<String> lines = flattenOnLane(account, day, byAdmin ? "ADMIN_EXIT" : "TRADER_EXIT", positionId, quantity,
+                withActor(actor, audit));
         return lines.isEmpty() ? List.of("position " + positionId + " is not open") : lines;
     }
 
@@ -793,7 +827,8 @@ public final class ExecutionLoop implements AutoCloseable {
                     return lines;
                 }
                 for (long positionId : open) {
-                    lines.addAll(flattenHere(account, risk, route, epoch, borrowed, day, "TRADER_EXIT", positionId, null));
+                    lines.addAll(flattenHere(account, risk, route, epoch, borrowed, day, "TRADER_EXIT", positionId, null,
+                            withActor(actor, Map.of())));
                 }
                 return lines;
             });
@@ -811,11 +846,11 @@ public final class ExecutionLoop implements AutoCloseable {
     }
 
     private List<String> flattenOnLane(BrokerAccount account, LocalDate day, String reason) throws Exception {
-        return flattenOnLane(account, day, reason, null, null);
+        return flattenOnLane(account, day, reason, null, null, Map.of());
     }
 
-    private List<String> flattenOnLane(BrokerAccount account, LocalDate day, String reason, Long positionId, Long quantity)
-            throws Exception {
+    private List<String> flattenOnLane(BrokerAccount account, LocalDate day, String reason, Long positionId, Long quantity,
+                                       Map<String, ?> audit) throws Exception {
         FollowerRisk risk = risks.computeIfAbsent(account.id(), id -> FollowerRisk.load(Path.of(account.riskFile())));
         BrokerConnections.Route route = connections.route(account, risk);
         if (route.venue() == null) {
@@ -823,7 +858,7 @@ public final class ExecutionLoop implements AutoCloseable {
         }
         try {
             return onLane(account, (epoch, borrowed) -> flattenHere(account, risk, route, epoch, borrowed, day, reason,
-                    positionId, quantity));
+                    positionId, quantity, audit));
         } catch (IllegalStateException e) {
             if (!String.valueOf(e.getMessage()).startsWith("another worker")) {
                 throw e;
@@ -834,11 +869,14 @@ public final class ExecutionLoop implements AutoCloseable {
 
     /** A flatten already on the account's lane, under its lease ({@code borrowed}: a simulator of its own). */
     private List<String> flattenHere(BrokerAccount account, FollowerRisk risk, BrokerConnections.Route route, long epoch,
-                                     boolean borrowed, LocalDate day, String reason, Long positionId, Long quantity) {
+                                     boolean borrowed, LocalDate day, String reason, Long positionId, Long quantity,
+                                     Map<String, ?> audit) {
         // main 16 Nov 2026 (multi-broker): the account's own costs and the broker's rules, as every follower is built
         FollowerSimulator simulator = borrowed ? follower(account, risk, route, epoch)
                 : simulators.computeIfAbsent(account.id(), id -> follower(account, risk, route, epoch));
-        return simulator.flatten(account, day, this::flattenPrice, reason, positionId, quantity);
+        boolean person = PERSON_EXITS.contains(reason);
+        return simulator.flatten(account, day, position -> flattenPrice(position, person), reason, positionId, quantity,
+                audit);
     }
 
     /** Work on an account's own lane, under its lease (borrowed for the call when this worker does not hold it). */
@@ -874,18 +912,151 @@ public final class ExecutionLoop implements AutoCloseable {
         }
     }
 
-    private double flattenPrice(Map<String, Object> position) {
+    /** How old a stored bid may be to count as fresh for a simulated exit (else a person's exit says how old it is). */
+    static final java.time.Duration EXIT_QUOTE_MAX_AGE = java.time.Duration.ofMinutes(5);
+    private static final java.time.ZoneId IST = java.time.ZoneId.of("Asia/Kolkata");
+
+    /**
+     * A simulated exit's price. Automated exits (the end-of-day square-off): the stored bid of the last 5 minutes, else the
+     * contract's last signal price, else the entry price, as before. A person's exit ({@code person}; admin exit desk
+     * review, user 20 Nov 2026), never the entry price: the stored bid of the last 5 minutes; else today's latest stored bid
+     * of any age ("stale-bid", its age said in the line and the audit); else the contract's last signal price today
+     * ("signal"); else refused. A broker venue prices from the broker and ignores all of this.
+     */
+    private FollowerSimulator.ExitPrice flattenPrice(Map<String, Object> position, boolean person) {
         long token = ((Number) position.get("instrument_token")).longValue();
         List<Double> bid = jdbc.queryForList("select bid_px[1] from md.option_tick where instrument_token = ? "
-                + "and recv_ts > now() - interval '5 minutes' and bid_px[1] > 0 order by recv_ts desc limit 1", Double.class,
-                token);
+                + "and recv_ts > now() - make_interval(secs => ?) and bid_px[1] > 0 order by recv_ts desc limit 1",
+                Double.class, token, (double) EXIT_QUOTE_MAX_AGE.toSeconds());
         if (!bid.isEmpty() && bid.getFirst() != null) {
-            return bid.getFirst();
+            return new FollowerSimulator.ExitPrice(bid.getFirst(), "bid", null);
         }
+        if (!person) {
+            List<Double> signal = jdbc.queryForList("select reference_price from exec.signal_decision where instrument_token "
+                    + "= ? and reference_price > 0 order by decided_at desc limit 1", Double.class, token);
+            boolean fromSignal = !signal.isEmpty() && signal.getFirst() != null;
+            return new FollowerSimulator.ExitPrice(fromSignal ? signal.getFirst()
+                    : ((Number) position.get("average_entry")).doubleValue(), fromSignal ? "signal" : "entry", null);
+        }
+        java.sql.Timestamp dayStart = java.sql.Timestamp.from(LocalDate.now(IST).atStartOfDay(IST).toInstant());
+        Map<String, Object> stale = todaysLastBid(position, token, dayStart);
+        if (stale != null) {
+            long minutes = Math.max(0, java.time.Duration.between(((java.sql.Timestamp) stale.get("recv_ts")).toInstant(),
+                    Instant.now()).toMinutes());
+            return new FollowerSimulator.ExitPrice(((Number) stale.get("bid")).doubleValue(), "stale-bid", null,
+                    "last bid " + minutes + " min old");
+        }
+        // only a signal decided after the position opened (an EXIT or an ADD of the contract): the latest signal of the day
+        // is usually the position's own ENTER, whose price would book a fake zero P&L (principal review, 20 Nov 2026)
+        Object openedAt = position.get("opened_at");
+        java.sql.Timestamp after = openedAt instanceof java.sql.Timestamp t && t.after(dayStart) ? t : dayStart;
         List<Double> signal = jdbc.queryForList("select reference_price from exec.signal_decision where instrument_token = ? "
-                + "and reference_price > 0 order by decided_at desc limit 1", Double.class, token);
-        return !signal.isEmpty() && signal.getFirst() != null ? signal.getFirst()
-                : ((Number) position.get("average_entry")).doubleValue();
+                + "and reference_price > 0 and decided_at > ? order by decided_at desc limit 1", Double.class, token, after);
+        if (!signal.isEmpty() && signal.getFirst() != null) {
+            return new FollowerSimulator.ExitPrice(signal.getFirst(), "signal", null,
+                    "no bid today: the price of a signal after the entry");
+        }
+        return new FollowerSimulator.ExitPrice(Double.NaN, "none", "no bid today and no signal since the entry: "
+                + "a paper exit is never booked at the entry price; nothing sold");
+    }
+
+    /**
+     * Today's newest stored bid of the position's contract (bid, recv_ts), read through the contract index (underlying,
+     * expiry, strike, type, time) when ref.instrument knows the key, else by token within today; null when none.
+     */
+    private Map<String, Object> todaysLastBid(Map<String, Object> position, long token, java.sql.Timestamp dayStart) {
+        String key = (String) position.get("instrument_key");
+        List<Map<String, Object>> contract = key == null ? List.of() : jdbc.queryForList("select expiry, strike, type "
+                + "from ref.instrument where instrument_key = ? and type in ('CE', 'PE') order by snapshot_id desc limit 1",
+                InstrumentKeys.normalize(key, token));
+        List<Map<String, Object>> rows = contract.isEmpty()
+                ? jdbc.queryForList("select bid_px[1] bid, recv_ts from md.option_tick where instrument_token = ? "
+                        + "and recv_ts >= ? and bid_px[1] > 0 order by recv_ts desc limit 1", token, dayStart)
+                : jdbc.queryForList("select bid_px[1] bid, recv_ts from md.option_tick where underlying = ? and expiry = ? "
+                        + "and strike = ? and option_type = ? and recv_ts >= ? and bid_px[1] > 0 order by recv_ts desc "
+                        + "limit 1", position.get("underlying"), contract.getFirst().get("expiry"),
+                        contract.getFirst().get("strike"), contract.getFirst().get("type"), dayStart);
+        return rows.isEmpty() || rows.getFirst().get("bid") == null ? null : rows.getFirst();
+    }
+
+    /**
+     * One position's exit judged on the account's own lane (admin exit desk review, user 20 Nov 2026): the position is read
+     * there just before the exit (closed by then, e.g. by its strategy: ALREADY_CLOSED, nothing sent), the exit runs as
+     * {@link #exitPosition(long, long, String, LocalDate, Long, boolean, Map)} does, and the position and the exit orders
+     * it wrote are read after it ({@link ExitOutcome#classify}): an order that may still work is UNKNOWN, never REFUSED.
+     */
+    public ExitOutcome exitPositionOutcome(long accountId, long positionId, String actor, LocalDate day, boolean byAdmin,
+                                           Map<String, ?> audit) throws Exception {
+        BrokerAccount account = accounts.byId(accountId).orElseThrow(() -> new IllegalArgumentException("no account "
+                + accountId));
+        if (account.role() == com.autotrade.account.AccountRole.SIGNAL_SOURCE) {
+            throw new IllegalArgumentException(account.displayName() + " is a signal source: its positions are not orders");
+        }
+        FollowerRisk risk = risks.computeIfAbsent(account.id(), id -> FollowerRisk.load(Path.of(account.riskFile())));
+        BrokerConnections.Route route = connections.route(account, risk);
+        if (route.venue() == null) {
+            // plan phase D2 (20 Nov 2026): a LIVE account the worker cannot reach (logged out, no static IP, ...) says what
+            // to do instead; its broker stop was never touched
+            return ExitOutcome.refused(List.of("not exited: " + route.description()), route.description()
+                    + (account.tradeMode() == TradeMode.LIVE ? "; nothing sent, its broker stop untouched: ask the holder "
+                    + "to exit in the broker app, then book a hand exit here" : ""));
+        }
+        Map<String, ?> detail = withActor(actor, audit);
+        try {
+            return onLane(account, (epoch, borrowed) -> {
+                Map<String, Object> before = jdbc.queryForList("select status, quantity_open, entry_trade_intent_id from "
+                        + "exec.position where id = ? and broker_account_id = ?", positionId, accountId).stream().findFirst()
+                        .orElse(null);
+                if (before == null) {
+                    return ExitOutcome.refused(List.of(), "no position " + positionId + " in " + account.displayName());
+                }
+                long open = ((Number) before.get("quantity_open")).longValue();
+                if ("CLOSED".equals(before.get("status")) || open <= 0) {
+                    return new ExitOutcome(ExitOutcome.ALREADY_CLOSED, open, open, List.of(), "closed before the exit "
+                            + "got its turn (its strategy, a stop or another exit)");
+                }
+                if (!"OPEN".equals(before.get("status"))) {
+                    // second review 20 Nov 2026: RECONCILIATION_REQUIRED (our record and the broker's disagree): the flatten
+                    // sells only OPEN positions, so nothing is sent; at a broker what it holds is not known
+                    String why = "nothing sent: the position is " + before.get("status") + " (our record and the broker's "
+                            + "disagree); reconcile it first";
+                    return route.venue().broker() ? new ExitOutcome(ExitOutcome.UNKNOWN, open, open, List.of(), why + ": "
+                            + ExitOutcome.UNKNOWN_ADVICE) : new ExitOutcome(ExitOutcome.REFUSED, open, open, List.of(), why);
+                }
+                long intent = ((Number) before.get("entry_trade_intent_id")).longValue();
+                long mark = jdbc.queryForObject("select coalesce(max(id), 0) from exec.order_execution", Long.class);
+                List<String> lines;
+                RuntimeException failure = null;
+                try {
+                    lines = flattenHere(account, risk, route, epoch, borrowed, day, byAdmin ? "ADMIN_EXIT" : "TRADER_EXIT",
+                            positionId, null, detail);
+                } catch (RuntimeException e) {
+                    failure = e;
+                    lines = List.of("the exit failed: " + e.getMessage());
+                    log.error("account {} ({}): exit of position {} failed", account.id(), account.displayName(), positionId,
+                            e);
+                }
+                try {
+                    Map<String, Object> after = jdbc.queryForMap("select status, quantity_open from exec.position where id = ?",
+                            positionId);
+                    List<String> orders = jdbc.queryForList("select status from exec.order_execution where trade_intent_id = ? "
+                            + "and role = 'EMERGENCY_EXIT' and id > ? order by id", String.class, intent, mark);
+                    return ExitOutcome.classify(open, ((Number) after.get("quantity_open")).longValue(),
+                            "CLOSED".equals(after.get("status")), lines, orders, failure, route.venue().broker());
+                } catch (RuntimeException e) {
+                    return new ExitOutcome(ExitOutcome.UNKNOWN, open, null, lines, "the exit was sent but its result could "
+                            + "not be read (" + e.getMessage() + "): " + ExitOutcome.UNKNOWN_ADVICE);
+                }
+            });
+        } catch (java.util.concurrent.TimeoutException e) {
+            return ExitOutcome.unknown(List.of(), "the exit is still queued behind the account's running turn and may "
+                    + "still sell");
+        } catch (IllegalStateException e) {
+            if (!String.valueOf(e.getMessage()).startsWith("another worker")) {
+                throw e;
+            }
+            return ExitOutcome.refused(List.of("not exited here: " + e.getMessage()), e.getMessage());
+        }
     }
 
     /** End-of-day broker reconciliation for every broker-routed account this worker holds; returns the ledger rows. */

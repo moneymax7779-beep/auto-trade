@@ -55,6 +55,15 @@ public final class KillSwitches {
      * same difference every 30 s wrote 1,076 audit rows).
      */
     public void engageAccount(BrokerAccount account, String reason, String actor) {
+        engageAccount(account, reason, actor, Map.of());
+    }
+
+    /**
+     * As above, with {@code extra} added to the audit row's detail (second review of the admin exit desk, 20 Nov 2026:
+     * {@code by_admin: true} on the platform admin's kill of a member's account, so the alert of it goes to the admin chat
+     * only and the member hears of the admin's action once, from its own message).
+     */
+    public void engageAccount(BrokerAccount account, String reason, String actor, Map<String, ?> extra) {
         // review 16 Nov 2026: a HOLD (a canary run's entry hold) is not a kill: a real one engaged meanwhile gets its own
         // row, or the hold's release at the run's end lifted it in silence
         int engaged = jdbc.update("insert into exec.kill_switch (tenant_id, scope, broker_account_id, reason, engaged_by) "
@@ -67,7 +76,10 @@ public final class KillSwitches {
                 + "and l.detail ->> 'reason' = ? and l.at >= k.engaged_at)", Boolean.class, account.id(), reason)) {
             return;                                                   // this reason is already on record for the switch
         }
-        audit(account, actor, engaged > 0 ? "KILL_ACCOUNT" : "KILL_ACCOUNT_ALREADY_ENGAGED", Map.of("reason", reason));
+        Map<String, Object> detail = new java.util.LinkedHashMap<>();
+        detail.put("reason", reason);
+        extra.forEach(detail::putIfAbsent);
+        audit(account, actor, engaged > 0 ? "KILL_ACCOUNT" : "KILL_ACCOUNT_ALREADY_ENGAGED", detail);
         log.error("ACCOUNT KILL {} ({}): {}", account.id(), account.displayName(), reason);
     }
 

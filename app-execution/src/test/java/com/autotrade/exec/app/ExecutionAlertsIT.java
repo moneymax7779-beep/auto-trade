@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.LocalDate;
 import java.util.List;
+import java.util.Map;
 
 import org.flywaydb.core.Flyway;
 import org.junit.jupiter.api.AfterAll;
@@ -81,5 +82,37 @@ class ExecutionAlertsIT {
         kills.engageAccount(dryRun, "RECONCILIATION: BSE_FO|1134459: ours 20, broker 0", "reconciler");
         assertThat(alerts.collect().stream().map(ExecutionAlerts.Alert::text).toList()).singleElement().asString().startsWith("ZERODHA-1 (DRY_RUN): KILL_ACCOUNT ")
                 .contains("ours 20, broker 0");
+    }
+
+    /**
+     * Review 20 Nov 2026: an admin's flatten of a member's account tells the members once (AdminExits, with the admin's
+     * reason); its FLATTEN audit row goes to the admin chat only. A member's own flatten is still sent to them.
+     */
+    @Test
+    void anAdminsFlattenIsNotSentToTheMembersASecondTime() {
+        AccountStore accounts = new AccountStore(dataSource);
+        long tenant = accounts.ensureTenant("member-alerts");
+        long member = accounts.ensureUser("kc-member-alerts", "member");
+        accounts.ensureMembership(tenant, member, "OWNER");
+        JdbcTemplate jdbc = new JdbcTemplate(dataSource);
+        jdbc.update("update acct.tenant set trading_control = 'DAILY_SWITCH' where id = ?", tenant);
+        long account = accounts.ensureFollowerAccount(tenant, member, "MEMBER-KITE", BrokerType.ZERODHA, TradeMode.DRY_RUN,
+                200_000, EquityMode.FIXED, LocalDate.of(2026, 10, 26), "../config/risk/follower-risk.v7.yaml", 0);
+        ExecutionAlerts alerts = new ExecutionAlerts(dataSource, null);
+        assertThat(alerts.collect()).isEmpty();
+        String insert = "insert into exec.audit_log (tenant_id, broker_account_id, actor, action, detail) values (?, ?, "
+                + "'flatten', 'FLATTEN', ?::jsonb)";
+        jdbc.update(insert, tenant, account, "{\"reason\": \"FLATTEN\", \"by_admin\": true, \"admin_reason\": \"drill\"}");
+        jdbc.update(insert, tenant, account, "{\"reason\": \"FLATTEN\", \"by_admin\": false}");
+        // second review 20 Nov 2026: the admin's kill switch (a flatten's or a batch's) the same: once, from AdminExits
+        BrokerAccount kite = accounts.byId(account).orElseThrow();
+        new KillSwitches(dataSource).engageAccount(kite, "ADMIN EXIT BATCH by kc-admin: drill", "kc-admin",
+                Map.of("by_admin", true));
+        List<ExecutionAlerts.Alert> sent = alerts.collect();
+        assertThat(sent).hasSize(3);
+        assertThat(sent.get(0).memberTenant()).as("the admin's: the members hear it from AdminExits").isNull();
+        assertThat(sent.get(1).memberTenant()).as("the member's own").isEqualTo(tenant);
+        assertThat(sent.get(2).text()).contains("KILL_ACCOUNT");
+        assertThat(sent.get(2).memberTenant()).as("the admin's kill: admin chat only").isNull();
     }
 }

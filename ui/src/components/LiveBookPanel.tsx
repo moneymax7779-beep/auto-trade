@@ -169,7 +169,8 @@ export function LiveBookPanel({ accountId, hideEmpty }: { accountId: number; hid
       : p.stop == null ? "no stop on record"
       : p.stopWorking ? <>stop resting at the broker{p.bid != null ? <> · {px(p.bid - p.stop)} pts below the bid · {money(p.atRisk ?? null, false)} at risk</> : null}</>
       : <span className="text-down">stop {p.stopStatus?.toLowerCase() ?? "not working"} at the broker</span>,
-    actions: b.canAct || b.canStop ? <PositionActions accountId={accountId} p={p} paper={paper} /> : undefined,
+    actions: b.canAct || b.canStop ? <PositionActions accountId={accountId} p={p} paper={paper}
+      reasonRequired={b.reasonRequired} /> : undefined,
     flags: p.strategyExitedAt || p.lateJoin ? (
       <div className="space-y-0.5 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 md:col-span-4">
         {p.strategyExitedAt && <div><b>Not managed by its strategy:</b> {p.strategy} exited this contract at {p.strategyExitedAt.slice(11, 19)}.
@@ -237,8 +238,11 @@ const istNow = () => new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 
  * - Book hand exit: it was sold outside the app (in Kite): our record closes as MANUAL at the price and time the trader
  *   enters; nothing is sent to the broker. Opened by itself when the reconciler found the broker holds none of it.
  */
-function PositionActions({ accountId, p, paper }: { accountId: number; p: LiveOpenPosition; paper?: boolean }) {
+function PositionActions({ accountId, p, paper, reasonRequired }: { accountId: number; p: LiveOpenPosition; paper?: boolean;
+  /** admin exit desk (20 Nov 2026): SUPPORT exiting a member's position gives a reason (the member is told) */
+  reasonRequired?: boolean }) {
   const client = useQueryClient();
+  const [reason, setReason] = useState("");
   const hint = p.notAtBroker;
   const [mode, setMode] = useState<"idle" | "exit" | "hand">(hint ? "hand" : "idle");
   const [price, setPrice] = useState<string>(() => (hint?.bidFirst ?? p.bid ?? p.entry).toFixed(2));
@@ -261,7 +265,8 @@ function PositionActions({ accountId, p, paper }: { accountId: number; p: LiveOp
   const newKey = () => setKey(typeof crypto !== "undefined" && "randomUUID" in crypto ? crypto.randomUUID()
     : `${Date.now()}-${Math.random()}`);
   const exit = useMutation({
-    mutationFn: () => postJson<{ result: string[]; repeat?: boolean }>(`${base}/exit`, { confirm: "EXIT", quantity: qty ?? null, key }),
+    mutationFn: () => postJson<{ result: string[]; repeat?: boolean }>(`${base}/exit`, { confirm: "EXIT", quantity: qty ?? null,
+      key, reason: reason.trim() || null }),
     onSuccess: (r) => { setDone((r.repeat ? "already sent: " : "") + r.result.join(" · ")); setMode("idle"); },
     // a refusal (4xx) sold nothing: the next click is a new attempt; anything else may have sold, so it keeps its key
     onError: (e) => { if (/^4\d\d:/.test((e as Error).message)) newKey(); },
@@ -274,6 +279,7 @@ function PositionActions({ accountId, p, paper }: { accountId: number; p: LiveOp
   const pv = preview.data;
   // review 17 Nov 2026: a failed preview never blocks the exit; it asks for the typed EXIT instead
   const mustType = preview.error != null || (pv != null && (pv.typeToConfirm || (paper === true && pv.warnings.length > 0)));
+  const needsReason = reasonRequired === true || pv?.reasonRequired === true;
   const hand = useMutation({
     mutationFn: () => postJson<{ result: string }>(`${base}/hand-exit`, { price: Number(price), at, unchecked }),
     onSuccess: (r) => { setDone(r.result); setMode("idle"); },
@@ -320,7 +326,7 @@ function PositionActions({ accountId, p, paper }: { accountId: number; p: LiveOp
               <tbody>
                 <tr><td className="py-0.5 pr-3 text-muted">Sell</td><td className="num">{lotsText(pv.quantity, pv.lotSize)}{pv.remaining > 0 ? ` · ${pv.remaining.toLocaleString("en-IN")} stay open` : " · closes the position"}</td></tr>
                 <tr><td className="py-0.5 pr-3 text-muted">Order</td><td>{pv.how}{pv.orders > 1 ? ` · ${pv.orders} orders (freeze ${pv.freezeQuantity?.toLocaleString("en-IN")})` : ""}</td></tr>
-                <tr><td className="py-0.5 pr-3 text-muted">Est. price</td><td className="num">{px(pv.price)} {pv.priceFrom === "bid" ? <>bid{pv.bidQuantity != null ? <> × {pv.bidQuantity.toLocaleString("en-IN")}</> : null}</> : <span className="text-amber-800">({pv.priceFrom}'s price: no fresh bid)</span>}
+                <tr><td className="py-0.5 pr-3 text-muted">Est. price</td><td className="num">{px(pv.price)} {pv.priceFrom === "bid" ? <>bid{pv.bidQuantity != null ? <> × {pv.bidQuantity.toLocaleString("en-IN")}</> : null}</> : <span className="text-amber-800">({pv.priceNote ?? `${pv.priceFrom}'s price: no fresh bid`})</span>}
                   {pv.spreadPct != null ? ` · spread ${pv.spreadPct.toFixed(1)} %` : ""}{pv.quoteAgeSec != null ? ` · ${pv.quoteAgeSec} s old` : ""}</td></tr>
                 <tr><td className="py-0.5 pr-3 text-muted">Gross</td><td className={`num ${tone(pv.gross)}`}>{money(pv.gross)}</td></tr>
                 {pv.charges != null && <tr><td className="py-0.5 pr-3 text-muted">Charges</td><td className="num">{money(pv.charges, false)}</td></tr>}
@@ -332,11 +338,26 @@ function PositionActions({ accountId, p, paper }: { accountId: number; p: LiveOp
           {pv && pv.warnings.length > 0 && (
             <ul className="list-disc pl-5 text-amber-900">{pv.warnings.map((w) => <li key={w}>{w}</li>)}</ul>
           )}
+          {pv?.preconditions && (
+            <ul className="text-xs">
+              {([["session", "Broker login"], ["staticIp", "Static IP"], ["lease", "Worker"], ["squareOff", "Square-off"]] as const)
+                .filter(([k]) => pv.preconditions?.[k]).map(([k, label]) => {
+                  const c = pv.preconditions![k]!;
+                  return <li key={k} className={c.ok === false ? "font-semibold text-rose-800" : c.ok ? "text-emerald-800" : "text-muted"}>
+                    {c.ok === false ? "✗" : c.ok ? "✓" : "·"} {label}: {c.text}</li>;
+                })}
+            </ul>
+          )}
+          {pv?.brokerDown && <div className="font-semibold text-rose-800">{pv.brokerDown}</div>}
+          {pv?.refusal && <div className="font-semibold text-rose-800">Not possible now: {pv.refusal}</div>}
+          {needsReason && <input placeholder="Reason (the member is told)" value={reason} maxLength={300}
+            onChange={(e) => setReason(e.target.value)} className="w-full max-w-xl rounded border border-rose-300 bg-white px-2 py-1 text-sm" />}
           <div className="flex flex-wrap items-center gap-2">
             {mustType && <input placeholder="type EXIT" value={typed} onChange={(e) => setTyped(e.target.value)}
               className="w-28 rounded border border-rose-300 bg-white px-2 py-1 text-sm" />}
             <button className={`${btn} border-rose-500 bg-rose-600 text-white hover:bg-rose-700`}
-              disabled={exit.isPending || (!pv && !preview.error) || (mustType && typed !== "EXIT")}
+              disabled={exit.isPending || (!pv && !preview.error) || (mustType && typed !== "EXIT") || pv?.refusal != null
+                || (needsReason && reason.trim() === "")}
               onClick={() => exit.mutate()}>{exit.isPending ? "Selling…" : `Exit ${Math.min(lots, allLots)} lot${Math.min(lots, allLots) === 1 ? "" : "s"} now`}</button>
             <button className={`${btn} border-line bg-white`} disabled={exit.isPending} onClick={() => setMode("idle")}>Cancel</button>
             {mustType && <span className="text-xs text-muted">{preview.error ? "No preview: type EXIT to confirm."
@@ -587,6 +608,7 @@ function Tag({ children, strategy }: { children: ReactNode; strategy?: boolean }
 
 const REASONS: Record<string, string> = { STOP: "stop", MANUAL: "sold by hand", TARGET: "target", FLAT_BY: "end of day",
   TRAIL: "trail", EOD_SQUARE_OFF: "square-off", FLATTEN: "flattened", TIME_60: "60-min time stop", TRADER_EXIT: "exited by you",
+  ADMIN_EXIT: "exited by the admin",
   EARLY_FAIL_15: "15-min early exit" };
 
 function ClosedTable({ rows, showDay }: { rows: ClosedView[]; showDay: boolean }) {

@@ -32,7 +32,8 @@ class ExecutionService implements DisposableBean {
 
     private static final Logger log = LoggerFactory.getLogger(ExecutionService.class);
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
-    static final int REQUIRED_SCHEMA = 43;          // V43: Telegram updates per bot (V42: reader's offset, V41: its bot)
+    // V51: the members' consent to admin exits (admin exit desk, 20 Nov 2026); V43: Telegram updates per bot
+    static final int REQUIRED_SCHEMA = 51;
 
     private final DataSource dataSource;
     private final ExecutionProperties properties;
@@ -251,8 +252,9 @@ class ExecutionService implements DisposableBean {
         Integer version = new JdbcTemplate(dataSource).queryForObject(
                 "select max(version::int) from flyway_schema_history where success", Integer.class);
         if (version == null || version < REQUIRED_SCHEMA) {
-            throw new IllegalStateException("schema version " + version + " < " + REQUIRED_SCHEMA
-                    + ": start trading-core with this code first (it owns the migrations)");
+            // review 20 Nov 2026: say plainly which migration is missing (the deploy starts trading-core first)
+            throw new IllegalStateException("trading-core has not applied V" + REQUIRED_SCHEMA + " yet: start trading-core "
+                    + "first (it owns the migrations; schema version now " + version + ")");
         }
         if (rules == null) {
             throw new IllegalStateException("no broker rules (autotrade.execution.broker-rules-file)");
@@ -349,11 +351,53 @@ class ExecutionService implements DisposableBean {
 
     /** {@code quantity}: whole lots of the position to sell, the rest stays open; null: all of it. */
     List<String> exitPosition(long accountId, long positionId, String actor, LocalDate day, Long quantity) throws Exception {
+        return exitPosition(accountId, positionId, actor, day, quantity, false, java.util.Map.of());
+    }
+
+    /**
+     * As above; {@code byAdmin}: someone other than the account's owner asked (closes as ADMIN_EXIT), {@code audit}: added
+     * to the POSITION_EXIT audit detail (admin exit desk, user 20 Nov 2026).
+     */
+    List<String> exitPosition(long accountId, long positionId, String actor, LocalDate day, Long quantity, boolean byAdmin,
+                              java.util.Map<String, ?> audit) throws Exception {
         ExecutionLoop current = loop;
         if (current == null) {
             return List.of("the worker has not started");
         }
-        return current.exitPosition(accountId, positionId, actor, day, quantity);
+        return current.exitPosition(accountId, positionId, actor, day, quantity, byAdmin, audit);
+    }
+
+    /** One position's exit judged on its lane (the admin exit desk's batch; see ExecutionLoop#exitPositionOutcome). */
+    com.autotrade.execution.ExitOutcome exitPositionOutcome(long accountId, long positionId, String actor, LocalDate day,
+                                                            boolean byAdmin, java.util.Map<String, ?> audit)
+            throws Exception {
+        ExecutionLoop current = loop;
+        if (current == null) {
+            return com.autotrade.execution.ExitOutcome.refused(List.of("the worker has not started"),
+                    "the worker has not started");
+        }
+        return current.exitPositionOutcome(accountId, positionId, actor, day, byAdmin, audit);
+    }
+
+    /** {@link #flatten} with {@code audit} added to the FLATTEN audit detail (an admin's flatten). */
+    List<String> flatten(long accountId, String actor, String reason, LocalDate day, java.util.Map<String, ?> audit)
+            throws Exception {
+        ExecutionLoop current = loop;
+        if (current == null) {
+            // second review 20 Nov 2026: the switch still goes on (as Telegram's flatten does), so the members' message
+            // "new entries are stopped" is true even before the worker has started
+            new com.autotrade.account.AccountStore(dataSource).byId(accountId).ifPresent(a -> new com.autotrade.execution.KillSwitches(dataSource)
+                    .engageAccount(a, "FLATTEN by " + actor + ": " + reason, actor,
+                            Boolean.TRUE.equals(audit.get("by_admin")) ? java.util.Map.of("by_admin", true)
+                                    : java.util.Map.of()));
+            return List.of("the worker has not started: kill switch on, nothing sold");
+        }
+        return current.flatten(accountId, actor, reason, day, audit);
+    }
+
+    /** This worker's id (its account leases carry it as their owner). */
+    String workerId() {
+        return properties.workerId();
     }
 
     String bookManualExit(long accountId, long positionId, double price, java.time.Instant at, String actor,

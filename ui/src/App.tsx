@@ -4,6 +4,7 @@ import { Navigate, NavLink, Route, Routes, useLocation } from "react-router";
 import { get, type ExecMe, type ExecutionAccount } from "./api";
 import { MobileNav, type NavItem } from "./components/MobileNav";
 import { AppUpdate } from "./components/AppUpdate";
+import { AdminExitBanner } from "./components/AdminExitBanner";
 import { PageBoundary } from "./components/PageBoundary";
 import { WorkspaceProvider, WorkspaceSwitcher } from "./workspace";
 
@@ -47,6 +48,7 @@ const LedgerScreen = page(() => import("./mobile/LedgerScreen"), "LedgerScreen")
 const BrokerWizard = page(() => import("./mobile/BrokerWizard"), "BrokerWizard");
 const StrategiesScreen = page(() => import("./mobile/StrategiesScreen"), "StrategiesScreen");
 const NotificationsScreen = page(() => import("./mobile/NotificationsScreen"), "NotificationsScreen");
+const AdminPositionsPage = page(() => import("./pages/AdminPositionsPage"), "AdminPositionsPage");
 
 /** Below the md breakpoint "/" opens the phone's Home instead of the desktop's first page. */
 const phone = () => typeof window !== "undefined" && window.matchMedia?.("(max-width: 767px)").matches;
@@ -82,6 +84,9 @@ const MEMBER_NAV: readonly NavItem[] = [
   ["/settings", "Settings"],
 ];
 
+/** The platform admin's exit desk (20 Nov 2026): every open position of every workspace; shown to them only. */
+const ADMIN_NAV: readonly NavItem[] = [["/admin/positions", "Open positions"]];
+
 /** The phone's bottom tabs (mobile phase 0); every other menu item is under More. "/index" covers the three charts. */
 // Phase 1: Home, Positions, Chart, Ledger for everyone; the rest of each menu (Overview, Accounts, Today, Brokers...) under More.
 const TABS: readonly NavItem[] = [["/home", "Home"], ["/positions", "Positions"], ["/index/NIFTY", "Chart"], ["/ledger", "Ledger"]];
@@ -91,12 +96,15 @@ const PHONE_MORE: readonly NavItem[] = [["/strategies", "Strategies"], ["/notifi
 
 export function App() {
   const me = useQuery({ queryKey: ["me"], queryFn: () => get<Me>("/api/me"), staleTime: 60_000 });
+  const execMe = useQuery({ queryKey: ["exec-me"], queryFn: () => get<ExecMe>("/api/execution/me"), staleTime: 30_000,
+    retry: false });
   const location = useLocation();
   // offline, React Query pauses the call (it never fails): show the shell then, and let each page say it is offline
   if (me.isPending && me.fetchStatus !== "paused") return null;
   // fails closed: if /api/me cannot be read, the member's menu (the server refuses the rest anyway)
   const member = !me.data || (me.data.mode === "oidc" && !me.data.operator);
-  const nav = member ? MEMBER_NAV : NAV;
+  // the exit desk is the platform admin's (the server refuses everyone else too)
+  const nav = member ? MEMBER_NAV : execMe.data?.admin ? [...NAV, ...ADMIN_NAV] : NAV;
   return (
     <WorkspaceProvider>
     <div className="min-h-full">
@@ -122,6 +130,7 @@ export function App() {
         </div>
       </header>
       <main className="mx-auto max-w-7xl pb-[calc(5rem+env(safe-area-inset-bottom))] pl-[max(1rem,env(safe-area-inset-left))] pr-[max(1rem,env(safe-area-inset-right))] pt-4 md:pb-4">
+        <AdminExitBanner />
         <PageBoundary key={location.pathname}>
         <Suspense fallback={<p className="text-sm text-muted">Loading…</p>}>
         {member ? (
@@ -163,6 +172,7 @@ export function App() {
           <Route path="/brokers" element={<BrokersPage />} />
             <Route path="/brokers/add" element={<BrokerWizard />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/admin/positions" element={<AdminPositionsPage />} />
         </Routes>
         )}
         </Suspense>

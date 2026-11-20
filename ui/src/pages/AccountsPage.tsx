@@ -277,8 +277,10 @@ function GlobalLivePanel({ onDone }: { onDone: (text: string, ok: boolean) => vo
 }
 
 /** A destructive action that needs its word typed before it is sent. */
-function TypedConfirm({ word, label, busy, onConfirm }: {
+function TypedConfirm({ word, label, busy, onConfirm, requireReason }: {
   word: string; label: string; busy: boolean; onConfirm: (reason: string) => void;
+  /** review 20 Nov 2026: the platform admin and SUPPORT say why (the server refuses a blank reason; members are told) */
+  requireReason?: boolean;
 }) {
   const [typed, setTyped] = useState("");
   const [reason, setReason] = useState("");
@@ -286,10 +288,12 @@ function TypedConfirm({ word, label, busy, onConfirm }: {
     <div className="flex flex-wrap items-center gap-2">
       <input className="w-40 rounded border border-line bg-bg px-2 py-1 text-sm" placeholder={`type ${word}`}
         value={typed} onChange={(e) => setTyped(e.target.value)} />
-      <input className="w-48 rounded border border-line bg-bg px-2 py-1 text-sm" placeholder="reason"
+      <input className="w-48 rounded border border-line bg-bg px-2 py-1 text-sm"
+        placeholder={requireReason ? "reason (required: the members are told)" : "reason"}
         value={reason} onChange={(e) => setReason(e.target.value)} />
       <button className="rounded bg-down px-3 py-1 text-sm font-semibold text-white disabled:opacity-40"
-        disabled={typed !== word || busy} onClick={() => { onConfirm(reason || "manual"); setTyped(""); }}>
+        disabled={typed !== word || busy || (requireReason === true && reason.trim() === "")}
+        onClick={() => { onConfirm(reason.trim() || "manual"); setTyped(""); }}>
         {busy ? "Working…" : label}
       </button>
     </div>
@@ -306,6 +310,8 @@ export function AccountsPage() {
     refetchInterval: 5000 });
   // the caller's tenants and role in each (29 Oct 2026, family members): what they may do on which account
   const me = useQuery({ queryKey: ["exec-me"], queryFn: () => get<ExecMe>("/api/execution/me"), staleTime: 30_000 });
+  // the platform admin, or SUPPORT anywhere: a flatten needs their reason (review 20 Nov 2026)
+  const adminOrSupport = (me.data?.admin ?? false) || (me.data?.tenants ?? []).some((t) => t.role === "SUPPORT");
   const [auditAccount, setAuditAccount] = useState<number | "">("");
   const audit = useQuery({
     queryKey: ["exec-audit", auditAccount],
@@ -542,7 +548,7 @@ export function AccountsPage() {
               Flatten <span className="font-semibold">{names.get(flattenFor)}</span>: stops its entries (kill switch), takes
               each position's broker stop off, then sells every open position now.
             </p>
-            <TypedConfirm word="FLATTEN" label="Flatten account" busy={act.isPending} onConfirm={(reason) =>
+            <TypedConfirm word="FLATTEN" label="Flatten account" busy={act.isPending} requireReason={adminOrSupport} onConfirm={(reason) =>
               act.mutate({ path: `/api/execution/accounts/${flattenFor}/flatten`, body: { confirm: "FLATTEN", reason },
                 done: `${names.get(flattenFor)} flattened` })} />
           </div>
@@ -574,7 +580,7 @@ export function AccountsPage() {
           Every follower account you may act on{several ? ` (${acting.map((t) => t.name).join(", ")})` : ""}: kill switch,
           broker stops off, every open position sold.
         </p>
-        <TypedConfirm word="FLATTEN ALL" label="Flatten all accounts" busy={act.isPending} onConfirm={(reason) =>
+        <TypedConfirm word="FLATTEN ALL" label="Flatten all accounts" busy={act.isPending} requireReason={adminOrSupport} onConfirm={(reason) =>
           act.mutate({ path: "/api/execution/flatten-all", body: { confirm: "FLATTEN ALL", reason }, done: "flatten all done" })} />
       </Panel>
       </>}
