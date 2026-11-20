@@ -17,6 +17,9 @@ services:
       # Accounts page reaches the execution worker through /api/execution.
       AUTOTRADE_SIGNALSOURCE_ENABLED: "true"
       AUTOTRADE_UI_EXECUTION_URL: http://execution:8096
+      # the live session starts at 07:30 (user 20 Nov 2026: the 09:00 start took to 09:17 that day, two sessions each loading
+      # history); it waits for zt-tiger-v2's Upstox token until 09:00 (SessionRunner.waitForToken)
+      AUTOTRADE_TRADING_STARTAT: "07:30"
       # review 19 Nov 2026: the proxy signs the user it names to the execution worker (shared secret, root-only .env)
       AUTOTRADE_PROXY_SECRET: ${AUTOTRADE_PROXY_SECRET:?set in .env}
     volumes:
