@@ -25,7 +25,7 @@ type N = number | null;
  */
 type Row = [number, N, N, N, N, N?, N?, N?, N?, N?, N?, N?, N?, N?, N?, Who?, Who?, N?, N?, N[]?, (N | string)[]?];
 interface Wall { strike: number; oi: N; change: N; since: string; from: number | null }
-interface Structure { callWall: Wall | null; nearCeiling: Wall | null; nearFloor: Wall | null; putWall: Wall | null; atmIv: N; sigmaClose: N }
+interface Structure { callWall: Wall | null; nearCeiling: Wall | null; nearFloor: Wall | null; putWall: Wall | null; atmIv: N; atmIv15?: N; sigmaClose: N }
 /**
  * The next-print heads-up (server: OiTapeController.headsUp): BUILDING with the flagged cells [strike, side, volume since
  * the last print], JUST_PRINTED (a print just came in), NONE; the check of the latest heads-up resolved: per flag [strike,
@@ -127,6 +127,22 @@ const whoStyle = (w: Exclude<Who, null>, color: string) => w === "WRITING" ? { f
 const strikeText = (k: number | null | undefined) => (k == null ? "–" : k.toLocaleString("en-IN"));
 const pctText = (v: N) => (v == null ? "–" : `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(v).toFixed(Math.abs(v) >= 10 ? 0 : 1)} %`);
 const ivText = (v: N) => (v == null ? "–" : `${(100 * v).toFixed(1)} %`);
+/** The strike's IV who traded is read from: the call's and the put's averaged (whichever is known when only one is). */
+const kIv = (a: N, b: N): N => (a == null ? b : b == null ? a : (a + b) / 2);
+/** The server's threshold for who traded (OiTapeController.MIN_IV_CHANGE): a smaller strike IV change gives no label. */
+const MIN_IV_CHANGE = 0.0015;
+/**
+ * A label read from a strike IV change under twice the threshold is drawn faint (user 20 Nov 2026): on 19 Nov the strike
+ * IV moved a median 0.04 point per 30 s and 0.15 at the 90th percentile, so a change just over 0.15 is near the noise.
+ */
+const WEAK_IV_CHANGE = 2 * MIN_IV_CHANGE;
+const strikeIvChange = (r: Strike): N => {
+  const now = kIv(r.c.iv, r.p.iv), then = kIv(r.c.iv0, r.p.iv0);
+  return now == null || then == null ? null : now - then;
+};
+const weakWho = (r: Strike) => { const x = strikeIvChange(r); return x != null && Math.abs(x) < WEAK_IV_CHANGE; };
+/** An IV change in volatility points ("+0.3 pt"). */
+const ivPts = (v: number) => `${v > 0 ? "+" : v < 0 ? "−" : ""}${Math.abs(100 * v).toFixed(Math.abs(100 * v) < 1 ? 2 : 1)} pt`;
 const hhmm = (t: string | null | undefined) => (t ? t.slice(0, 5) : "–");
 const hhmmss = (t: string) => (t.length === 5 ? `${t}:00` : t.slice(0, 8));
 
@@ -191,7 +207,7 @@ export function Strikes({ underlying, date, at, pinned, live }: { underlying: st
         <button type="button" onClick={() => setOpts({ panel: !opts.panel })} aria-expanded={opts.panel}
           className={`rounded border px-2 py-0.5 ${opts.panel ? "border-accent bg-accent/10" : "border-line text-muted hover:text-text"}`}>
           Display options {opts.panel ? "▴" : "▾"}</button>
-        {d?.spot != null && <span className="ml-auto num text-muted">spot {px(d.spot)} · ATM {px(d.atm)}</span>}
+        {d?.spot != null && <span className="ml-auto num text-muted">spot {px(d.spot)} · ATM {px(d.atm)}<AtmIv st={d.structure} /></span>}
       </div>
       {opts.panel && <OptionsBar opts={opts} setOpts={setOpts} />}
       {q.error ? <ErrorNote error={q.error} /> : d?.deferred ? <p className="mt-2 text-sm text-muted">Built after the close.</p> : (
@@ -351,9 +367,9 @@ const markFor = (dirOn: boolean, heavy: ReadonlySet<string>) => (r: Strike, sd: 
   dirOn && heavy.has(cellKey(r.k, sd)) && dirArrow((sd === "c" ? r.sc : r.sp).last) != null;
 
 function rowTitle(r: Strike, spot?: number | null, huge: ReadonlySet<string> = NO_CELLS, heavy: ReadonlySet<string> = NO_CELLS, dir = false) {
-  // the IV who traded is read from: the call's and the put's averaged (whichever is known when only one is)
-  const kIv = (a: N, b: N): N => (a == null ? b : b == null ? a : (a + b) / 2);
-  const strikeIvLine = `strike IV (call and put averaged, read for who traded) ${ivText(kIv(r.c.iv0, r.p.iv0))} → ${ivText(kIv(r.c.iv, r.p.iv))}`;
+  const dIv = strikeIvChange(r);
+  const strikeIvLine = `strike IV (call and put averaged, read for who traded) ${ivText(kIv(r.c.iv0, r.p.iv0))} → ${ivText(kIv(r.c.iv, r.p.iv))}`
+    + (dIv == null ? "" : ` (${ivPts(dIv)}${weakWho(r) ? ", under 0.3 point: a weak reading, the label is drawn faint" : ""})`);
   const one = (name: string, s: Side) => `${name}: OI ${big(s.oi)} (${big(s.d, true)}, ${pctText(s.pct)})`
     + ` · IV ${ivText(s.iv0)} → ${ivText(s.iv)} · premium ${px(s.px0)} → ${px(s.px)} · traded ${big(s.vol)}`
     + (s.who ? ` · ${WHO_HELP[s.who]}` : "");
@@ -408,14 +424,31 @@ const ink = (color: string) => `color-mix(in oklab, ${color} 66%, black)`;
 const changeStyle = (text: string, room: number, color: string) => ({ fill: ink(color), fontSize: `${Math.min(13, Math.max(9, room / (0.61 * text.length)))}px` });
 const changeClass = (huge: boolean) => `num ${huge ? "font-bold" : "font-semibold"}`;
 
-function WhoChip({ x, y, w, who, color, compact }: { x: number; y: number; w: number; who: Who; color: string; compact?: boolean }) {
+/**
+ * The ATM IV now and its change over 15 minutes (user 20 Nov 2026), the ATM strike's call and put IV averaged. Not a
+ * direction signal: A-506 (20 Nov) found the 10-minute ATM IV change no help in telling a reversal from a pullback.
+ */
+function AtmIv({ st }: { st?: Structure | null }) {
+  if (st?.atmIv == null) return null;
+  const ch = st.atmIv15 == null ? null : st.atmIv - st.atmIv15;
+  return (
+    <span title={"ATM IV: the at-the-money strike's call and put IV averaged; the change is against the ATM strike 15 minutes ago. "
+      + "IV up = options dearer as a whole (premium rises without the index moving, falls back when it eases); IV down = cheaper. "
+      + "All strikes up together reads as fear, one strike alone as trading in it. It does not say which way the index goes "
+      + "(A-506: the 10-minute ATM IV change did not separate reversals from pullbacks). On an expiry afternoon the 0-DTE IV is unstable."}>
+      {" · ATM IV "}{ivText(st.atmIv)}{ch != null && <span style={Math.abs(ch) >= 0.005 ? { color: ink(ch > 0 ? "var(--color-down)" : "var(--color-up)") } : undefined}> ({ivPts(ch)} in 15 m)</span>}
+    </span>
+  );
+}
+
+function WhoChip({ x, y, w, who, color, compact, weak }: { x: number; y: number; w: number; who: Who; color: string; compact?: boolean; weak?: boolean }) {
   if (!who) return null;
   const st = whoStyle(who, color);
   return (
-    <g>
+    <g opacity={weak ? 0.4 : 1}>
       <rect x={x} y={y} width={w} height={CHIP_H} rx={4} fill={st.fill} opacity={st.opacity} />
       <text x={x + w / 2} y={y + CHIP_H / 2 + 4} textAnchor="middle" className="text-[12px] font-semibold" style={{ fill: st.text === "var(--color-muted)" ? st.text : ink(st.text) }}>{compact ? WHO_LETTER[who] : WHO_TEXT[who]}</text>
-      <title>{WHO_HELP[who]}</title>
+      <title>{WHO_HELP[who] + (weak ? " · weak: the strike IV moved under 0.3 point" : "")}</title>
     </g>
   );
 }
@@ -567,8 +600,8 @@ function Stacked({ d, rows, W: box, opts, whoOf, underlying, huge, pulse, heavy,
             {mark(r, "p") && <DirMark x={cellX(pDx)} y={y0 + rowH / 2 + 4.5} last={r.sp.last} color={PUT} />}
             <text x={cDx} y={y0 + rowH / 2 + 4.5} textAnchor="end" className={changeClass(huge.has(cellKey(r.k, "c")))} style={changeStyle(changeText(r.c, opts), room - (mark(r, "c") ? dirW(r.sc.last) : 0), CALL)}>{changeText(r.c, opts)}</text>
             <text x={pDx} y={y0 + rowH / 2 + 4.5} textAnchor="end" className={changeClass(huge.has(cellKey(r.k, "p")))} style={changeStyle(changeText(r.p, opts), room - (mark(r, "p") ? dirW(r.sp.last) : 0), PUT)}>{changeText(r.p, opts)}</text>
-            {who && <WhoChip x={cDx + 4} y={y0 + (rowH - CHIP_H) / 2} w={chipW} who={whoOf(r.c)} color={CALL} compact={compact} />}
-            {who && <WhoChip x={pDx + 4} y={y0 + (rowH - CHIP_H) / 2} w={chipW} who={whoOf(r.p)} color={PUT} compact={compact} />}
+            {who && <WhoChip x={cDx + 4} y={y0 + (rowH - CHIP_H) / 2} w={chipW} who={whoOf(r.c)} color={CALL} compact={compact} weak={weakWho(r)} />}
+            {who && <WhoChip x={pDx + 4} y={y0 + (rowH - CHIP_H) / 2} w={chipW} who={whoOf(r.p)} color={PUT} compact={compact} weak={weakWho(r)} />}
             <title>{rowTitle(r, d.spot, huge, heavy, dirOn)}</title>
           </g>
         );
@@ -629,7 +662,7 @@ function Mirror({ d, rows, W: box, opts, whoOf, underlying, huge, pulse, heavy, 
             <Meter x={cols - 3} y={y0 + rowH - 1} room={cols - 6} dir={-1} v={r.sp.vol} max={meterMax} flagged={heavy.has(cellKey(r.k, "p"))} color={PUT} />
             {mark(r, "p") && <DirMark x={3} y={y0 + rowH / 2 + 4.5} last={r.sp.last} color={PUT} />}
             <text x={dW - 4} y={y0 + rowH / 2 + 4.5} textAnchor="end" className={changeClass(huge.has(cellKey(r.k, "p")))} style={changeStyle(changeText(r.p, opts), dW - 6 - (mark(r, "p") ? dirW(r.sp.last) : 0), PUT)}>{changeText(r.p, opts)}</text>
-            {who && <WhoChip x={dW + 2} y={y0 + (rowH - CHIP_H) / 2} w={chipW} who={whoOf(r.p)} color={PUT} compact={compact} />}
+            {who && <WhoChip x={dW + 2} y={y0 + (rowH - CHIP_H) / 2} w={chipW} who={whoOf(r.p)} color={PUT} compact={compact} weak={weakWho(r)} />}
             {opts.multi && <>
               <line x1={mL} x2={mL} y1={y0} y2={y0 + rowH} stroke="var(--color-line)" />
               <WindowBars x0={mL} half={mHalf} y={by} h={bh} w={r.wp} now={r.p.oi} max={mMax} color={PUT} opts={opts} />
@@ -650,7 +683,7 @@ function Mirror({ d, rows, W: box, opts, whoOf, underlying, huge, pulse, heavy, 
             <Meter x={outR + 3} y={y0 + rowH - 1} room={cols - 6} dir={1} v={r.sc.vol} max={meterMax} flagged={heavy.has(cellKey(r.k, "c"))} color={CALL} />
             {mark(r, "c") && <DirMark x={outR + 3} y={y0 + rowH / 2 + 4.5} last={r.sc.last} color={CALL} />}
             <text x={outR + dW - 4} y={y0 + rowH / 2 + 4.5} textAnchor="end" className={changeClass(huge.has(cellKey(r.k, "c")))} style={changeStyle(changeText(r.c, opts), dW - 6 - (mark(r, "c") ? dirW(r.sc.last) : 0), CALL)}>{changeText(r.c, opts)}</text>
-            {who && <WhoChip x={outR + dW + 2} y={y0 + (rowH - CHIP_H) / 2} w={chipW} who={whoOf(r.c)} color={CALL} compact={compact} />}
+            {who && <WhoChip x={outR + dW + 2} y={y0 + (rowH - CHIP_H) / 2} w={chipW} who={whoOf(r.c)} color={CALL} compact={compact} weak={weakWho(r)} />}
             {opts.gamma && <GammaBar x={W - gW + 6} y={y0 + (rowH - 11) / 2} w={gW - 10} gc={r.gc} gp={r.gp} max={gMax} />}
             <title>{rowTitle(r, d.spot, huge, heavy, dirOn)}</title>
           </g>
@@ -749,7 +782,7 @@ function Legend({ d, at, opts, openIv }: { d?: StrikesData; at: string; opts: Op
   parts.push(<> A boxed change is a huge one for this ladder: one of its side's two largest, at least 5 × the median change of all strikes and at least half the largest{opts.size === "pct" ? " (in % of strike, among strikes that held at least a quarter of their side's median OI)" : ""}; it blinks a few times when it first becomes one on a live update.</>);
   if (opts.heads) parts.push(<> The thin bar under each change is its build-up meter: contracts traded since that strike's last OI update, against the ladder's largest; it empties at each update and fills until the next (NSE about every minute, BSE every 2½–3 minutes). A coloured meter is a heads-up: one of its side's two largest, at least 3 × the median and half the largest, so a big OI change is likely there at the next update. On 11 past days 44 % of the flagged cells were among their side's two biggest changes at the next update, against 5 % of the others and about a third of the biggest-OI strikes. It says how big, not whether OI will rise or fall: who is buying or selling between updates did not tell that (A-383). After each update the line above checks the last heads-up: each flag's actual change, its rank on its side (✓ = 1st or 2nd) and who traded by IV, with today's tally.</>);
   if (opts.heads && opts.dir) parts.push(<> The small boxed ↑ / ↓ beside a flagged change (e.g. ↑6k) is the direction hint for its OI (not the price), with the size of the last update it repeats: {PERSIST_TEXT}. The number beside the box is the change over the whole window, which can hold several updates, so the two can differ in sign (a −72k update then a +6k one shows −66k with ↑6k). So ↑ adds a little over "OI usually rises", and ↓ is right only slightly more often than wrong. The check line marks whether each flag's update kept its direction, with today's count.</>);
-  if (opts.who !== "off") parts.push(<> Who traded is read from the OI change against the change in the strike's IV, the call's and the put's averaged over each 30 s (OI up and IV down: writers opening; OI down and IV up: writers buying back); blank when either change is small (OI under 0.5 % of the strike, IV under 0.15 point). Not one side's IV: the feed's call and put IV move apart with the index, so one side alone read writers adding calls into a fall as buying (19 Nov). Not from the premium: it mostly follows the index, so a rally would read as call buying and put writing whoever traded. An inference, not a record of who traded. On a narrow screen the labels are W, B, C and X.{d && fromPreOpen(d) && openIv ? " Over a window from the previous close the IV then is the strike's first IV of today (none is recorded before the open), so the label weighs a day's net OI change against the IV move since the open: many traders' opening and closing netted into one word." : ""}</>);
+  if (opts.who !== "off") parts.push(<> Who traded is read from the OI change against the change in the strike's IV, the call's and the put's averaged over each 30 s (OI up and IV down: writers opening; OI down and IV up: writers buying back); blank when either change is small (OI under 0.5 % of the strike, IV under 0.15 point), and drawn faint when the IV moved under 0.3 point, a reading near the noise (the strike IV moves 0.04 point per 30 s at the median). Not one side's IV: the feed's call and put IV move apart with the index, so one side alone read writers adding calls into a fall as buying (19 Nov). Not from the premium: it mostly follows the index, so a rally would read as call buying and put writing whoever traded. An inference, not a record of who traded. On a narrow screen the labels are W, B, C and X.{d && fromPreOpen(d) && openIv ? " Over a window from the previous close the IV then is the strike's first IV of today (none is recorded before the open), so the label weighs a day's net OI change against the IV move since the open: many traders' opening and closing netted into one word." : ""}</>);
   if (opts.multi) parts.push(<> Changes 1 min–open: each strike's OI change over the last 1, 5, 15, 30 minutes and 1 hour, and since the day's first OI print, at once, as nested bars from the zero line (right: added, left: cut), 1 min darkest, 1 h palest and since open a dashed outline, one scale for all; the longest bar is drawn first so none hides another; a window reaching back before the open starts from the pre-open OI (the previous close){opts.size === "pct" ? " (as a share of the strike's OI at each window's start)" : ""}; hover a row for the numbers. A 1-minute window holds about one exchange OI update.</>);
   if (opts.walls) parts.push(<> Walls: the largest call OI above spot (call wall: within ATM ± 15; ceiling: within 6 strikes) and the largest put OI below it (put wall, floor); a wall moves only when another strike holds 5 % more OI; ↑ / ↓ and "was" mark a move inside the window.</>);
   if (opts.gamma) parts.push(<> Gamma: Black-Scholes gamma from each side's IV times its OI, calls (top) and puts (bottom) on one scale; hover a row for the numbers: per contract unit, in units of delta per point of the index, and in ₹ crore of delta per 1 % move. Option writers are short this gamma, so it shows where their risk changes fastest as the price moves; whether they hedge it, and so whether it speeds moves up or pins them, it does not say (A-164: no usable regime filter).</>);
