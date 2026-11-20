@@ -120,7 +120,7 @@ class KotakSessionSourceIT {
     }
 
     @Test
-    void theWorkersSessionsDispatchByBrokerAndKotakHasNoLiveConnection() {
+    void theWorkersSessionsDispatchByBrokerAndKotakIsLiveOnlyWhenConfigured() {
         tokenFile(kotak.id(), Instant.now().plusSeconds(3600));
         BrokerSessions kite = a -> Optional.of(new BrokerSessions.Access("kite-key", "kite-token"));
         BrokerSessionRouter router = new BrokerSessionRouter(Map.of(BrokerType.ZERODHA, kite,
@@ -141,7 +141,8 @@ class KotakSessionSourceIT {
                 BrokerType.UPSTOX, BrokerType.GROWW);
         assertThat(adapters.get(1).live(kotak, null).isRefused()).as("no egress address: the static-IP gate").isTrue();
         assertThat(LiveBrokers.of(LiveBrokers.DEFAULT, adapters).live()).containsExactly(BrokerType.ZERODHA);
+        // Kotak step 4 (18 Nov 2026): its adapter offers LIVE, so the configuration decides (and the static IP above)
         assertThat(LiveBrokers.of("ZERODHA,KOTAK_NEO", adapters).live(BrokerType.KOTAK_NEO))
-                .as("configured LIVE, but its adapter does not offer LIVE yet (READ_LIVE and canary first)").isFalse();
+                .as("configured LIVE and offered").isTrue();
     }
 }

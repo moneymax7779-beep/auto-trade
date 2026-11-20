@@ -134,6 +134,17 @@ public final class KotakDryRunAdapter implements BrokerAdapter {
     }
 
     /**
+     * Kotak's LIVE path is offered (user 18 Nov 2026, Kotak step 4, after the static IP and the canary): a Kotak account
+     * trades LIVE only when the configuration lists KOTAK_NEO as well ({@link LiveBrokers}, AUTOTRADE_LIVE_BROKERS), its
+     * own static IP is checked and registered ({@link AccountEgress#liveRefusal}), the platform admin marked it
+     * LIVE-eligible and its owner switched it LIVE.
+     */
+    @Override
+    public boolean offersLive() {
+        return true;
+    }
+
+    /**
      * The LIVE Kotak connection (production gaps C1, 16 Nov 2026), behind its {@link LiveGuard}; refused without the
      * account's verified egress address (B2: Kotak takes the session and orders only from the registered IP).
      */

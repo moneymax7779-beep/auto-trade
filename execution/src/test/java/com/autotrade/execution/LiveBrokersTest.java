@@ -63,9 +63,11 @@ class LiveBrokersTest {
     @Test
     void aConfiguredBrokerIsLiveOnlyWhenItsAdapterOffersLive() {
         LiveBrokers configured = LiveBrokers.of(" zerodha , UPSTOX,KOTAK_NEO ", WORKER);
-        assertThat(configured.live()).containsExactly(BrokerType.ZERODHA);
-        assertThat(configured.configuredWithoutLiveAdapter()).containsExactlyInAnyOrder(BrokerType.UPSTOX,
-                BrokerType.KOTAK_NEO);
+        // Kotak step 4 (18 Nov 2026): Kotak's adapter offers LIVE; Upstox's does not yet
+        assertThat(configured.live()).containsExactlyInAnyOrder(BrokerType.ZERODHA, BrokerType.KOTAK_NEO);
+        assertThat(configured.configuredWithoutLiveAdapter()).containsExactly(BrokerType.UPSTOX);
+        assertThat(LiveBrokers.of(LiveBrokers.DEFAULT, WORKER).live(BrokerType.KOTAK_NEO))
+                .as("offered, but LIVE only once the configuration lists it").isFalse();
         assertThat(LiveBrokers.of("ZERODHA,UPSTOX", List.of(WORKER.getFirst(), offeringLive(BrokerType.UPSTOX))).live())
                 .containsExactlyInAnyOrder(BrokerType.ZERODHA, BrokerType.UPSTOX);
         assertThat(LiveBrokers.of("ZERODHA", List.of(WORKER.getFirst(), offeringLive(BrokerType.UPSTOX)))
