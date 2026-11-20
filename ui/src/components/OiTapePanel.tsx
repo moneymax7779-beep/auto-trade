@@ -110,6 +110,9 @@ function Tape({ d, date, underlying, volume, view, setView, trades, pinned, setP
     return d.series.map((r) => { cc += r[7]; cp += r[8]; return { t: secs(r[0]) / 60, time: r[0], spot: r[1], fpx: r[2], foi: r[3], atm: r[4],
       ce: r[5], pe: r[6], dce: r[7], dpe: r[8], pcr: r[9], cumCe: cc, cumPe: cp }; });
   }, [d.series]);
+  // the day's first futures OI from 09:15, so the tooltip can say how much futures OI changed since the open (user 20 Nov
+  // 2026: "8.8M" rounded away a 1.2 lakh build-up; futures OI moves 1-2 % in a day)
+  const foi0 = useMemo(() => rows.find((r) => r.t >= 555 && r.foi != null)?.foi ?? null, [rows]);
   const vols = useMemo(() => volume.map(([t, v, normal]) => ({ t: secs(t) / 60, v, surge: normal != null && v >= 5 * normal, normal })), [volume]);
   const vis = useMemo(() => rows.filter((r) => r.t >= view.a && r.t <= view.b), [rows, view.a, view.b]);
   const visVol = vols.filter((r) => r.t >= view.a && r.t <= view.b);
@@ -277,7 +280,8 @@ function Tape({ d, date, underlying, volume, view, setView, trades, pinned, setP
             <div>spot {px(hv.spot)} · ATM {px(hv.atm)}</div>
             <div><span style={{ color: CALL }}>calls</span> {big(hv.ce)} ({big(hv.dce, true)}) · since 09:15 {big(hv.cumCe, true)}</div>
             <div><span style={{ color: PUT }}>puts</span> {big(hv.pe)} ({big(hv.dpe, true)}) · since 09:15 {big(hv.cumPe, true)}</div>
-            <div>PCR {hv.pcr?.toFixed(3) ?? "–"} · futures OI {big(hv.foi)} @ {px(hv.fpx)}</div>
+            <div>PCR {hv.pcr?.toFixed(3) ?? "–"} · futures OI {hv.foi == null ? "–" : hv.foi.toLocaleString("en-IN")}
+              {hv.foi != null && foi0 != null ? ` (${big(hv.foi - foi0, true)} since 09:15)` : ""} @ {px(hv.fpx)}</div>
             {hvVol && <div>futures volume {big(hvVol.v)} in {hm(hvVol.t)}{hvVol.normal ? ` (${(hvVol.v / hvVol.normal).toFixed(1)} × normal)` : ""}</div>}
           </div>
         )}
