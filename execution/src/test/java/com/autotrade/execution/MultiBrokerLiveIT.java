@@ -558,9 +558,11 @@ class MultiBrokerLiveIT {
             }
             try (BrokerConnections registry = new BrokerConnections(dataSource, 1e9, List.of(
                     new KotakDryRunAdapter(dataSource, 1e9, any, noQuotes, ReadLiveProbe.Settings.OFF, loopbackFor(k))))) {
+                // Kotak step 4 (18 Nov 2026): Kotak offers LIVE; a worker that does not list it LIVE opens no route
+                registry.liveBrokers(b -> b == BrokerType.ZERODHA);
                 BrokerConnections.Route route = registry.route(k, v7);
-                assertThat(route.venue()).as("Kotak is not a LIVE broker: its connection is unreachable").isNull();
-                assertThat(route.description()).isEqualTo("LIVE refused: KOTAK_NEO is not a LIVE broker yet");
+                assertThat(route.venue()).as("Kotak is not configured LIVE here: no route").isNull();
+                assertThat(route.description()).isEqualTo("LIVE refused: KOTAK_NEO is not configured LIVE on this worker");
             }
             assertThat(kotak.requests() + upstox.requests() + groww.requests()).as("nothing reached a broker").isZero();
         }

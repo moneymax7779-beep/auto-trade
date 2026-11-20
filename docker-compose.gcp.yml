@@ -50,6 +50,9 @@ services:
       AUTOTRADE_READ_LIVE_PROBE_ACCOUNTS: "21"
       # ...and its redacted answers kept (D2; user 18 Nov 2026, Kotak LIVE step 2: the READ_LIVE sessions' evidence)
       AUTOTRADE_READ_LIVE_RECORD_ACCOUNTS: "21"
+      # the brokers that may trade LIVE (Kotak step 4, user 18 Nov 2026; default ZERODHA alone): an account still needs
+      # its own checked and registered static IP (Kotak), the admin's LIVE eligibility and its owner's LIVE switch
+      AUTOTRADE_LIVE_BROKERS: "ZERODHA,KOTAK_NEO"
     volumes:
       - ./.local/kite-secrets:/app/secrets:ro
       - ./.local/broker-sessions:/app/broker-sessions

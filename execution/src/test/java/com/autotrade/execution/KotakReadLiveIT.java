@@ -321,9 +321,13 @@ class KotakReadLiveIT {
 
     @Test
     void aKotakAccountSwitchedLiveGetsNoLiveRouteAndNothingIsSent() {
+        // Kotak step 4 (18 Nov 2026): Kotak's adapter offers LIVE; the configuration's list and the account's own static IP
+        // are what still stand between a LIVE switch and an order
         assertThat(LiveBrokers.of("ZERODHA,KOTAK_NEO", java.util.List.of(new ZerodhaDryRunAdapter(dataSource, 1e9),
                 new KotakDryRunAdapter(dataSource, 1e9))).live(BrokerType.KOTAK_NEO))
-                .as("Kotak is configured LIVE here, but its adapter offers no LIVE connection").isFalse();
+                .as("configured LIVE and offered: a LIVE broker").isTrue();
+        assertThat(LiveBrokers.of(LiveBrokers.DEFAULT, java.util.List.of(new KotakDryRunAdapter(dataSource, 1e9)))
+                .live(BrokerType.KOTAK_NEO)).as("not configured: not LIVE").isFalse();
         AccountStore accounts = new AccountStore(dataSource);
         long tenant = accounts.ensureTenant("owner");
         long owner = accounts.ensureUser("kc-owner", "owner");
@@ -341,11 +345,21 @@ class KotakReadLiveIT {
         try (BrokerConnections registry = new BrokerConnections(dataSource, 1e9, List.of(
                 new ZerodhaDryRunAdapter(dataSource, 1e9, sessions, kotak.baseUri()),
                 new KotakDryRunAdapter(dataSource, 1e9, sessions)))) {
+            registry.liveBrokers(b -> b == BrokerType.ZERODHA);
             BrokerConnections.Route route = registry.route(live, v7);
             assertThat(route.venue()).isNull();
             assertThat(route.connection()).isNull();
-            assertThat(route.description()).as("16 Nov 2026: its LIVE connection exists but is unreachable")
-                    .isEqualTo("LIVE refused: KOTAK_NEO is not a LIVE broker yet");
+            assertThat(route.description()).as("a worker that does not list Kotak LIVE")
+                    .isEqualTo("LIVE refused: KOTAK_NEO is not configured LIVE on this worker");
+        }
+        try (BrokerConnections registry = new BrokerConnections(dataSource, 1e9, List.of(
+                new ZerodhaDryRunAdapter(dataSource, 1e9, sessions, kotak.baseUri()),
+                new KotakDryRunAdapter(dataSource, 1e9, sessions)))) {
+            registry.liveBrokers(b -> b == BrokerType.ZERODHA || b == BrokerType.KOTAK_NEO);
+            BrokerConnections.Route route = registry.route(live, v7);
+            assertThat(route.venue()).isNull();
+            assertThat(route.description()).as("listed, but the account has no static IP of its own")
+                    .startsWith("LIVE refused: ").contains("static IP");
         }
         assertThat(kotak.requests()).as("nothing reached Kotak").isZero();
     }
