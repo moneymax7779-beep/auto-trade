@@ -17,10 +17,17 @@ public final class StoredSessionSource implements SessionEventSource {
 
     private final LoadManifests manifests;
     private final ReplayReader reader;
+    private final ReplayCache cache;
 
     public StoredSessionSource(DataSource dataSource) {
+        this(dataSource, null);
+    }
+
+    /** With {@code cache} (null: none) holding each day's ordered stream for later replays (22 Nov 2026). */
+    public StoredSessionSource(DataSource dataSource, ReplayCache cache) {
         this.manifests = new LoadManifests(dataSource);
         this.reader = new ReplayReader(dataSource);
+        this.cache = cache;
     }
 
     @Override
@@ -44,6 +51,6 @@ public final class StoredSessionSource implements SessionEventSource {
         if (!missing.isEmpty()) {
             LOG.warn("own capture {}: no load for {}; replaying {} without them", session, missing, underlyings);
         }
-        return new ReplayResult(reader.replay(ids, sink), 0);
+        return new ReplayResult(cache == null ? reader.replay(ids, sink) : cache.replay(session, ids, reader, sink), 0);
     }
 }

@@ -46,7 +46,10 @@ final class OwnCaptureSource implements SessionEventSource {
             if (!all.contains(VIX) && new LoadManifests(reader).active(session, VIX).isPresent()) {
                 all.add(VIX);
             }
-            return new StoredSessionSource(reader).replay(session, all, sink);
+            String dir = System.getenv(HistoryCache.ENV);   // 22 Nov 2026: the day's ordered stream, cached for replays
+            com.autotrade.md.store.ReplayCache cache = dir == null || dir.isBlank() ? null
+                    : new com.autotrade.md.store.ReplayCache(java.nio.file.Path.of(dir, "ticks"), reader);
+            return new StoredSessionSource(reader, cache).replay(session, all, sink);
         }
     }
 
