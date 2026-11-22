@@ -3,9 +3,12 @@
 # less" and an opt-in file): v16 with one addition, live.fill_allocation: true. A LIVE entry's budget is already PAPER-1's
 # fraction (strategy budget / Rs 5 L reference x the account's equity). On v17, when the strategies selected for LIVE on the
 # account (that it subscribes to and the signal source runs) have budgets adding up to less than the reference capital, each is
-# scaled up by reference / their sum, so together they fill the account's equity in PAPER-1's proportions; never below 1
-# (all six selected = today's sizes). Example, Rs 5 L account: mac + obc selected = 2.5 L each (already 100 %, unchanged);
-# mac alone = 5 L. The shared caps still apply: open premium <= equity, the stop-risk cap, the daily loss limit, broker funds.
+# scaled up by reference / their sum, so together they fill the account's equity in PAPER-1's proportions; the factor is
+# never below 1 (all six selected = today's sizes) and the extra comes from spare capital only (0.97 x free). Example, Rs 5 L
+# account: mac + obc selected = 2.5 L each (already 100 %, unchanged); mac alone = up to 5 L. Trade-off (review 22 Nov):
+# one filled entry can leave no room for a later one the same day (mac alone: a NIFTY entry near 5 L, then a SENSEX mac
+# signal is refused for capital where v16's two 2.5 L entries both fit); adds of a plan strategy scale the same way. The
+# shared caps still apply: open premium <= equity, the stop-risk cap, the daily loss limit, broker funds.
 # Everything else is exactly v16.
 # v16:
 # follower-risk v16 (user 22 Nov 2026: "ma-cross-open v7 make it eligible for live and PAPER/LIVE to place LIVE orders"): v15 with

@@ -120,7 +120,8 @@ autotrade:
       # swing intact, and a floor 0.5 ATR back through the point the hold began. 37 own-capture tick days, in-sample (its design
       # days): alone 5 trades 5 won +Rs 11.39 L; with the live five +Rs 89.67 L vs +Rs 77.47 L, worst day and drawdown unchanged.
       # Thin: +48K over mco-v2 without 20 Nov; mco-v2 alone lost on the Oct 2024-May 2025 bar days (A-548, stopped). Listed last,
-      # Rs 2.5 L budget, not low priority. PAPER only: ma-cross-open is in no account's LIVE list (follower-risk live.strategies).
+      # Rs 2.5 L budget, not low priority. LIVE only where the owner chooses it (follower-risk v16+ live.strategies; it is in
+      # no default list) and the account subscribes to it.
       - config/strategy/ma-cross-open.v7.yaml
       # zbf-v10 removed 2026-10-19 after one live session (A-149, user 19 Oct ~16:50: "remove zbf-v10 from the live set"):
       # live 19 Oct only (A-148), 3 trades, 3 losses, -Rs 1,49,446 (the set's day -Rs 1,16,673; without it +Rs 32,774).
