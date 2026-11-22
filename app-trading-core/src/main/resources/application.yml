@@ -113,6 +113,15 @@ autotrade:
       # while 50 % of the capital stays free), closed to make room when another strategy's entry is refused for capital
       # (risk v44, A-476). Last in the list. PAPER-1 only: no account subscribes to session-break-retest.
       - config/strategy/session-break-retest.v27.yaml
+      # 2026-11-22 (A-558/A-560, user: "add mco-v7 to live set"): ma-cross-open v7 = mac-v34's EMA9/EMA20 cross on 3-minute
+      # bars with the averages, ATR and swings carried over from the previous session, entries 09:30-10:21 only (the hour mac-v34
+      # cannot see), no cross in the opening gap's direction before 09:45 (|gap| >= 0.25 %), swing stop <= 3 carried ATR, 2R
+      # target / 60-min time stop held only while the index stays beyond VWAP with today's EMA9 beyond EMA20 and its last 3-min
+      # swing intact, and a floor 0.5 ATR back through the point the hold began. 37 own-capture tick days, in-sample (its design
+      # days): alone 5 trades 5 won +Rs 11.39 L; with the live five +Rs 89.67 L vs +Rs 77.47 L, worst day and drawdown unchanged.
+      # Thin: +48K over mco-v2 without 20 Nov; mco-v2 alone lost on the Oct 2024-May 2025 bar days (A-548, stopped). Listed last,
+      # Rs 2.5 L budget, not low priority. PAPER only: ma-cross-open is in no account's LIVE list (follower-risk live.strategies).
+      - config/strategy/ma-cross-open.v7.yaml
       # zbf-v10 removed 2026-10-19 after one live session (A-149, user 19 Oct ~16:50: "remove zbf-v10 from the live set"):
       # live 19 Oct only (A-148), 3 trades, 3 losses, -Rs 1,49,446 (the set's day -Rs 1,16,673; without it +Rs 32,774).
       # Its file and code stay; it returns only through a new registered test.

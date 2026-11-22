@@ -20,6 +20,7 @@ public final class SetupFactory implements StrategyFactory {
             Map.entry("break-retest-runner", BreakRetest::new),   // A-065: brt-v1's entry, runner exits from its file
             Map.entry("trend-day-rider", TrendDayRider::new),   // A-064
             Map.entry("ma-cross", MaCross::new),   // A-066
+            Map.entry("ma-cross-open", MaCross::new),   // A-537: mac's rules on carried EMAs, opening hour (own strategy id)
             Map.entry("opening-range-continuation", OpeningRangeContinuation::new),   // A-076
             Map.entry("trend-state", TrendState::new),   // A-081
             Map.entry("opening-range-breakout", OpeningRangeBreakout::new),   // A-082

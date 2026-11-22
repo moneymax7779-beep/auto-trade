@@ -97,6 +97,7 @@ public final class FeatureEngine implements Consumer<MarketEvent> {
         java.util.List<java.util.List<com.autotrade.core.history.MinuteBar>> previous = history.spotMinuteBars(underlying, session, 1);
         if (!previous.isEmpty()) {
             structure.previousSessionBars(previous.getFirst());   // prior-day opening range (opening-drive)
+            structure.carryPrevious(previous.getFirst());         // A-537: carried EMAs / ATR / swings
             if (config.atrSeedPreviousSession()) {
                 structure.seedAtr(previous.getFirst());
             }

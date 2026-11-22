@@ -66,6 +66,14 @@ public final class SetupProviders {
         }
     }
 
+    /** A-537. */
+    public static final class MaCrossOpenProvider extends Base {
+        @Override
+        public String strategyKey() {
+            return "ma-cross-open";
+        }
+    }
+
     public static final class OpeningRangeContinuationProvider extends Base {
         @Override
         public String strategyKey() {

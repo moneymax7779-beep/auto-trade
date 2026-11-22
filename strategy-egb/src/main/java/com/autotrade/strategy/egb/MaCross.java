@@ -58,10 +58,72 @@ final class MaCross extends SetupStrategy {
     private boolean earlyChecked;
     private static final int EARLY_FAIL_GRACE_MIN = 5;
     private double previousDiff = Double.NaN;
+    // A-537 (ma-cross-open): cross, swing stop and ATR from the indicators carried over from the previous session
+    private final boolean carried;
+    // A-546 (off when absent): skip a cross in the opening gap's direction before gapSkipUntil when |gap| >= gapSkipMinPct;
+    // levelBreak: a cross arms a wait for the nearest level beyond the index in its direction (OR high/low, prior-day
+    // high/low/close, prior-week and prior-month high/low) and enters when the index trades beyond it while the averages
+    // still agree (an opposite flip drops the wait)
+    private final LocalTime gapSkipUntil;
+    private final double gapSkipMinPct;
+    private final boolean levelBreak;
+    private OptionSide awaitSide;
+    // A-547 (exits.level_hold, off when absent): entry as before; the 2R target and the time stop are this class's
+    // (frame target and time stop must be off). At entry the nearest level beyond the index in the trade's direction is
+    // noted. A target or time exit that comes with the index within near_atr ATR of that unbroken level and the carried
+    // averages still agreeing waits instead; once the index trades beyond the level the trade rides with no target or time
+    // stop (the broken level ratchets to each further level broken) until the averages cross against it, the index comes
+    // back fail_atr ATR across the broken level, the swing / premium stop, or flat_by. While waiting at the level, a
+    // flip of the averages or a move reject_atr ATR back away from it exits.
+    private final boolean levelHold;
+    private final int holdTimeMin;
+    private final double nearAtr, failAtr, rejectAtr;
+    private double holdLevel = Double.NaN;
+    private boolean riding, deferred;
+    private double awaitLevel = Double.NaN;
+    // A-559 (exits.structure_hold, off when absent): the 2R target and the time stop are this class's (frame target and
+    // time stop must be off). When either would fire, the trade holds while, at the last completed minute's close, the
+    // index is on its side of the session VWAP, today's 3-min EMA9 is beyond today's EMA20 in its direction and the index
+    // has not crossed today's last confirmed 3-min swing low (high for a put); any missing value = no support. While
+    // holding, the first minute close without that support exits (HOLD_STRUCTURE); swing / premium stop and flat_by stay.
+    private final boolean structureHold;
+    private final int structureHoldTimeMin;
+    private boolean structureHolding;
+    private java.time.LocalDateTime supportMinute;
+    private Boolean supportAtClose;             // support at the last completed minute's close (null = none seen yet)
+    private boolean supportNow;                 // support at the latest snapshot of the current minute
+    // A-560 (exits.structure_hold_floor_atr, off when absent): the index at the minute close where the hold started is a
+    // floor; a later minute close back beyond it by floor_atr x the carried ATR(3m) noted then exits (HOLD_FLOOR)
+    private final double holdFloorAtr;
+    private double spotNow = Double.NaN, spotAtClose = Double.NaN, holdFloor = Double.NaN, holdFloorAtrValue = Double.NaN;
 
     MaCross(ThresholdConfig c) {
         super(c);
         maxStopAtr = c.getDouble("setup.max_stop_atr");
+        carried = c.has("setup.carried_emas") && c.getBoolean("setup.carried_emas");
+        gapSkipUntil = c.has("setup.gap_skip_until") ? LocalTime.parse(c.getString("setup.gap_skip_until")) : null;
+        gapSkipMinPct = c.has("setup.gap_skip_min_pct") ? c.getDouble("setup.gap_skip_min_pct") : Double.NaN;
+        levelBreak = c.has("setup.level_break") && c.getBoolean("setup.level_break");
+        requirePair(c, "setup.gap_skip_until", "setup.gap_skip_min_pct");
+        levelHold = c.has("exits.level_hold") && c.getBoolean("exits.level_hold");
+        holdTimeMin = levelHold ? c.getInt("exits.level_hold_time_min") : 0;
+        nearAtr = levelHold ? c.getDouble("exits.level_hold_near_atr") : Double.NaN;
+        failAtr = levelHold ? c.getDouble("exits.level_hold_fail_atr") : Double.NaN;
+        rejectAtr = levelHold ? c.getDouble("exits.level_hold_reject_atr") : Double.NaN;
+        if (levelHold && (c.getInt("scope.time_stop_min") != 0 || !c.has("exits.use_target") || c.getBoolean("exits.use_target"))) {
+            throw new IllegalArgumentException("exits.level_hold needs scope.time_stop_min: 0 and exits.use_target: false");
+        }
+        structureHold = c.has("exits.structure_hold") && c.getBoolean("exits.structure_hold");
+        structureHoldTimeMin = structureHold ? c.getInt("exits.structure_hold_time_min") : 0;
+        holdFloorAtr = c.has("exits.structure_hold_floor_atr") ? c.getDouble("exits.structure_hold_floor_atr") : Double.NaN;
+        if (c.has("exits.structure_hold_floor_atr") && !(structureHold && holdFloorAtr >= 0)) {
+            throw new IllegalArgumentException("exits.structure_hold_floor_atr needs exits.structure_hold and a value >= 0");
+        }
+        if (structureHold && (levelHold || c.getInt("scope.time_stop_min") != 0 || !c.has("exits.use_target")
+                || c.getBoolean("exits.use_target"))) {
+            throw new IllegalArgumentException(
+                    "exits.structure_hold needs scope.time_stop_min: 0, exits.use_target: false and no exits.level_hold");
+        }
         rewardToRisk = c.getDouble("setup.reward_to_risk");
         requireVwapSide = c.has("setup.require_vwap_side") && c.getBoolean("setup.require_vwap_side");
         maxChg1mAtr1m = c.has("setup.max_chg1m_atr1m") ? c.getDouble("setup.max_chg1m_atr1m") : Double.NaN;
@@ -147,13 +209,116 @@ final class MaCross extends SetupStrategy {
                 && !(bestR >= timeStopUnlessR)) {
             return "TIME_" + timeStopMin;
         }
+        if (levelHold) {
+            return levelHoldExit(s, side, r);
+        }
+        if (structureHold) {
+            return structureHoldExit(s, side, r);
+        }
+        return null;
+    }
+
+    /** A-559: target / time exits held while the price structure supports the trade; see the field comment. */
+    private String structureHoldExit(FeatureSnapshot s, OptionSide side, double r) {
+        java.time.LocalDateTime minute = java.time.LocalDateTime.ofInstant(s.time(), java.time.ZoneId.of("Asia/Kolkata"))
+                .truncatedTo(java.time.temporal.ChronoUnit.MINUTES);
+        boolean newMinute = supportMinute != null && minute.isAfter(supportMinute);
+        if (newMinute) {
+            supportAtClose = supportNow;               // the previous minute's last snapshot = its close
+            spotAtClose = spotNow;
+        }
+        supportMinute = minute;
+        supportNow = structureSupports(s.structure(), s.spot(), side == OptionSide.CE);
+        spotNow = s.spot();
+        if (structureHolding) {
+            if (!Boolean.TRUE.equals(supportAtClose)) {
+                return "HOLD_STRUCTURE";
+            }
+            if (newMinute && Double.isFinite(holdFloor) && Double.isFinite(holdFloorAtrValue)
+                    && (side == OptionSide.CE ? holdFloor - spotAtClose : spotAtClose - holdFloor) >= holdFloorAtr * holdFloorAtrValue) {
+                return "HOLD_FLOOR";
+            }
+            return null;
+        }
+        boolean timeUp = entryTime != null
+                && java.time.Duration.between(entryTime, s.time()).toMinutes() >= structureHoldTimeMin;
+        boolean target = r >= rewardToRisk;
+        if (target || timeUp) {
+            if (Boolean.TRUE.equals(supportAtClose)) {
+                structureHolding = true;
+                if (Double.isFinite(holdFloorAtr)) {
+                    StructureFeatures st = s.structure();
+                    holdFloor = spotAtClose;
+                    holdFloorAtrValue = carried ? st.carriedAtr3m() : st.atr3m();
+                }
+                return null;
+            }
+            return target ? "TARGET" : "TIME_" + structureHoldTimeMin;
+        }
+        return null;
+    }
+
+    static boolean structureSupports(StructureFeatures st, double spot, boolean up) {
+        double vwap = st.vwapSpotProxy(), e9 = st.ema9(), e20 = st.ema20();
+        double swing = up ? st.lastSwingLow() : st.lastSwingHigh();
+        if (!(Double.isFinite(spot) && Double.isFinite(vwap) && Double.isFinite(e9) && Double.isFinite(e20)
+                && Double.isFinite(swing))) {
+            return false;
+        }
+        return up ? spot > vwap && e9 > e20 && spot > swing : spot < vwap && e9 < e20 && spot < swing;
+    }
+
+    /** A-547: target / time exits around the nearest level; see the field comment. */
+    private String levelHoldExit(FeatureSnapshot s, OptionSide side, double r) {
+        StructureFeatures st = s.structure();
+        boolean up = side == OptionSide.CE;
+        double spot = s.spot(), atr = carried ? st.carriedAtr3m() : st.atr3m();
+        double diff = carried ? st.carriedEma9() - st.carriedEma20() : st.ema9() - st.ema20();
+        boolean aligned = up ? diff > 0 : diff < 0;                   // NaN = not aligned
+        double sign = up ? 1 : -1;
+        if (Double.isFinite(holdLevel) && sign * (spot - holdLevel) > 0) {
+            riding = true;
+            deferred = false;
+            double next;
+            while (Double.isFinite(next = nearestLevel(st, holdLevel, up)) && sign * (spot - next) > 0) {
+                holdLevel = next;
+            }
+        }
+        if (riding) {
+            if (!aligned) {
+                return "HOLD_OPP_CROSS";
+            }
+            if (atr > 0 && sign * (holdLevel - spot) >= failAtr * atr) {
+                return "HOLD_LEVEL_FAIL";
+            }
+            return null;
+        }
+        boolean near = Double.isFinite(holdLevel) && atr > 0 && sign * (holdLevel - spot) <= nearAtr * atr;
+        if (deferred) {
+            if (!aligned) {
+                return "HOLD_OPP_CROSS";
+            }
+            if (atr > 0 && sign * (holdLevel - spot) >= rejectAtr * atr) {
+                return "HOLD_REJECT";
+            }
+            return null;
+        }
+        boolean timeUp = entryTime != null && java.time.Duration.between(entryTime, s.time()).toMinutes() >= holdTimeMin;
+        boolean target = r >= rewardToRisk;
+        if (target || timeUp) {
+            if (near && aligned) {
+                deferred = true;
+                return null;
+            }
+            return target ? "TARGET" : "TIME_" + holdTimeMin;
+        }
         return null;
     }
 
     @Override
     protected Entry evaluate(FeatureSnapshot s, LocalTime time, boolean canEnter, Map<String, Boolean> c) {
         StructureFeatures st = s.structure();
-        double diff = st.ema9() - st.ema20();
+        double diff = carried ? st.carriedEma9() - st.carriedEma20() : st.ema9() - st.ema20();
         boolean crossUp = Double.isFinite(diff) && Double.isFinite(previousDiff) && previousDiff < 0 && diff > 0;
         boolean crossDown = Double.isFinite(diff) && Double.isFinite(previousDiff) && previousDiff > 0 && diff < 0;
         previousDiff = Double.isFinite(diff) ? diff : previousDiff;
@@ -205,24 +370,91 @@ final class MaCross extends SetupStrategy {
                 return new Entry(next.side(), next.stop(), target, next.reason() + "_REVERSE");
             }
         }
+        if (levelBreak && awaitSide != null) {
+            // A-546: the armed cross waits for its level; dropped when the averages flip back
+            boolean aligned = awaitSide == OptionSide.CE ? diff > 0 : diff < 0;
+            if (!aligned) {
+                awaitSide = null;
+            } else if (canEnter && !(crossUp || crossDown)) {
+                boolean broke = awaitSide == OptionSide.CE ? s.spot() > awaitLevel : s.spot() < awaitLevel;
+                if (broke) {
+                    boolean up = awaitSide == OptionSide.CE;
+                    awaitSide = null;
+                    Entry b = crossEntry(s, up, c);
+                    c.put("level_broken", true);
+                    if (b != null) {
+                        entrySpot = s.spot();
+                        entryRisk = up ? entrySpot - b.stop() : b.stop() - entrySpot;
+                        entryTime = s.time();
+                        bestR = Double.NaN;
+                        earlyChecked = false;
+                        return new Entry(b.side(), b.stop(), b.target(), b.reason() + "_LEVEL");
+                    }
+                }
+            }
+        }
         if (!canEnter || !(crossUp || crossDown)) {
             return null;
         }
+        if (gapSkipUntil != null && time.isBefore(gapSkipUntil)) {
+            StructureFeatures g = s.structure();
+            double gapPct = (g.dayOpen() / g.prevClose() - 1) * 100.0;    // NaN = no gap known, no skip
+            boolean withGap = Math.abs(gapPct) >= gapSkipMinPct && (crossUp ? gapPct > 0 : gapPct < 0);
+            c.put("not_gap_echo", !withGap);
+            if (withGap) {
+                return null;
+            }
+        }
         Entry e = crossEntry(s, crossUp, c);
+        if (e != null && levelBreak) {
+            double lvl = nearestLevel(s.structure(), s.spot(), crossUp);
+            if (Double.isFinite(lvl)) {
+                awaitSide = e.side();
+                awaitLevel = lvl;
+                c.put("await_level", true);
+                return null;
+            }
+        }
         if (e != null) {
             entrySpot = s.spot();
             entryRisk = crossUp ? entrySpot - e.stop() : e.stop() - entrySpot;
             entryTime = s.time();
             bestR = Double.NaN;
             earlyChecked = false;
+            holdLevel = levelHold ? nearestLevel(s.structure(), entrySpot, crossUp) : Double.NaN;
+            riding = false;
+            deferred = false;
+            structureHolding = false;
+            supportMinute = null;
+            supportAtClose = null;
+            spotNow = Double.NaN;
+            spotAtClose = Double.NaN;
+            holdFloor = Double.NaN;
+            holdFloorAtrValue = Double.NaN;
         }
         return e;
+    }
+
+    /** A-546: the nearest level strictly beyond the index in the cross's direction, NaN when there is none. */
+    static double nearestLevel(StructureFeatures st, double spot, boolean up) {
+        double[] lv = {st.orComplete() ? st.orHigh() : Double.NaN, st.orComplete() ? st.orLow() : Double.NaN, st.prevClose(),
+                st.pdh(), st.pdl(), st.pwh(), st.pwl(), st.pmh(), st.pml()};
+        double best = Double.NaN;
+        for (double l : lv) {
+            if (!Double.isFinite(l) || (up ? l <= spot : l >= spot)) {
+                continue;
+            }
+            if (Double.isNaN(best) || (up ? l < best : l > best)) {
+                best = l;
+            }
+        }
+        return best;
     }
 
     /** The cross's entry after its checks (VWAP side, spike, swing stop), or null; no state change. */
     private Entry crossEntry(FeatureSnapshot s, boolean crossUp, Map<String, Boolean> c) {
         StructureFeatures st = s.structure();
-        double spot = s.spot(), atr = st.atr3m();
+        double spot = s.spot(), atr = carried ? st.carriedAtr3m() : st.atr3m();
         if (requireVwapSide) {
             double vwap = st.vwapSpotProxy();
             boolean withVwap = crossUp ? spot > vwap : spot < vwap;   // NaN compares false: no VWAP, no entry
@@ -240,7 +472,8 @@ final class MaCross extends SetupStrategy {
                 return null;
             }
         }
-        double stop = crossUp ? st.lastSwingLow() : st.lastSwingHigh();
+        double stop = carried ? (crossUp ? st.carriedSwingLow() : st.carriedSwingHigh())
+                : crossUp ? st.lastSwingLow() : st.lastSwingHigh();
         double risk = crossUp ? spot - stop : stop - spot;
         boolean stopOk = Double.isFinite(stop) && atr > 0 && risk > 0 && risk <= maxStopAtr * atr;
         c.put("swing_stop_ok", stopOk);
