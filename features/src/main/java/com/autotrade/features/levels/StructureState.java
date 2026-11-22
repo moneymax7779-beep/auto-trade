@@ -48,6 +48,11 @@ public final class StructureState {
     private final Ema ema9;
     private final Ema ema20;
     private final SwingTracker swings;
+    // A-537: the same indicators carried over from the previous session (fed by carryPrevious, then every 3-minute close)
+    private final Ema carriedEma9;
+    private final Ema carriedEma20;
+    private final WilderAtr carriedAtr3m;
+    private final SwingTracker carriedSwings;
     private final TimedSeries spotSeries = new TimedSeries(Duration.ofMinutes(15));
     private final Deque<Double> recentRanges = new ArrayDeque<>();
     private final double pdh;
@@ -115,6 +120,10 @@ public final class StructureState {
         this.ema9 = new Ema(config.emaFast(), config.emaSlopeBars() + 1);
         this.ema20 = new Ema(config.emaSlow(), config.emaSlopeBars() + 1);
         this.swings = new SwingTracker(config.swingStrength());
+        this.carriedEma9 = new Ema(config.emaFast(), config.emaSlopeBars() + 1);
+        this.carriedEma20 = new Ema(config.emaSlow(), config.emaSlopeBars() + 1);
+        this.carriedAtr3m = new WilderAtr(config.atrPeriod());
+        this.carriedSwings = new SwingTracker(config.swingStrength());
         this.pdh = previousSession.map(DailyBar::high).orElse(Double.NaN);
         this.pdl = previousSession.map(DailyBar::low).orElse(Double.NaN);
         this.previousSessionDate = previousSession.map(DailyBar::session).orElse(null);
@@ -131,6 +140,51 @@ public final class StructureState {
      * the opening range on. 3-minute bars are built from the 1-minute bars aligned to 09:15; today's
      * first true range then spans the overnight gap from the previous close, as Wilder's ATR does.
      */
+    /**
+     * A-537: feeds the carried EMA9 / EMA20, ATR(3m) and swings with the previous session's 1-minute spot bars,
+     * aggregated to 3-minute bars aligned to 09:15 as {@link #seedAtr} does. Today's indicators are not touched.
+     */
+    public void carryPrevious(List<com.autotrade.core.history.MinuteBar> previousSession) {
+        if (previousSession.isEmpty()) {
+            return;
+        }
+        Instant first = previousSession.getFirst().start();
+        Instant open = first.atZone(com.autotrade.core.time.MarketTime.IST).toLocalDate()
+                .atTime(sessionOpen.atZone(com.autotrade.core.time.MarketTime.IST).toLocalTime())
+                .atZone(com.autotrade.core.time.MarketTime.IST).toInstant();
+        Bar three = null;
+        for (com.autotrade.core.history.MinuteBar m : previousSession) {
+            long slot = Math.floorDiv(Duration.between(open, m.start()).toMinutes(), 3);
+            Instant start = open.plus(Duration.ofMinutes(3 * slot));
+            if (three != null && !three.start().equals(start)) {
+                carry(three);
+                three = null;
+            }
+            three = three == null ? new Bar(start, start.plus(Duration.ofMinutes(3)), m.open(), m.high(), m.low(), m.close(), 0, 1)
+                    : new Bar(three.start(), three.end(), three.open(), Math.max(three.high(), m.high()),
+                            Math.min(three.low(), m.low()), m.close(), 0, three.ticks() + 1);
+        }
+        if (three != null) {
+            carry(three);
+        }
+    }
+
+    /** A-537: the carried EMA9 / EMA20 now (NaN until each has its seed bars). */
+    public double carriedEma9() {
+        return carriedEma9.value();
+    }
+
+    public double carriedEma20() {
+        return carriedEma20.value();
+    }
+
+    private void carry(Bar bar) {
+        carriedEma9.update(bar.close());
+        carriedEma20.update(bar.close());
+        carriedAtr3m.update(bar);
+        carriedSwings.update(bar);
+    }
+
     public void seedAtr(List<com.autotrade.core.history.MinuteBar> previousSession) {
         if (previousSession.isEmpty()) {
             return;
@@ -541,6 +595,7 @@ public final class StructureState {
         ema9.update(bar.close());
         ema20.update(bar.close());
         swings.update(bar);
+        carry(bar);
         double band = atr3m.ready() ? config.retestBandAtr() * atr3m.value() : 0;
         // The opening-range levels exist only once the range is complete; a bar that closes exactly
         // at the range end is the first one they see.
@@ -633,7 +688,10 @@ public final class StructureState {
                 zoneLow, zoneLowTouches, zoneHigh, zoneHighTouches,
                 pwh, pwl, pmh, pml, distance(pwh, atr), distance(pwl, atr), distance(pmh, atr), distance(pml, atr),
                 last == null ? Double.NaN : last.open(), last == null ? Double.NaN : last.high(),
-                last == null ? Double.NaN : last.low(), lastMinuteHigh, lastMinuteLow, historyLevels);
+                last == null ? Double.NaN : last.low(), lastMinuteHigh, lastMinuteLow, historyLevels,
+                carriedEma9.value(), carriedEma20.value(), carriedAtr3m.value(),
+                carriedSwings.lastHigh() == null ? Double.NaN : carriedSwings.lastHigh().price(),
+                carriedSwings.lastLow() == null ? Double.NaN : carriedSwings.lastLow().price());
     }
 
     /** A-439: the older levels known at 09:15 (HistoryLevels). */

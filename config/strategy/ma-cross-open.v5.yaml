@@ -1,0 +1,36 @@
+# mco-v5 (2026-11-22, A-547, user: "it can trade as normal and can wait till level break or near the level and if data supports
+# don't exit, continue as long as data is valid"): mco-v1 entries; the target / time exits wait at the nearest level and a
+# broken level lets the trade ride while the carried averages agree, to flat_by 15:15 (index data valid to 15:15).
+version: mco-v5
+strategy: ma-cross-open
+status: UNCALIBRATED
+source: "A-547 registration (user, 22 Nov), rules fixed before the replay"
+
+scope:
+  entry_from: "09:30"
+  last_new_entry: "10:21"              # exclusive: from 10:21 mac-v34 itself sees crosses
+  flat_by: "15:15"
+  time_stop_min: 0                     # A-547: the time stop is the level-hold rule's (exits.level_hold_time_min)
+  skip_expiring_index: true
+
+setup:
+  max_stop_atr: 3.0                    # of the carried ATR(3m)
+  carried_emas: true                   # A-537: cross, swing stop and ATR from the carried indicators
+  reward_to_risk: 2.0                  # target = entry + 2 x (entry - stop)
+  # the averages are the carried EMA9 and EMA20 of 3-minute bars (structure.carriedEma9 / carriedEma20)
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 25                 # emergency only; the index-level stop comes first
+  early_fail_min: 15                   # A-334
+  early_fail_pct: -7.5
+  use_target: false                    # A-547: the 2R target is the level-hold rule's
+  level_hold: true                     # A-547
+  level_hold_time_min: 60              # mco-v1's time stop, unless waiting at / riding past the level
+  level_hold_near_atr: 0.5             # 'near the level': within 0.5 x carried ATR(3m) of it
+  level_hold_fail_atr: 0.5             # riding: back 0.5 ATR across the broken level = failed break
+  level_hold_reject_atr: 1.0           # waiting: 1 ATR back away from the level = rejected

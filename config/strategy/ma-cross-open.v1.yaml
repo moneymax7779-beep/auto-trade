@@ -1,0 +1,31 @@
+# mco-v1 (2026-11-21, A-537, user: "build the opening-hour strategy and replay on tick days"): mac-v34's rules on EMA9 / EMA20,
+# ATR(3m) and pivot swings carried over from the previous session (features: carried*), trading only 09:30-10:21,
+# the hour in which mac-v34 cannot see a cross (its EMA20 of 3-minute bars is seeded each morning; earliest cross 10:21).
+# From the A-535 screen on the same 37 tick days (in-sample). Own strategy id, so ma-cross (live) is unchanged.
+version: mco-v1
+strategy: ma-cross-open
+status: UNCALIBRATED
+source: "A-535 screen, A-537 registration (rules fixed before the replay)"
+
+scope:
+  entry_from: "09:30"
+  last_new_entry: "10:21"              # exclusive: from 10:21 mac-v34 itself sees crosses
+  flat_by: "15:15"
+  time_stop_min: 60
+  skip_expiring_index: true
+
+setup:
+  max_stop_atr: 3.0                    # of the carried ATR(3m)
+  carried_emas: true                   # A-537: cross, swing stop and ATR from the carried indicators
+  reward_to_risk: 2.0                  # target = entry + 2 x (entry - stop)
+  # the averages are the carried EMA9 and EMA20 of 3-minute bars (structure.carriedEma9 / carriedEma20)
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 25                 # emergency only; the index-level stop comes first
+  early_fail_min: 15                   # A-334
+  early_fail_pct: -7.5

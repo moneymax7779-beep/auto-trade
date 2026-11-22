@@ -87,5 +87,15 @@ public record StructureFeatures(
         double lastMinuteHigh,
         double lastMinuteLow,
         /** A-439 (features structure.history_levels): HistoryLevels at 09:15; empty when off. */
-        java.util.List<Double> historyLevels) {
+        java.util.List<Double> historyLevels,
+        /**
+         * A-537: EMA9 / EMA20, ATR(3m) and the last pivot swings of 3-minute bars carried over from the previous
+         * session (its 1-minute spot bars aggregated to 3-minute bars from 09:15, then today's 3-minute closes), so they
+         * exist at the open like a chart's; NaN without a previous session. The fields above are unchanged.
+         */
+        double carriedEma9,
+        double carriedEma20,
+        double carriedAtr3m,
+        double carriedSwingHigh,
+        double carriedSwingLow) {
 }
