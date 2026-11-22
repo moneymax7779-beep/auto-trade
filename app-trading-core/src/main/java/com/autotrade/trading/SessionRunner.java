@@ -696,6 +696,10 @@ class SessionRunner implements ApplicationRunner {
                         replay ? referenceStore : liveReference);
         // features v12 (A-090): older sessions' spot bars and the OI baseline from the stored one-minute bars
         history = com.autotrade.md.store.SessionHistories.forFeatures(history, features.barBackfill(), target);
+        if (replay) {          // 22 Nov 2026: earlier sessions' answers cached across replays (AUTOTRADE_REPLAY_CACHE_DIR)
+            history = HistoryCache.wrap(history, target, source, (bars ? "bars" : "ticks") + "|backfill="
+                    + features.barBackfill());
+        }
         // risk v8: live sizes from the account's equity (starting capital + realised net of finished live sessions);
         // a replay uses the starting capital, so its results stay comparable day to day, unless replay-equity chains days
         RiskLimits baseRisk = RiskLimits.from(riskFile);
@@ -834,6 +838,7 @@ class SessionRunner implements ApplicationRunner {
             }
             SnapshotWriter snapshotWriter = snapshots;
             Long snapshotRunId = snapshotRun;
+            SessionHistory cachedHistory = history;
             Thread worker = Thread.ofPlatform().name("trading-session-" + session).start(() -> {
                 Map<String, Object> summary;
                 try {
@@ -867,6 +872,7 @@ class SessionRunner implements ApplicationRunner {
                         source.close();                      // none for a bar replay
                     }
                 log.info("session summary: {}", summary);
+                HistoryCache.report(cachedHistory);
             });
             Running started = new Running(session, trading, worker, timer);
             running = started;
