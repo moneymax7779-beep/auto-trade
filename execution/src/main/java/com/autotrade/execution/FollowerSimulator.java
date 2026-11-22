@@ -69,7 +69,7 @@ public final class FollowerSimulator {
                            double budget, double referenceCapital, int lots, String legGroup, Instant at, String reason,
                            double sizeMultiplier, double strategyLots, double intendedLots, double liquidityLots,
                            double rvol, double callAsk, double putAsk, double bookQuantity, double stopPct,
-                           int fixedLots) {
+                           int fixedLots, Map<String, Double> setBudgets) {
     }
 
     /** A broker exit is sent this many times at most, this far apart (code review 3 Nov 2026). */
@@ -938,7 +938,49 @@ public final class FollowerSimulator {
         if (!(p.budget() > 0) || !(p.referenceCapital() > 0)) {
             return 0;
         }
-        return p.budget() * (day.equity / p.referenceCapital()) * p.sizeMultiplier();
+        double base = p.budget() * (day.equity / p.referenceCapital()) * p.sizeMultiplier();
+        double fill = fillFactor(day, p);
+        if (!(fill > 1)) {
+            return base;
+        }
+        // v17: the extra comes from spare capital only (as the RVOL boost), so it never exceeds what is free and never
+        // makes an entry smaller than today's
+        double free = day.equity - openPremium(day.account.id());
+        return Math.max(base, Math.min(base * fill, 0.97 * free));
+    }
+
+    /**
+     * follower-risk v17 (user 22 Nov 2026: "real capital should be allocated just like how the PAPER allocation does, and if
+     * any of the strategy is not selected for live should auto adjusted among all other remaining strategies"): on a LIVE
+     * intent, 1 unless the strategies selected for LIVE on the account, subscribed and in the signal's set have budgets
+     * adding up to less than the reference capital; then reference / their sum, so they fill the account's equity in
+     * PAPER-1's proportions. Never below 1 (never smaller than today's PAPER fraction). {@link #scaledBudget} takes the
+     * extra from spare capital only.
+     */
+    private double fillFactor(Day day, Pending p) {
+        if (!risk.fillLiveAllocation() || !"LIVE".equals(p.mode()) || p.setBudgets().isEmpty()) {
+            return 1;
+        }
+        java.util.Set<String> selected = new java.util.HashSet<>(liveStrategies.effective(day.account.id(), risk));
+        selected.retainAll(jdbc.queryForList("select strategy_id from acct.strategy_subscription where broker_account_id = ? "
+                + "and copy_group_id = ? and enabled", String.class, day.account.id(), p.copyGroupId()));
+        return fillFactor(p.setBudgets(), selected, p.strategyId(), p.referenceCapital());
+    }
+
+    /** The v17 factor for {@code strategy}: reference / (sum of the selected strategies' set budgets), at least 1. */
+    static double fillFactor(Map<String, Double> setBudgets, java.util.Collection<String> selected, String strategy,
+                             double referenceCapital) {
+        if (!selected.contains(strategy) || !setBudgets.containsKey(strategy) || !(referenceCapital > 0)) {
+            return 1;
+        }
+        double sum = 0;
+        for (String s : new java.util.HashSet<>(selected)) {
+            Double b = setBudgets.get(s);
+            if (b != null && b > 0) {
+                sum += b;
+            }
+        }
+        return sum > 0 ? Math.max(1, referenceCapital / sum) : 1;
     }
 
     // ---------------------------------------------------------------- v14 stop-risk cap
@@ -1730,6 +1772,7 @@ public final class FollowerSimulator {
             + "(d.context->>'liquidity_lots')::float8 as liquidity_lots, (d.context->>'rvol_tod')::float8 as rvol_tod, "
             + "(d.context->>'call_ask')::float8 as call_ask, (d.context->>'put_ask')::float8 as put_ask, "
             + "(d.context->>'stop_pct')::float8 as stop_pct, (d.context->>'fixed_lots')::float8::int as fixed_lots, "
+            + "d.context::text as context_json, "
             // replay depth ceiling: what the signal account's own position got filled through the same book
             + "(select tp.quantity from trade.position tp where tp.session_id = d.signal_session_id "
             + "and tp.strategy_id = d.strategy_id and tp.underlying = d.underlying and tp.symbol = d.symbol "
@@ -1785,6 +1828,21 @@ public final class FollowerSimulator {
                 rs.getInt("lots"), rs.getString("leg_group"), rs.getTimestamp("decided_at").toInstant(),
                 rs.getString("reason"), rs.getDouble("size_multiplier"), orNaN(rs, "strategy_lots"),
                 orNaN(rs, "intended_lots"), orNaN(rs, "liquidity_lots"), orNaN(rs, "rvol_tod"), orNaN(rs, "call_ask"),
-                orNaN(rs, "put_ask"), bookQuantity(rs), orNaN(rs, "stop_pct"), rs.getInt("fixed_lots"));
+                orNaN(rs, "put_ask"), bookQuantity(rs), orNaN(rs, "stop_pct"), rs.getInt("fixed_lots"),
+                setBudgets(rs.getString("context_json")));
     }
+
+    /** v17: each strategy's premium budget on the signal's session ({@code budget:<strategy>} keys of the context). */
+    static Map<String, Double> setBudgets(String contextJson) {
+        Map<String, Double> out = new java.util.HashMap<>();
+        SignalDecisionStore.context(contextJson).forEach((key, value) -> {
+            if (key.startsWith(SET_BUDGET_PREFIX) && value != null && value > 0 && Double.isFinite(value)) {
+                out.put(key.substring(SET_BUDGET_PREFIX.length()), value);
+            }
+        });
+        return out;
+    }
+
+    /** The context key prefix the signal source publishes each strategy's budget under (follower-risk v17). */
+    public static final String SET_BUDGET_PREFIX = "budget:";
 }
