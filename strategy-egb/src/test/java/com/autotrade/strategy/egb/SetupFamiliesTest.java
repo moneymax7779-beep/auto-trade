@@ -245,6 +245,190 @@ class SetupFamiliesTest {
                 .as("first quote 21 minutes in: past the 5-minute grace, no look").isEmpty();
     }
 
+    /** ma-cross-open v7 test day: carried swings 22,560 / 22,700 and carried ATR 20; no gap (open = previous close). */
+    private static Day mcoV7() {
+        return new Day("ma-cross-open.v7.yaml", Map.of("structure.carriedSwingLow", 22560.0,
+                "structure.carriedSwingHigh", 22700.0, "structure.carriedAtr3m", 20.0, "structure.dayOpen", 22600.0,
+                "structure.prevClose", 22600.0));
+    }
+
+    /** A carried cross up at 09:33 buys the call (risk 50 = 2.5 carried ATR); 09:50 passes the 15-minute look. */
+    private static void mcoCall(Day d, PositionView holding) {
+        d.at("09:30", 22600, PositionView.FLAT, "structure.carriedEma9", 22598.0, "structure.carriedEma20", 22602.0);
+        assertThat(d.at("09:33", 22610, PositionView.FLAT, "structure.carriedEma9", 22605.0,
+                "structure.carriedEma20", 22601.0).orders()).singleElement().extracting(OrderIntent::side)
+                .isEqualTo(OptionSide.CE);
+        assertThat(d.at("09:50", 22620, holding, "structure.carriedEma9", 22608.0, "structure.carriedEma20", 22602.0)
+                .orders()).isEmpty();
+    }
+
+    /** Supported for a call: above VWAP 22,600, today's EMA9 above EMA20, today's last swing low under the index. */
+    private static final Object[] CALL_SUPPORT = {"structure.ema9", 22640.0, "structure.ema20", 22630.0,
+            "structure.lastSwingLow", 22620.0};
+
+    private static Object[] with(Object[] base, Object... more) {
+        Object[] out = java.util.Arrays.copyOf(base, base.length + more.length);
+        System.arraycopy(more, 0, out, base.length, more.length);
+        return out;
+    }
+
+    /**
+     * Review 22 Nov 2026 (A-559/A-560 mco-v7): at the 60-minute time stop a supported trade holds, judged on that minute's
+     * own snapshot; the index where the hold began is a floor and a close 0.5 carried ATR (10) back through it exits.
+     */
+    @Test
+    void maCrossOpenV7HoldsASupportedTradeAtTheTimeStopAndExitsOnTheFloor() {
+        PositionView holding = new PositionView(true, OptionSide.CE, 1, 50, null, 52);
+        Day d = mcoV7();
+        mcoCall(d, holding);
+        assertThat(d.at("10:33", 22650, holding, CALL_SUPPORT).orders()).as("supported at 60 minutes: hold").isEmpty();
+        assertThat(d.at("10:34", 22655, holding, CALL_SUPPORT).orders()).isEmpty();
+        assertThat(d.at("10:35", 22641, holding, CALL_SUPPORT).orders()).as("9 under the floor 22,650: keep").isEmpty();
+        assertThat(d.at("10:36", 22640, holding, CALL_SUPPORT).orders()).as("10 under the floor: out")
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("HOLD_FLOOR");
+    }
+
+    @Test
+    void maCrossOpenV7LeavesOnTheFirstMinuteWithoutSupport() {
+        PositionView holding = new PositionView(true, OptionSide.CE, 1, 50, null, 52);
+        Day d = mcoV7();
+        mcoCall(d, holding);
+        assertThat(d.at("10:33", 22650, holding, CALL_SUPPORT).orders()).isEmpty();
+        assertThat(d.at("10:40", 22660, holding, with(CALL_SUPPORT, "structure.lastSwingLow", 22665.0)).orders())
+                .as("the last swing low is above the index: no support").singleElement()
+                .extracting(OrderIntent::reason).isEqualTo("HOLD_STRUCTURE");
+
+        Day vwap = mcoV7();
+        mcoCall(vwap, holding);
+        assertThat(vwap.at("10:33", 22650, holding, CALL_SUPPORT).orders()).isEmpty();
+        assertThat(vwap.at("10:41", 22645, holding, with(CALL_SUPPORT, "structure.vwapSpotProxy", 22646.0)).orders())
+                .as("below VWAP").singleElement().extracting(OrderIntent::reason).isEqualTo("HOLD_STRUCTURE");
+    }
+
+    @Test
+    void maCrossOpenV7TimeStopsWhenThatMinuteHasNoSupport() {
+        PositionView holding = new PositionView(true, OptionSide.CE, 1, 50, null, 52);
+        Day d = mcoV7();
+        mcoCall(d, holding);
+        assertThat(d.at("10:32", 22650, holding, CALL_SUPPORT).orders()).as("59 minutes").isEmpty();
+        assertThat(d.at("10:33", 22650, holding, with(CALL_SUPPORT, "structure.ema9", 22620.0)).orders())
+                .as("EMA9 under EMA20 at the time stop's own minute: out, though the minute before was supported")
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("TIME_60");
+
+        Day nan = mcoV7();
+        mcoCall(nan, holding);
+        assertThat(nan.at("10:33", 22650, holding, with(CALL_SUPPORT, "structure.ema20", Double.NaN)).orders())
+                .as("a missing value is no support").singleElement().extracting(OrderIntent::reason).isEqualTo("TIME_60");
+    }
+
+    /** ma-cross-open v8 test day: as v7. */
+    private static Day mcoV8() {
+        return new Day("ma-cross-open.v8.yaml", Map.of("structure.carriedSwingLow", 22560.0,
+                "structure.carriedSwingHigh", 22700.0, "structure.carriedAtr3m", 20.0, "structure.dayOpen", 22600.0,
+                "structure.prevClose", 22600.0));
+    }
+
+    /**
+     * A-562 mco-v8: the hold is judged on the last completed 3-minute bar's close and looked at only when a new bar has
+     * closed: a 1-minute dip through the floor between bar closes does nothing; a bar closing 10 (0.5 carried ATR) back
+     * through the floor exits.
+     */
+    @Test
+    void maCrossOpenV8JudgesTheHoldOnThreeMinuteBarCloses() {
+        PositionView holding = new PositionView(true, OptionSide.CE, 1, 50, null, 52);
+        Day d = mcoV8();
+        mcoCall(d, holding);
+        assertThat(d.at("10:33", 22652, holding, with(CALL_SUPPORT, "structure.lastBarClose", 22650.0)).orders())
+                .as("supported bar close at 60 minutes: hold, floor 22,650").isEmpty();
+        assertThat(d.at("10:34", 22630, holding, with(CALL_SUPPORT, "structure.lastBarClose", 22650.0)).orders())
+                .as("the index 20 under the floor between bar closes: no look").isEmpty();
+        assertThat(d.at("10:35", 22630, holding, with(CALL_SUPPORT, "structure.lastBarClose", 22650.0)).orders()).isEmpty();
+        assertThat(d.at("10:36", 22646, holding, with(CALL_SUPPORT, "structure.lastBarClose", 22645.0)).orders())
+                .as("a bar closes 5 under the floor: keep").isEmpty();
+        assertThat(d.at("10:39", 22641, holding, with(CALL_SUPPORT, "structure.lastBarClose", 22640.0)).orders())
+                .as("a bar closes 10 under the floor: out").singleElement().extracting(OrderIntent::reason)
+                .isEqualTo("HOLD_FLOOR");
+    }
+
+    @Test
+    void maCrossOpenV8LeavesWhenABarClosesWithoutSupport() {
+        PositionView holding = new PositionView(true, OptionSide.CE, 1, 50, null, 52);
+        Day d = mcoV8();
+        mcoCall(d, holding);
+        assertThat(d.at("10:33", 22652, holding, with(CALL_SUPPORT, "structure.lastBarClose", 22650.0)).orders()).isEmpty();
+        assertThat(d.at("10:37", 22590, holding, with(CALL_SUPPORT, "structure.lastBarClose", 22650.0)).orders())
+                .as("below VWAP at the minute, but no new bar yet").isEmpty();
+        assertThat(d.at("10:39", 22590, holding, with(CALL_SUPPORT, "structure.lastBarClose", 22655.0,
+                "structure.vwapSpotProxy", 22660.0)).orders()).as("the new bar closed under VWAP").singleElement()
+                .extracting(OrderIntent::reason).isEqualTo("HOLD_STRUCTURE");
+
+        Day noBar = mcoV8();
+        mcoCall(noBar, holding);
+        assertThat(noBar.at("10:33", 22652, holding, CALL_SUPPORT).orders())
+                .as("no completed bar close known: no support, the time stop exits").singleElement()
+                .extracting(OrderIntent::reason).isEqualTo("TIME_60");
+    }
+
+    /** Review 22 Nov 2026: a bar closing at the same price as the last is still a look (a 3-minute boundary). */
+    @Test
+    void maCrossOpenV8LooksAtABarWithTheSameClose() {
+        PositionView holding = new PositionView(true, OptionSide.CE, 1, 50, null, 52);
+        Day d = mcoV8();
+        mcoCall(d, holding);
+        assertThat(d.at("10:33", 22652, holding, with(CALL_SUPPORT, "structure.lastBarClose", 22650.0)).orders()).isEmpty();
+        assertThat(d.at("10:36", 22650, holding, with(CALL_SUPPORT, "structure.lastBarClose", 22650.0,
+                "structure.lastSwingLow", 22655.0)).orders()).as("same close, but the swing low is now above it")
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("HOLD_STRUCTURE");
+    }
+
+    @Test
+    void maCrossOpenV8MirrorsAPut() {
+        PositionView holding = new PositionView(true, OptionSide.PE, 1, 50, null, 52);
+        Day d = mcoV8();
+        d.at("09:30", 22600, PositionView.FLAT, "structure.carriedEma9", 22602.0, "structure.carriedEma20", 22598.0);
+        assertThat(d.at("09:33", 22650, PositionView.FLAT, "structure.carriedEma9", 22595.0,
+                "structure.carriedEma20", 22599.0).orders()).singleElement().extracting(OrderIntent::side)
+                .isEqualTo(OptionSide.PE);
+        d.at("09:50", 22640, holding, "structure.carriedEma9", 22592.0, "structure.carriedEma20", 22598.0);
+        Object[] putSupport = {"structure.ema9", 22560.0, "structure.ema20", 22570.0, "structure.lastSwingHigh", 22580.0};
+        assertThat(d.at("10:33", 22549, holding, with(putSupport, "structure.lastBarClose", 22550.0)).orders()).isEmpty();
+        assertThat(d.at("10:34", 22575, holding, with(putSupport, "structure.lastBarClose", 22550.0)).orders())
+                .as("between bar closes").isEmpty();
+        assertThat(d.at("10:36", 22561, holding, with(putSupport, "structure.lastBarClose", 22560.0)).orders())
+                .as("a bar closes 10 back up through the floor 22,550").singleElement().extracting(OrderIntent::reason)
+                .isEqualTo("HOLD_FLOOR");
+    }
+
+    /** structure_hold_on is minute or bar3m, and only with structure_hold. */
+    @Test
+    void structureHoldOnIsCheckedWhenTheFileLoads(@org.junit.jupiter.api.io.TempDir Path dir) throws Exception {
+        String v8 = java.nio.file.Files.readString(Path.of("..", "config", "strategy", "ma-cross-open.v8.yaml"));
+        Path odd = dir.resolve("ma-cross-open.v8.yaml");
+        java.nio.file.Files.writeString(odd, v8.replace("structure_hold_on: bar3m", "structure_hold_on: bar5m"));
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> Strategies.load(odd).create("NIFTY", Snapshots.SESSION))
+                .hasStackTraceContaining("structure_hold_on must be minute or bar3m");
+        String v34 = java.nio.file.Files.readString(Path.of("..", "config", "strategy", "ma-cross.v34.yaml"));
+        Path alone = dir.resolve("ma-cross.v34.yaml");
+        java.nio.file.Files.writeString(alone, v34.replaceAll("(?m)^exits:\\s*$", "exits:\n  structure_hold_on: bar3m"));
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> Strategies.load(alone).create("NIFTY", Snapshots.SESSION))
+                .hasStackTraceContaining("with exits.structure_hold");
+    }
+
+    @Test
+    void maCrossOpenV7MirrorsAPut() {
+        PositionView holding = new PositionView(true, OptionSide.PE, 1, 50, null, 52);
+        Day d = mcoV7();
+        d.at("09:30", 22600, PositionView.FLAT, "structure.carriedEma9", 22602.0, "structure.carriedEma20", 22598.0);
+        assertThat(d.at("09:33", 22650, PositionView.FLAT, "structure.carriedEma9", 22595.0,
+                "structure.carriedEma20", 22599.0).orders()).singleElement().extracting(OrderIntent::side)
+                .isEqualTo(OptionSide.PE);                                      // risk 50 to the carried swing high
+        d.at("09:50", 22640, holding, "structure.carriedEma9", 22592.0, "structure.carriedEma20", 22598.0);
+        Object[] putSupport = {"structure.ema9", 22560.0, "structure.ema20", 22570.0, "structure.lastSwingHigh", 22580.0};
+        assertThat(d.at("10:33", 22550, holding, putSupport).orders()).as("below VWAP, EMA9 under EMA20").isEmpty();
+        assertThat(d.at("10:36", 22560, holding, putSupport).orders()).as("10 back up through the floor 22,550")
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("HOLD_FLOOR");
+    }
+
     /** A-332 mac-v20: past 60 minutes the time stop closes only a trade whose index never reached +1R. */
     @Test
     void maCrossV20TimeStopsOnlyATradeThatNeverReachedOneR() {
@@ -269,8 +453,9 @@ class SetupFamiliesTest {
     @Test
     void everyMaCrossFileLoadsAndAHalfPairIsRefused(@org.junit.jupiter.api.io.TempDir Path dir) throws Exception {
         try (var files = java.nio.file.Files.list(Path.of("..", "config", "strategy"))) {
-            List<Path> mac = files.filter(p -> p.getFileName().toString().startsWith("ma-cross.v")).toList();
-            assertThat(mac).hasSizeGreaterThanOrEqualTo(20);
+            List<Path> mac = files.filter(p -> p.getFileName().toString().startsWith("ma-cross.v")
+                    || p.getFileName().toString().startsWith("ma-cross-open.v")).toList();
+            assertThat(mac).hasSizeGreaterThanOrEqualTo(27);
             for (Path p : mac) {
                 assertThat(Strategies.load(p).create("NIFTY", Snapshots.SESSION)).as(p.toString()).isNotNull();
             }

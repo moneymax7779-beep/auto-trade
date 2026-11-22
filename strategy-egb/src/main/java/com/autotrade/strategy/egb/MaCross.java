@@ -82,20 +82,25 @@ final class MaCross extends SetupStrategy {
     private boolean riding, deferred;
     private double awaitLevel = Double.NaN;
     // A-559 (exits.structure_hold, off when absent): the 2R target and the time stop are this class's (frame target and
-    // time stop must be off). When either would fire, the trade holds while, at the last completed minute's close, the
+    // time stop must be off). When either would fire, the trade holds while, at the minute close (each snapshot is one:
+    // features snapshot.interval_sec 60; review 22 Nov 2026: judged on the snapshot itself, not the one before), the
     // index is on its side of the session VWAP, today's 3-min EMA9 is beyond today's EMA20 in its direction and the index
     // has not crossed today's last confirmed 3-min swing low (high for a put); any missing value = no support. While
     // holding, the first minute close without that support exits (HOLD_STRUCTURE); swing / premium stop and flat_by stay.
     private final boolean structureHold;
     private final int structureHoldTimeMin;
     private boolean structureHolding;
-    private java.time.LocalDateTime supportMinute;
-    private Boolean supportAtClose;             // support at the last completed minute's close (null = none seen yet)
-    private boolean supportNow;                 // support at the latest snapshot of the current minute
     // A-560 (exits.structure_hold_floor_atr, off when absent): the index at the minute close where the hold started is a
     // floor; a later minute close back beyond it by floor_atr x the carried ATR(3m) noted then exits (HOLD_FLOOR)
     private final double holdFloorAtr;
-    private double spotNow = Double.NaN, spotAtClose = Double.NaN, holdFloor = Double.NaN, holdFloorAtrValue = Double.NaN;
+    private double holdFloor = Double.NaN, holdFloorAtrValue = Double.NaN;
+    // A-562 (exits.structure_hold_on: bar3m; default minute): the hold's support and floor judged on the last completed
+    // 3-minute bar's close (structure.lastBarClose), acted on only when a new 3-minute bar has closed (its close changed or
+    // a 3-minute boundary); the hold's evidence (VWAP, EMA9/20, swings) is 3-minute. A hold the 2R target starts mid-bar
+    // is judged, and floored, on the previous bar's close (review 22 Nov 2026: as registered; a target-touch floor is a
+    // separate test)
+    private final boolean holdOnBar3m;
+    private double lastBarSeen = Double.NaN;
 
     MaCross(ThresholdConfig c) {
         super(c);
@@ -116,6 +121,11 @@ final class MaCross extends SetupStrategy {
         structureHold = c.has("exits.structure_hold") && c.getBoolean("exits.structure_hold");
         structureHoldTimeMin = structureHold ? c.getInt("exits.structure_hold_time_min") : 0;
         holdFloorAtr = c.has("exits.structure_hold_floor_atr") ? c.getDouble("exits.structure_hold_floor_atr") : Double.NaN;
+        String holdOn = c.has("exits.structure_hold_on") ? c.getString("exits.structure_hold_on") : "minute";
+        if (!java.util.Set.of("minute", "bar3m").contains(holdOn) || (!"minute".equals(holdOn) && !structureHold)) {
+            throw new IllegalArgumentException("exits.structure_hold_on must be minute or bar3m, with exits.structure_hold");
+        }
+        holdOnBar3m = "bar3m".equals(holdOn);
         if (c.has("exits.structure_hold_floor_atr") && !(structureHold && holdFloorAtr >= 0)) {
             throw new IllegalArgumentException("exits.structure_hold_floor_atr needs exits.structure_hold and a value >= 0");
         }
@@ -213,29 +223,36 @@ final class MaCross extends SetupStrategy {
             return levelHoldExit(s, side, r);
         }
         if (structureHold) {
-            return structureHoldExit(s, side, r);
+            return structureHoldExit(s, side, r, time);
         }
         return null;
     }
 
     /** A-559: target / time exits held while the price structure supports the trade; see the field comment. */
-    private String structureHoldExit(FeatureSnapshot s, OptionSide side, double r) {
-        java.time.LocalDateTime minute = java.time.LocalDateTime.ofInstant(s.time(), java.time.ZoneId.of("Asia/Kolkata"))
-                .truncatedTo(java.time.temporal.ChronoUnit.MINUTES);
-        boolean newMinute = supportMinute != null && minute.isAfter(supportMinute);
-        if (newMinute) {
-            supportAtClose = supportNow;               // the previous minute's last snapshot = its close
-            spotAtClose = spotNow;
+    private String structureHoldExit(FeatureSnapshot s, OptionSide side, double r, LocalTime time) {
+        // each snapshot is a minute close (features snapshot.interval_sec 60), so support and the floor are judged on it;
+        // A-562 bar3m: on the last completed 3-minute bar's close, looked at only when a new bar has closed
+        boolean up = side == OptionSide.CE;
+        double price = holdOnBar3m ? s.structure().lastBarClose() : s.spot();
+        boolean look = true;
+        if (holdOnBar3m) {
+            // a new bar closed: its close changed, or this snapshot is a 3-minute boundary (review 22 Nov 2026: two bars with
+            // the same close are two looks; bars close only on the grid, before the boundary snapshot)
+            look = Double.isFinite(price) && (price != lastBarSeen || threeMinuteClose(time));
+            if (Double.isFinite(price)) {
+                lastBarSeen = price;
+            }
         }
-        supportMinute = minute;
-        supportNow = structureSupports(s.structure(), s.spot(), side == OptionSide.CE);
-        spotNow = s.spot();
+        boolean support = structureSupports(s.structure(), price, up);
         if (structureHolding) {
-            if (!Boolean.TRUE.equals(supportAtClose)) {
+            if (!look) {
+                return null;
+            }
+            if (!support) {
                 return "HOLD_STRUCTURE";
             }
-            if (newMinute && Double.isFinite(holdFloor) && Double.isFinite(holdFloorAtrValue)
-                    && (side == OptionSide.CE ? holdFloor - spotAtClose : spotAtClose - holdFloor) >= holdFloorAtr * holdFloorAtrValue) {
+            if (Double.isFinite(holdFloor) && Double.isFinite(holdFloorAtrValue)
+                    && (up ? holdFloor - price : price - holdFloor) >= holdFloorAtr * holdFloorAtrValue) {
                 return "HOLD_FLOOR";
             }
             return null;
@@ -244,11 +261,11 @@ final class MaCross extends SetupStrategy {
                 && java.time.Duration.between(entryTime, s.time()).toMinutes() >= structureHoldTimeMin;
         boolean target = r >= rewardToRisk;
         if (target || timeUp) {
-            if (Boolean.TRUE.equals(supportAtClose)) {
+            if (support) {
                 structureHolding = true;
                 if (Double.isFinite(holdFloorAtr)) {
                     StructureFeatures st = s.structure();
-                    holdFloor = spotAtClose;
+                    holdFloor = price;
                     holdFloorAtrValue = carried ? st.carriedAtr3m() : st.atr3m();
                 }
                 return null;
@@ -256,6 +273,22 @@ final class MaCross extends SetupStrategy {
             return target ? "TARGET" : "TIME_" + structureHoldTimeMin;
         }
         return null;
+    }
+
+    /** Every entry path (cross, reverse, level break) starts its trade's state here (review 22 Nov 2026). */
+    private void startTrade(FeatureSnapshot s, double risk, boolean up) {
+        entrySpot = s.spot();
+        entryRisk = risk;
+        entryTime = s.time();
+        bestR = Double.NaN;
+        earlyChecked = false;
+        holdLevel = levelHold ? nearestLevel(s.structure(), entrySpot, up) : Double.NaN;
+        riding = false;
+        deferred = false;
+        structureHolding = false;
+        holdFloor = Double.NaN;
+        holdFloorAtrValue = Double.NaN;
+        lastBarSeen = Double.NaN;
     }
 
     static boolean structureSupports(StructureFeatures st, double spot, boolean up) {
@@ -338,6 +371,14 @@ final class MaCross extends SetupStrategy {
                     st.distOrlAtr(), st.distEma20Atr(), st.dayHigh(), st.dayLow(), st.dayOpen(), st.lastBarBodyRatio(),
                     st.lastBarRangeVsAvg(), st.spotChange3m(), st.spotChange1m(), st.higherLows(), st.lowerHighs(),
                     crosses.size(), st.distPdhAtr(), st.distPdlAtr());
+            if (carried) {
+                // review 22 Nov 2026: A332CROSS prints today's indicators; a carried cross decides on these
+                double csw = crossUp ? st.carriedSwingLow() : st.carriedSwingHigh();
+                log.info("MCOCROSS {} {} {} canEnter={} spot={} carriedEma9={} carriedEma20={} carriedAtr3m={} carriedSwing={} "
+                        + "riskCarriedAtr={}", s.underlying(), time, crossUp ? "UP" : "DOWN", canEnter, s.spot(),
+                        st.carriedEma9(), st.carriedEma20(), st.carriedAtr3m(), csw,
+                        (crossUp ? s.spot() - csw : csw - s.spot()) / st.carriedAtr3m());
+            }
             crosses.addLast(s.time());
         }
         if (!"ignore".equals(onOppositeCross) && openSide != null && (crossUp && openSide == OptionSide.PE
@@ -361,11 +402,7 @@ final class MaCross extends SetupStrategy {
             pendingReverse = null;
             double risk = next.side() == OptionSide.CE ? s.spot() - next.stop() : next.stop() - s.spot();
             if (s.time().isBefore(pendingAt.plusSeconds(180)) && risk > 0) {
-                entrySpot = s.spot();
-                entryRisk = risk;
-                entryTime = s.time();
-                bestR = Double.NaN;
-                earlyChecked = false;
+                startTrade(s, risk, next.side() == OptionSide.CE);
                 double target = next.side() == OptionSide.CE ? entrySpot + rewardToRisk * risk : entrySpot - rewardToRisk * risk;
                 return new Entry(next.side(), next.stop(), target, next.reason() + "_REVERSE");
             }
@@ -383,11 +420,7 @@ final class MaCross extends SetupStrategy {
                     Entry b = crossEntry(s, up, c);
                     c.put("level_broken", true);
                     if (b != null) {
-                        entrySpot = s.spot();
-                        entryRisk = up ? entrySpot - b.stop() : b.stop() - entrySpot;
-                        entryTime = s.time();
-                        bestR = Double.NaN;
-                        earlyChecked = false;
+                        startTrade(s, up ? s.spot() - b.stop() : b.stop() - s.spot(), up);
                         return new Entry(b.side(), b.stop(), b.target(), b.reason() + "_LEVEL");
                     }
                 }
@@ -416,21 +449,7 @@ final class MaCross extends SetupStrategy {
             }
         }
         if (e != null) {
-            entrySpot = s.spot();
-            entryRisk = crossUp ? entrySpot - e.stop() : e.stop() - entrySpot;
-            entryTime = s.time();
-            bestR = Double.NaN;
-            earlyChecked = false;
-            holdLevel = levelHold ? nearestLevel(s.structure(), entrySpot, crossUp) : Double.NaN;
-            riding = false;
-            deferred = false;
-            structureHolding = false;
-            supportMinute = null;
-            supportAtClose = null;
-            spotNow = Double.NaN;
-            spotAtClose = Double.NaN;
-            holdFloor = Double.NaN;
-            holdFloorAtrValue = Double.NaN;
+            startTrade(s, crossUp ? s.spot() - e.stop() : e.stop() - s.spot(), crossUp);
         }
         return e;
     }

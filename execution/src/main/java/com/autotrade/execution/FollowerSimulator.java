@@ -954,16 +954,20 @@ public final class FollowerSimulator {
      * any of the strategy is not selected for live should auto adjusted among all other remaining strategies"): on a LIVE
      * intent, 1 unless the strategies selected for LIVE on the account, subscribed and in the signal's set have budgets
      * adding up to less than the reference capital; then reference / their sum, so they fill the account's equity in
-     * PAPER-1's proportions. Never below 1 (never smaller than today's PAPER fraction). {@link #scaledBudget} takes the
-     * extra from spare capital only.
+     * PAPER-1's proportions. The factor is never below 1 and {@link #scaledBudget} takes the extra from spare capital only,
+     * so one entry is never smaller than v16's; but a filled entry can leave no capital for a later one the same day (the
+     * same strategy on the other index, or another selected strategy), which v16's smaller entries would both have fit.
      */
     private double fillFactor(Day day, Pending p) {
-        if (!risk.fillLiveAllocation() || !"LIVE".equals(p.mode()) || p.setBudgets().isEmpty()) {
+        // the same LIVE test as check() (review 22 Nov 2026): the account's mode or the intent's
+        boolean live = day.account.tradeMode() == TradeMode.LIVE || TradeMode.LIVE.name().equals(p.mode());
+        if (!risk.fillLiveAllocation() || !live || p.setBudgets().isEmpty()) {
             return 1;
         }
         java.util.Set<String> selected = new java.util.HashSet<>(liveStrategies.effective(day.account.id(), risk));
-        selected.retainAll(jdbc.queryForList("select strategy_id from acct.strategy_subscription where broker_account_id = ? "
-                + "and copy_group_id = ? and enabled", String.class, day.account.id(), p.copyGroupId()));
+        // every copy group the account follows (review 22 Nov 2026), not only this decision's
+        selected.retainAll(jdbc.queryForList("select distinct strategy_id from acct.strategy_subscription "
+                + "where broker_account_id = ? and enabled", String.class, day.account.id()));
         return fillFactor(p.setBudgets(), selected, p.strategyId(), p.referenceCapital());
     }
 

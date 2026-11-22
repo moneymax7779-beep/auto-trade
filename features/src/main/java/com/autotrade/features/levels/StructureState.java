@@ -149,6 +149,12 @@ public final class StructureState {
             return;
         }
         Instant first = previousSession.getFirst().start();
+        // review 22 Nov 2026: bars of another day than the previous session PDH/PDL came from (a missed capture day
+        // falls back to an older one) are not carried: the carried indicators stay NaN and a carried cross cannot enter
+        if (previousSessionDate != null
+                && !previousSessionDate.equals(first.atZone(com.autotrade.core.time.MarketTime.IST).toLocalDate())) {
+            return;
+        }
         Instant open = first.atZone(com.autotrade.core.time.MarketTime.IST).toLocalDate()
                 .atTime(sessionOpen.atZone(com.autotrade.core.time.MarketTime.IST).toLocalTime())
                 .atZone(com.autotrade.core.time.MarketTime.IST).toInstant();

@@ -82,13 +82,15 @@ public final class SignalDecisionStore {
         return Double.isFinite(value) ? value : null;
     }
 
+    private static final Pattern CONTEXT_ENTRY = Pattern.compile("\"([^\"]+)\"\\s*:\\s*(null|-?[0-9.Ee+-]+)");
+
     /** Reads the flat {"key": number|null} object written by {@link SignalDecision#contextJson()}. */
     static Map<String, Double> context(String json) {
         Map<String, Double> values = new HashMap<>();
         if (json == null) {
             return values;
         }
-        Matcher m = Pattern.compile("\"([^\"]+)\"\\s*:\\s*(null|-?[0-9.Ee+-]+)").matcher(json);
+        Matcher m = CONTEXT_ENTRY.matcher(json);
         while (m.find()) {
             values.put(m.group(1), "null".equals(m.group(2)) ? Double.NaN : Double.parseDouble(m.group(2)));
         }
