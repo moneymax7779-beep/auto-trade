@@ -1,0 +1,42 @@
+# mco-v8 (2026-11-22, A-562, user: "review the mco v7 and correct it to get the maximum profit"): mco-v7 with the hold's
+# support and floor judged on 3-minute bar closes (structure.lastBarClose), looked at when a new 3-minute bar closes.
+# Based on: mco-v7 (2026-11-22, A-560, user: "add some more intelligence to the v6 - to turn this to profit"): mco-v6 + a hold floor: the index where
+# the hold started (v2's exit point) is a floor; a minute close back beyond it by 0.5 x carried ATR(3m) exits (HOLD_FLOOR).
+# Based on: mco-v6 (2026-11-22, A-559, user: "I don't like the concept of holding till 3.15 unless the data supports"): mco-v2, but the 2R target and
+# the 60-min time stop hold while the price structure supports the trade (index beyond session VWAP, today's 3-min EMA9 beyond
+# EMA20, today's last 3-min swing not crossed, at each minute close); the first minute close without support exits.
+# Based on: mco-v2 (2026-11-22, A-546, user: "skip a carried-average cross in the gap's direction during the first 15-30 minutes"): mco-v1 + no cross in the opening gap's direction (|open / prev close - 1| >= 0.25 %, A-414's gap size) before 09:45.
+version: mco-v8
+strategy: ma-cross-open
+status: UNCALIBRATED
+source: "A-562 registration (user, 22 Nov), rules fixed before the replay"
+
+scope:
+  entry_from: "09:30"
+  last_new_entry: "10:21"              # exclusive: from 10:21 mac-v34 itself sees crosses
+  flat_by: "15:15"
+  time_stop_min: 0                     # A-559: the time stop is the structure-hold rule's (exits.structure_hold_time_min)
+  skip_expiring_index: true
+
+setup:
+  max_stop_atr: 3.0                    # of the carried ATR(3m)
+  carried_emas: true                   # A-537: cross, swing stop and ATR from the carried indicators
+  gap_skip_until: "09:45"              # A-546
+  gap_skip_min_pct: 0.25
+  reward_to_risk: 2.0                  # target = entry + 2 x (entry - stop)
+  # the averages are the carried EMA9 and EMA20 of 3-minute bars (structure.carriedEma9 / carriedEma20)
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 25                 # emergency only; the index-level stop comes first
+  early_fail_min: 15                   # A-334
+  early_fail_pct: -7.5
+  use_target: false                    # A-559: the 2R target is the structure-hold rule's
+  structure_hold: true                 # A-559
+  structure_hold_time_min: 60          # mco-v2's time stop, unless the structure supports holding
+  structure_hold_floor_atr: 0.5        # A-560
+  structure_hold_on: bar3m             # A-562
