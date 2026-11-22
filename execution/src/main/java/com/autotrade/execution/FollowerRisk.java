@@ -19,14 +19,20 @@ import com.autotrade.config.ThresholdConfig;
  * open positions plus a new entry could lose before their broker stops sell them (each stop-limit filled at its limit)
  * may be at most this % of the day's loss limit; an entry is sized down to fit and refused under one lot. From v15,
  * {@code stopRiskCountsRealised} (capital.stop_risk_counts_realised; review 19 Nov 2026): the day's realised loss is taken
- * off that room too, so a losing morning plus the broker stops still stays within the day's limit.
+ * off that room too, so a losing morning plus the broker stops still stays within the day's limit. From v17,
+ * {@code fillLiveAllocation} (live.fill_allocation; user 22 Nov 2026): on a LIVE intent, the strategies selected for LIVE
+ * on the account (and subscribed, and in the signal's set) share its whole equity in PAPER-1's proportions: when their
+ * budgets add up to less than the reference capital, each is scaled up by reference / their sum, never below 1.
  */
 public record FollowerRisk(String version, CapitalLimits limits, int maxOpenPositions, int maxLotsPerUnderlying,
                            double rvolBoostThreshold, double rvolBoostFactor, double adverseBps, OrderRules orders,
                            Combined combined, LiveLimits live, boolean dailyLossCountsOpen, double convictionRvolFull,
-                           double maxStopRiskPct, boolean stopRiskCountsRealised) {
+                           double maxStopRiskPct, boolean stopRiskCountsRealised, boolean fillLiveAllocation) {
 
     public FollowerRisk {
+        if (fillLiveAllocation && live == null) {
+            throw new IllegalArgumentException("live.fill_allocation needs a live section");
+        }
         // v14: a share of the daily loss limit; off (NaN) or positive only
         if (!Double.isNaN(maxStopRiskPct) && !(maxStopRiskPct > 0 && Double.isFinite(maxStopRiskPct))) {
             throw new IllegalArgumentException("capital.max_stop_risk_pct_of_daily_loss must be a positive %, not "
@@ -96,7 +102,8 @@ public record FollowerRisk(String version, CapitalLimits limits, int maxOpenPosi
                 c.has("sizing.conviction_rvol_full") ? c.getDouble("sizing.conviction_rvol_full") : Double.NaN,
                 c.has("capital.max_stop_risk_pct_of_daily_loss") ? c.getDouble("capital.max_stop_risk_pct_of_daily_loss")
                         : Double.NaN,
-                c.has("capital.stop_risk_counts_realised") && c.getBoolean("capital.stop_risk_counts_realised"));
+                c.has("capital.stop_risk_counts_realised") && c.getBoolean("capital.stop_risk_counts_realised"),
+                c.has("live.fill_allocation") && c.getBoolean("live.fill_allocation"));
     }
 
     private static java.util.Set<String> names(Object list) {

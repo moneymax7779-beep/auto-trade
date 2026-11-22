@@ -669,6 +669,7 @@ public final class TradingSession {
                     signalSizing.put("liquidity_lots", cap >= Long.MAX_VALUE / contract.get().lotSize() ? Double.NaN : cap);
                     signalSizing.put("rvol_tod", snapshot.futures().rvolTod());
                     signalSizing.put("stop_pct", stopPct);
+                    putSetBudgets(signalSizing);
                     signals.entered(clock.get(), strategyId, underlying, intent.side(), contract.get(), ask, budget,
                             (int) Math.min(lots, cap), intent.stage().name(), intent.reason(), null, signalSizing);
                 }
@@ -721,8 +722,9 @@ public final class TradingSession {
                 candidate(strategyId, underlying, snapshot, decision, intent, result.approved(), result.reason());
                 if (signals != null && result.approved()) {
                     String group = strategyId + "@" + time;
-                    Map<String, Double> legs = Map.of("call_ask", oms.ask(call.get()), "put_ask", oms.ask(put.get()),
-                            "stop_pct", straddleStop);
+                    Map<String, Double> legs = new HashMap<>(Map.of("call_ask", oms.ask(call.get()),
+                            "put_ask", oms.ask(put.get()), "stop_pct", straddleStop));
+                    putSetBudgets(legs);
                     signals.entered(clock.get(), strategyId, underlying, OptionSide.CE, call.get(), oms.ask(call.get()),
                             straddleBudget, 0, intent.stage().name(), intent.reason(), group, legs);
                     signals.entered(clock.get(), strategyId, underlying, OptionSide.PE, put.get(), oms.ask(put.get()),
@@ -774,6 +776,20 @@ public final class TradingSession {
             case EXIT -> {
                 oms.exit(strategyId, underlying, intent.reason());
                 log.info("{} {} {} EXIT {} ({})", time, underlying, strategyId, intent.side(), intent.reason());
+            }
+        }
+    }
+
+    /**
+     * follower-risk v17 (user 22 Nov 2026): every strategy's premium budget on this session, at the decision budget's scale,
+     * under {@code budget:<strategy>}, so a LIVE follower can share its capital among the strategies selected for LIVE on
+     * it in these proportions.
+     */
+    private void putSetBudgets(Map<String, Double> context) {
+        double scale = settings.risk().budgetScale();
+        for (List<Slot> slots : strategies.values()) {
+            for (Slot slot : slots) {
+                context.putIfAbsent("budget:" + slot.factory().id(), slot.factory().premiumBudget() * scale);
             }
         }
     }

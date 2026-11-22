@@ -68,6 +68,8 @@ class LiveIT {
     private static final String V11 = "../config/risk/follower-risk.v11.yaml";
     private static final String V14 = "../config/risk/follower-risk.v14.yaml";
     private static final String V15 = "../config/risk/follower-risk.v15.yaml";
+    private static final String V16 = "../config/risk/follower-risk.v16.yaml";
+    private static final String V17 = "../config/risk/follower-risk.v17.yaml";
     /** The worker's broker rules (16 Nov 2026, A1): ZERODHA's last LIVE entry 15:10, square-off 15:20. */
     private static final BrokerRules RULES = BrokerRules.load(Path.of("..", "config", "brokers", "broker-rules.v1.yaml"));
     private static final int LOT = 65;
@@ -177,6 +179,11 @@ class LiveIT {
 
     /** The same, with the signal's futures RVOL ({@code rvol_tod}; NaN: none published). */
     private void enter(long group, long sessionId, String strategy, int i, double rvol) {
+        enter(group, sessionId, strategy, i, rvol, Map.of());
+    }
+
+    /** The same, with more context (v17: the set's budgets under budget:<strategy>). */
+    private void enter(long group, long sessionId, String strategy, int i, double rvol, Map<String, Double> extra) {
         int n = jdbc.queryForObject("select count(*) from exec.signal_decision where copy_group_id = ?", Integer.class,
                 group) + 1;
         long token = 3_000_000_000L + Long.parseLong(KEYS[i].substring(7));
@@ -185,6 +192,7 @@ class LiveIT {
         if (!Double.isNaN(rvol)) {
             sizing.put("rvol_tod", rvol);
         }
+        sizing.putAll(extra);
         new SignalDecisionStore(dataSource).insert(new SignalDecision(group, sessionId, DAY, CLOCK.instant(), strategy, 2,
                 "NIFTY", SignalDecision.Action.ENTER, "PE", null, "CONFIRMED", "IT", token, KEYS[i], SYMBOLS[i], LOT, 100,
                 260_000, 500_000, 0, group + ":" + sessionId + ":" + n, sizing));
@@ -454,6 +462,39 @@ class LiveIT {
             assertThat(jdbc.queryForObject("select quantity_open from exec.position where broker_account_id = ? "
                     + "and status = 'OPEN'", Long.class, a.id())).as("what is left of the day's limit").isEqualTo(2L * LOT);
         }
+    }
+
+    /** The set's budgets the signal source publishes (follower-risk v17): mac 2.6 L (the decision's), obc and wbr 2.5 L. */
+    private static final Map<String, Double> SET_BUDGETS = Map.of("budget:ma-cross", 260_000.0,
+            "budget:oi-burst-cross", 250_000.0, "budget:wall-break-rider", 250_000.0);
+
+    /** A v16/v17 LIVE follower (2 L, full size, a 1 L day limit so the stop-risk cap does not bind) choosing {@code live}. */
+    private long liveEntry(String riskFile, List<String> live) {
+        long group = group();
+        BrokerAccount a = account(group, true, riskFile, 100, "ma-cross", "oi-burst-cross");
+        jdbc.update("update acct.broker_account set daily_loss_limit = 100000 where id = ?", a.id());
+        a = new AccountStore(dataSource).byId(a.id()).orElseThrow();
+        new LiveStrategies(dataSource).choose(a.id(), FollowerRisk.load(Path.of(riskFile)), live);
+        enter(group, signalSession(group), "ma-cross", 0, Double.NaN, SET_BUDGETS);
+        try (BrokerConnections registry = registry()) {
+            follower(registry, a).run(a, group, DAY);
+        }
+        return jdbc.queryForObject("select quantity_open from exec.position where broker_account_id = ?", Long.class,
+                a.id()) / LOT;
+    }
+
+    /**
+     * v17 (user 22 Nov 2026): the strategies selected for LIVE share the whole equity in PAPER-1's proportions, never less
+     * than today. 2 L account, signal budget 2.6 L at 5 L reference = 1,04,000 = 16 lots (v11/v16). With only ma-cross
+     * selected (obc deselected, wbr not subscribed) it fills the equity: 5 / 2.6 = 2,00,000, from spare capital only
+     * (0.97 x 2 L free = 1,94,000) = 29 lots at 6,500. With mac and obc selected (5.1 L of budgets, over 100 %) nothing
+     * changes. On v16 nothing changes either way.
+     */
+    @Test
+    void aV17LiveEntryFillsTheEquityAmongTheSelectedStrategiesNeverLess() {
+        assertThat(liveEntry(V17, List.of("ma-cross"))).as("mac alone fills the spare equity").isEqualTo(29L);
+        assertThat(liveEntry(V17, List.of("ma-cross", "oi-burst-cross"))).as("already 100 %: unchanged").isEqualTo(16L);
+        assertThat(liveEntry(V16, List.of("ma-cross"))).as("v16: today's fraction").isEqualTo(16L);
     }
 
     /**
