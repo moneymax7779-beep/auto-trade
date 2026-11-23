@@ -272,11 +272,16 @@ class AdminDeskIT {
     }
 
     private static AdminDeskController.Batch batch(String key, String confirm, Boolean kill, long[]... positions) {
+        return batch(key, confirm, kill, null, null, positions);
+    }
+
+    private static AdminDeskController.Batch batch(String key, String confirm, Boolean kill, Boolean killPaper,
+                                                   Boolean globalLive, long[]... positions) {
         List<AdminDeskController.BatchPosition> list = new ArrayList<>();
         for (long[] p : positions) {
             list.add(new AdminDeskController.BatchPosition(p[0], p[1]));
         }
-        return new AdminDeskController.Batch(list, "risk check", kill, key, confirm);
+        return new AdminDeskController.Batch(list, "risk check", kill, key, confirm, killPaper, globalLive);
     }
 
     @Test
@@ -306,6 +311,34 @@ class AdminDeskIT {
         assertThat(ran).isEmpty();
     }
 
+    /**
+     * Plan 2026-11-23 decision 3 ("Exit everything"): by default only the accounts with a LIVE position are stopped; the
+     * paper ones keep trading; GLOBAL_LIVE goes on first when asked, once (a second batch finds it on).
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void exitEverythingStopsTheLiveAccountsAndGlobalLiveFirstAndLeavesPaperTrading() throws Exception {
+        long live = position(aliceTenant, kite1, aliceGroup, "LIVE", 100);
+        long paper = position(bobTenant, bobPaper, bobGroup, "PAPER", 80);
+        AdminDeskController desk = desk();
+        Map<String, Object> out = runBatch(desk, batch("everything-1", "EXIT 2 POSITIONS", null, null, true,
+                new long[] {kite1, live}, new long[] {bobPaper, paper}));
+        assertThat(out).containsEntry("killAfter", true).containsEntry("globalLive", "ENGAGED");
+        assertThat((List<String>) out.get("killed")).containsExactly("ALICE-KITE");
+        assertThat(jdbc.queryForList("select coalesce(broker_account_id::text, scope) from exec.kill_switch where "
+                + "released_at is null and (scope = 'GLOBAL_LIVE' or broker_account_id in (?, ?))", String.class, kite1,
+                bobPaper)).containsExactlyInAnyOrder("GLOBAL_LIVE", String.valueOf(kite1));
+        assertThat(killedWhenRun).containsEntry(live, true).containsEntry(paper, false);
+        assertThat((List<Map<String, Object>>) out.get("results")).extracting(r -> r.get("outcome"))
+                .containsExactly("SOLD", "SOLD");
+        long again = position(aliceTenant, kite2, aliceGroup, "LIVE", 50);
+        Map<String, Object> second = runBatch(desk, batch("everything-2", "EXIT 1 POSITIONS", null, null, true,
+                new long[] {kite2, again}));
+        assertThat(second).containsEntry("globalLive", "ALREADY");
+        assertThat(jdbc.queryForObject("select count(*) from exec.kill_switch where scope = 'GLOBAL_LIVE' and released_at "
+                + "is null", Integer.class)).isEqualTo(1);
+    }
+
     @Test
     void aBatchNeedsTheCountInItsPhraseAReasonAndAKey() {
         long a = position(aliceTenant, kite1, aliceGroup, "LIVE", 120);
@@ -315,7 +348,7 @@ class AdminDeskIT {
                 new long[] {bobPaper, b})))).as("a stale screen: the count differs").isEqualTo(403);
         assertThat(code(() -> desk.exitBatch("kc-admin", batch("k1", "EXIT", null, new long[] {kite1, a})))).isEqualTo(403);
         assertThat(code(() -> desk.exitBatch("kc-admin", new AdminDeskController.Batch(List.of(
-                new AdminDeskController.BatchPosition(kite1, a)), " ", null, "k1", "EXIT 1 POSITIONS")))).isEqualTo(400);
+                new AdminDeskController.BatchPosition(kite1, a)), " ", null, "k1", "EXIT 1 POSITIONS", null, null)))).isEqualTo(400);
         assertThat(code(() -> desk.exitBatch("kc-admin", batch(null, "EXIT 1 POSITIONS", null, new long[] {kite1, a}))))
                 .isEqualTo(400);
         assertThat(code(() -> desk.exitBatch("kc-admin", batch("k1", "EXIT 2 POSITIONS", null, new long[] {kite1, a},
@@ -333,7 +366,8 @@ class AdminDeskIT {
         jdbc.update("update exec.position set status = 'CLOSED', quantity_open = 0, closed_at = now() where id = ?", gone);
         waits.clear();
         AdminDeskController desk = desk();
-        AdminDeskController.Batch b1 = batch("batch-1", "EXIT 5 POSITIONS", null, new long[] {kite1, small},
+        // the paper accounts' switches too (killPaper, 23 Nov 2026: by default only the accounts with a LIVE position)
+        AdminDeskController.Batch b1 = batch("batch-1", "EXIT 5 POSITIONS", null, true, null, new long[] {kite1, small},
                 new long[] {bobPaper, paper}, new long[] {kite2, big}, new long[] {alicePaper, gone},
                 new long[] {demo, 999_999});
         Map<String, Object> out = runBatch(desk, b1);

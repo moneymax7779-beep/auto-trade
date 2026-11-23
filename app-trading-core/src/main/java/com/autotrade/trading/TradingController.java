@@ -72,6 +72,8 @@ class TradingController {
             for (String key : List.of("session", "account", "mode", "date", "status", "lastEvent")) {
                 s.put(key, status.get(key));
             }
+            // review 23 Nov 2026: the desk shows a session whose new entries are stopped (GLOBAL), with its Resume
+            s.put("killSwitches", status.getOrDefault("killSwitches", java.util.Set.of()));
             s.put("positions", status.getOrDefault("openPositions", List.of()));
             out.add(s);
         }

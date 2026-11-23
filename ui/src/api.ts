@@ -793,6 +793,8 @@ export interface DeskOpenPositions {
 /** One engine session's open positions (trading-core GET /api/sessions/open-positions), read-only. */
 export interface EngineSessionPositions {
   session: number; account: string; mode: string; date: string; status: string; lastEvent: string | null;
+  /** the session's engaged kill switches; "GLOBAL" = its new entries are stopped (23 Nov 2026) */
+  killSwitches?: string[];
   positions: PositionRow[];
 }
 
@@ -807,6 +809,8 @@ export interface BatchResult {
   batchId: string; status: "RUNNING" | "DONE"; count: number; answered: number; killAfter: boolean; killed: string[];
   killFailed: Record<string, string>; order: number[]; results: (BatchResultRow | null)[]; repeat?: boolean;
   startedAt: string; finishedAt: string | null;
+  /** GLOBAL_LIVE when asked (23 Nov 2026): "ENGAGED", "ALREADY", "FAILED: why"; null when not asked */
+  globalLive?: string | null;
 }
 
 /** An admin exit on one of the caller's accounts (the in-app banner). */

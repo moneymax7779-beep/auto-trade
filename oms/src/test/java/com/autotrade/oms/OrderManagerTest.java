@@ -93,6 +93,24 @@ class OrderManagerTest {
         assertThat(oms.reconcile()).isTrue();
     }
 
+    /** The admin exit desk's engine exit (23 Nov 2026): held while entering or open, not once an exit started or closed. */
+    @Test
+    void holdsIsTrueOnlyUntilAnExitStarts() {
+        quote("10:00:00", 99.5, 100, 100);
+        assertThat(oms.holds("ecr", "NIFTY")).isFalse();
+        assertThat(oms.enter("ecr", "NIFTY", OptionSide.CE, CE, 1, "EARLY", market("10:00"), Double.NaN).approved()).isTrue();
+        assertThat(oms.holds("ecr", "NIFTY")).as("entering").isTrue();
+        quote("10:00:01", 99.5, 100, 100);
+        assertThat(oms.holds("ecr", "NIFTY")).as("open").isTrue();
+        assertThat(oms.holds("egb", "NIFTY")).as("another strategy holds nothing here").isFalse();
+        oms.exit("ecr", "NIFTY", "ADMIN_EXIT");
+        assertThat(oms.holds("ecr", "NIFTY")).as("its exit started: not exited twice").isFalse();
+        quote("10:02:00", 99.5, 100, 100);
+        quote("10:02:01", 99.5, 100, 100);
+        assertThat(oms.holds("ecr", "NIFTY")).isFalse();
+        assertThat(oms.closedPositions()).singleElement().extracting(ManagedPosition::exitReason).isEqualTo("ADMIN_EXIT");
+    }
+
     @Test
     void twoStrategiesHoldTheSameUnderlyingIndependently() {
         quote("10:00:00", 99.5, 100, 100);
