@@ -10,9 +10,14 @@ const BUILD = "__BUILD__";
 const CACHE = `autotrade-${BUILD}`;
 const PRECACHE = __PRECACHE__;   // the build's entry script and stylesheet (vite.config.ts writes them in)
 
+// 23 Nov 2026: only a real file is kept (ok, same origin, not redirected): a fetch sent to sign in (a session gone after a
+// deploy) answered with the sign-in page, which addAll kept under the code's name, and the app could open blank
+const keep = (res) => res.ok && res.type === "basic" && !res.redirected;
+
 self.addEventListener("install", (event) => {
   self.skipWaiting();
-  event.waitUntil(caches.open(CACHE).then((c) => c.addAll(["/icons/icon-192.png", ...PRECACHE])).catch(() => undefined));
+  event.waitUntil(caches.open(CACHE).then((c) => Promise.all(["/icons/icon-192.png", ...PRECACHE].map((url) =>
+    fetch(url, { cache: "no-cache" }).then((res) => (keep(res) ? c.put(url, res) : undefined)).catch(() => undefined)))));
 });
 
 self.addEventListener("activate", (event) => {
@@ -37,7 +42,7 @@ self.addEventListener("fetch", (event) => {
       const hit = await c.match(req);
       if (hit) return hit;
       const res = await fetch(req);
-      if (res.ok && res.type === "basic") c.put(req, res.clone());
+      if (keep(res)) c.put(req, res.clone());
       return res;
     }));
     return;
