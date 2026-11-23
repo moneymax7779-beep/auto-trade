@@ -207,6 +207,30 @@ class WorkspaceController {
         return view(user, tenant);
     }
 
+    /**
+     * 23 Nov 2026: LIVE needs the account's latest canary to have passed (the real-order round trip: funds, book, quote,
+     * place, read, modify, cancel). myzerodha's three canaries failed at its quote (the Kite app has no market data), yet
+     * its member could switch LIVE, and its first LIVE entry failed the same way. The latest result counts, whenever it
+     * ran: a pass stays good until a canary fails (a canary every day would need the admin every morning).
+     */
+    String canaryRefusal(BrokerAccount a) {
+        List<Map<String, Object>> last = jdbc.queryForList("select coalesce(detail ->> 'result', '?') result, "
+                + "coalesce(detail ->> 'message', '') message, to_char(at at time zone 'Asia/Kolkata', 'DD Mon HH24:MI') at "
+                + "from exec.audit_log where broker_account_id = ? and action = 'CANARY_RESULT' order by at desc, id desc "
+                + "limit 1", a.id());
+        if (last.isEmpty()) {
+            return a.displayName() + " has had no canary yet: the platform admin runs one (a real order far below the "
+                    + "market, cancelled) before it can go LIVE";
+        }
+        Map<String, Object> r = last.getFirst();
+        if ("PASS".equals(r.get("result"))) {
+            return null;
+        }
+        String message = String.valueOf(r.get("message"));
+        return a.displayName() + "'s last canary (" + r.get("at") + " IST) was " + r.get("result")
+                + (message.isBlank() ? "" : ": " + message) + ". It trades PAPER until a canary passes.";
+    }
+
     /** Why the workspace's chosen broker cannot go LIVE now; null when it can. Runs under the workspace's lock. */
     private String liveRefusal(long tenant, Long accountId) {
         if (accountId == null) {
@@ -255,7 +279,7 @@ class WorkspaceController {
             return "another broker still holds a live position or a working order (" + names(elsewhere)
                     + "): one broker live at a time";
         }
-        return null;
+        return canaryRefusal(a);                                        // 23 Nov 2026: the latest canary passed
     }
 
     record Limits(Double dailyLossLimit, Boolean clear) {
@@ -427,6 +451,8 @@ class WorkspaceController {
             b.put("enabled", a.enabled());
             b.put("liveCapable", liveBrokers.live(a.brokerType()));
             b.put("liveEligible", a.liveTradingEnabled());
+            // review 23 Nov 2026: the canary's refusal, so the page says it before LIVE is typed (null: passed, or paper)
+            b.put("canaryBlock", a.brokerType() == BrokerType.PAPER || !a.liveTradingEnabled() ? null : canaryRefusal(a));
             b.put("paperTwinId", twin);
             b.put("allocation", a.allocatedCapital());
             b.put("equityMode", a.equityMode().name());

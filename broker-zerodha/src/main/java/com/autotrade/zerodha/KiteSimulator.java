@@ -128,6 +128,7 @@ public final class KiteSimulator implements AutoCloseable {
     private String token;
     private boolean acceptAnyToken = true;
     private boolean tokenExpired;
+    private boolean noMarketData;              // 23 Nov 2026: an app without Kite Connect's paid plan
     private double funds = 1e9;
     private double partialFraction = 1.0;
     private boolean fillStopOnCancel;
@@ -268,6 +269,14 @@ public final class KiteSimulator implements AutoCloseable {
         this.staleOnce = true;
     }
 
+    /**
+     * 23 Nov 2026: answers /quote as Kite answers an app without the paid Connect plan (403 PermissionException
+     * "Insufficient permission for that call."); every other call works.
+     */
+    public synchronized void noMarketData() {
+        noMarketData = true;
+    }
+
     public synchronized void expireToken() {
         this.tokenExpired = true;
     }
@@ -380,6 +389,14 @@ public final class KiteSimulator implements AutoCloseable {
             }
             if (!path.equals("/session/token") && !path.equals("/instruments") && !authorised(ex)) {
                 respond(ex, 403, error("TokenException", "Incorrect `api_key` or `access_token`."));
+                return;
+            }
+            boolean denied;
+            synchronized (this) {
+                denied = noMarketData && path.equals("/quote");
+            }
+            if (denied) {
+                respond(ex, 403, error("PermissionException", "Insufficient permission for that call."));
                 return;
             }
             ObjectNode body = route(method, path, form, query, fault);

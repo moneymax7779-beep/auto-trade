@@ -149,6 +149,22 @@ public final class KillSwitches {
         return true;
     }
 
+    /**
+     * 23 Nov 2026: the account's broker refuses its app market data ({@link
+     * com.autotrade.broker.BrokerException#isNoMarketData}). The session stays as it is (it is valid: a new login changes
+     * nothing); a NO_MARKET_DATA audit row (sent on Telegram) says what to fix, once a day. Returns whether it was written.
+     */
+    public boolean noMarketData(BrokerAccount account, String actor, Map<String, ?> detail) {
+        Boolean toldToday = jdbc.queryForObject("select exists (select 1 from exec.audit_log where broker_account_id = ? "
+                + "and action = 'NO_MARKET_DATA' and at >= (now() at time zone 'Asia/Kolkata')::date::timestamp "
+                + "at time zone 'Asia/Kolkata')", Boolean.class, account.id());
+        if (Boolean.TRUE.equals(toldToday)) {
+            return false;
+        }
+        audit(account, actor, "NO_MARKET_DATA", detail);
+        return true;
+    }
+
     public void audit(Long tenantId, Long accountId, String actor, String action, Map<String, ?> detail) {
         jdbc.update("insert into exec.audit_log (tenant_id, broker_account_id, actor, action, detail) values (?, ?, ?, ?, "
                 + "?::jsonb)", tenantId, accountId, actor, action, JSON.writeValueAsString(detail));

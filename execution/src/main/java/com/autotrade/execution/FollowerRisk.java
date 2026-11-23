@@ -27,9 +27,30 @@ import com.autotrade.config.ThresholdConfig;
 public record FollowerRisk(String version, CapitalLimits limits, int maxOpenPositions, int maxLotsPerUnderlying,
                            double rvolBoostThreshold, double rvolBoostFactor, double adverseBps, OrderRules orders,
                            Combined combined, LiveLimits live, boolean dailyLossCountsOpen, double convictionRvolFull,
-                           double maxStopRiskPct, boolean stopRiskCountsRealised, boolean fillLiveAllocation) {
+                           double maxStopRiskPct, boolean stopRiskCountsRealised, boolean fillLiveAllocation,
+                           PaperFill paperFill) {
+
+    /**
+     * From v19 (23 Nov 2026), {@code simulation.entry_fill: captured_book}: how a simulated (PAPER, or DRY_RUN without a
+     * broker) entry fills. Null: at the signal's price, always (v1-v18). Otherwise as a real marketable limit would on our
+     * own captured book (md.option_tick): its limit is the ask when the signal was decided plus the entry buffer; it
+     * arrives {@code latencyMs} later and fills at the ask then if that is within the limit, else at its limit the first
+     * time the ask comes down to it before the entry timeout, else not at all (NOT_FILLED, as a broker entry). A contract
+     * with no captured book around the signal fills at the signal's price, as before.
+     */
+    public record PaperFill(long latencyMs) {
+        public PaperFill {
+            if (latencyMs < 0 || latencyMs > 5_000) {
+                throw new IllegalArgumentException("simulation.latency_ms must be 0..5000, not " + latencyMs);
+            }
+        }
+    }
 
     public FollowerRisk {
+        if (paperFill != null && orders == null) {
+            throw new IllegalArgumentException("simulation.entry_fill: captured_book needs the orders section (entry buffer "
+                    + "and timeout)");
+        }
         if (fillLiveAllocation && live == null) {
             throw new IllegalArgumentException("live.fill_allocation needs a live section");
         }
@@ -103,7 +124,16 @@ public record FollowerRisk(String version, CapitalLimits limits, int maxOpenPosi
                 c.has("capital.max_stop_risk_pct_of_daily_loss") ? c.getDouble("capital.max_stop_risk_pct_of_daily_loss")
                         : Double.NaN,
                 c.has("capital.stop_risk_counts_realised") && c.getBoolean("capital.stop_risk_counts_realised"),
-                c.has("live.fill_allocation") && c.getBoolean("live.fill_allocation"));
+                c.has("live.fill_allocation") && c.getBoolean("live.fill_allocation"), paperFill(c));
+    }
+
+    private static PaperFill paperFill(ThresholdConfig c) {
+        String mode = c.has("simulation.entry_fill") ? String.valueOf(c.get("simulation.entry_fill")).trim() : "signal_price";
+        return switch (mode) {
+            case "signal_price" -> null;
+            case "captured_book" -> new PaperFill(c.has("simulation.latency_ms") ? c.getInt("simulation.latency_ms") : 500);
+            default -> throw new IllegalArgumentException("simulation.entry_fill: signal_price or captured_book, not " + mode);
+        };
     }
 
     private static java.util.Set<String> names(Object list) {

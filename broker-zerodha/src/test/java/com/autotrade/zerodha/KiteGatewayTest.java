@@ -351,4 +351,26 @@ class KiteGatewayTest {
         }
         assertThat(started).as("no thread of the closed simulator still runs").noneMatch(Thread::isAlive);
     }
+
+    @Test
+    void anAppWithoutMarketDataIsSaidSoNotALostSession() {
+        // 23 Nov 2026: myzerodha's app (no Connect plan): /quote answers PermissionException, funds and books work
+        sim.noMarketData();
+        assertThatThrownBy(() -> gateway.quote(KEY)).isInstanceOfSatisfying(BrokerException.class, e -> {
+            assertThat(e.kind()).as("handled as a lost session: no order can be priced").isEqualTo(Kind.SESSION);
+            assertThat(e.isNoMarketData()).isTrue();
+            assertThat(e.getMessage()).contains("NO_MARKET_DATA").contains("Insufficient permission")
+                    .contains("paid plan").contains("logging in again does not help");
+        });
+        assertThat(gateway.availableFunds()).as("the session itself works").isPositive();
+    }
+
+    @Test
+    void anExpiredTokenOnAQuoteIsStillALostSession() {
+        sim.expireToken();
+        assertThatThrownBy(() -> gateway.quote(KEY)).isInstanceOfSatisfying(BrokerException.class, e -> {
+            assertThat(e.kind()).isEqualTo(Kind.SESSION);
+            assertThat(e.isNoMarketData()).isFalse();
+        });
+    }
 }

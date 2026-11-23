@@ -144,11 +144,35 @@ public final class TradingDay {
     /**
      * The worker lost a real account's broker session. When that account is the workspace's LIVE broker now, the day
      * goes back to PAPER (later entries go to the paper twin; open LIVE positions keep their broker stop and their exits
-     * wait for the next login). Audited once per loss. Nothing for an ACCOUNT_MODE workspace.
+     * wait for the next login). Audited once per loss. Nothing for an ACCOUNT_MODE workspace. Returns true when the day
+     * went back to PAPER now.
      */
-    public void sessionLost(BrokerAccount account, String actor) {
+    public boolean sessionLost(BrokerAccount account, String actor) {
+        return backToPaper(account, actor, "SESSION_LOST", "MODE_PAPER_SESSION_LOST");
+    }
+
+    /**
+     * 23 Nov 2026: the real account's broker refuses its app market data ({@link
+     * com.autotrade.broker.BrokerException#isNoMarketData}), so it cannot price an order: a LIVE day on it goes back to
+     * PAPER as for a lost session, said as what it is (logging in again does not fix it). Returns true when the day
+     * went back to PAPER now.
+     */
+    public boolean noMarketData(BrokerAccount account, String actor) {
+        return backToPaper(account, actor, "NO_MARKET_DATA", "MODE_PAPER_NO_MARKET_DATA");
+    }
+
+    /**
+     * Review 23 Nov 2026: a canary that did not pass on the workspace's LIVE broker sends the day back to PAPER (myzerodha
+     * stayed LIVE from 11:34, its third failed canary, until its first entry failed the same way at 12:06). Returns true
+     * when the day went back to PAPER now.
+     */
+    public boolean canaryFailed(BrokerAccount account, String actor) {
+        return backToPaper(account, actor, "CANARY_FAILED", "MODE_PAPER_CANARY_FAILED");
+    }
+
+    private boolean backToPaper(BrokerAccount account, String actor, String reason, String auditAction) {
         if (account.brokerType() == BrokerType.PAPER || !dailySwitch(account.tenantId())) {
-            return;
+            return false;
         }
         // under the workspace's lock, read again: a LIVE switch committing meanwhile is seen (and sent back to PAPER), and
         // a broker change made meanwhile is never undone (code review 7 Nov 2026)
@@ -156,14 +180,15 @@ public final class TradingDay {
             lock(account.tenantId());
             State now = stateNow(account.tenantId());
             if (now.mode() == Mode.LIVE && Long.valueOf(account.id()).equals(now.brokerAccountId())) {
-                append(account.tenantId(), account.id(), Mode.PAPER, "SESSION_LOST", null);
+                append(account.tenantId(), account.id(), Mode.PAPER, reason, null);
                 return now;
             }
             return null;
         });
         if (before != null) {
-            audit.audit(account, actor, "MODE_PAPER_SESSION_LOST", Map.of("since", String.valueOf(before.since())));
+            audit.audit(account, actor, auditAction, Map.of("since", String.valueOf(before.since())));
         }
+        return before != null;
     }
 
     /**

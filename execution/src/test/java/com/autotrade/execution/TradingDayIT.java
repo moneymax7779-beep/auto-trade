@@ -323,6 +323,169 @@ class TradingDayIT {
         assertThat(result.executed()).isEqualTo(1);
     }
 
+    /**
+     * Fix 2 (23 Nov 2026): an entry the real account's broker could not take (its session lost while LIVE) is refused there
+     * and made again for the paper twin, which takes it; before, it was lost to both (myzerodha's etr 12:06 entry).
+     */
+    @Test
+    void anEntryTheBrokerCouldNotTakeIsMadeAgainForThePaperTwin() {
+        LocalDate today = TradingDay.today();
+        Workspace w = workspace("nila", today, true);
+        jdbc.update("update acct.broker_session set created_at = now() - interval '2 minutes' where broker_account_id = ?",
+                w.real());
+        AccountStore accounts = new AccountStore(dataSource);
+        CostModel costs = CostModel.from(ThresholdConfig.load(Path.of("..", "config", "costs",
+                "india-index-options-costs.v2.yaml")));
+        FollowerRisk risk = FollowerRisk.load(Path.of("..", "config", "risk", "follower-risk.v7.yaml"));
+        TradingDay td = new TradingDay(dataSource);
+        event(w, w.real(), "LIVE", Instant.now().minusSeconds(60));       // switched LIVE a minute ago
+        decide(w, today, Instant.now().minusSeconds(5), SignalDecision.Action.ENTER);
+        new FanOut(dataSource).fanOut(w.group(), today);
+        assertThat(intents(w, "ENTER")).containsExactly("REAL:LIVE");
+        // the session goes before the real account runs it: the day goes back to PAPER
+        BrokerAccount real = accounts.byId(w.real()).orElseThrow();
+        new KillSwitches(dataSource).loseSession(real, "IT", Map.of("message", "TokenException"));
+        assertThat(td.sessionLost(real, "IT")).isTrue();
+        FollowerVenue broker = new FollowerVenue() {
+            public boolean broker() {
+                return true;
+            }
+
+            public boolean live() {
+                return true;
+            }
+
+            public Fill execute(OrderSpec order) {
+                throw new AssertionError("nothing is sent to a broker whose session is lost");
+            }
+
+            public double funds(BrokerAccount account) {
+                return 1e9;
+            }
+        };
+        FollowerSimulator.DayResult onReal = new FollowerSimulator(dataSource, costs, risk, broker, null)
+                .run(accounts.byId(w.real()).orElseThrow(), w.group(), today);
+        assertThat(onReal.reasons()).containsEntry("REJECTED_BROKER_SESSION", 1);
+        assertThat(intents(w, "ENTER")).containsExactly("REAL:LIVE", "TWIN:PAPER");
+        assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? and action = "
+                + "'ENTRY_TO_PAPER_TWIN'", Integer.class, w.real())).isEqualTo(1);
+        // the twin takes it on its own turn; running the real account again makes no second copy
+        new FollowerSimulator(dataSource, costs, risk, broker, null).run(accounts.byId(w.real()).orElseThrow(), w.group(),
+                today);
+        assertThat(intents(w, "ENTER")).hasSize(2);
+        FollowerSimulator.DayResult onTwin = new FollowerSimulator(dataSource, costs, risk, 1e9)
+                .run(accounts.byId(w.twin()).orElseThrow(), w.group(), today);
+        assertThat(onTwin.executed()).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select count(*) from exec.position where broker_account_id = ?", Integer.class,
+                w.twin())).isEqualTo(1);
+
+    }
+
+    /**
+     * Fix 4 (23 Nov 2026): on follower-risk v19 a paper twin's entry fills as a real one would on the captured book: one
+     * whose ask ran away (as on 23 Nov 11:03) is NOT_FILLED with a cancelled order row; one whose ask held fills at it.
+     */
+    @Test
+    void aV19TwinsEntryFillsOnTheCapturedBookOrNotAtAll() {
+        LocalDate today = TradingDay.today();
+        Workspace w = workspace("ira", today, true);
+        AccountStore accounts = new AccountStore(dataSource);
+        CostModel costs = CostModel.from(ThresholdConfig.load(Path.of("..", "config", "costs",
+                "india-index-options-costs.v2.yaml")));
+        FollowerRisk v19 = FollowerRisk.load(Path.of("..", "config", "risk", "follower-risk.v19.yaml"));
+        assertThat(v19.paperFill()).isNotNull();
+        Instant ran = Instant.now().minusSeconds(120), held = Instant.now().minusSeconds(60);
+        tick(77, ran.minusMillis(300), 100.00);
+        tick(77, ran.plusMillis(200), 103.00);                 // gone above the limit (100.20) before it arrives
+        tick(77, held.minusMillis(300), 100.00);
+        tick(77, held.plusMillis(400), 100.10);                // still within the limit on arrival
+        decide(w, today, ran, SignalDecision.Action.ENTER);
+        new FanOut(dataSource).fanOut(w.group(), today);
+        FollowerSimulator.DayResult first = new FollowerSimulator(dataSource, costs, v19, 1e9)
+                .run(accounts.byId(w.twin()).orElseThrow(), w.group(), today);
+        assertThat(first.reasons()).containsEntry("REJECTED_NOT_FILLED", 1);
+        assertThat(jdbc.queryForObject("select status || ':' || raw_status || ':' || quantity_filled from "
+                + "exec.order_execution where broker_account_id = ?", String.class, w.twin()))
+                .isEqualTo("CANCELLED:PAPER_SIMULATED:0");
+        decide(w, today, held, SignalDecision.Action.ENTER);
+        new FanOut(dataSource).fanOut(w.group(), today);
+        FollowerSimulator.DayResult second = new FollowerSimulator(dataSource, costs, v19, 1e9)
+                .run(accounts.byId(w.twin()).orElseThrow(), w.group(), today);
+        assertThat(second.executed()).isEqualTo(1);
+        assertThat(jdbc.queryForObject("select average_entry from exec.position where broker_account_id = ?", Double.class,
+                w.twin())).isEqualTo(100.10);
+    }
+
+    private static void tick(long token, Instant at, double ask) {
+        jdbc.update("insert into md.option_tick (manifest_id, session_date, underlying, recv_ts, src_seq, instrument_token, "
+                + "symbol, expiry, strike, option_type, lot_size, ltp, bid_px, bid_qty, bid_orders, ask_px, ask_qty, "
+                + "ask_orders, analytics_complete, depth_complete) values (1, ?, 'NIFTY', ?, 1, ?, 'NIFTY 23000 CE', ?, 23000, "
+                + "'CE', 65, ?, array[?]::float8[], '{650}', '{3}', array[?]::float8[], '{650}', '{3}', false, true)",
+                TradingDay.today(), Timestamp.from(at), token, TradingDay.today().plusDays(2), ask, ask - 0.1, ask);
+    }
+
+    /** Review 23 Nov 2026: an entry refused past the LIVE entry age is never handed to the twin (late, at an old price). */
+    @Test
+    void aLateRefusedEntryIsNotHandedToTheTwin() {
+        LocalDate today = TradingDay.today();
+        Workspace w = workspace("omar", today, true);
+        jdbc.update("update acct.broker_session set created_at = now() - interval '10 minutes' where broker_account_id = ?",
+                w.real());
+        AccountStore accounts = new AccountStore(dataSource);
+        CostModel costs = CostModel.from(ThresholdConfig.load(Path.of("..", "config", "costs",
+                "india-index-options-costs.v2.yaml")));
+        FollowerRisk risk = FollowerRisk.load(Path.of("..", "config", "risk", "follower-risk.v7.yaml"));
+        event(w, w.real(), "LIVE", Instant.now().minusSeconds(300));
+        decide(w, today, Instant.now().minus(FollowerSimulator.LIVE_ENTRY_MAX_AGE).minusSeconds(30),
+                SignalDecision.Action.ENTER);
+        new FanOut(dataSource).fanOut(w.group(), today);
+        assertThat(intents(w, "ENTER")).containsExactly("REAL:LIVE");
+        BrokerAccount real = accounts.byId(w.real()).orElseThrow();
+        new KillSwitches(dataSource).loseSession(real, "IT", Map.of("message", "TokenException"));
+        new TradingDay(dataSource).sessionLost(real, "IT");
+        FollowerVenue broker = new FollowerVenue() {
+            public boolean broker() {
+                return true;
+            }
+
+            public boolean live() {
+                return true;
+            }
+
+            public Fill execute(OrderSpec order) {
+                throw new AssertionError("nothing is sent");
+            }
+
+            public double funds(BrokerAccount account) {
+                return 1e9;
+            }
+        };
+        new FollowerSimulator(dataSource, costs, risk, broker, null).run(accounts.byId(w.real()).orElseThrow(), w.group(),
+                today);
+        assertThat(intents(w, "ENTER")).containsExactly("REAL:LIVE");
+    }
+
+    /** Fix 3 (23 Nov 2026): no market data sends a LIVE day back to PAPER said as what it is; the session stays valid. */
+    @Test
+    void noMarketDataSendsALiveDayBackToPaperWithoutLosingTheSession() {
+        LocalDate today = TradingDay.today();
+        Workspace w = workspace("zoya", today, true);
+        TradingDay td = new TradingDay(dataSource);
+        KillSwitches kills = new KillSwitches(dataSource);
+        BrokerAccount real = new AccountStore(dataSource).byId(w.real()).orElseThrow();
+        td.append(w.tenant(), w.real(), TradingDay.Mode.LIVE, "IT", w.member());
+        assertThat(td.noMarketData(real, "IT")).isTrue();
+        assertThat(td.noMarketData(real, "IT")).as("PAPER already").isFalse();
+        assertThat(kills.noMarketData(real, "IT", Map.of("message", "NO_MARKET_DATA"))).isTrue();
+        assertThat(kills.noMarketData(real, "IT", Map.of("message", "NO_MARKET_DATA"))).as("once a day").isFalse();
+        assertThat(jdbc.queryForList("select mode || ':' || reason from acct.trading_day_event where tenant_id = ? "
+                + "order by id", String.class, w.tenant())).containsExactly("LIVE:IT", "PAPER:NO_MARKET_DATA");
+        assertThat(jdbc.queryForList("select action from exec.audit_log where broker_account_id = ? order by id",
+                String.class, w.real())).containsExactly("MODE_PAPER_NO_MARKET_DATA", "NO_MARKET_DATA");
+        assertThat(jdbc.queryForObject("select connection_status from acct.broker_account where id = ?", String.class,
+                w.real())).as("a new login would change nothing: the session is left as it is").isEqualTo("ACTIVE");
+    }
+
     /** Code review 7 Nov 2026: an add fanned out to an idle LIVE-eligible account keeps it idle and is closed. */
     @Test
     void anAddToAnIdleLiveEligibleAccountDoesNotWakeIt() {

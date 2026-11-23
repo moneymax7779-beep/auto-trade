@@ -18,6 +18,8 @@ public class BrokerException extends RuntimeException {
     }
 
     private final Kind kind;
+    /** True when the broker refuses this app market data (a Kite app without the Connect plan): see {@link #noMarketData}. */
+    private boolean noMarketData;
 
     public BrokerException(String message) {
         this(Kind.TERMINAL, message, null);
@@ -38,5 +40,22 @@ public class BrokerException extends RuntimeException {
 
     public Kind kind() {
         return kind;
+    }
+
+    /**
+     * 23 Nov 2026: the broker answers but refuses this app market data (Kite's PermissionException on /quote from an app
+     * without the paid Connect plan). Orders can neither be priced nor exited at a price, so it is handled as a lost
+     * session ({@link Kind#SESSION}: the day goes back to PAPER, entries refused, exits wait), but it is not one: the
+     * login is valid and logging in again changes nothing. Callers say so and leave the session as it is.
+     */
+    public static BrokerException noMarketData(String message, Throwable cause) {
+        BrokerException e = new BrokerException(Kind.SESSION, message, cause);
+        e.noMarketData = true;
+        return e;
+    }
+
+    /** True for {@link #noMarketData}: the app may not read prices; the session itself is valid. */
+    public boolean isNoMarketData() {
+        return noMarketData;
     }
 }

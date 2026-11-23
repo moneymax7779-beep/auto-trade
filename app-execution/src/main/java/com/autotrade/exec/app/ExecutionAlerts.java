@@ -38,7 +38,9 @@ class ExecutionAlerts {
             "SPLIT_PRODUCT",                      // review 16 Nov 2026: another product sold against our holding
             "EGRESS_REFUSED",                     // 16 Nov 2026: a LIVE account with positions has no route (its address)
             "LIVE_ROUTE_REFUSED",                 // review 16 Nov 2026: the same for any other LIVE refusal
-            "CANARY_LEFTOVER");                   // 16 Nov 2026: a canary left a fill or an order at the broker
+            "CANARY_LEFTOVER",                    // 16 Nov 2026: a canary left a fill or an order at the broker
+            "NO_MARKET_DATA", "MODE_PAPER_NO_MARKET_DATA", "MODE_PAPER_CANARY_FAILED",   // 23 Nov 2026: the broker refuses this app prices
+            "ENTRY_TO_PAPER_TWIN");               // 23 Nov 2026: an entry the broker could not take went to the twin
 
     /** One message, and the member workspace it is also for (null: the admin's only). */
     record Alert(String text, Long memberTenant) {
@@ -110,6 +112,14 @@ class ExecutionAlerts {
                     : action.equals("MODE_PAPER_SESSION_LOST") ? "\nThe broker session was lost while LIVE: new signals "
                     + "paper-trade; open LIVE positions keep their broker stop and their exits wait for the next login. "
                     + "Log in again, then switch LIVE again if you want."
+                    : action.equals("MODE_PAPER_NO_MARKET_DATA") || action.equals("NO_MARKET_DATA") ? "\nThe broker "
+                    + "refuses this app market data (Kite: the app needs the paid Connect plan), so orders cannot be priced: "
+                    + "new signals paper-trade. Logging in again does not fix it: upgrade the app, log in, run the canary "
+                    + "and switch LIVE again."
+                    : action.equals("MODE_PAPER_CANARY_FAILED") ? "\nA canary did not pass on the LIVE broker: new "
+                    + "signals paper-trade. Switch LIVE again after a canary passes."
+                    : action.equals("ENTRY_TO_PAPER_TWIN") ? "\nThe broker could not take this entry; it was made on the "
+                    + "paper twin instead (no real order)."
                     : action.equals("DAILY_LOSS_STOP") ? "\nThe daily loss limit (closed + open) is reached: every open "
                     + "position is being sold and no new entries today. It trades again tomorrow." : ""), member));
         }

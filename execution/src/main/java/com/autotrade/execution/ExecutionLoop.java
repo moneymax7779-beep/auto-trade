@@ -431,7 +431,13 @@ public final class ExecutionLoop implements AutoCloseable {
                         BrokerReconciler.Check c = reconciler(account).check(account, route.connection());
                         check = c.matched() ? "" : ", RECONCILIATION " + c.differences();
                     } catch (BrokerException e) {
-                        if (e.kind() == BrokerException.Kind.SESSION) {
+                        if (e.isNoMarketData()) {
+                            // 23 Nov 2026: the app may not read prices; the login is valid and stays (see BrokerException)
+                            new KillSwitches(dataSource).noMarketData(account, workerId,
+                                    Map.of("message", String.valueOf(e.getMessage()), "during", "reconciliation"));
+                            tradingDay.noMarketData(account, workerId);
+                            check = ", NO MARKET DATA (" + e.getMessage() + ")";
+                        } else if (e.kind() == BrokerException.Kind.SESSION) {
                             // the session is gone: the simulator below refuses entries and keeps exits for the next login
                             new KillSwitches(dataSource).loseSession(account, workerId,
                                     Map.of("message", String.valueOf(e.getMessage()), "during", "reconciliation"));
