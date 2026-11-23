@@ -533,6 +533,13 @@ export interface ExecutionAccount {
   today?: DayResult & { liveNet: number; liveTrades: number; liveOpen: number };
   /** V49: the engine account (e.g. PAPER-1) whose trades this paper account shows; it takes none of its own */
   mirrorOf?: string | null;
+  /**
+   * A trader workspace's real account today (23 Nov 2026): LIVE (real orders), PAPER (its paper twin takes the entries),
+   * OTHER (another account is today's broker), OFF (no trading today); null otherwise
+   */
+  dayRole?: "LIVE" | "PAPER" | "OTHER" | "OFF" | null;
+  /** the account's latest canary (23 Nov 2026: LIVE needs it passed); null when none ran or a paper account */
+  canary?: { result: string; at: string; message: string } | null;
 }
 
 /** GET/POST /api/execution/accounts/{id}/live-strategies: the owner's choice of LIVE strategies (V32, 9 Nov 2026) */

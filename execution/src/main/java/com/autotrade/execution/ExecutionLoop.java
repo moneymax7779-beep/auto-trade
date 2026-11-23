@@ -379,8 +379,9 @@ public final class ExecutionLoop implements AutoCloseable {
             }
             if (tradingDay.idle(account)) {
                 int closed = tradingDay.closeIdleIntents(account.id());
-                record(account, null, null, "IDLE", "not the day's broker and holds nothing; "
-                        + (probeOnly.contains(account.id()) ? probe(account, day) : "no broker connection")
+                record(account, null, null, "IDLE", tradingDay.notTargetReason(account) + "; this account holds nothing "
+                        + "and sends no orders; " + (probeOnly.contains(account.id()) ? probe(account, day)
+                        : "no broker connection")
                         + (closed > 0 ? " (" + closed + " exit/add closed NOT_HELD)" : ""));
                 return;
             }

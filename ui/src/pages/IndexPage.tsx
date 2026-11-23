@@ -147,8 +147,9 @@ function LiveDay({ underlying, s, nav, inspect }: { underlying: string; s: Statu
       )}
       {/* one above the other (11 Nov 2026): side by side each 11-column table scrolled sideways in half the width */}
       <div className="grid gap-4">
-        <Panel title="Open positions"><LivePositions rows={open} closed={false} empty="Flat." /></Panel>
-        <Panel title="Closed today"><LivePositions rows={closed} closed empty="No closed positions yet." /></Panel>
+        <p className="text-xs text-muted">{SIGNAL_NOTE}</p>
+        <Panel title="Open positions"><LivePositions rows={open} closed={false} empty="Flat." percentOnly /></Panel>
+        <Panel title="Closed today"><LivePositions rows={closed} closed empty="No closed positions yet." percentOnly /></Panel>
       </div>
     </>
   );
@@ -224,12 +225,20 @@ function PlainPastDay({ underlying, day, sessionId, nav }: { underlying: string;
     <>
       <SurgePanel plain date={day} underlying={underlying} nav={nav} trades={chartTrades(trades, underlying, null, strategyShort, noSpot)} />
       <Panel title={`Trades on ${underlying} · ${day}`}>
-        <TradesTable rows={trades} showStrategy empty={sessionId == null ? "No trades recorded for this day."
+        <p className="mb-2 text-xs text-muted">{SIGNAL_NOTE}</p>
+        <TradesTable rows={trades} showStrategy percentOnly empty={sessionId == null ? "No trades recorded for this day."
           : positions.isLoading ? "Loading…" : "No trades on this index that day."} />
       </Panel>
     </>
   );
 }
+
+/**
+ * What a member's chart and tables show (user 23 Nov 2026): the live set's own trades, sized on its ₹5 L model account,
+ * so as % of premium; the member's own fills and rupees are on the Today page.
+ */
+const SIGNAL_NOTE = "These are the live set's trades, shown as % of the premium paid (its rupees are for a ₹5 L model "
+  + "account, not yours). What your own accounts traded, in rupees, is on the Today page.";
 
 const noSpot = () => null;                                // the surge chart places a trade on its own index line
 

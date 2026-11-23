@@ -130,8 +130,9 @@ export function chartTrades(rows: TradePositionRow[], underlying: string, strate
     if (t.underlying !== underlying || (strategy != null && t.strategy != null && t.strategy !== strategy)) return [];
     const from = time(t.opened)!, to = time(t.closed);
     const side = t.legs.length === 2 ? "STRADDLE" as const : t.legs[0].option_side === "PE" ? "PE" as const : "CE" as const;
+    const v = paid(t);
     return [{ n: i + 1, who: t.strategy ? short(t.strategy) : "", side, from, to, net: t.net,
-      entrySpot: spotAt(from), exitSpot: to ? spotAt(to) : null }];
+      pct: v != null && v > 0 ? (t.net / v) * 100 : null, entrySpot: spotAt(from), exitSpot: to ? spotAt(to) : null }];
   });
 }
 
@@ -154,9 +155,14 @@ const paid = (t: Trade) => t.legs.every((l) => l.quantity != null && l.average_c
  * Trades with a straddle as one row: lots, quantity, entry and exit premium (average fill per unit),
  * premium paid, time, exit reason, net and costs. Wide tables scroll inside their panel.
  */
-export function TradesTable({ rows, showStrategy, empty = "No trades.", numbered = false, onPick }: {
+export function TradesTable({ rows, showStrategy, empty = "No trades.", numbered = false, onPick, percentOnly = false }: {
   rows: TradePositionRow[];
   showStrategy: boolean;
+  /**
+   * A member's view (user 23 Nov 2026): the live set's trades without its ₹5 L model account's lots, quantity, premium
+   * and rupees, which are not the member's; the result as % of premium instead
+   */
+  percentOnly?: boolean;
   empty?: string;
   /** a "#" column matching the numbers on the chart */
   numbered?: boolean;
@@ -186,27 +192,37 @@ export function TradesTable({ rows, showStrategy, empty = "No trades.", numbered
             </div>
           ),
         },
-        { key: "l", label: "Lots", align: "right", render: (t: Trade) => <PerLeg trade={t} value={(l) => { const n = lotsOf(l); return n == null ? "–" : String(n); }} /> },
-        { key: "q", label: "Qty", align: "right", render: (t: Trade) => <PerLeg trade={t} value={(l) => l.quantity == null ? "–" : l.quantity.toLocaleString("en-IN")} /> },
+        ...(percentOnly ? [] : [
+          { key: "l", label: "Lots", align: "right" as const, render: (t: Trade) => <PerLeg trade={t} value={(l) => { const n = lotsOf(l); return n == null ? "–" : String(n); }} /> },
+          { key: "q", label: "Qty", align: "right" as const, render: (t: Trade) => <PerLeg trade={t} value={(l) => l.quantity == null ? "–" : l.quantity.toLocaleString("en-IN")} /> },
+        ]),
         { key: "e", label: "Entry ₹", align: "right", render: (t: Trade) => <PerLeg trade={t} value={(l) => px(l.average_cost)} /> },
         { key: "x", label: "Exit ₹", align: "right", render: (t: Trade) => <PerLeg trade={t} value={(l) => px(l.average_exit)} /> },
         // a short (A-358): the entry is the credit received and this column is the premium received
-        { key: "p", label: "Premium paid", align: "right", render: (t: Trade) => { const v = paid(t); return <span className="whitespace-nowrap">{v == null ? "–" : rupees(v)}{t.legs[0]?.direction === "SHORT" && <span className="text-xs text-muted"> credit</span>}</span>; } },
+        ...(percentOnly ? [] : [{ key: "p", label: "Premium paid", align: "right" as const, render: (t: Trade) => { const v = paid(t); return <span className="whitespace-nowrap">{v == null ? "–" : rupees(v)}{t.legs[0]?.direction === "SHORT" && <span className="text-xs text-muted"> credit</span>}</span>; } }]),
         {
           key: "t", label: "IST", render: (t: Trade) => (
             <span className="num whitespace-nowrap">{time(t.opened)}–{time(t.closed) ?? "open"}</span>
           ),
         },
         { key: "r", label: "Exit reason", render: (t: Trade) => <span className="text-xs">{t.exit ?? "–"}</span> },
-        {
-          key: "n", label: "Net", align: "right", render: (t: Trade) => (
-            <div className="whitespace-nowrap">
-              <Pnl value={t.net} />
-              {t.legs.length === 2 && <div className="text-xs text-muted">{t.detail.split(" · ").slice(0, 2).join(" · ")}</div>}
-            </div>
-          ),
-        },
-        { key: "k", label: "Costs", align: "right", render: (t: Trade) => <span className="whitespace-nowrap text-muted">{rupees(t.costs)}</span> },
+        ...(percentOnly ? [{
+          key: "pc", label: "Result", align: "right" as const, render: (t: Trade) => {
+            const v = paid(t), pct = v != null && v > 0 ? (t.net / v) * 100 : null;
+            return pct == null ? <span className="text-muted">–</span>
+              : <span className={`num whitespace-nowrap ${pct >= 0 ? "text-up" : "text-down"}`}>{pct >= 0 ? "+" : "−"}{Math.abs(pct).toFixed(1)}%</span>;
+          },
+        }] : [
+          {
+            key: "n", label: "Net", align: "right" as const, render: (t: Trade) => (
+              <div className="whitespace-nowrap">
+                <Pnl value={t.net} />
+                {t.legs.length === 2 && <div className="text-xs text-muted">{t.detail.split(" · ").slice(0, 2).join(" · ")}</div>}
+              </div>
+            ),
+          },
+          { key: "k", label: "Costs", align: "right" as const, render: (t: Trade) => <span className="whitespace-nowrap text-muted">{rupees(t.costs)}</span> },
+        ]),
       ]}
     />
   );

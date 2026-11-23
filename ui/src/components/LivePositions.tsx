@@ -89,7 +89,9 @@ function BracketBar({ pct, stop, target }: { pct: number; stop: number; target: 
  * The session's positions as trades: open ones valued at the current bid (with a straddle's
  * stop-to-target bar), closed ones at their exit. A straddle's two legs are one row.
  */
-export function LivePositions({ rows, closed, empty }: { rows: PositionRow[]; closed: boolean; empty: string }) {
+export function LivePositions({ rows, closed, empty, percentOnly = false }: { rows: PositionRow[]; closed: boolean; empty: string;
+  /** a member's view (user 23 Nov 2026): no lots, quantity or rupees of the live set's ₹5 L model account; % of premium */
+  percentOnly?: boolean }) {
   const trades = group(rows);
   // the same column widths for open and closed (user, 11 Nov 2026: "Align these properly"), so the two tables, one
   // above the other, line up; the trade column takes what is left
@@ -108,24 +110,29 @@ export function LivePositions({ rows, closed, empty }: { rows: PositionRow[]; cl
             </div>
           ),
         },
-        { key: "l", label: "Lots", width: "3.5rem", align: "right", render: (t: LiveTrade) => <PerLeg trade={t} value={(l) => l.lotSize ? String(Math.round(heldOrBought(l) / l.lotSize)) : "–"} /> },
-        { key: "q", label: "Qty", width: "4.75rem", align: "right", render: (t: LiveTrade) => <PerLeg trade={t} value={(l) => heldOrBought(l).toLocaleString("en-IN")} /> },
+        ...(percentOnly ? [] : [
+        { key: "l", label: "Lots", width: "3.5rem", align: "right" as const, render: (t: LiveTrade) => <PerLeg trade={t} value={(l) => l.lotSize ? String(Math.round(heldOrBought(l) / l.lotSize)) : "–"} /> },
+        { key: "q", label: "Qty", width: "4.75rem", align: "right" as const, render: (t: LiveTrade) => <PerLeg trade={t} value={(l) => heldOrBought(l).toLocaleString("en-IN")} /> },
+        ]),
         { key: "e", label: "Entry ₹", width: "5.75rem", align: "right", render: (t: LiveTrade) => <PerLeg trade={t} value={(l) => px(l.averageCost)} /> },
         {
           key: "n", label: closed ? "Exit ₹" : "Now ₹ (bid)", width: "5.75rem", align: "right",
           render: (t: LiveTrade) => <PerLeg trade={t} value={(l) => px(closed ? l.exitPrice : l.bid)} />,
         },
-        { key: "p", label: "Premium paid", width: "6rem", align: "right", render: (t: LiveTrade) => <span className="whitespace-nowrap">{rupees(t.paid)}</span> },
+        ...(percentOnly ? [] : [
+        { key: "p", label: "Premium paid", width: "6rem", align: "right" as const, render: (t: LiveTrade) => <span className="whitespace-nowrap">{rupees(t.paid)}</span> },
         {
-          key: "v", label: closed ? "Sold for" : "Value now", width: "6rem", align: "right",
+          key: "v", label: closed ? "Sold for" : "Value now", width: "6rem", align: "right" as const,
           render: (t: LiveTrade) => <span className="whitespace-nowrap">{t.value == null ? "–" : rupees(t.value)}</span>,
         },
+        ]),
         {
-          key: "pl", label: "P&L", width: "5.75rem", align: "right", render: (t: LiveTrade) => {
+          key: "pl", label: percentOnly ? "Result" : "P&L", width: "5.75rem", align: "right", render: (t: LiveTrade) => {
             const pct = t.value != null && t.paid > 0 ? (t.value / t.paid - 1) * 100 : null;
             return (
               <div className="whitespace-nowrap">
-                <Pnl value={t.net} />
+                {!percentOnly && <Pnl value={t.net} />}
+                {percentOnly && pct == null && <span className="text-muted">–</span>}
                 {pct != null && <div className={`num text-xs ${pct >= 0 ? "text-up" : "text-down"}`}>{pct >= 0 ? "+" : ""}{pct.toFixed(1)}%</div>}
                 {!closed && pct != null && t.targetPct != null && t.stopPct != null
                   && <BracketBar pct={pct} stop={t.stopPct} target={t.targetPct} />}
