@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
-import { useNavigate } from "react-router";
+import { useEffect, useState } from "react";
+import { useLocation, useNavigate } from "react-router";
 import { get, postJson, type HouseholdCard } from "../api";
 import { ErrorNote, Loading, Panel, Pnl } from "../components/ui";
 import { useWorkspace } from "../workspace";
@@ -22,6 +22,12 @@ export function HouseholdPage() {
   const cards = useQuery({ queryKey: ["household"], refetchInterval: 10000,
     queryFn: () => get<HouseholdCard[]>("/api/execution/household") });
   const [message, setMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  // Admin ▸ User activity (/household#activity): the Activity panel brought into view, again once the cards above have
+  // loaded and moved it down
+  const { hash } = useLocation();
+  useEffect(() => {
+    if (hash === "#activity") document.getElementById("activity")?.scrollIntoView({ block: "start" });
+  }, [hash, cards.isSuccess]);
   const call = useMutation({
     mutationFn: ({ path, body }: { path: string; body: unknown; ok: string }) => postJson<unknown>(path, body),
     onSuccess: (_d, v) => { setMessage({ ok: true, text: v.ok }); client.invalidateQueries({ queryKey: ["household"] }); },
@@ -86,7 +92,7 @@ export function HouseholdPage() {
           </div>
         )}
       </Panel>
-      <ActivityPanel />
+      <div id="activity" className="scroll-mt-20"><ActivityPanel /></div>
       <MembersPanel onDone={(text, ok) => setMessage({ ok, text })} />
     </div>
   );
