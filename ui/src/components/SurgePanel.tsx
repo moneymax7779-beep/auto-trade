@@ -210,6 +210,12 @@ function UnderlyingSurgesPanel({ date, data: polled, live, until, sessionId, fil
   const data = useMemo(() => (pushed.bars ? { ...polled, index: withLiveCloses(polled.index, pushed.bars, until) } : polled),
     [polled, pushed.bars, pushed.version]);
   const [picked, setPicked] = useState<ChartTrade | null>(null);
+  // the trades and finished chart orders can be hidden to read the chart (user 23 Nov 2026: "I should be able to hide the
+  // trades taken"); a draft or working chart order's lines stay, they are what is being placed
+  const [showTrades, setShowTrades] = useShowTrades();
+  const shownTrades = showTrades ? trades : NO_TRADES;
+  const shownDrawing = showTrades || !drawing?.boxes?.length ? drawing : { ...drawing, boxes: [] };
+  const tradesToggle = <TradesToggle on={showTrades} onChange={setShowTrades} count={trades.length + (drawing?.boxes?.length ?? 0)} />;
   const contexts = useTradeContext(sessionId, !!live, picked != null);
   // a chart trade is the stored trade of the same strategy and side that opened in the same minute
   // the trade's row: same index, side and strategy, opened within a minute of the marker (an open trade's row carries the
@@ -247,8 +253,9 @@ function UnderlyingSurgesPanel({ date, data: polled, live, until, sessionId, fil
         {live && <span className="ml-2 text-xs font-normal text-muted">
           {pushed.streaming ? <><span className="mr-1 inline-block h-1.5 w-1.5 rounded-full bg-up align-middle" />live</> : "updates every 30 s"}
         </span>}</>}>
+        <div className="mb-2 flex flex-wrap items-center gap-1 text-xs">{tradesToggle}</div>
         <SurgeChart date={date} live={live} until={until} nav={nav} data={data} shown={NO_SURGES} groups={NO_BURSTS} selected={null}
-          onSelect={() => {}} levels={undefined} toggles={NO_LEVELS} trades={trades} structure={undefined}
+          onSelect={() => {}} levels={undefined} toggles={NO_LEVELS} trades={shownTrades} structure={undefined}
           structureToggles={NO_STRUCTURE} plain />
       </Panel>
     );
@@ -265,6 +272,7 @@ function UnderlyingSurgesPanel({ date, data: polled, live, until, sessionId, fil
       {!data.historyAvailable && <p className="mb-2 text-xs text-warn">No futures volume history for the previous sessions (zt-tiger-v2 or own capture), so surges cannot be ranked.</p>}
       {/* mobile phase 3: on a phone the filters and layer toggles fold behind one button so the chart is on the first
           screen; their state stays here, so folding loses nothing */}
+      <div className="mb-2 flex flex-wrap items-center gap-1 text-xs">{tradesToggle}</div>
       <div className="mb-2"><PhoneFold label="Chart settings: levels, layers, surge filters">
       <Toolbar filters={filters} onFilters={onFilters} data={data} />
       <div className="mb-2 flex flex-wrap items-center gap-3">
@@ -278,8 +286,8 @@ function UnderlyingSurgesPanel({ date, data: polled, live, until, sessionId, fil
       )}
       {desk}
       <SurgeChart date={date} live={live} until={until} nav={nav} data={data} shown={shown} groups={groups} selected={selected}
-        onSelect={setSelected} levels={levels.data} toggles={toggles} trades={trades} onPickTrade={sessionId != null ? setPicked : undefined}
-        structure={structure} structureToggles={structureToggles} drawing={drawing} />
+        onSelect={setSelected} levels={levels.data} toggles={toggles} trades={shownTrades} onPickTrade={sessionId != null ? setPicked : undefined}
+        structure={structure} structureToggles={structureToggles} drawing={shownDrawing} />
       {picked && sessionId != null && (
         <div className="mt-3">
           {pickedContext
@@ -307,6 +315,30 @@ function UnderlyingSurgesPanel({ date, data: polled, live, until, sessionId, fil
         </>
       )}
     </Panel>
+  );
+}
+
+const SHOW_TRADES_KEY = "surge-chart-show-trades";
+
+/** Whether the chart draws the day's trades and finished chart orders; kept in the browser (on by default). */
+function useShowTrades(): [boolean, (on: boolean) => void] {
+  const [on, setOn] = useState<boolean>(() => {
+    try { return localStorage.getItem(SHOW_TRADES_KEY) !== "off"; } catch { return true; }
+  });
+  const update = (next: boolean) => {
+    setOn(next);
+    try { localStorage.setItem(SHOW_TRADES_KEY, next ? "on" : "off"); } catch { /* not persisted */ }
+  };
+  return [on, update];
+}
+
+function TradesToggle({ on, onChange, count }: { on: boolean; onChange: (on: boolean) => void; count: number }) {
+  return (
+    <button type="button" aria-pressed={on} onClick={() => onChange(!on)}
+      title={on ? "hide the trades and finished chart orders to read the chart" : "show the trades and finished chart orders"}
+      className={`rounded-full border px-2.5 py-1 ${on ? "border-line bg-panel-2" : "border-transparent text-muted opacity-60"}`}>
+      trades{count > 0 ? ` (${count})` : ""}{on ? "" : " hidden"}
+    </button>
   );
 }
 
