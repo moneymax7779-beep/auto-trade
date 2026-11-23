@@ -69,7 +69,7 @@ class OiTapeController implements org.springframework.beans.factory.DisposableBe
     /** The widest band a caller may ask for (the capture records about ATM ± 16, re-centred as the market moves). */
     static final int MAX_BAND = 10;
     /**
-     * Today is read only up to this long ago: the live capture writes its ticks every 5 s ({@code LiveCapture.flush}),
+     * Today is read only up to this long ago: the live capture writes its ticks every second ({@code SessionRunner.CAPTURE_FLUSH}; 5 s before 23 Nov 2026),
      * and a step is read once, so a step read before its last ticks were written would keep them out for good.
      */
     static final java.time.Duration WRITE_LAG = java.time.Duration.ofSeconds(15);

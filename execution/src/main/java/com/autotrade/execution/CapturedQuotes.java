@@ -22,7 +22,8 @@ import com.autotrade.broker.Quote;
  * depth): the quote of a DRY_RUN route that reads a broker whose own quote API this build does not call (Kotak Neo). Only
  * a tick younger than {@link #MAX_AGE} counts; an older one, or none, is no quote ({@link BrokerException.Kind#RETRYABLE}:
  * the venue sends no order). The capture's book is not the broker's own, but the exchange's book is the same at every
- * broker; what differs (the broker's latency) is not modelled.
+ * broker; what differs (the broker's latency) is not modelled. A row lands when trading-core's capture flushes (every second since
+ * 23 Nov 2026, SessionRunner.CAPTURE_FLUSH; every 5 s before, when a Kotak entry was priced from a 2 s old ask and missed).
  */
 public final class CapturedQuotes implements Function<String, Quote> {
 
