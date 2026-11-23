@@ -33,7 +33,7 @@ import com.autotrade.core.event.SessionPhaseEvent;
  *
  * <p>One CAPTURE manifest per session and underlying (INDIA_VIX included), ACTIVE from the start and
  * appended to by later runs of the same day (a restart does not hide the morning). Events are
- * buffered in memory and written with COPY on {@link #flush()}; call it every few seconds.
+ * buffered in memory and written with COPY on {@link #flush()}; call it every few seconds (a live session: every second, SessionRunner.CAPTURE_FLUSH).
  */
 public final class LiveCapture implements AutoCloseable {
 

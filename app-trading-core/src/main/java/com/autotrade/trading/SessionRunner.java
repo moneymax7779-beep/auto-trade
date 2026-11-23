@@ -76,6 +76,13 @@ class SessionRunner implements ApplicationRunner {
     private static final Duration RESTART_BACKOFF = Duration.ofMinutes(1);
     /** V35: how often a live session re-reads the owner's OFF list (a switch applies within this). */
     static final Duration OFF_READ_EVERY = Duration.ofSeconds(5);
+    /**
+     * How often the live capture's buffered ticks are written (23 Nov 2026; was 5 s). The LIVE routes that price orders
+     * from our capture (Kotak, Upstox, Groww: CapturedQuotes) see a quote at most about this old plus the write itself.
+     */
+    static final Duration CAPTURE_FLUSH = Duration.ofSeconds(1);
+    /** How long the session end waits for a capture flush in progress before the recorder's last one. */
+    static final Duration CAPTURE_FLUSH_STOP_WAIT = Duration.ofSeconds(30);
 
     /** A running session and what it owns. */
     private record Running(LocalDate date, TradingSession session, Thread worker, ScheduledExecutorService timer) {
@@ -769,6 +776,14 @@ class SessionRunner implements ApplicationRunner {
         // snapshot run) left its sync thread running, and the retry started a second engine beside it
         boolean workerStarted = false;
         ScheduledExecutorService timer = Executors.newSingleThreadScheduledExecutor();
+        // 23 Nov 2026: the capture is flushed on its own thread every CAPTURE_FLUSH (was every 5 s on the heartbeat's
+        // timer). LIVE Kotak, Upstox and Groww orders are priced from these rows (CapturedQuotes); at 5 s a Kotak entry
+        // at 12:06:00 was priced from the 12:05:58 ask, sat below the market and went unfilled.
+        ScheduledExecutorService captureTimer = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread th = new Thread(r, "live-capture-flush");
+            th.setDaemon(true);
+            return th;
+        });
         try {
             if (signalSource) {
                 com.autotrade.account.AccountStore accounts = new com.autotrade.account.AccountStore(target);
@@ -821,7 +836,8 @@ class SessionRunner implements ApplicationRunner {
             boolean upstoxFeedUsed = upstoxFeed != null;
             LiveCapture recorder = capture;
             if (recorder != null) {
-                timer.scheduleAtFixedRate(safe(recorder::flush), 5, 5, TimeUnit.SECONDS);
+                long every = CAPTURE_FLUSH.toMillis();
+                captureTimer.scheduleWithFixedDelay(safe(recorder::flush), every, every, TimeUnit.MILLISECONDS);
             }
             Runs runs = new Runs(target);
             Long snapshotRun = null;
@@ -853,6 +869,7 @@ class SessionRunner implements ApplicationRunner {
                 if (chartOrders != null) {
                     chartOrders.close();
                 }
+                stopCaptureFlush(captureTimer);              // its last flush ends before the recorder's own
                 if (recorder != null) {
                     recorder.close();
                 }
@@ -884,6 +901,7 @@ class SessionRunner implements ApplicationRunner {
                     chartOrders.close();
                 }
                 timer.shutdownNow();                             // its heartbeat and snapshot flush, too
+                captureTimer.shutdownNow();
                 if (signalFeed != null) {
                     // third review 16 Nov 2026: a signal source started alongside read a feed nothing would ever fill;
                     // its feed is ended, so its run returns and its own finally stops its timer
@@ -1035,6 +1053,22 @@ class SessionRunner implements ApplicationRunner {
     private void exit(int code) {
         int exitCode = SpringApplication.exit(context, () -> code);
         System.exit(exitCode);
+    }
+
+    /**
+     * Stops the capture flusher and lets a flush in progress finish (no interrupt: a COPY cut mid-way loses its batch),
+     * so the recorder's closing flush never runs beside it.
+     */
+    static void stopCaptureFlush(ScheduledExecutorService captureTimer) {
+        captureTimer.shutdown();
+        try {
+            if (!captureTimer.awaitTermination(CAPTURE_FLUSH_STOP_WAIT.toMillis(), TimeUnit.MILLISECONDS)) {
+                log.warn("live capture flush still running after {} s; closing the recorder beside it",
+                        CAPTURE_FLUSH_STOP_WAIT.toSeconds());
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private static Runnable safe(Runnable task) {

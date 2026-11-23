@@ -152,7 +152,7 @@ class PcrController implements org.springframework.beans.factory.DisposableBean 
         synchronized (d) {
             if (!d.complete) {
                 Instant end = day.atTime(CLOSE).atZone(MarketTime.IST).toInstant();
-                // today only up to whole minutes the live capture has written (it writes every 5 s; see OiTapeController)
+                // today only up to whole minutes the live capture has written (it writes every second; see OiTapeController)
                 Instant written = Instant.now().minus(OiTapeController.WRITE_LAG);
                 Instant until = day.equals(today) && written.isBefore(end)
                         ? written.truncatedTo(java.time.temporal.ChronoUnit.MINUTES) : end;
