@@ -265,7 +265,18 @@ public final class KiteGateway implements BrokerConnection {
         KiteInstruments.Contract c = contract(instrumentKey);
         String key = c.exchange() + ":" + c.tradingSymbol();
         quotes.acquire();
-        JsonNode q = http.getRepeated("/quote", "i", List.of(key)).path(key);
+        JsonNode q;
+        try {
+            q = http.getRepeated("/quote", "i", List.of(key)).path(key);
+        } catch (KiteException e) {
+            if ("PermissionException".equals(e.errorType())) {
+                // 23 Nov 2026: Kite refuses /quote to an app without the paid Connect plan; the session is valid (funds,
+                // books and orders work), so this is not a lost login and logging in again does not fix it
+                throw BrokerException.noMarketData("NO_MARKET_DATA: Kite refuses market data to this app ("
+                        + e.getMessage() + "): it needs Kite Connect's paid plan; logging in again does not help", e);
+            }
+            throw e;
+        }
         if (q.isMissingNode() || q.isNull()) {
             throw new BrokerException(Kind.RETRYABLE, "no quote for " + key);
         }

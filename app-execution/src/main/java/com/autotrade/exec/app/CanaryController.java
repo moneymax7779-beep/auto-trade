@@ -436,6 +436,15 @@ class CanaryController {
                             e.toString());
                 }
             }
+            if (report == null || report.result() != Canary.Result.PASS) {
+                try {
+                    // review 23 Nov 2026: a LIVE day on this account goes back to PAPER (Switch LIVE then needs a pass)
+                    new com.autotrade.execution.TradingDay(dataSource).canaryFailed(a, run.actor);
+                } catch (RuntimeException e) {
+                    log.error("canary {} on account {}: its LIVE day was not sent back to PAPER: {}", run.id, a.id(),
+                            e.toString());
+                }
+            }
             run.reportFile = journal.reportFile() == null ? null : journal.reportFile().toString();
             run.result = CanaryJournal.view(report);
             running.remove(a.id());

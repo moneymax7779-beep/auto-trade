@@ -497,7 +497,7 @@ class AccountsController {
     static final List<String> VIEWER_ACTIONS = List.of("ACCOUNT_CREATED", "ACCOUNT_SETTINGS", "LIVE_ON", "LIVE_OFF",
             "LIVE_ELIGIBLE_ON", "LIVE_ELIGIBLE_OFF", "LIVE_STRATEGIES", "TODAYS_BROKER", "KILL_ACCOUNT", "KILL_RELEASED",
             "FLATTEN", "POSITION_EXIT", "MANUAL_EXIT", "EOD_SQUARE_OFF", "MODE_PAPER_SESSION_LOST", "MODE_PAPER_NEW_SESSION",
-            "BROKER_SESSION_LOST");
+            "BROKER_SESSION_LOST", "NO_MARKET_DATA", "MODE_PAPER_NO_MARKET_DATA", "MODE_PAPER_CANARY_FAILED", "ENTRY_TO_PAPER_TWIN");
 
     /**
      * The audit log of the caller's tenants, newest first. Every role but VIEWER (an AUDITOR included) reads it whole; a

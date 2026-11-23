@@ -89,6 +89,7 @@ function TodayFor({ tenant }: { tenant: number }) {
     : chosen.broker === "PAPER" ? "a paper account never trades LIVE"
     : !chosen.liveCapable ? `${BROKER_NAMES[chosen.broker]} has no LIVE order adapter yet: it trades PAPER`
     : !chosen.liveEligible ? "not LIVE-eligible yet (the admin's one-time check)"
+    : chosen.canaryBlock ? chosen.canaryBlock
     : !loggedIn(chosen) ? `log in to ${chosen.name} first`
     : tenantKill ? "your kill switch is engaged"
     : t.lossLimit.reached ? "your daily loss limit is reached"

@@ -416,6 +416,8 @@ export interface WorkspaceBroker {
   enabled: boolean;
   liveCapable: boolean;
   liveEligible: boolean;
+  /** Why the latest canary keeps it PAPER (none run, or it did not pass); null when it passed (23 Nov 2026). */
+  canaryBlock?: string | null;
   paperTwinId: number | null;
   allocation: number;
   equityMode: string;

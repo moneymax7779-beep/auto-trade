@@ -441,6 +441,34 @@ class CanaryIT {
                 .startsWith("403 a canary sends a real order");
     }
 
+    /**
+     * Review 23 Nov 2026 (myzerodha): a canary failing at its quote (the Kite app has no market data) on the workspace's
+     * LIVE broker sends the day back to PAPER, said as such; the quote failure is named for what it is.
+     */
+    @Test
+    void aFailedCanaryOnTheLiveBrokerSendsTheDayBackToPaper(@TempDir Path dir) throws Exception {
+        long t = new AccountStore(dataSource).ensureTenant("member-noquote");
+        long u = new AccountStore(dataSource).ensureUser("member-noquote-owner", "noquote");
+        new AccountStore(dataSource).ensureMembership(t, u, "OWNER");
+        new AccountStore(dataSource).ensureMembership(t, kcAdmin, "SUPPORT");
+        jdbc.update("update acct.tenant set trading_control = 'DAILY_SWITCH' where id = ?", t);
+        BrokerAccount m = account(t, u, BrokerType.ZERODHA, V9, true);
+        jdbc.update("insert into acct.support_grant (tenant_id, granted_to, granted_by, expires_at) values (?, ?, ?, "
+                + "now() + interval '1 hour')", t, kcAdmin, u);
+        new com.autotrade.execution.TradingDay(dataSource).append(t, m.id(),
+                com.autotrade.execution.TradingDay.Mode.LIVE, "IT", u);
+        kite.noMarketData();
+        Map<String, Object> out = run(api(clock(10, 0), dir), "kc-admin", m.id(),
+                new CanaryController.Request(KEY, phrase(m)));
+        assertThat(out.get("result")).isEqualTo("FAIL");
+        assertThat(String.valueOf(out.get("message"))).contains("NO_MARKET_DATA");
+        assertThat(kite.requests("place")).as("nothing placed after the failed quote").isZero();
+        assertThat(jdbc.queryForList("select mode || ':' || reason from acct.trading_day_event where tenant_id = ? "
+                + "order by id", String.class, t)).containsExactly("LIVE:IT", "PAPER:CANARY_FAILED");
+        assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? and action = "
+                + "'MODE_PAPER_CANARY_FAILED'", Integer.class, m.id())).isEqualTo(1);
+    }
+
     @Test
     void theRequestStartsTheRunAndOneRunsAtATimeUntilItEnds(@TempDir Path dir) throws Exception {
         BrokerAccount a = account(BrokerType.ZERODHA, V9, true);

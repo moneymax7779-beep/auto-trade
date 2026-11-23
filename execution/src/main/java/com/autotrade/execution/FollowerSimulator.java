@@ -218,6 +218,7 @@ public final class FollowerSimulator {
         int executed = 0, skipped = 0, rejected = 0, closed = 0;
         Map<String, Integer> reasons = new LinkedHashMap<>();
         boolean sessionLost = venue.broker() && sessionLost(account);
+        BrokerException lostBy = null;                         // what lost it this turn (null: known lost before)
         if (venue.broker() && !sessionLost) {
             try {
                 for (FollowerVenue.StopFill stop : venue.stopFills(account)) {   // stops that sold while held
@@ -227,7 +228,8 @@ public final class FollowerSimulator {
             } catch (BrokerException e) {
                 if (e.kind() == BrokerException.Kind.SESSION) {
                     sessionLost = true;
-                    loseSession(account, e.getMessage());
+                    lostBy = e;
+                    loseSession(account, e);
                 } else {
                     reasons.merge("STOP_READ_" + e.kind(), 1, Integer::sum);     // read again next turn
                 }
@@ -239,7 +241,8 @@ public final class FollowerSimulator {
             } catch (BrokerException e) {
                 if (e.kind() == BrokerException.Kind.SESSION) {
                     sessionLost = true;
-                    loseSession(account, e.getMessage());
+                    lostBy = e;
+                    loseSession(account, e);
                 } else {
                     reasons.merge("LATE_FILL_READ_" + e.kind(), 1, Integer::sum);
                 }
@@ -268,7 +271,8 @@ public final class FollowerSimulator {
                     throw e;
                 }
                 sessionLost = true;
-                loseSession(account, e.getMessage());
+                lostBy = e;
+                loseSession(account, e);
             }
         }
         List<Pending> pending = pending(account.id(), copyGroupId, date);
@@ -282,7 +286,8 @@ public final class FollowerSimulator {
                 // entries refused; exits wait for the next login. Review 8 Nov 2026: so does an entry with orders already at
                 // the broker (it is resumed by tag after the login; refused, its fill would have no position or stop)
                 if (!p.action().equals("EXIT") && !(venue.broker() && hasOrders(p.intentId(), "ENTRY"))) {
-                    outcomes.add(reject(p, "BROKER_SESSION", "the broker session is not valid: log in again"));
+                    outcomes.add(refuseToTwin(account, p, brokerCode(lostBy), lostBy != null && lostBy.isNoMarketData()
+                            ? lostBy.getMessage() : "the broker session is not valid: log in again"));
                 } else {
                     outcomes.add("PENDING_BROKER_SESSION");
                 }
@@ -313,11 +318,12 @@ public final class FollowerSimulator {
                         throw e;
                     }
                     sessionLost = true;
-                    loseSession(account, e.getMessage());
+                    lostBy = e;
+                    loseSession(account, e);
                     // an exit, or an entry with an order already at the broker, waits for the next login (it resumes
-                    // by tag); an entry that sent nothing is refused
+                    // by tag); an entry that sent nothing is refused (and an ENTER made again for the paper twin)
                     outcomes.add(p.action().equals("EXIT") || hasOrders(p.intentId()) ? "PENDING_BROKER_SESSION"
-                            : reject(p, "BROKER_SESSION", e.getMessage()));
+                            : refuseToTwin(account, p, brokerCode(e), e.getMessage()));
                 } finally {
                     if (tenantLock != null) {
                         tenantLock.unlock();
@@ -1277,7 +1283,7 @@ public final class FollowerSimulator {
                 throw e;
             }
             // the fill is booked; the stop is placed at the next login (ensureProtected), entries wait till then
-            loseSession(day.account, e.getMessage());
+            loseSession(day.account, e);
         }
     }
 
@@ -1304,7 +1310,7 @@ public final class FollowerSimulator {
                 if (e.kind() != BrokerException.Kind.SESSION) {
                     throw e;
                 }
-                loseSession(day.account, e.getMessage());
+                loseSession(day.account, e);
                 return -1;
             }
         }
@@ -1471,6 +1477,26 @@ public final class FollowerSimulator {
 
     private FollowerVenue.Fill order(BrokerAccount account, Pending p, String role, String side, long quantity, double price,
                                      int attempt) {
+        // v19 (23 Nov 2026): a simulated entry fills as a marketable limit would have on our captured book, not at the
+        // signal's price always. A first attempt of a single-leg entry or add only: a retried add is priced at its retry's
+        // ask already, and a straddle's two legs fill together or not at all (one leg alone would be a different trade)
+        if (risk.paperFill() != null && !venue.broker() && role.equals("ENTRY") && attempt == 1 && p.legGroup() == null
+                && p.token() > 0) {
+            CapturedEntryFill.Outcome book = new CapturedEntryFill(jdbc.getDataSource(), clock)
+                    .fill(p.token(), p.at(), risk.orders(), risk.paperFill().latencyMs());
+            if (book.filled()) {
+                price = book.price();
+            } else if (book.kind() == CapturedEntryFill.Outcome.Kind.NOT_FILLED) {
+                jdbc.update("insert into exec.order_execution (tenant_id, trade_intent_id, broker_account_id, broker_type, "
+                        + "role, client_tag, attempt_no, order_side, order_type, quantity_requested, quantity_filled, "
+                        + "limit_price, status, raw_status, raw_error, lease_epoch) values (?, ?, ?, ?, ?, ?, ?, ?, 'LIMIT', "
+                        + "?, 0, ?, 'CANCELLED', ?, ?, ?)", account.tenantId(), p.intentId(), account.id(),
+                        account.brokerType().name(), role, spec(account, p, role, side, quantity, price, attempt).tag(),
+                        attempt, side, quantity, book.limit(), p.mode().equals("DRY_RUN") ? "DRY_RUN_SIMULATED"
+                                : "PAPER_SIMULATED", book.reason(), leaseEpoch);
+                return FollowerVenue.Fill.none("NOT_FILLED", book.reason(), p.at());
+            }
+        }
         return venue.execute(spec(account, p, role, side, quantity, price, attempt));
     }
 
@@ -1680,10 +1706,62 @@ public final class FollowerSimulator {
         return "TOKEN_EXPIRED".equals(status) || "TOKEN_REJECTED".equals(status) || "DISCONNECTED".equals(status);
     }
 
-    private void loseSession(BrokerAccount account, String message) {
+    private void loseSession(BrokerAccount account, BrokerException e) {
         protectionChecked.removeIf(k -> k.startsWith(account.id() + ":"));   // stops are verified again after the login
-        kills.loseSession(account, "execution", Map.of("message", String.valueOf(message)));
+        if (e.isNoMarketData()) {
+            // 23 Nov 2026: the login is valid, the app may not read prices: the session is left as it is (a new login
+            // changes nothing) and the day goes back to PAPER, said as what it is
+            kills.noMarketData(account, "execution", Map.of("message", String.valueOf(e.getMessage())));
+            tradingDay.noMarketData(account, "execution");
+            return;
+        }
+        kills.loseSession(account, "execution", Map.of("message", String.valueOf(e.getMessage())));
         tradingDay.sessionLost(account, "execution");      // a DAILY_SWITCH workspace's LIVE day goes back to PAPER
+    }
+
+    /** The refusal code of an entry its account's broker could not take (no session, or no market data). */
+    private static String brokerCode(BrokerException e) {
+        return e != null && e.isNoMarketData() ? "NO_MARKET_DATA" : "BROKER_SESSION";
+    }
+
+    /**
+     * 23 Nov 2026: an ENTER refused on a real account because its broker cannot take it (a lost session, no market data)
+     * with nothing sent is refused there and, when its DAILY_SWITCH workspace's entry target is now that account's paper
+     * twin (the LIVE day went back to PAPER), made again for the twin, so the paper record keeps the trade. Before, only
+     * the later entries went to the twin: on 23 Nov the entry that found the failure (etr 12:06, +63 % by 15:15) was lost
+     * to both, and its adds were skipped for want of a position. Returns the refused intent's outcome.
+     */
+    private String refuseToTwin(BrokerAccount account, Pending p, String code, String reason) {
+        String outcome = reject(p, code, reason);
+        // review 23 Nov 2026: never a straddle leg (the twin would hold one leg of it), and never late: past the LIVE
+        // entry age the twin would buy at the signal's old price, which the fan-out refuses too (17 Nov 2026)
+        if (!p.action().equals("ENTER") || p.legGroup() != null
+                || account.brokerType() == com.autotrade.account.BrokerType.PAPER
+                || java.time.Duration.between(p.at(), clock.instant()).compareTo(LIVE_ENTRY_MAX_AGE) > 0
+                || !tradingDay.dailySwitch(account.tenantId())) {
+            return outcome;
+        }
+        Long twin = tradingDay.paperTwin(account.id());
+        if (twin == null || !twin.equals(tradingDay.entryTargetNow(account.tenantId()))) {
+            return outcome;                                    // still LIVE on it, or the day moved elsewhere: no copy
+        }
+        int made = jdbc.update("insert into exec.trade_intent (tenant_id, trade_batch_id, broker_account_id, broker_type, "
+                + "execution_mode, strategy_id, priority, underlying, action, option_side, instrument_token, symbol, state, "
+                + "idempotency_key) select i.tenant_id, i.trade_batch_id, t.id, t.broker_type, "
+                + "coalesce(s.mode_override, t.trade_mode), i.strategy_id, i.priority, i.underlying, i.action, i.option_side, "
+                + "i.instrument_token, i.symbol, 'CREATED', d.idempotency_key || ':' || t.id "
+                + "from exec.trade_intent i join exec.trade_batch b on b.id = i.trade_batch_id "
+                + "join exec.signal_decision d on d.id = b.signal_decision_id "
+                + "join acct.broker_account t on t.id = ? and t.enabled and t.tenant_id = i.tenant_id "
+                + "join acct.strategy_subscription s on s.copy_group_id = d.copy_group_id and s.broker_account_id = t.id "
+                + "and s.strategy_id = i.strategy_id and s.enabled "
+                + "where i.id = ? on conflict (tenant_id, broker_account_id, idempotency_key) do nothing", twin,
+                p.intentId());
+        if (made > 0) {
+            kills.audit(account, "execution", "ENTRY_TO_PAPER_TWIN", Map.of("intent", p.intentId(), "twin", twin,
+                    "strategy", String.valueOf(p.strategyId()), "symbol", String.valueOf(p.symbol()), "why", code));
+        }
+        return outcome;
     }
 
     private String done(Pending p, long quantity) {

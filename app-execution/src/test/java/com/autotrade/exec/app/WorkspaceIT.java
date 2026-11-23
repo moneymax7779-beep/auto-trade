@@ -206,6 +206,18 @@ class WorkspaceIT {
                 .contains("no broker session today");
         jdbc.update("update acct.broker_account set connection_status = 'ACTIVE' where id = ?", zerodha);
 
+        // 23 Nov 2026: LIVE needs the latest canary passed: none yet, then a failed one (myzerodha's quote), refused
+        assertThat(reason(() -> workspaces.mode("asha", asha, new WorkspaceController.Mode("LIVE", "LIVE"))))
+                .contains("has had no canary yet");
+        canary(asha, zerodha, "PASS", "an older pass", "now() - interval '2 days'");
+        canary(asha, zerodha, "FAIL", "QUOTE: SESSION: PermissionException: Insufficient permission for that call.",
+                "now() - interval '1 hour'");
+        assertThat(reason(() -> workspaces.mode("asha", asha, new WorkspaceController.Mode("LIVE", "LIVE"))))
+                .as("the latest result counts, not an older pass").contains("last canary").contains("was FAIL")
+                .contains("PermissionException").contains("trades PAPER until a canary passes");
+        assertThat(state("asha", asha)).containsEntry("mode", "PAPER");
+        canary(asha, zerodha, "PASS", "placed, read, modified, cancelled", "now()");
+
         // LIVE: the day's target is the broker itself; an entry from now goes there
         workspaces.mode("asha", asha, new WorkspaceController.Mode("LIVE", "LIVE"));
         assertThat(state("asha", asha)).containsEntry("mode", "LIVE").containsEntry("targetAccountId", zerodha)
@@ -357,6 +369,7 @@ class WorkspaceIT {
         long account = account("hina", hina, "Kite", "ZERODHA", "KL1234");
         loggedIn(hina, account);
         workspaces.liveEligible("satya", account, new WorkspaceController.Eligible(true, "Kite"));
+        canary(hina, account, "PASS", "placed, read, modified, cancelled", "now()");   // 23 Nov 2026
         AccountStore accounts = new AccountStore(dataSource);
         accounts.ensureMembership(hina, accounts.ensureUser("hina-trader", "t"), "TRADER");
         assertThat(code(() -> workspaces.mode("hina-trader", hina, new WorkspaceController.Mode("LIVE", "LIVE"))))
@@ -379,6 +392,7 @@ class WorkspaceIT {
         long account = account("satya", jaya, "Kite", "ZERODHA", "JY1234");
         loggedIn(jaya, account);
         workspaces.liveEligible("satya", account, new WorkspaceController.Eligible(true, "Kite"));
+        canary(jaya, account, "PASS", "placed, read, modified, cancelled", "now()");   // 23 Nov 2026
         assertThat(code(() -> workspaces.mode("jaya", jaya, new WorkspaceController.Mode("LIVE", "LIVE")))).isEqualTo(403);
 
         assertThat(members.role("satya", "jaya", new MembersController.Role(null, "owner")))
@@ -410,6 +424,7 @@ class WorkspaceIT {
         long account = account("ira", ira, "Kite", "ZERODHA", "MN1234");
         loggedIn(ira, account);
         workspaces.liveEligible("satya", account, new WorkspaceController.Eligible(true, "Kite"));
+        canary(ira, account, "PASS", "placed, read, modified, cancelled", "now()");   // 23 Nov 2026
         workspaces.mode("ira", ira, new WorkspaceController.Mode("LIVE", "LIVE"));
         jdbc.update("update acct.broker_session set status = 'EXPIRED' where broker_account_id = ?", account);
         admin.settings("ira", account, new AccountAdminController.Settings(null, null, null, null, null, null, "OP1234",
@@ -446,5 +461,12 @@ class WorkspaceIT {
                 a1, a2)).containsExactly(f1, f2);
         assertThat(jdbc.queryForObject("select external_broker_user_id from acct.broker_account where id = ?", String.class,
                 a1)).as("the first one untouched").isEqualTo("GH1234");
+    }
+
+    /** A canary's result row as CanaryJournal writes it (23 Nov 2026: LIVE needs the latest one passed). */
+    private void canary(long tenant, long account, String result, String message, String at) {
+        jdbc.update("insert into exec.audit_log (tenant_id, broker_account_id, actor, action, detail, at) values (?, ?, "
+                + "'satya', 'CANARY_RESULT', jsonb_build_object('result', ?::text, 'message', ?::text), " + at + ")",
+                tenant, account, result, message);
     }
 }
