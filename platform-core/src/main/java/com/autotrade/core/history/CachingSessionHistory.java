@@ -53,14 +53,25 @@ public final class CachingSessionHistory implements SessionHistory {
     private final SessionHistory delegate;
     private final Store store;
     private final String fingerprint;
+    /** The session the fingerprint describes (v2: data before it only); null = every session. */
+    private final LocalDate validFor;
     private final AtomicLong hits = new AtomicLong();
     private final AtomicLong misses = new AtomicLong();
     private final AtomicLong storeErrors = new AtomicLong();
 
     public CachingSessionHistory(SessionHistory delegate, Store store, String fingerprint) {
+        this(delegate, store, fingerprint, null);
+    }
+
+    /**
+     * With a fingerprint of the data before {@code validFor} only: requests for that session are cached, requests for
+     * any other session (none in a replay) pass through to {@code delegate} uncached.
+     */
+    public CachingSessionHistory(SessionHistory delegate, Store store, String fingerprint, LocalDate validFor) {
         this.delegate = delegate;
         this.store = store;
         this.fingerprint = fingerprint;
+        this.validFor = validFor;
     }
 
     public long hits() {
@@ -129,6 +140,9 @@ public final class CachingSessionHistory implements SessionHistory {
 
     private <T> T cached(String method, String underlying, LocalDate session, String arg, Loader<T> loader,
                          Writer<T> writer, Reader<T> reader) {
+        if (validFor != null && !validFor.equals(session)) {
+            return loader.load();
+        }
         String request = fingerprint + "|" + method + "|" + underlying + "|" + session + "|" + arg;
         String key = sha256(request);
         byte[] bytes;

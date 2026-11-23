@@ -165,4 +165,19 @@ class CachingSessionHistoryTest {
         assertEquals(source.spotMinuteBars("NIFTY", DAY, 2), c.spotMinuteBars("NIFTY", DAY, 2));
         assertEquals(2, c.storeErrors());
     }
+
+    @Test
+    void anotherSessionThanTheFingerprintsPassesThroughUncached(@TempDir Path dir) {
+        Source source = new Source();
+        CachingSessionHistory c = new CachingSessionHistory(source, new CachingSessionHistory.FileStore(dir), "fp", DAY);
+        c.spotMinuteBars("NIFTY", DAY, 2);
+        c.spotMinuteBars("NIFTY", DAY, 2);
+        assertEquals(1, c.hits());
+        var other = c.spotMinuteBars("NIFTY", DAY.plusDays(1), 2);
+        c.spotMinuteBars("NIFTY", DAY.plusDays(1), 2);
+        assertEquals(source.spotMinuteBars("NIFTY", DAY.plusDays(1), 2), other);
+        assertEquals(1, c.hits());
+        assertEquals(1, c.misses());          // only the first DAY request was a miss; other days never touch the store
+        assertEquals(4, source.calls.get());  // DAY once + the other day twice + the comparison call
+    }
 }

@@ -705,7 +705,7 @@ class SessionRunner implements ApplicationRunner {
         history = com.autotrade.md.store.SessionHistories.forFeatures(history, features.barBackfill(), target);
         if (replay) {          // 22 Nov 2026: earlier sessions' answers cached across replays (AUTOTRADE_REPLAY_CACHE_DIR)
             history = HistoryCache.wrap(history, target, source, (bars ? "bars" : "ticks") + "|backfill="
-                    + features.barBackfill());
+                    + features.barBackfill(), session);
         }
         // risk v8: live sizes from the account's equity (starting capital + realised net of finished live sessions);
         // a replay uses the starting capital, so its results stay comparable day to day, unless replay-equity chains days
