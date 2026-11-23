@@ -87,7 +87,8 @@ class SecurityConfig {
      */
     static final String[] MEMBER_APIS = {"/api/me", "/api/execution", "/api/execution/**",
             "/api/client-errors",    // mobile phase 5: everyone signed in may report their own page's errors
-            "/api/presence", "/api/me/devices"};   // user activity (23 Nov 2026): each page's beat, one's own sign-ins
+            "/api/presence"};   // user activity (23 Nov 2026): each page's beat; who signed in where is the owner's only
+                                // (user 23 Nov 2026: "show all the user logging to owner only"): /api/me/devices too
 
     /**
      * And, read-only, what the NIFTY / SENSEX / BANKNIFTY chart pages read for a member: the live status (trimmed to the

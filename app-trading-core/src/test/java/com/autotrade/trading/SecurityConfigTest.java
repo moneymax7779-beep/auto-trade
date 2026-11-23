@@ -184,16 +184,17 @@ class SecurityConfigTest {
                     .andExpect(status().isNoContent());
         }
 
-        /** User activity (23 Nov 2026): every page beats and sees its own devices; only the owner sees everyone's. */
+        /** User activity (23 Nov 2026): every page beats; only the owner sees the activity, his devices included. */
         @Test
-        void everyoneBeatsAndSeesTheirOwnDevicesAndOnlyTheOwnerSeesEveryonesActivity(WebApplicationContext context)
+        void everyoneBeatsAndOnlyTheOwnerSeesTheActivity(WebApplicationContext context)
                 throws Exception {
             MockMvc mvc = mvc(context);
             String beat = "{\"tabId\":\"6f1c1a52-6a43-4b0b-9a43-0c2b8c1a9d10\",\"visible\":60,\"active\":10}";
             mvc.perform(post("/api/presence").contentType("application/json").content(beat)).andExpect(status().isUnauthorized());
             mvc.perform(post("/api/presence").contentType("application/json").content(beat).with(user("member")))
                     .andExpect(status().isOk());
-            mvc.perform(get("/api/me/devices").with(user("member"))).andExpect(status().isOk());
+            mvc.perform(get("/api/me/devices").with(user("member"))).andExpect(status().isForbidden());
+            mvc.perform(get("/api/me/devices").with(user("satya", "ROLE_OPERATOR"))).andExpect(status().isOk());
             mvc.perform(get("/api/activity").with(user("member"))).andExpect(status().isForbidden());
             mvc.perform(get("/api/activity").with(user("satya", "ROLE_OPERATOR"))).andExpect(status().isOk());
         }

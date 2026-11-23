@@ -100,9 +100,13 @@ function UserSignIns({ subject }: { subject: string }) {
 
 /** The owner's view: who is signed in now, on what, with how many tabs, and time on screen per day. */
 export function ActivityPanel() {
-  const q = useQuery({ queryKey: ["activity"], refetchInterval: 30_000,
+  // the owner's only (user 23 Nov 2026): a member reaching the Family page by its address sees no panel, not a 403
+  const me = useQuery({ queryKey: ["me"], queryFn: () => get<{ mode: string; operator: boolean }>("/api/me"), staleTime: 60_000 });
+  const owner = !!me.data && (me.data.mode !== "oidc" || me.data.operator);
+  const q = useQuery({ queryKey: ["activity"], refetchInterval: 30_000, enabled: owner,
     queryFn: () => get<Overview>("/api/activity?days=30") });
   const [open, setOpen] = useState<string | null>(null);
+  if (!owner) return null;
   return (
     <Panel title="Activity · sign-ins and time on the app" collapsible="family-activity"
       right={<span className="text-xs text-muted">on screen = the app in the foreground; in use = with input in the last 2 min</span>}>
@@ -155,13 +159,16 @@ export function ActivityPanel() {
 
 /** Each user's own sign-ins (Settings), with what is recorded and for how long. */
 export function MyDevicesPanel() {
-  const q = useQuery({ queryKey: ["my-devices"], refetchInterval: 60_000,
+  // the owner's only (user 23 Nov 2026: "show all the user logging to owner only, not others"): members never see it
+  const me = useQuery({ queryKey: ["me"], queryFn: () => get<{ mode: string; operator: boolean }>("/api/me"), staleTime: 60_000 });
+  const owner = !!me.data && (me.data.mode !== "oidc" || me.data.operator);
+  const q = useQuery({ queryKey: ["my-devices"], refetchInterval: 60_000, enabled: owner,
     queryFn: () => get<{ enabled: boolean; signIns: SignIn[] }>("/api/me/devices") });
-  if (q.data && !q.data.enabled) return null;
+  if (!owner || (q.data && !q.data.enabled)) return null;
   return (
     <Panel title="Your devices" collapsible="my-devices">
-      <p className="mb-2 text-xs text-muted">auto-trade records your sign-ins (browser, device and address) and how long the
-        app is on screen, to show you and the platform owner. Sign-ins are kept 180 days, addresses shortened after 30 days.</p>
+      <p className="mb-2 text-xs text-muted">Your own sign-ins (browser, device and address). Everyone's sign-ins and time on
+        screen are on the Family page. Sign-ins are kept 180 days, addresses shortened after 30 days.</p>
       {q.isLoading ? <Loading what="devices" /> : q.error ? <ErrorNote error={q.error} /> : (
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
