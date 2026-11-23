@@ -1176,7 +1176,9 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
                   <text x={x0 + 6} y={put ? ay - 6 : ay + 13} fontSize="10" fill={entryCol} className="num" {...HALO}>#{tr.n} {tr.who}</text>
                   {tr.to && <rect x={x1 - 4} y={y1p + (put ? 6 : -14)} width={8} height={8} fill={col} {...pickable(tr)}>
                     <title>#{tr.n} {tr.who} exit {tr.to}{onPickTrade ? ": click for the data at entry and exit" : ""}</title></rect>}
-                  <text x={x1 + 6} y={y1p + (put ? 15 : -8)} fontSize="10" fill={col} className="num font-semibold" {...HALO}>
+                  {/* an exit near the right edge is labelled to its left (23 Nov 2026: "#4 +62.7%" was cut to "#4 +6") */}
+                  <text x={x1 > X(b) - 80 ? x1 - 6 : x1 + 6} textAnchor={x1 > X(b) - 80 ? "end" : "start"}
+                    y={y1p + (put ? 15 : -8)} fontSize="10" fill={col} className="num font-semibold" {...HALO}>
                     #{tr.n} {tr.to ? "" : "open "}{tradeResult(tr, plain)}</text>
                 </g>
               );
