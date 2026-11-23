@@ -57,6 +57,12 @@ class SecurityConfigTest {
             return "ok";
         }
 
+        /** The engine exits of the admin exit desk (23 Nov 2026): the operator's only. */
+        @PostMapping({"/api/sessions/exit-everything", "/api/sessions/7/positions/exit", "/api/sessions/7/entries/release"})
+        String engineExit() {
+            return "ok";
+        }
+
         @org.springframework.web.bind.annotation.GetMapping({"/api/sessions", "/api/configs", "/api/execution/accounts",
                 "/api/execution", "/actuator/info", "/api/surges", "/api/sessions/7/positions", "/api/sessions/7/decisions",
                 "/api/oi-tape/strikes", "/api/runs", "/api/equity", "/api/sessions/7/rejections", "/api/close-auction",
@@ -247,6 +253,12 @@ class SecurityConfigTest {
             mvc.perform(post("/api/replay").with(user("member"))).andExpect(status().isForbidden());
             for (String path : List.of("/api/kill", "/api/kill/release", "/api/stop", "/api/exit-all", "/api/replay-control")) {
                 mvc.perform(post(path).with(user("member"))).andExpect(status().isForbidden());
+            }
+            // the engine exits (23 Nov 2026): never a member's, the operator's only
+            for (String path : List.of("/api/sessions/exit-everything", "/api/sessions/7/positions/exit",
+                    "/api/sessions/7/entries/release")) {
+                mvc.perform(post(path).with(user("member"))).andExpect(status().isForbidden());
+                mvc.perform(post(path).with(user("satya", "ROLE_OPERATOR"))).andExpect(status().isOk());
             }
             mvc.perform(get("/accounts").with(user("member"))).andExpect(status().isNotFound());   // a page: signed in is enough
         }

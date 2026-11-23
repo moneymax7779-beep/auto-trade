@@ -45,7 +45,8 @@ class EngineOpenPositionsTest {
 
         List<Map<String, Object>> out = new TradingController(runner, NONE).openPositions();
         assertThat(out).extracting(s -> s.get("account")).containsExactly("PAPER-1", "SIGNAL-1");
-        assertThat(out.getFirst()).containsOnlyKeys("session", "account", "mode", "date", "status", "lastEvent", "positions")
+        assertThat(out.getFirst()).containsOnlyKeys("session", "account", "mode", "date", "status", "lastEvent", "killSwitches",
+                        "positions")
                 .containsEntry("positions", List.of(position));
         assertThat(new TradingController(mock(SessionRunner.class), NONE).openPositions()).isEmpty();
     }

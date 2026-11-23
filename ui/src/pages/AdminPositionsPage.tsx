@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { get, postJson, type BatchResult, type DeskOpenPositions, type DeskPosition, type EngineSessionPositions,
-  type ExecMe } from "../api";
+  type ExecMe, type PositionRow } from "../api";
 import { Big, Card, ErrorLine, Freshness, istTime, ModeBadge, Sheet, signed, tone } from "../mobile/common";
 import { ExitSheet } from "../mobile/PositionsScreen";
 
@@ -27,7 +27,8 @@ export function AdminPositionsPage() {
   const engine = useQuery({ queryKey: ["engine-open-positions"], enabled: me.data?.admin === true, refetchInterval: 3_000,
     retry: false, queryFn: () => get<EngineSessionPositions[]>("/api/sessions/open-positions") });
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [batch, setBatch] = useState<{ rows: DeskPosition[]; title: string; kill?: boolean } | null>(null);
+  const [batch, setBatch] = useState<{ rows: DeskPosition[]; title: string; kill?: boolean; everything?: boolean } | null>(null);
+  const [engineExit, setEngineExit] = useState<{ session: EngineSessionPositions; p: PositionRow } | null>(null);
   const [exiting, setExiting] = useState<DeskPosition | null>(null);
   const [flatten, setFlatten] = useState<{ accountId: number; account: string; mode: string; open: number } | null>(null);
 
@@ -35,6 +36,7 @@ export function AdminPositionsPage() {
     return <p className="text-sm text-muted">The exit desk is the platform admin's.</p>;
   }
   const rows = desk.data?.positions ?? [];
+  const engineOpen = (engine.data ?? []).reduce((n, s) => n + s.positions.filter((p) => p.quantity > 0).length, 0);
   const live = rows.filter((r) => r.group === "LIVE");
   const paper = rows.filter((r) => r.group === "PAPER");
   // a stale screen never exits what is gone: the selection keeps only rows still open
@@ -55,8 +57,9 @@ export function AdminPositionsPage() {
         <div className="flex flex-wrap gap-2">
           <Big kind="danger" disabled={chosen.length === 0}
             onClick={() => setBatch({ rows: chosen, title: `Exit ${chosen.length} selected` })}>Exit selected ({chosen.length})</Big>
-          <Big kind="danger" disabled={rows.length === 0}
-            onClick={() => setBatch({ rows, title: `Exit everything (${rows.length})` })}>Exit everything ({rows.length})</Big>
+          <Big kind="danger" disabled={rows.length === 0 && engineOpen === 0}
+            onClick={() => setBatch({ rows, title: "EXIT EVERYTHING", everything: true })}>
+            Exit everything ({rows.length + engineOpen})</Big>
           {selected.size > 0 && <Big onClick={() => setSelected(new Set())}>Clear selection</Big>}
         </div>
       )}
@@ -68,7 +71,8 @@ export function AdminPositionsPage() {
         onExitAccount={(accountRows) => setBatch({ rows: accountRows, title: `Exit all in ${accountRows[0].account}`, kill: false })}
         onFlatten={(r, n) => setFlatten({ accountId: r.accountId, account: r.account, mode: r.mode, open: n })}
         staleSec={desk.data?.staleQuoteSec ?? 10} loading={desk.isPending} />
-      <EngineGroup sessions={engine.data} error={engine.error} followers={rows} />
+      <EngineGroup sessions={engine.data} error={engine.error} followers={rows}
+        onExit={(session, p) => setEngineExit({ session, p })} onResumed={() => engine.refetch()} />
       {desk.data && desk.data.mirrors.length > 0 && (
         <Card>
           <h2 className="mb-1 text-sm font-semibold">Mirror accounts</h2>
@@ -88,7 +92,10 @@ export function AdminPositionsPage() {
           onClose={() => setExiting(null)} onDone={() => desk.refetch()} />
       )}
       {batch && <BatchSheet rows={batch.rows} title={batch.title} kill={batch.kill} onClose={() => setBatch(null)}
-        onDone={() => { setSelected(new Set()); desk.refetch(); }} />}
+        everything={batch.everything ? { engine: engine.data ?? [] } : undefined}
+        onDone={() => { setSelected(new Set()); desk.refetch(); engine.refetch(); }} />}
+      {engineExit && <EngineExitSheet session={engineExit.session} p={engineExit.p} followers={rows}
+        onClose={() => setEngineExit(null)} onDone={() => { engine.refetch(); desk.refetch(); }} />}
       {flatten && <FlattenSheet {...flatten} onClose={() => setFlatten(null)} onDone={() => desk.refetch()} />}
     </div>
   );
@@ -177,14 +184,24 @@ function Row({ r, checked, toggle, onExit, staleSec }: { r: DeskPosition; checke
   );
 }
 
-/** The engine's own positions (PAPER-1, SIGNAL-1), read-only: no per-position engine exit yet (plan phase C). */
-function EngineGroup({ sessions, error, followers }: { sessions: EngineSessionPositions[] | undefined; error: unknown;
-  followers: DeskPosition[] }) {
+/**
+ * The engine's own positions (PAPER-1, SIGNAL-1), each with Exit (plan 2026-11-23 A1): through the session's order manager
+ * as the strategy's own exit; a SIGNAL-1 exit is sent to every follower holding the trade (listed with it).
+ */
+function EngineGroup({ sessions, error, followers, onExit, onResumed }: { sessions: EngineSessionPositions[] | undefined;
+  error: unknown; followers: DeskPosition[]; onExit: (s: EngineSessionPositions, p: PositionRow) => void;
+  onResumed: () => void }) {
+  const resume = useMutation({
+    mutationFn: (s: EngineSessionPositions) => postJson(`/api/sessions/${s.session}/entries/release`,
+      { reason: "resumed from the exit desk" }),
+    onSettled: onResumed,
+  });
   return (
     <Card>
-      <h2 className="mb-1 text-base font-semibold">Engine (read-only)</h2>
-      <p className="mb-2 text-xs text-muted">The live sessions' own positions. They exit on their strategy's signal or the session's
-        Exit all; an engine position cannot be exited from here yet. Followers that copy one are listed with it.</p>
+      <h2 className="mb-1 text-base font-semibold">Engine</h2>
+      <p className="mb-2 text-xs text-muted">The live sessions' own positions. Exiting a SIGNAL-1 position also exits every follower
+        copy of it (they follow SIGNAL-1); PAPER-1's is your own paper account (DEMO-1 mirrors it).</p>
+      {resume.error && <p className="text-sm text-down">{(resume.error as Error).message}</p>}
       {error ? <p className="text-sm text-muted">Engine positions not readable here ({(error as Error).message}).</p>
         : !sessions ? <p className="text-sm text-muted">Loading…</p>
         : sessions.length === 0 ? <p className="text-sm text-muted">No live session is running.</p>
@@ -194,7 +211,13 @@ function EngineGroup({ sessions, error, followers }: { sessions: EngineSessionPo
           return (
             <div key={s.account} id={`engine-${s.account}`} className="mb-2 rounded-lg border border-line">
               <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-line px-3 py-2 text-sm">
-                <span><b>{s.account}</b> <span className="text-muted">· session {s.session} · {s.status}{s.lastEvent ? ` · last ${s.lastEvent}` : ""}</span></span>
+                <span><b>{s.account}</b> <span className="text-muted">· session {s.session} · {s.status}{s.lastEvent ? ` · last ${s.lastEvent}` : ""}</span>
+                  {s.killSwitches?.includes("GLOBAL") && <>
+                    <span className="ml-2 rounded bg-down/15 px-1.5 py-0.5 text-[11px] font-semibold text-down">NEW ENTRIES STOPPED</span>
+                    <button type="button" className="ml-2 min-h-9 rounded-lg border border-line px-3 text-xs font-semibold"
+                      disabled={resume.isPending} onClick={() => { if (window.confirm(`Let ${s.account} enter new trades again?`
+                        + (s.account.startsWith("SIGNAL") ? " Its entries go to every follower again." : ""))) resume.mutate(s); }}>
+                      Resume entries</button></>}</span>
                 <span className="num">{open.length} open · <span className={`font-semibold ${tone(pnl)}`}>{signed(pnl)}</span></span>
               </div>
               {open.length === 0 ? <p className="px-3 py-2 text-sm text-muted">Nothing open.</p> : (
@@ -211,6 +234,8 @@ function EngineGroup({ sessions, error, followers }: { sessions: EngineSessionPo
                           {p.opened ? ` · since ${p.opened.slice(0, 5)}` : ""}</div>
                         {copies.length > 0 && <div className="text-xs">copied by {copies.map((c) =>
                           `${c.account}, ${c.lots ?? c.quantity} ${c.lots != null ? (c.lots === 1 ? "lot" : "lots") : "qty"} ${c.mode}`).join("; ")}</div>}
+                        {p.strategy && <button type="button" className="mt-1 min-h-9 rounded-lg border border-down px-3 text-xs font-semibold text-down"
+                          onClick={() => onExit(s, p)}>Exit…</button>}
                       </li>
                     );
                   })}
@@ -228,26 +253,64 @@ function EngineGroup({ sessions, error, followers }: { sessions: EngineSessionPo
  * is in it, decision 2), the count typed ("EXIT 3 POSITIONS"), one key per opened sheet (a double tap or retry answers the
  * first result and sells nothing more). The server runs LIVE first (largest premium at risk first), paced per broker app.
  */
-function BatchSheet({ rows, title, kill, onClose, onDone }: { rows: DeskPosition[]; title: string; kill?: boolean;
-  onClose: () => void; onDone: () => void }) {
+function BatchSheet({ rows, title, kill, everything, onClose, onDone }: { rows: DeskPosition[]; title: string; kill?: boolean;
+  everything?: { engine: EngineSessionPositions[] }; onClose: () => void; onDone: () => void }) {
+  // the engine's open positions when the sheet opened (exit-everything exits whatever is open when it is sent)
+  const [engineRows] = useState(() => (everything?.engine ?? []).flatMap((s) => s.positions.filter((p) => p.quantity > 0)
+    .map((p) => ({ account: s.account, p }))));
   const client = useQueryClient();
   const anyLive = rows.some((r) => r.mode === "LIVE");
+  // plan 2026-11-23 decision 3: the LIVE accounts' kill switches on by default, the paper ones only when asked;
+  // "Exit everything" also engages GLOBAL_LIVE first and exits the engine's own positions
   const [killAfter, setKillAfter] = useState(kill ?? anyLive);
+  const [killPaper, setKillPaper] = useState(false);
+  const [globalLive, setGlobalLive] = useState(everything != null);
+  const [withEngine, setWithEngine] = useState(everything != null && engineRows.length > 0);
+  // review 23 Nov 2026: "everything" stays flat only if the engine cannot enter again on its next signal (and SIGNAL-1
+  // send that entry to every follower): its sessions' new entries are stopped first, resumed from the Engine card
+  const [stopEngine, setStopEngine] = useState(everything != null);
+  const [engineDone, setEngineDone] = useState<string | null>(null);
+  const [globalDone, setGlobalDone] = useState<string | null>(null);
   const [reason, setReason] = useState("");
   const [typed, setTyped] = useState("");
   const [key] = useState(newKey);
   const [snapshot] = useState(rows);                          // what was on screen when the sheet opened
   const sending = useRef(false);
-  const phrase = `EXIT ${snapshot.length} POSITIONS`;
+  const countPhrase = `EXIT ${snapshot.length} POSITIONS`;
+  const phrase = everything ? "EXIT EVERYTHING" : countPhrase;
   // review 20 Nov 2026: the batch runs in the background (a LIVE batch can outlast the proxy's 150 s); POST answers at
   // once with its id and this sheet follows it every 1.5 s, showing each row as it answers
   const run = useMutation({
-    mutationFn: () => postJson<BatchResult>("/api/execution/admin/exit-batch", {
-      positions: snapshot.map((r) => ({ accountId: r.accountId, positionId: r.positionId })), reason: reason.trim(), killAfter,
-      key, confirm: phrase }),
+    mutationFn: async () => {
+      // the followers' batch starts first (GLOBAL_LIVE and the kill switches before any of its exits, then LIVE first,
+      // paced; it runs on in the background), then the engine's exits are sent at once. A SIGNAL-1 exit fanned out to a
+      // follower whose position the batch is also selling is run on that account's own lane after it: one sells, the
+      // other answers ALREADY_CLOSED / NOT_HELD; nothing is sold twice
+      if (snapshot.length === 0 && everything && globalLive) {
+        // review 23 Nov 2026: with no follower position there is no batch to carry GLOBAL_LIVE: engaged on its own
+        await postJson("/api/execution/kill-switches", { scope: "GLOBAL_LIVE", reason: `EXIT EVERYTHING: ${reason.trim()}` });
+        setGlobalDone("engaged first: no LIVE entry anywhere until it is released");
+      }
+      const followers = snapshot.length === 0 ? null : await postJson<BatchResult>("/api/execution/admin/exit-batch", {
+        positions: snapshot.map((r) => ({ accountId: r.accountId, positionId: r.positionId })), reason: reason.trim(),
+        killAfter: killAfter || killPaper, killPaper, globalLive: everything != null && globalLive, key, confirm: countPhrase });
+      if (everything && (withEngine || stopEngine)) {
+        try {
+          const e = await postJson<{ sessions: { account: string; positions: number }[] }>("/api/sessions/exit-everything",
+            { reason: reason.trim(), confirm: "EXIT EVERYTHING", stopEntries: stopEngine, exitPositions: withEngine });
+          setEngineDone(`Engine: ${withEngine ? "exit sent for " : ""}${e.sessions.map((x) => withEngine ? `${x.account} (${x.positions})`
+            : x.account).join(", ") || "no live session"}`
+            + `${stopEngine ? "; its new entries stopped (Resume on the Engine card)" : ""}.`);
+        } catch (err) {
+          setEngineDone(`Engine exit NOT sent: ${(err as Error).message}`);
+        }
+      }
+      return followers ?? ({ batchId: "", status: "DONE", count: 0, answered: 0, killAfter: false, killed: [], killFailed: {},
+        order: [], results: [], startedAt: "", finishedAt: "" } as BatchResult);
+    },
     onSettled: () => { sending.current = false; },
   });
-  const batchId = run.data?.batchId;
+  const batchId = run.data?.batchId || undefined;
   const progress = useQuery({ queryKey: ["exit-batch", batchId], enabled: batchId != null,
     queryFn: () => get<BatchResult>(`/api/execution/admin/exit-batch/${batchId}`),
     // second review 20 Nov 2026: a 404 means this worker no longer knows the batch (it restarted): stop asking
@@ -272,16 +335,21 @@ function BatchSheet({ rows, title, kill, onClose, onDone }: { rows: DeskPosition
     <Sheet title={title} onClose={onClose}>
       {res ? (
         <div className="flex flex-col gap-3">
-          <p className="text-sm">{res.repeat ? "Already sent: this is that batch. " : ""}{res.killAfter
+          {globalDone && <p className="text-sm">GLOBAL_LIVE: {globalDone}</p>}
+          {res.globalLive && <p className={`text-sm ${res.globalLive.startsWith("FAILED") ? "font-semibold text-down" : ""}`}>
+            GLOBAL_LIVE: {res.globalLive === "ENGAGED" ? "engaged first: no LIVE entry anywhere until it is released"
+              : res.globalLive === "ALREADY" ? "was already engaged" : res.globalLive}</p>}
+          {res.count > 0 && <p className="text-sm">{res.repeat ? "Already sent: this is that batch. " : ""}{res.killAfter
             ? `Kill switch engaged first on ${res.killed.join(", ") || "none"}.` : "No kill switch: the accounts keep trading."}
             {Object.keys(res.killFailed ?? {}).length > 0 && <b className="text-down"> Kill switch NOT engaged on {Object.entries(res.killFailed)
-              .map(([a, why]) => `${a} (${why})`).join(", ")}.</b>}</p>
+              .map(([a, why]) => `${a} (${why})`).join(", ")}.</b>}</p>}
           <p className="text-xs text-muted">{finished ? "Done" : gone ? `${res.answered} of ${res.count} answered before it was lost`
             : `Working: ${res.answered} of ${res.count} answered…`}</p>
           {gone ? <p className="text-sm font-semibold text-down">The worker no longer knows this batch (it restarted?): rows not
             answered above may still have sold. Read the open positions again, and do not sell by hand in the broker app before
             checking its order book.</p>
             : progress.error && <p className="text-xs text-warn">Progress not readable now ({(progress.error as Error).message}); retrying.</p>}
+          {engineDone && <p className={`text-sm ${engineDone.startsWith("Engine exit NOT") ? "font-semibold text-down" : ""}`}>{engineDone}</p>}
           <ul className="flex flex-col gap-1 text-sm">
             {res.results.map((r, i) => r && (
               <li key={`${r.accountId}:${r.positionId}:${i}`} className="rounded border border-line px-2 py-1">
@@ -297,17 +365,39 @@ function BatchSheet({ rows, title, kill, onClose, onDone }: { rows: DeskPosition
         </div>
       ) : (
         <div className="flex flex-col gap-3">
-          <p className="text-sm">In this order (LIVE first, the largest premium at risk first; LIVE orders paced per broker app):</p>
+          {snapshot.length > 0 && <p className="text-sm">In this order (LIVE first, the largest premium at risk first; LIVE orders paced per broker app):</p>}
           <ol className="max-h-56 list-decimal overflow-y-auto pl-5 text-sm">
             {order.map((r) => <li key={rowKey(r)}><ModeBadge mode={r.mode} /> {r.account} · {r.symbol} · {r.lots ?? r.quantity}
-              {r.lots != null ? " lots" : " qty"}{r.loggedIn === false ? <b className="text-down"> · broker not logged in</b> : null}</li>)}
+              {r.lots != null ? (r.lots === 1 ? " lot" : " lots") : " qty"}{r.loggedIn === false ? <b className="text-down"> · broker not logged in</b> : null}</li>)}
           </ol>
+          {everything && engineRows.length > 0 && <>
+            <p className="text-sm">And the engine&apos;s own (a SIGNAL-1 exit also reaches every follower copy):</p>
+            <ul className="max-h-40 list-disc overflow-y-auto pl-5 text-sm">
+              {engineRows.map(({ account, p }, i) => <li key={`${account}-${p.symbol}-${i}`}>
+                {`${account} · ${p.strategy} · ${p.symbol} · ${p.quantity} qty`}</li>)}
+            </ul></>}
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={killAfter} onChange={(e) => setKillAfter(e.target.checked)} className="h-5 w-5 shrink-0" />
+            Stop new entries on the LIVE accounts (kill switch, engaged before any exit){anyLive ? " · on by default" : ""}
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={killPaper} onChange={(e) => setKillPaper(e.target.checked)} className="h-5 w-5 shrink-0" />
+            Stop the paper accounts too
+          </label>
+          {everything && <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={globalLive} onChange={(e) => setGlobalLive(e.target.checked)} className="h-5 w-5 shrink-0" />
+            Engage GLOBAL_LIVE first (no LIVE entry anywhere until you release it)
+          </label>}
+          {everything && engineRows.length > 0 && <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={withEngine} onChange={(e) => setWithEngine(e.target.checked)} className="h-5 w-5 shrink-0" />
+            Exit the engine&apos;s positions too
+          </label>}
+          {everything && <label className="flex items-center gap-2 text-sm">
+            <input type="checkbox" checked={stopEngine} onChange={(e) => setStopEngine(e.target.checked)} className="h-5 w-5 shrink-0" />
+            Stop the engine&apos;s new entries (PAPER-1 and SIGNAL-1: no follower gets a new signal) until resumed on the Engine card
+          </label>}
           <input className="min-h-11 rounded-lg border border-line bg-bg px-3 text-base" placeholder="Reason (each member is told)"
             value={reason} maxLength={300} onChange={(e) => setReason(e.target.value)} aria-label="Reason" />
-          <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={killAfter} onChange={(e) => setKillAfter(e.target.checked)} className="h-5 w-5" />
-            Then stop new entries on these accounts (kill switch){anyLive ? " · on by default with LIVE positions" : ""}
-          </label>
           <input className="min-h-11 rounded-lg border border-line bg-bg px-3 text-base uppercase" placeholder={`Type ${phrase}`}
             autoCapitalize="characters" autoCorrect="off" value={typed} onChange={(e) => setTyped(e.target.value)} aria-label={`Type ${phrase}`} />
           {run.error && <p className="text-sm text-down">{(run.error as Error).message}</p>}
@@ -315,7 +405,53 @@ function BatchSheet({ rows, title, kill, onClose, onDone }: { rows: DeskPosition
             broker app; sending again answers with the same batch if it did.</p>}
           <Big kind="danger" disabled={!ready && !unknown}
             onClick={() => { if (!sending.current) { sending.current = true; run.mutate(); } }}>
-            {run.isPending ? "Exiting…" : unknown ? "Send the same request again" : `Exit ${snapshot.length} position${snapshot.length === 1 ? "" : "s"}`}</Big>
+            {run.isPending ? "Exiting…" : unknown ? "Send the same request again" : everything ? "Exit everything"
+              : `Exit ${snapshot.length} position${snapshot.length === 1 ? "" : "s"}`}</Big>
+          <Big onClick={onClose}>Cancel</Big>
+        </div>
+      )}
+    </Sheet>
+  );
+}
+
+/**
+ * One engine position's exit (plan 2026-11-23 A1): the strategy's position on its index in that session, through the
+ * session's order manager; a reason and the typed word EXIT. On SIGNAL-1 the follower copies are listed: they exit too.
+ */
+function EngineExitSheet({ session, p, followers, onClose, onDone }: { session: EngineSessionPositions; p: PositionRow;
+  followers: DeskPosition[]; onClose: () => void; onDone: () => void }) {
+  const [reason, setReason] = useState("");
+  const [typed, setTyped] = useState("");
+  const sending = useRef(false);
+  const copies = followers.filter((f) => f.source === session.account && f.strategy === p.strategy && f.underlying === p.underlying);
+  const exit = useMutation({
+    mutationFn: () => postJson<{ outcome: string }>(`/api/sessions/${session.session}/positions/exit`,
+      { strategy: p.strategy, underlying: p.underlying, reason: reason.trim() }),
+    onSettled: () => { sending.current = false; onDone(); },
+  });
+  return (
+    <Sheet title={`Exit ${p.strategy} on ${p.underlying} · ${session.account}`} onClose={onClose}>
+      {exit.data ? (
+        <div className="flex flex-col gap-3">
+          <p className="text-sm">{exit.data.outcome === "EXITING" ? "Exit sent: the session's order manager is selling it now."
+            : "Nothing to exit: it is closed, or its exit is already under way."}</p>
+          <Big onClick={onClose}>Done</Big>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          <p className="text-sm">{p.leg ? `${p.strategy}'s straddle on ${p.underlying}: both legs` : `${p.symbol} · ${p.quantity} qty`},
+            through {session.account}&apos;s own exit (marketable limit, chased).</p>
+          {session.account.startsWith("SIGNAL") && <p className="text-sm font-semibold text-down">{copies.length > 0
+            ? `This also exits every follower copy: ${copies.map((c) => `${c.account} (${c.mode})`).join(", ")}.`
+            : "Followers holding this trade exit too (none open on the desk now)."}</p>}
+          <input className="min-h-11 rounded-lg border border-line bg-bg px-3 text-base" placeholder="Reason (audited)"
+            value={reason} maxLength={300} onChange={(e) => setReason(e.target.value)} aria-label="Reason" />
+          <input className="min-h-11 rounded-lg border border-line bg-bg px-3 text-base uppercase" placeholder="Type EXIT"
+            autoCapitalize="characters" autoCorrect="off" value={typed} onChange={(e) => setTyped(e.target.value)} aria-label="Type EXIT" />
+          {exit.error && <p className="text-sm text-down">{(exit.error as Error).message}</p>}
+          <Big kind="danger" disabled={typed.trim().toUpperCase() !== "EXIT" || reason.trim().length < 3 || exit.isPending}
+            onClick={() => { if (!sending.current) { sending.current = true; exit.mutate(); } }}>
+            {exit.isPending ? "Exiting…" : "Exit now"}</Big>
           <Big onClick={onClose}>Cancel</Big>
         </div>
       )}

@@ -408,6 +408,19 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         maybeSellAfterCancels(position);
     }
 
+    /**
+     * True when {@code strategyId} holds (or is still entering) a position in {@code underlying} that no exit has started
+     * on (the admin exit desk's engine exit, 23 Nov 2026: an exit already under way, or none, is answered, not repeated).
+     */
+    public synchronized boolean holds(String strategyId, String underlying) {
+        for (ManagedPosition position : positionsOf(strategyId, underlying)) {
+            if (position.state == ManagedPosition.State.OPENING || position.state == ManagedPosition.State.OPEN) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     public synchronized void exitAll(String reason) {
         for (ManagedPosition position : List.copyOf(live.values())) {
             exit(position.strategy, position.underlying, reason);

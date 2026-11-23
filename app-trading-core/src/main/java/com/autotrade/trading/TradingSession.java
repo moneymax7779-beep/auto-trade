@@ -1004,6 +1004,22 @@ public final class TradingSession {
     }
 
     /**
+     * Exits one strategy's position on one index (both legs of a straddle) through the order manager, as the strategy's
+     * own exit would (admin exit desk, 23 Nov 2026). On the signal source (SIGNAL-1) the close is published as an EXIT
+     * decision, so every follower holding the trade exits too. Returns false when nothing of it is held (or an exit is
+     * already under way).
+     */
+    public boolean exitPosition(String strategyId, String underlying, String reason) {
+        synchronized (lock) {
+            if (oms == null || !oms.holds(strategyId, underlying)) {
+                return false;
+            }
+            oms.exit(strategyId, underlying, reason);
+            return true;
+        }
+    }
+
+    /**
      * A replay with every strategy's orders off (user, 15 Nov 2026, chart orders in a replay): the strategies still
      * decide (their states show), nothing of theirs is entered; only the trader's chart orders trade.
      */

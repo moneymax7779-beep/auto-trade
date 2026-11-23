@@ -81,11 +81,17 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
     }
 
     /**
-     * @param killAfter engage each account's kill switch before its exits run (null: true when any LIVE position is in it,
-     *                  user 20 Nov 2026 decision 2)
-     * @param confirm   exactly "EXIT &lt;n&gt; POSITIONS", n the number of positions sent (a stale screen cannot exit more)
+     * @param killAfter  engage the kill switch of each account with a LIVE position before its exits run (null: true when
+     *                   any LIVE position is in it, user 20 Nov 2026 decision 2)
+     * @param confirm    exactly "EXIT &lt;n&gt; POSITIONS", n the number of positions sent (a stale screen cannot exit more)
+     * @param killPaper  with killAfter, the paper accounts' kill switches too (user 23 Nov 2026, plan 2026-11-23 decision 3:
+     *                   LIVE accounts by default, paper ones only when asked; null: as killAfter was sent, so an explicit
+     *                   killAfter true without it stops paper accounts too, as before)
+     * @param globalLive engage GLOBAL_LIVE first (no LIVE entry anywhere until it is released; "Exit everything", plan
+     *                   2026-11-23 decision 3; null: false)
      */
-    record Batch(List<BatchPosition> positions, String reason, Boolean killAfter, String key, String confirm) {
+    record Batch(List<BatchPosition> positions, String reason, Boolean killAfter, String key, String confirm,
+                 Boolean killPaper, Boolean globalLive) {
     }
 
     record Consent(Boolean on) {
@@ -106,6 +112,8 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
         /** The accounts whose kill switch this batch engaged (their members' message says entries are stopped). */
         final Set<Long> killedIds = ConcurrentHashMap.newKeySet();
         final Map<String, String> killFailed = new ConcurrentHashMap<>();
+        /** GLOBAL_LIVE: "ENGAGED", "ALREADY" (another was on), "FAILED: why", or null when not asked. */
+        volatile String globalLive;
         final List<Long> order;
         final Map<Integer, Map<String, Object>> rows = new ConcurrentHashMap<>();
 
@@ -125,6 +133,7 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
             out.put("killAfter", killAfter);
             out.put("killed", List.copyOf(killed));
             out.put("killFailed", Map.copyOf(killFailed));
+            out.put("globalLive", globalLive);
             out.put("order", order);
             List<Map<String, Object>> results = new ArrayList<>();
             for (int i = 0; i < count; i++) {
@@ -356,10 +365,32 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
                     runnable.stream().map(Planned::positionId).toList());
             plans.forEach(p -> run.rows.put(p.index(), p.answer() != null ? p.answer() : answer(p, "PENDING", List.of())));
             runs.put(id, run);
+            // 23 Nov 2026 (plan decision 3): GLOBAL_LIVE first, when asked: no LIVE entry anywhere while the batch runs
+            if (Boolean.TRUE.equals(b.globalLive())) {
+                try {
+                    boolean on = kills.list(null).stream().anyMatch(sw -> "GLOBAL_LIVE".equals(sw.scope()));
+                    if (!on) {
+                        kills.engage(null, "GLOBAL_LIVE", null, null, null, "ADMIN EXIT BATCH by " + user.subject() + ": "
+                                + reason, user.subject());
+                    }
+                    run.globalLive = on ? "ALREADY" : "ENGAGED";
+                } catch (RuntimeException e) {
+                    run.globalLive = "FAILED: " + e.getMessage();
+                    log.error("admin exit batch {}: GLOBAL_LIVE not engaged", id, e);
+                }
+            }
             // review 20 Nov 2026: the kill switches go on BEFORE any exit (as a flatten does), so whatever happens to the
-            // exits, entries are already stopped; each account on its own (one failure does not skip the others)
+            // exits, entries are already stopped; each account on its own (one failure does not skip the others).
+            // 23 Nov 2026 (plan decision 3): by default (killAfter not sent) the accounts with a LIVE position only; the
+            // paper ones too when killPaper says so, or when killAfter was asked for explicitly without killPaper (as before)
             if (run.killAfter) {
+                boolean paperToo = b.killPaper() != null ? b.killPaper() : Boolean.TRUE.equals(b.killAfter());
+                Set<Long> liveAccounts = new java.util.HashSet<>();
+                plans.stream().filter(Planned::live).forEach(p -> liveAccounts.add(p.accountId()));
                 for (BrokerAccount a : involved(plans).values()) {
+                    if (!liveAccounts.contains(a.id()) && !paperToo) {
+                        continue;
+                    }
                     try {
                         // by_admin: the kill's own alert goes to the admin chat only; the member hears of it once,
                         // in the batch's message (second review 20 Nov 2026)
