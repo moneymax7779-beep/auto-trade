@@ -348,11 +348,15 @@ public final class CachingSessionHistory implements SessionHistory {
             try {
                 Files.createDirectories(target.getParent());
                 Path tmp = Files.createTempFile(target.getParent(), key.substring(0, 8), ".tmp");
-                Files.write(tmp, value);
                 try {
-                    Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-                } catch (AtomicMoveNotSupportedException e) {
-                    Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+                    Files.write(tmp, value);
+                    try {
+                        Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                    } catch (AtomicMoveNotSupportedException e) {
+                        Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
+                    }
+                } finally {
+                    Files.deleteIfExists(tmp);           // gone after a move; removed when the write or move failed
                 }
             } catch (IOException e) {
                 throw new UncheckedIOException(e);

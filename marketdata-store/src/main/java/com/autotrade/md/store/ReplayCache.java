@@ -20,6 +20,7 @@ import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.time.Instant;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.HexFormat;
@@ -62,38 +63,83 @@ public final class ReplayCache {
             IndexTick.class, FutureTick.class, OptionTick.class, ConstituentTick.class, SessionPhaseEvent.class,
             AuctionTick.class, DepthLevels.class);
 
-    private final Path dir;
-    private final DataSource dataSource;
-
-    public ReplayCache(Path dir, DataSource dataSource) {
-        this.dir = dir;
-        this.dataSource = dataSource;
+    /** The uncached stream, e.g. {@code ReplayReader::replay}. */
+    public interface Source {
+        long replay(List<Long> manifestIds, Consumer<MarketEvent> sink) throws Exception;
     }
 
-    /** The stream of {@code manifestIds} into {@code sink}, from the cache file or through {@code reader}. */
-    public long replay(LocalDate session, List<Long> manifestIds, ReplayReader reader, Consumer<MarketEvent> sink)
+    /** The cache key of a day's loads; the database form unless a test supplies one. */
+    interface Fingerprinter {
+        String of(LocalDate session, List<Long> sortedManifestIds) throws Exception;
+    }
+
+    private static final Duration STALE_TMP = Duration.ofHours(6);
+
+    private final Path dir;
+    private final Fingerprinter fingerprinter;
+
+    public ReplayCache(Path dir, DataSource dataSource) {
+        this(dir, (session, ids) -> fingerprint(dataSource, session, ids));
+    }
+
+    ReplayCache(Path dir, Fingerprinter fingerprinter) {
+        this.dir = dir;
+        this.fingerprinter = fingerprinter;
+    }
+
+    /**
+     * The stream of {@code manifestIds} into {@code sink}, from the cache file or through {@code reader}. The cache never
+     * stops a replay that would have run without it: a fingerprint, set-up, write or rename failure falls back to (or
+     * finishes) the database stream. A cache file that cannot be read is deleted; if that happens before any event was
+     * delivered the database stream is used instead, after the first event the replay fails loudly (rerun it).
+     */
+    public long replay(LocalDate session, List<Long> manifestIds, Source reader, Consumer<MarketEvent> sink)
             throws Exception {
         String fingerprint;
         try {
-            fingerprint = fingerprint(session, manifestIds);
-        } catch (SQLException | IOException | RuntimeException e) {
+            fingerprint = fingerprinter.of(session, manifestIds.stream().sorted().toList());
+        } catch (Exception e) {
             LOG.warn("tick cache off for this run: no fingerprint ({})", e.toString());
             return reader.replay(manifestIds, sink);
         }
         Path file = dir.resolve(session + "-" + fingerprint.substring(0, 32) + ".events.gz");
         if (Files.isRegularFile(file)) {
             long started = System.nanoTime();
-            long n = read(file, fingerprint, sink);
+            long[] delivered = {0};
+            long n = -1;
+            try {
+                n = read(file, fingerprint, event -> {
+                    delivered[0]++;
+                    sink.accept(event);
+                });
+            } catch (IOException e) {
+                Files.deleteIfExists(file);
+                if (delivered[0] > 0) {
+                    throw new IOException("tick cache " + file.getFileName() + " failed after " + delivered[0]
+                            + " events (file removed; rerun the replay)", e);
+                }
+                LOG.warn("tick cache file {} unreadable ({}); removed, reading the database", file.getFileName(), e.toString());
+            }
             if (n >= 0) {
                 LOG.info("tick cache hit: {} events from {} in {} s", n, file.getFileName(),
                         (System.nanoTime() - started) / 1_000_000_000);
                 return n;
             }
-            LOG.warn("tick cache file {} has another fingerprint; reading the database", file.getFileName());
+            if (delivered[0] == 0 && Files.isRegularFile(file)) {
+                LOG.warn("tick cache file {} has another fingerprint; reading the database", file.getFileName());
+            }
         }
-        Files.createDirectories(dir);
-        Path tmp = Files.createTempFile(dir, session + "-", ".tmp");
-        Writer writer = new Writer(tmp, fingerprint);
+        Path tmp;
+        Writer writer;
+        try {
+            Files.createDirectories(dir);
+            removeStaleTemps();
+            tmp = Files.createTempFile(dir, session + "-", ".tmp");
+            writer = new Writer(tmp, fingerprint);
+        } catch (IOException | RuntimeException e) {
+            LOG.warn("tick cache not written this run ({}); reading the database", e.toString());
+            return reader.replay(manifestIds, sink);
+        }
         long n;
         try {
             n = reader.replay(manifestIds, event -> {
@@ -106,24 +152,56 @@ public final class ReplayCache {
         }
         if (writer.finish(n)) {
             try {
-                Files.move(tmp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
-            } catch (AtomicMoveNotSupportedException e) {
-                Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
+                try {
+                    Files.move(tmp, file, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+                } catch (AtomicMoveNotSupportedException e) {
+                    Files.move(tmp, file, StandardCopyOption.REPLACE_EXISTING);
+                }
+                LOG.info("tick cache stored: {} events in {}", n, file.getFileName());
+            } catch (IOException e) {
+                LOG.warn("tick cache file not moved into place ({}); dropped", e.toString());
+                Files.deleteIfExists(tmp);
             }
-            LOG.info("tick cache stored: {} events in {}", n, file.getFileName());
         }
         return n;
     }
 
+    /** Temporary files left by killed runs (older than six hours); best effort. */
+    private void removeStaleTemps() {
+        Instant cutoff = Instant.now().minus(STALE_TMP);
+        try (var files = Files.list(dir)) {
+            for (Path f : files.filter(f -> f.getFileName().toString().endsWith(".tmp")).toList()) {
+                try {
+                    if (Files.getLastModifiedTime(f).toInstant().isBefore(cutoff)) {
+                        Files.deleteIfExists(f);
+                    }
+                } catch (IOException ignored) {
+                    // another process may be finishing it
+                }
+            }
+        } catch (IOException ignored) {
+            // nothing to clean
+        }
+    }
+
     // ------------------------------------------------------------------------------------------ fingerprint
 
-    String fingerprint(LocalDate session, List<Long> manifestIds) throws SQLException, IOException {
-        StringBuilder text = new StringBuilder("ticks-v").append(FORMAT).append('|').append(session).append('|')
+    /**
+     * v2 (review of 24 Nov 2026): the sorted load ids, the database's start and statistics-reset times (chunk counters
+     * restart from zero after a crash), and only the md chunks that overlap the session's IST day.
+     */
+    static String fingerprint(DataSource dataSource, LocalDate session, List<Long> manifestIds)
+            throws SQLException, IOException {
+        StringBuilder text = new StringBuilder("ticks-fp2|").append(session).append('|')
                 .append(manifestIds).append('|');
         for (Class<?> type : CODE) {
             appendClassHash(text, type);
         }
         try (Connection c = dataSource.getConnection()) {
+            try (PreparedStatement s = c.prepareStatement("select pg_postmaster_start_time()::text || ':' || coalesce("
+                    + "(select stats_reset::text from pg_stat_database where datname = current_database()), '')")) {
+                text.append("server=").append(one(s)).append('|');
+            }
             try (PreparedStatement s = c.prepareStatement("select coalesce(string_agg(id || ':' || status || ':' || "
                     + "coalesce(finished_at::text, '') || ':' || loaded_counts::text, ';' order by id), '') "
                     + "from md.load_manifest where id = any(?)")) {
@@ -133,7 +211,8 @@ public final class ReplayCache {
             try (PreparedStatement s = c.prepareStatement("select coalesce(sum(n_tup_ins + n_tup_upd + n_tup_del), 0) "
                     + "|| ':' || count(*) from pg_stat_user_tables where relid in (select format('%I.%I', chunk_schema, "
                     + "chunk_name)::regclass from timescaledb_information.chunks where hypertable_schema = 'md' "
-                    + "and range_start < (?::date + 2) and range_end > (?::date - 1))")) {
+                    + "and range_start < ((?::date + 1)::timestamp at time zone 'Asia/Kolkata') "
+                    + "and range_end > (?::date::timestamp at time zone 'Asia/Kolkata'))")) {
                 s.setObject(1, session);
                 s.setObject(2, session);
                 text.append("chunks=").append(one(s));
@@ -201,20 +280,27 @@ public final class ReplayCache {
     /** Writes events as they pass; a write failure stops writing (the file is then dropped), never the replay. */
     static final class Writer {
         private final Path tmp;
+        private final java.io.FileOutputStream file;
+        private final FastGzip gzip;
         private DataOutputStream out;
         private long written;
 
         Writer(Path tmp, String fingerprint) throws IOException {
             this.tmp = tmp;
-            OutputStream file = Files.newOutputStream(tmp);
+            java.io.FileOutputStream f = new java.io.FileOutputStream(tmp.toFile());
+            FastGzip g = null;
             try {
-                out = new DataOutputStream(new BufferedOutputStream(new FastGzip(file), 1 << 16));
+                g = new FastGzip(f);
+                out = new DataOutputStream(new BufferedOutputStream(g, 1 << 16));
                 out.writeInt(FORMAT);
                 out.writeUTF(fingerprint);
-            } catch (IOException e) {
-                file.close();
+            } catch (IOException | RuntimeException e) {
+                f.close();
+                Files.deleteIfExists(tmp);
                 throw e;
             }
+            this.file = f;
+            this.gzip = g;
         }
 
         void write(MarketEvent event) {
@@ -230,7 +316,7 @@ public final class ReplayCache {
             }
         }
 
-        /** Closes the file; true when it is complete and can be moved into place. */
+        /** Completes, syncs to disk and closes the file; true when it can be moved into place. */
         boolean finish(long delivered) {
             if (out == null) {
                 return false;
@@ -243,6 +329,10 @@ public final class ReplayCache {
             try {
                 out.writeByte(END);
                 out.writeLong(written);
+                out.flush();
+                gzip.finish();
+                file.flush();
+                file.getChannel().force(true);       // on disk before the rename, so a crash cannot leave a short file
                 out.close();
                 out = null;
                 return true;
@@ -265,7 +355,7 @@ public final class ReplayCache {
             try {
                 Files.deleteIfExists(tmp);
             } catch (IOException ignored) {
-                // a stray .tmp file is never read
+                // a stray .tmp file is never read and is removed after six hours
             }
         }
     }
