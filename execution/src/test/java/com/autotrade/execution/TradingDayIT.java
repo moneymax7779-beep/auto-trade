@@ -484,6 +484,10 @@ class TradingDayIT {
                 String.class, w.real())).containsExactly("MODE_PAPER_NO_MARKET_DATA", "NO_MARKET_DATA");
         assertThat(jdbc.queryForObject("select connection_status from acct.broker_account where id = ?", String.class,
                 w.real())).as("a new login would change nothing: the session is left as it is").isEqualTo("ACTIVE");
+        // My accounts' route line (23 Nov 2026): why it takes no entries, in plain words
+        assertThat(td.notTargetReason(real)).isEqualTo("PAPER today: its paper twin takes the entries");
+        td.append(w.tenant(), null, TradingDay.Mode.PAPER, "IT", w.member());
+        assertThat(td.notTargetReason(real)).isEqualTo("trading is Off today");
     }
 
     /** Code review 7 Nov 2026: an add fanned out to an idle LIVE-eligible account keeps it idle and is closed. */

@@ -8,7 +8,7 @@ import {
   visibleZones, NO_LEVELS, type LevelToggles, type LevelsData,
 } from "./levels";
 import { presetView, useChartView, useLinkedTime, type View, useMoment } from "./chartView";
-import { compactRupees, type ChartTrade } from "./TimelineChart";
+import { tradeResult, type ChartTrade } from "./TimelineChart";
 import { TradeDetail, useTradeContext, type TradeContext } from "./TradeInspector";
 import { useLiveBars, withLiveCloses } from "./liveTicks";
 import { strategyShort } from "./strategies";
@@ -220,7 +220,7 @@ function UnderlyingSurgesPanel({ date, data: polled, live, until, sessionId, fil
   const shownDrawing = !drawing?.boxes?.length ? drawing
     : { ...drawing, boxes: showTrades ? drawing.boxes.filter((bx) => !hidden.has(`box:${bx.key}`)) : [] };
   const tradesToggle = <TradesToggle on={showTrades} onChange={setShowTrades} count={trades.length + (drawing?.boxes?.length ?? 0)}
-    trades={trades} boxes={drawing?.boxes ?? []} hidden={hidden} onToggle={toggleHidden} onShowAll={showAll} />;
+    trades={trades} boxes={drawing?.boxes ?? []} hidden={hidden} onToggle={toggleHidden} onShowAll={showAll} percent={plain} />;
   const contexts = useTradeContext(sessionId, !!live, picked != null);
   // a chart trade is the stored trade of the same strategy and side that opened in the same minute
   // the trade's row: same index, side and strategy, opened within a minute of the marker (an open trade's row carries the
@@ -366,8 +366,10 @@ function useHiddenTrades(scope: string): [Set<string>, (key: string) => void, ()
   return [hidden, toggle, showAll];
 }
 
-function TradesToggle({ on, onChange, count, trades, boxes, hidden, onToggle, onShowAll }: { on: boolean; onChange: (on: boolean) => void;
-  count: number; trades: ChartTrade[]; boxes: DrawnBox[]; hidden: Set<string>; onToggle: (key: string) => void; onShowAll: () => void }) {
+function TradesToggle({ on, onChange, count, trades, boxes, hidden, onToggle, onShowAll, percent = false }: { on: boolean; onChange: (on: boolean) => void;
+  count: number; trades: ChartTrade[]; boxes: DrawnBox[]; hidden: Set<string>; onToggle: (key: string) => void; onShowAll: () => void;
+  /** a member's chart: each trade's result as % of premium, not the live set's model-account rupees */
+  percent?: boolean }) {
   const chip = (key: string, label: string, color: string, title: string) => {
     const off = hidden.has(key);
     return (
@@ -384,7 +386,7 @@ function TradesToggle({ on, onChange, count, trades, boxes, hidden, onToggle, on
         className={`rounded-full border px-2.5 py-1 ${on ? "border-line bg-panel-2" : "border-transparent text-muted opacity-60"}`}>
         trades{count > 0 ? ` (${count})` : ""}{on ? "" : " hidden"}
       </button>
-      {on && trades.map((t) => chip(tradeKey(t), `#${t.n} ${t.who} ${t.to ? "" : "open "}${compactRupees(t.net)}`,
+      {on && trades.map((t) => chip(tradeKey(t), `#${t.n} ${t.who} ${t.to ? "" : "open "}${tradeResult(t, percent)}`,
         t.net >= 0 ? TRADE_UP : TRADE_DOWN, `trade #${t.n} ${t.who} (entry ${t.from})`))}
       {on && boxes.map((bx) => chip(`box:${bx.key}`, bx.label, bx.colors.entry, `chart order ${bx.label}`))}
       {on && someHidden && <button type="button" className="text-accent underline" onClick={onShowAll}>show all</button>}
@@ -1175,7 +1177,7 @@ function SurgeChart({ date, live, until, nav, data, shown, groups, selected, onS
                   {tr.to && <rect x={x1 - 4} y={y1p + (put ? 6 : -14)} width={8} height={8} fill={col} {...pickable(tr)}>
                     <title>#{tr.n} {tr.who} exit {tr.to}{onPickTrade ? ": click for the data at entry and exit" : ""}</title></rect>}
                   <text x={x1 + 6} y={y1p + (put ? 15 : -8)} fontSize="10" fill={col} className="num font-semibold" {...HALO}>
-                    #{tr.n} {tr.to ? "" : "open "}{compactRupees(tr.net)}</text>
+                    #{tr.n} {tr.to ? "" : "open "}{tradeResult(tr, plain)}</text>
                 </g>
               );
             })}

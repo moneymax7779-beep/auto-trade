@@ -28,11 +28,22 @@ export interface ChartTrade {
   from: string;
   to: string | null;
   net: number;
+  /** the result as % of the premium paid (null: unknown); a member's chart shows this, not the model account's rupees */
+  pct?: number | null;
   entrySpot: number | null;
   exitSpot: number | null;
 }
 
 const GREEN = "#16a34a", RED = "#dc2626", BLUE = "#2563eb";
+
+/**
+ * A trade's result on the chart: rupees, or (a member's chart, user 23 Nov 2026) the % of premium, the same at any
+ * account size: the live set's rupees are its ₹5 L model account's, not the member's (+₹4.54L on a ₹30K account).
+ */
+export function tradeResult(t: ChartTrade, percent: boolean): string {
+  if (percent) return t.pct == null || !Number.isFinite(t.pct) ? "" : `${t.pct > 0 ? "+" : t.pct < 0 ? "−" : ""}${Math.abs(t.pct).toFixed(1)}%`;
+  return compactRupees(t.net);
+}
 
 /** ₹8.46L, ₹86.1K, ₹950 with a sign. */
 export function compactRupees(v: number): string {

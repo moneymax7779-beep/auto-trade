@@ -35,6 +35,17 @@ const stateTone = (s: string | undefined) =>
   s === "RUNNING" ? "up" : s === "REFUSED" || s === "LEASE_HELD_ELSEWHERE" ? "warn" : s ? "down" : "muted";
 const modeTone = (m: string) => (m === "LIVE" ? "down" : m === "DRY_RUN" ? "accent" : "muted");
 
+/** The account's latest canary (23 Nov 2026: Switch LIVE needs it passed); its message on hover. */
+function CanaryBadge({ canary }: { canary: { result: string; at: string; message: string } | null }) {
+  if (canary == null) {
+    return <span title="No canary has run: the platform admin runs one before this account can go LIVE">
+      <Badge text="NO CANARY" tone="warn" /></span>;
+  }
+  const passed = canary.result === "PASS";
+  return <span title={`Canary ${canary.at} IST: ${canary.result}${canary.message ? `: ${canary.message}` : ""}`}>
+    <Badge text={passed ? "CANARY OK" : `CANARY ${canary.result}`} tone={passed ? "up" : "down"} /></span>;
+}
+
 const BROKER_LABELS: Record<string, string> = {
   ZERODHA: "Zerodha (Kite)", UPSTOX: "Upstox", KOTAK_NEO: "Kotak Neo", GROWW: "Groww", PAPER: "Paper (simulated fills)",
 };
@@ -102,7 +113,7 @@ function FollowerSummary({ rows, killed }: { rows: ExecutionAccount[]; killed: S
   rows.forEach((a) => {
     if (!a.enabled) return;
     const st = a.lastTurn?.state;
-    // an IDLE account (a workspace's real account that is not the day's broker) needs no login today
+    // an IDLE account (a workspace's real account that takes no entries today) needs no login today
     if (a.broker !== "PAPER" && a.connection !== "ACTIVE" && st !== "IDLE") {
       issues.push(`${a.name}: ${connectionLabel(a.connection).toLowerCase()}`);
     }
@@ -462,10 +473,19 @@ export function AccountsPage() {
           ) },
           { key: "st", label: "Status", render: ({ a }) => (
             <div className="flex min-w-36 flex-wrap items-center gap-1">
+              {/* user 23 Nov 2026: what the account does TODAY first (a red LIVE-ELIGIBLE read as live while the day was
+                  PAPER and the canary had failed), then whether it may go LIVE at all and its last canary */}
+              {a.dayRole === "LIVE" && <span title="Real orders go to this broker from the next signal">
+                <Badge text="LIVE TODAY" tone="down" /></span>}
+              {a.dayRole === "PAPER" && <span title="Today's broker, PAPER: its paper twin takes the entries; no real orders">
+                <Badge text="PAPER TODAY" tone="warn" /></span>}
+              {a.dayRole === "OTHER" && <span title="Another account is today's broker"><Badge text="NOT TODAY'S BROKER" tone="muted" /></span>}
+              {a.dayRole === "OFF" && <span title="Trading is Off today"><Badge text="OFF TODAY" tone="muted" /></span>}
               {a.mode === "LIVE" && daily(a.tenantId)
-                ? <span title="May trade real money; whether today is LIVE is the workspace's switch on the Today page">
-                    <Badge text="LIVE-ELIGIBLE" tone="down" /></span>
+                ? <span title="May trade real money once switched LIVE on the Today page (after a passing canary)">
+                    <Badge text="LIVE-ELIGIBLE" tone="accent" /></span>
                 : <Badge text={a.mode} tone={modeTone(a.mode)} />}
+              {a.broker !== "PAPER" && a.mode === "LIVE" && <CanaryBadge canary={a.canary ?? null} />}
               {a.broker !== "PAPER" && <Badge text={connectionLabel(a.connection)} tone={connectionTone(a.connection)} />}
               {killedAccounts.has(a.id) && <Badge text="ENTRIES STOPPED" tone="down" />}
               {!a.enabled && <Badge text="DISABLED" tone="muted" />}

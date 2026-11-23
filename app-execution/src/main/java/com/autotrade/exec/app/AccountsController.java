@@ -48,6 +48,7 @@ class AccountsController {
     private final KillSwitches kills;
     private final ExecutionService service;
     private final JdbcTemplate jdbc;
+    private final com.autotrade.execution.TradingDay tradingDay;
 
     AccountsController(Access access, DataSource dataSource, ExecutionService service) {
         this.access = access;
@@ -55,6 +56,7 @@ class AccountsController {
         this.kills = new KillSwitches(dataSource);
         this.service = service;
         this.jdbc = new JdbcTemplate(dataSource);
+        this.tradingDay = new com.autotrade.execution.TradingDay(dataSource);
     }
 
     /**
@@ -64,7 +66,44 @@ class AccountsController {
      */
     record AccountView(long id, long tenantId, String name, String broker, String mode, String role, boolean enabled,
                        double allocatedCapital, String riskFile, String connection, ExecutionLoop.AccountStatus lastTurn,
-                       Long paperOf, DayBook today, String mirrorOf) {
+                       Long paperOf, DayBook today, String mirrorOf, String dayRole, Canary canary) {
+    }
+
+    /**
+     * The latest canary of a real account (user 23 Nov 2026: My accounts showed LIVE-ELIGIBLE and LOGGED IN on an account
+     * whose three canaries had failed): PASS, FAIL or REFUSED, when (IST), and its message. Null when none ran.
+     */
+    record Canary(String result, String at, String message) {
+    }
+
+    /**
+     * A DAILY_SWITCH workspace's real account today (user 23 Nov 2026): LIVE (it takes the entries, real orders), PAPER
+     * (today's broker on a PAPER day, or LIVE without a valid session: its paper twin takes them), OTHER (another account
+     * is today's broker) or OFF (no trading today). Null for twins, paper accounts and other workspaces.
+     */
+    private String dayRole(BrokerAccount a) {
+        if (a.brokerType() == com.autotrade.account.BrokerType.PAPER || !tradingDay.dailySwitch(a.tenantId())) {
+            return null;
+        }
+        com.autotrade.execution.TradingDay.State now = tradingDay.stateNow(a.tenantId());
+        if (now.brokerAccountId() == null) {
+            return "OFF";
+        }
+        if (!Long.valueOf(a.id()).equals(now.brokerAccountId())) {
+            return "OTHER";
+        }
+        return Long.valueOf(a.id()).equals(tradingDay.entryTargetNow(a.tenantId())) ? "LIVE" : "PAPER";
+    }
+
+    private Canary canary(BrokerAccount a) {
+        if (a.brokerType() == com.autotrade.account.BrokerType.PAPER) {
+            return null;
+        }
+        return jdbc.query("select coalesce(detail ->> 'result', '?') result, to_char(at at time zone 'Asia/Kolkata', "
+                + "'DD Mon HH24:MI') at, coalesce(detail ->> 'message', '') message from exec.audit_log where "
+                + "broker_account_id = ? and action = 'CANARY_RESULT' order by at desc, id desc limit 1",
+                (rs, i) -> new Canary(rs.getString(1), rs.getString(2), rs.getString(3)), a.id()).stream().findFirst()
+                .orElse(null);
     }
 
     /**
@@ -92,7 +131,8 @@ class AccountsController {
             for (BrokerAccount a : accounts.ofTenant(tenant)) {
                 out.add(new AccountView(a.id(), a.tenantId(), a.displayName(), a.brokerType().name(), a.tradeMode().name(),
                         a.role().name(), a.enabled(), a.allocatedCapital(), a.riskFile(), connections.get(a.id()),
-                        turns.get(a.id()), a.paperOf(), books.getOrDefault(a.id(), DayBook.NONE), mirrors.get(a.id())));
+                        turns.get(a.id()), a.paperOf(), books.getOrDefault(a.id(), DayBook.NONE), mirrors.get(a.id()),
+                        dayRole(a), canary(a)));
             }
         }
         return out;

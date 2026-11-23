@@ -265,12 +265,30 @@ public final class TradingDay {
     }
 
     /**
+     * Why a real account of a DAILY_SWITCH workspace takes no entries now, in the member's words (user 23 Nov 2026: My
+     * accounts said "not the day's broker" of the broker the Today page showed as today's, on a PAPER day).
+     */
+    public String notTargetReason(BrokerAccount account) {
+        State now = stateNow(account.tenantId());
+        if (now.brokerAccountId() == null) {
+            return "trading is Off today";
+        }
+        if (!Long.valueOf(account.id()).equals(now.brokerAccountId())) {
+            return "another account is today's broker";
+        }
+        if (now.mode() == Mode.PAPER) {
+            return "PAPER today: its paper twin takes the entries";
+        }
+        return "switched LIVE, but without a valid session or LIVE eligibility its paper twin takes the entries";
+    }
+
+    /**
      * An idle account's exits and adds: it holds nothing they could apply to, so they are closed now (an old add must
      * never attach to a later position). Returns how many.
      */
     public int closeIdleIntents(long brokerAccountId) {
         return jdbc.update("update exec.trade_intent set state = 'SKIPPED', reject_code = 'NOT_HELD', reject_reason = "
-                + "'the account holds nothing (not the day''s broker)', updated_at = now() where broker_account_id = ? "
+                + "'the account holds nothing (today''s entries go to another account)', updated_at = now() where broker_account_id = ? "
                 + "and state = 'CREATED' and action in ('EXIT', 'ADD')", brokerAccountId);
     }
 

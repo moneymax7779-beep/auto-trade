@@ -216,12 +216,20 @@ class WorkspaceIT {
                 .as("the latest result counts, not an older pass").contains("last canary").contains("was FAIL")
                 .contains("PermissionException").contains("trades PAPER until a canary passes");
         assertThat(state("asha", asha)).containsEntry("mode", "PAPER");
+        // My accounts (23 Nov 2026): today's role and the latest canary, not a bare LIVE-ELIGIBLE
+        assertThat(view("asha", zerodha).dayRole()).isEqualTo("PAPER");
+        assertThat(view("asha", zerodha).canary().result()).isEqualTo("FAIL");
+        assertThat(view("asha", twin).dayRole()).as("a twin has no day role of its own").isNull();
+        assertThat(view("asha", twin).canary()).isNull();
+        assertThat(view("asha", upstox).dayRole()).isEqualTo("OTHER");
         canary(asha, zerodha, "PASS", "placed, read, modified, cancelled", "now()");
 
         // LIVE: the day's target is the broker itself; an entry from now goes there
         workspaces.mode("asha", asha, new WorkspaceController.Mode("LIVE", "LIVE"));
         assertThat(state("asha", asha)).containsEntry("mode", "LIVE").containsEntry("targetAccountId", zerodha)
                 .containsEntry("trading", "LIVE");
+        assertThat(view("asha", zerodha).dayRole()).isEqualTo("LIVE");
+        assertThat(view("asha", zerodha).canary().result()).isEqualTo("PASS");
         assertThat(jdbc.queryForList("select action from exec.audit_log where tenant_id = ? order by id", String.class, asha))
                 .contains("TODAYS_BROKER", "LIVE_ELIGIBLE_ON", "KILL_TENANT", "KILL_RELEASED", "MODE_LIVE");
 
