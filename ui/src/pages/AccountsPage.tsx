@@ -31,8 +31,9 @@ function Badge({ text, tone }: { text: string; tone: "up" | "down" | "warn" | "m
 
 const connectionTone = (c: string | null) =>
   c === "ACTIVE" ? "up" : c === "PENDING_CONNECT" ? "muted" : c ? "down" : "muted";
+// IDLE (a trader workspace's real account with nothing to do today, e.g. on a PAPER day) is normal: grey, not red
 const stateTone = (s: string | undefined) =>
-  s === "RUNNING" ? "up" : s === "REFUSED" || s === "LEASE_HELD_ELSEWHERE" ? "warn" : s ? "down" : "muted";
+  s === "RUNNING" ? "up" : s === "IDLE" ? "muted" : s === "REFUSED" || s === "LEASE_HELD_ELSEWHERE" ? "warn" : s ? "down" : "muted";
 const modeTone = (m: string) => (m === "LIVE" ? "down" : m === "DRY_RUN" ? "accent" : "muted");
 
 /** The account's latest canary (23 Nov 2026: Switch LIVE needs it passed); its message on hover. */
@@ -508,8 +509,10 @@ export function AccountsPage() {
                 <div className="line-clamp-2 text-muted">{a.mirrorOf} today {a.today ? `${signed(a.today.net)}, ${a.today.trades} closed`
                   : "–"}</div>
               </> : <>
-              <div className="line-clamp-2">{a.lastTurn?.route ?? (a.enabled ? "no route: the worker does not serve it now"
-                : "disabled")}</div>
+              {/* an IDLE account has no route by design; its result line says why (23 Nov 2026: "no route: the worker does
+                  not serve it now" above "PAPER today: its paper twin takes the entries" read as a fault) */}
+              {a.lastTurn?.state !== "IDLE" && <div className="line-clamp-2">{a.lastTurn?.route
+                ?? (a.enabled ? "no route: the worker does not serve it now" : "disabled")}</div>}
               {a.lastTurn?.lastResult && <div className="line-clamp-2 text-muted">{a.lastTurn.lastResult}</div>}
               </>}
             </div>
