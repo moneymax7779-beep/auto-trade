@@ -213,9 +213,14 @@ function UnderlyingSurgesPanel({ date, data: polled, live, until, sessionId, fil
   // the trades and finished chart orders can be hidden to read the chart (user 23 Nov 2026: "I should be able to hide the
   // trades taken"); a draft or working chart order's lines stay, they are what is being placed
   const [showTrades, setShowTrades] = useShowTrades();
-  const shownTrades = showTrades ? trades : NO_TRADES;
-  const shownDrawing = showTrades || !drawing?.boxes?.length ? drawing : { ...drawing, boxes: [] };
-  const tradesToggle = <TradesToggle on={showTrades} onChange={setShowTrades} count={trades.length + (drawing?.boxes?.length ?? 0)} />;
+  // one trade or finished chart order can be hidden on its own (user 23 Nov 2026: "I should be able to hide specific trade
+  // from the chart"): its button beside the toggle; kept in the browser per day and index
+  const [hidden, toggleHidden, showAll] = useHiddenTrades(`${date}|${polled.underlying}`);
+  const shownTrades = showTrades ? trades.filter((t) => !hidden.has(tradeKey(t))) : NO_TRADES;
+  const shownDrawing = !drawing?.boxes?.length ? drawing
+    : { ...drawing, boxes: showTrades ? drawing.boxes.filter((bx) => !hidden.has(`box:${bx.key}`)) : [] };
+  const tradesToggle = <TradesToggle on={showTrades} onChange={setShowTrades} count={trades.length + (drawing?.boxes?.length ?? 0)}
+    trades={trades} boxes={drawing?.boxes ?? []} hidden={hidden} onToggle={toggleHidden} onShowAll={showAll} />;
   const contexts = useTradeContext(sessionId, !!live, picked != null);
   // a chart trade is the stored trade of the same strategy and side that opened in the same minute
   // the trade's row: same index, side and strategy, opened within a minute of the marker (an open trade's row carries the
@@ -332,13 +337,58 @@ function useShowTrades(): [boolean, (on: boolean) => void] {
   return [on, update];
 }
 
-function TradesToggle({ on, onChange, count }: { on: boolean; onChange: (on: boolean) => void; count: number }) {
+const HIDDEN_TRADES_KEY = "surge-chart-hidden-trades";
+const HIDDEN_TRADES_MAX = 300;                      // the newest entries kept in the browser (older days drop off)
+/** A chart trade's identity within a day and index: its number, side and entry time. */
+const tradeKey = (t: ChartTrade) => `trade:${t.n}|${t.side}|${t.from}`;
+
+/** The trades hidden one by one on this day and index ({@code scope}), kept in the browser. */
+function useHiddenTrades(scope: string): [Set<string>, (key: string) => void, () => void] {
+  const read = (): string[] => {
+    try {
+      const raw = localStorage.getItem(HIDDEN_TRADES_KEY);
+      return raw ? (JSON.parse(raw) as string[]).filter((x) => typeof x === "string") : [];
+    } catch { return []; }
+  };
+  const [all, setAll] = useState<string[]>(read);
+  const write = (next: string[]) => {
+    const kept = next.slice(-HIDDEN_TRADES_MAX);
+    setAll(kept);
+    try { localStorage.setItem(HIDDEN_TRADES_KEY, JSON.stringify(kept)); } catch { /* not persisted */ }
+  };
+  const prefix = `${scope}#`;
+  const hidden = useMemo(() => new Set(all.filter((x) => x.startsWith(prefix)).map((x) => x.slice(prefix.length))), [all, prefix]);
+  const toggle = (key: string) => {
+    const full = prefix + key;
+    write(all.includes(full) ? all.filter((x) => x !== full) : [...all, full]);
+  };
+  const showAll = () => write(all.filter((x) => !x.startsWith(prefix)));
+  return [hidden, toggle, showAll];
+}
+
+function TradesToggle({ on, onChange, count, trades, boxes, hidden, onToggle, onShowAll }: { on: boolean; onChange: (on: boolean) => void;
+  count: number; trades: ChartTrade[]; boxes: DrawnBox[]; hidden: Set<string>; onToggle: (key: string) => void; onShowAll: () => void }) {
+  const chip = (key: string, label: string, color: string, title: string) => {
+    const off = hidden.has(key);
+    return (
+      <button key={key} type="button" aria-pressed={!off} onClick={() => onToggle(key)} title={off ? `show ${title}` : `hide ${title}`}
+        className={`num rounded-full border px-2 py-0.5 ${off ? "border-transparent text-muted line-through opacity-60" : "border-line"}`}
+        style={off ? undefined : { color }}>{label}</button>
+    );
+  };
+  const someHidden = trades.some((t) => hidden.has(tradeKey(t))) || boxes.some((bx) => hidden.has(`box:${bx.key}`));
   return (
-    <button type="button" aria-pressed={on} onClick={() => onChange(!on)}
-      title={on ? "hide the trades and finished chart orders to read the chart" : "show the trades and finished chart orders"}
-      className={`rounded-full border px-2.5 py-1 ${on ? "border-line bg-panel-2" : "border-transparent text-muted opacity-60"}`}>
-      trades{count > 0 ? ` (${count})` : ""}{on ? "" : " hidden"}
-    </button>
+    <>
+      <button type="button" aria-pressed={on} onClick={() => onChange(!on)}
+        title={on ? "hide the trades and finished chart orders to read the chart" : "show the trades and finished chart orders"}
+        className={`rounded-full border px-2.5 py-1 ${on ? "border-line bg-panel-2" : "border-transparent text-muted opacity-60"}`}>
+        trades{count > 0 ? ` (${count})` : ""}{on ? "" : " hidden"}
+      </button>
+      {on && trades.map((t) => chip(tradeKey(t), `#${t.n} ${t.who} ${t.to ? "" : "open "}${compactRupees(t.net)}`,
+        t.net >= 0 ? TRADE_UP : TRADE_DOWN, `trade #${t.n} ${t.who} (entry ${t.from})`))}
+      {on && boxes.map((bx) => chip(`box:${bx.key}`, bx.label, bx.colors.entry, `chart order ${bx.label}`))}
+      {on && someHidden && <button type="button" className="text-accent underline" onClick={onShowAll}>show all</button>}
+    </>
   );
 }
 
