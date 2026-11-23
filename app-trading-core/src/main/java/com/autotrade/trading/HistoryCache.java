@@ -57,7 +57,7 @@ final class HistoryCache {
 
     private static final List<Class<?>> CODE = List.of(OwnSessionHistory.class, ZtSessionHistory.class,
             BarSessionHistory.class, CombinedSessionHistory.class, BackfilledSessionHistory.class, SessionHistories.class,
-            CachingSessionHistory.class, MarketTime.class, HistoryCache.class);
+            CachingSessionHistory.class, MarketTime.class, HistoryCache.class, com.autotrade.md.zt.ZtSourceKeys.class);
 
     private HistoryCache() {
     }
@@ -70,7 +70,7 @@ final class HistoryCache {
         }
         try {
             long started = System.nanoTime();
-            String fingerprint = fingerprint(target, zt, shape, session);
+            String fingerprint = fingerprint(target, zt, shape, session, Path.of(dir, "history", "memo"));
             log.info("history cache on: {} (fingerprint {} for {}, {} ms)", dir, fingerprint.substring(0, 16), session,
                     (System.nanoTime() - started) / 1_000_000);
             return new CachingSessionHistory(history, new CachingSessionHistory.FileStore(Path.of(dir, "history")),
@@ -88,13 +88,26 @@ final class HistoryCache {
         }
     }
 
-    static String fingerprint(DataSource target, DataSource zt, String shape, LocalDate session)
+    /**
+     * v3 (review of 24 Nov 2026): v2 plus the database's start and statistics-reset times (table counters restart from zero
+     * after a crash, so a counter value alone can repeat), the stored one-minute bars the history reads (per index and
+     * kind, before D: count and last load time), the live feature-snapshot rows before D (count and last snapshot), and
+     * zt-tiger-v2's two history tables as a whole-row hash before D. That hash takes seconds, so on the zt_archive copy it
+     * is remembered under {@code memo} keyed by that database's start time, statistics reset and table counters (any
+     * write or restart recomputes it); on any other zt database (the live one) it falls back to those counters alone, so
+     * a replay never runs heavy reads against the live capture. The stored-bar aggregate is remembered the same way, keyed by
+     * auto-trade's own start time, statistics reset and {@code hist.candle}'s write counters.
+     */
+    static String fingerprint(DataSource target, DataSource zt, String shape, LocalDate session, Path memo)
             throws SQLException, IOException {
-        StringBuilder text = new StringBuilder("v2|").append(shape).append('|').append(session).append('|');
+        StringBuilder text = new StringBuilder("v3|").append(shape).append('|').append(session).append('|');
         for (Class<?> type : CODE) {
-            text.append(type.getName()).append('=').append(classHash(type)).append('|');
+            appendClassHash(text, type);
         }
         try (Connection c = target.getConnection()) {
+            String server = one(c, "select pg_postmaster_start_time()::text || ':' || coalesce((select "
+                    + "stats_reset::text from pg_stat_database where datname = current_database()), '')");
+            text.append("server=").append(server).append('|');
             text.append("loads=").append(one(c, "select coalesce(md5(string_agg(id || ':' || status || ':' || "
                     + "session_date || ':' || coalesce(underlying, '') || ':' || coalesce(finished_at::text, '') || ':' || "
                     + "loaded_counts::text, ',' order by id)), '') from md.load_manifest where session_date < ?", session))
@@ -106,23 +119,76 @@ final class HistoryCache {
             text.append("liveRuns=").append(one(c, "select coalesce(md5(string_agg(id || ':' || status || ':' || "
                     + "coalesce(finished_at::text, ''), ',' order by id)), '') from research.run where kind = 'LIVE_FEATURES' "
                     + "and exists (select 1 from unnest(sessions) d where d < ?)", session)).append('|');
-            text.append("liveRunning=").append(one(c, "select coalesce(sum((select count(*) from feat.snapshot s where "
-                    + "s.run_id = r.id and s.session_date < ?)), 0) from research.run r where r.kind = 'LIVE_FEATURES' "
-                    + "and r.status = 'RUNNING'", session)).append('|');
+            text.append("liveRows=").append(one(c, "select count(*) || ':' || coalesce(max(s.snap_time)::text, '') from "
+                    + "feat.snapshot s join research.run r on r.id = s.run_id and r.kind = 'LIVE_FEATURES' "
+                    + "where s.session_date < ?", session)).append('|');
             text.append("barFetches=").append(one(c, "select count(*) || ':' || coalesce(max(id), 0) from hist.fetch_log "
                     + "where from_date < ?", session)).append('|');
+            // the bar aggregate scans hist.candle (2 s idle, 20+ s under a replay batch): remembered per day, keyed by the
+            // database's start and statistics reset and hist.candle's write counters, so any write or restart recomputes it
+            String candleWrites = one(c, "select coalesce(sum(n_tup_ins + n_tup_upd + n_tup_del), 0) || ':' || count(*) "
+                    + "from pg_stat_user_tables where schemaname = 'hist' and relname = 'candle'");
+            text.append("bars=").append(memo(memo, "bars|" + server + "|" + candleWrites + "|" + session, () -> one(c,
+                    "select coalesce(string_agg(underlying || ':' || kind || ':' || n || ':' || "
+                    + "coalesce(m::text, ''), ',' order by underlying, kind), '') from (select underlying, kind, count(*) n, "
+                    + "max(loaded_at) m from hist.candle where kind in ('INDEX', 'FUTURE') and bar_start < ? "
+                    + "group by 1, 2) x", session))).append('|');
         }
         if (zt != null) {
             try (Connection c = zt.getConnection()) {
-                text.append("zt=").append(one(c, "select current_database() || ':' || (select oid from pg_database where "
-                        + "datname = current_database()) || ':' || (select count(*) || ':' || coalesce(max(bar_start)::text, "
-                        + "'') || ':' || coalesce(sum(round(close_price * 100)::bigint), 0) from market_candles where "
-                        + "bar_start < ?) || ':' || (select count(*) || ':' || coalesce(sum(round(coalesce("
-                        + "implied_volatility, 0) * 1000000)::bigint), 0) from option_tick_snapshots where captured_at < ?)",
-                        session, session));
+                String identity = one(c, "select current_database() || ':' || (select oid from pg_database where "
+                        + "datname = current_database()) || ':' || pg_postmaster_start_time()::text || ':' || coalesce((select "
+                        + "stats_reset::text from pg_stat_database where datname = current_database()), '') || ':' || "
+                        + "(select coalesce(sum(n_tup_ins + n_tup_upd + n_tup_del), 0) || ':' || count(*) from "
+                        + "pg_stat_user_tables where relname in ('market_candles', 'option_tick_snapshots', "
+                        + "'market_tick_records'))");
+                text.append("zt=").append(identity).append('|');
+                if (identity.startsWith("zt_archive:")) {
+                    text.append("ztRows=").append(memo(memo, identity + "|" + session, () -> one(c,
+                            "select (select count(*) || ':' || coalesce(sum(hashtext(t::text)::bigint), 0) from market_candles t "
+                                    + "where bar_start < ?) || ':' || (select count(*) || ':' || coalesce(sum(hashtext(t::text)"
+                                    + "::bigint), 0) from option_tick_snapshots t where captured_at < ?)", session, session)));
+                }
             }
         }
         return sha256(text.toString());
+    }
+
+    private interface SqlValue {
+        String get() throws SQLException;
+    }
+
+    /** {@code value}, remembered in {@code dir} under {@code key} (computed when absent or unreadable). */
+    private static String memo(Path dir, String key, SqlValue value) throws SQLException {
+        if (dir == null) {
+            return value.get();
+        }
+        Path file = dir.resolve(sha256(key) + ".txt");
+        try {
+            if (java.nio.file.Files.isRegularFile(file)) {
+                String v = java.nio.file.Files.readString(file).trim();
+                if (!v.isEmpty()) {
+                    return v;
+                }
+            }
+        } catch (IOException e) {
+            log.warn("history cache memo unreadable ({}); recomputing", e.toString());
+        }
+        String v = value.get();
+        try {
+            java.nio.file.Files.createDirectories(dir);
+            Path tmp = java.nio.file.Files.createTempFile(dir, "memo", ".tmp");
+            try {
+                java.nio.file.Files.writeString(tmp, v);
+                java.nio.file.Files.move(tmp, file, java.nio.file.StandardCopyOption.ATOMIC_MOVE,
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+            } finally {
+                java.nio.file.Files.deleteIfExists(tmp);
+            }
+        } catch (IOException e) {
+            log.warn("history cache memo not stored ({})", e.toString());
+        }
+        return v;
     }
 
     private static String one(Connection c, String sql, Object... args) throws SQLException {
@@ -138,13 +204,17 @@ final class HistoryCache {
     }
 
 
-    private static String classHash(Class<?> type) throws IOException {
+    /** The class's bytes and, recursively, its nested classes' (as the tick cache does). */
+    private static void appendClassHash(StringBuilder text, Class<?> type) throws IOException {
         String name = type.getName();
         try (InputStream in = type.getResourceAsStream("/" + name.replace('.', '/') + ".class")) {
             if (in == null) {
                 throw new IOException("class bytes not found for " + name);
             }
-            return sha256(in.readAllBytes());
+            text.append(name).append('=').append(sha256(in.readAllBytes())).append('|');
+        }
+        for (Class<?> nested : type.getDeclaredClasses()) {
+            appendClassHash(text, nested);
         }
     }
 

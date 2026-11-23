@@ -51,6 +51,6 @@ public final class StoredSessionSource implements SessionEventSource {
         if (!missing.isEmpty()) {
             LOG.warn("own capture {}: no load for {}; replaying {} without them", session, missing, underlyings);
         }
-        return new ReplayResult(cache == null ? reader.replay(ids, sink) : cache.replay(session, ids, reader, sink), 0);
+        return new ReplayResult(cache == null ? reader.replay(ids, sink) : cache.replay(session, ids, reader::replay, sink), 0);
     }
 }

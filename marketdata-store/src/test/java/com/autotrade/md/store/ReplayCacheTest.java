@@ -109,4 +109,82 @@ class ReplayCacheTest {
         x.abandon();
         assertFalse(Files.exists(gone));
     }
+
+    /** A source that replays {@link #events()} and counts its calls. */
+    private static final class FakeSource implements ReplayCache.Source {
+        int calls;
+
+        @Override
+        public long replay(List<Long> ids, java.util.function.Consumer<MarketEvent> sink) {
+            calls++;
+            events().forEach(sink);
+            return events().size();
+        }
+    }
+
+    private static final LocalDate DAY = LocalDate.of(2026, 11, 17);
+
+    @Test
+    void theFirstRunStoresTheStreamAndTheSecondReadsIt(@TempDir Path dir) throws Exception {
+        List<List<Long>> seen = new ArrayList<>();
+        ReplayCache cache = new ReplayCache(dir, (d, ids) -> {
+            seen.add(ids);
+            return "f".repeat(64);
+        });
+        FakeSource src = new FakeSource();
+        List<MarketEvent> first = new ArrayList<>();
+        List<MarketEvent> second = new ArrayList<>();
+        assertEquals(events().size(), cache.replay(DAY, List.of(130L, 128L), src, first::add));
+        assertEquals(events().size(), cache.replay(DAY, List.of(128L, 130L), src, second::add));
+        assertEquals(1, src.calls);                       // the second run came from the file
+        assertEquals(first, second);
+        assertEquals(List.of(List.of(128L, 130L), List.of(128L, 130L)), seen);   // the key ignores the load order
+    }
+
+    @Test
+    void anUnreadableFileIsRemovedAndTheDatabaseIsUsed(@TempDir Path dir) throws Exception {
+        ReplayCache cache = new ReplayCache(dir, (d, ids) -> "a".repeat(64));
+        FakeSource src = new FakeSource();
+        cache.replay(DAY, List.of(1L), src, e -> { });
+        Path file;
+        try (var files = Files.list(dir)) {
+            file = files.filter(f -> f.toString().endsWith(".events.gz")).findFirst().orElseThrow();
+        }
+        Files.write(file, new byte[] {1, 2, 3, 4});           // not gzip: fails before any event
+        List<MarketEvent> got = new ArrayList<>();
+        assertEquals(events().size(), cache.replay(DAY, List.of(1L), src, got::add));
+        assertEquals(events(), got);
+        assertEquals(2, src.calls);
+        assertTrue(Files.exists(file));                      // stored again by this run
+    }
+
+    @Test
+    void aFileThatFailsMidStreamIsRemovedAndTheReplayFailsLoudly(@TempDir Path dir) throws Exception {
+        ReplayCache cache = new ReplayCache(dir, (d, ids) -> "b".repeat(64));
+        cache.replay(DAY, List.of(1L), new FakeSource(), e -> { });
+        Path file;
+        try (var files = Files.list(dir)) {
+            file = files.filter(f -> f.toString().endsWith(".events.gz")).findFirst().orElseThrow();
+        }
+        byte[] bytes = Files.readAllBytes(file);
+        Files.write(file, java.util.Arrays.copyOf(bytes, bytes.length - 12));   // the gzip trailer gone
+        List<MarketEvent> got = new ArrayList<>();
+        assertThrows(IOException.class, () -> cache.replay(DAY, List.of(1L), new FakeSource(), got::add));
+        assertFalse(Files.exists(file));
+    }
+
+    @Test
+    void anUnusableCacheDirectoryNeverStopsTheReplay(@TempDir Path dir) throws Exception {
+        Path notADir = dir.resolve("plain-file");
+        Files.writeString(notADir, "x");
+        ReplayCache cache = new ReplayCache(notADir, (d, ids) -> "c".repeat(64));
+        FakeSource src = new FakeSource();
+        List<MarketEvent> got = new ArrayList<>();
+        assertEquals(events().size(), cache.replay(DAY, List.of(1L), src, got::add));
+        assertEquals(events(), got);
+        ReplayCache noKey = new ReplayCache(dir, (d, ids) -> {
+            throw new java.sql.SQLException("database down");
+        });
+        assertEquals(events().size(), noKey.replay(DAY, List.of(1L), src, e -> { }));
+    }
 }
