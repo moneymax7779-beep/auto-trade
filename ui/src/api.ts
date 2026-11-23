@@ -10,6 +10,22 @@ export function isPrimaryLive(row: { mode: string; account?: string }): boolean 
   return row.mode === "PAPER_LIVE" && !(row.account ?? "").startsWith("SIGNAL-");
 }
 
+/**
+ * An API error as a sentence for the page (23 Nov 2026, the desk showed "409 no NIFTY spot ... for /api/execution/desk/
+ * quote?..."): get's "409 why for /api/x" and postJson's "409: why" become "Why"; a server fault (5xx) says so with its
+ * status; anything else is shown as it is.
+ */
+export function plainError(e: unknown): string {
+  const text = e instanceof Error ? e.message : String(e ?? "");
+  const m = /^(\d{3}):?(?:\s+([\s\S]*?))?(?:\s+for\s+\/\S*)?$/.exec(text.trim());
+  if (!m) return text;
+  const status = Number(m[1]);
+  const why = (m[2] ?? "").trim();
+  if (status >= 500) return `The server could not do it (error ${status})${why ? `: ${why}` : ""}.`;
+  if (!why) return `Refused (${status}).`;
+  return why.charAt(0).toUpperCase() + why.slice(1);
+}
+
 export async function get<T>(path: string): Promise<T> {
   const response = await fetch(path);
   if (!response.ok) {

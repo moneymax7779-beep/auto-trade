@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useRef, useState } from "react";
-import { get, postJson, type ExecMe } from "../api";
-import { Big, Card, ErrorLine, ModeBadge, Sheet, signed, tone } from "../mobile/common";
+import { get, plainError, postJson, type ExecMe } from "../api";
+import { Big, Card, ModeBadge, serviceDown, Sheet, signed, tone } from "../mobile/common";
 
 /**
  * The owner's desk (plan 2026-11-23 feature B, PAPER only; user 23 Nov 2026: "start with desk trades PAPER only"): one
@@ -33,6 +33,13 @@ const newKey = () => (typeof crypto !== "undefined" && "randomUUID" in crypto ? 
   : `${Date.now()}-${Math.random()}`);
 const rupees = (v: number) => `₹${Math.round(v).toLocaleString("en-IN")}`;
 const field = "min-h-11 rounded-lg border border-line bg-bg px-3 text-base";
+
+/** A request that failed, said as a sentence (no status code or API path). */
+function Problem({ error }: { error: unknown }) {
+  if (!error) return null;
+  return <p className="rounded-lg border border-down/40 bg-down/5 px-3 py-2 text-sm text-down">{serviceDown(error)
+    ? "The trading service is not answering. The desk shows again when it is back." : plainError(error)}</p>;
+}
 const chip = (on: boolean) => `min-h-11 rounded-lg border px-4 text-sm font-semibold ${on ? "border-sky-700 bg-sky-700 text-white"
   : "border-line"}`;
 
@@ -47,7 +54,7 @@ export function DeskPage() {
         <p className="text-xs text-muted">PAPER only: a real account&apos;s trade goes to its paper twin. Desk trades are their own
           strategy (&quot;desk&quot;) in every report.</p>
       </div>
-      <ErrorLine error={me.error} />
+      <Problem error={me.error} />
       {admin && <NewOrder />}
       {admin && <Orders />}
     </div>
@@ -99,7 +106,8 @@ function NewOrder() {
         <div>
           <p className="mb-1 text-xs text-muted">Strike (around ATM{quote.data ? `, spot ${quote.data.spot.toFixed(2)}` : ""}; refreshed
             every 3 s)</p>
-          {quote.error ? <p className="text-sm text-down">{(quote.error as Error).message}</p> : !quote.data ? <p className="text-sm text-muted">Loading…</p> : (
+          {quote.error ? <p className="text-sm text-down">{serviceDown(quote.error) ? "The trading service is not answering."
+            : plainError(quote.error)}</p> : !quote.data ? <p className="text-sm text-muted">Loading…</p> : (
             <div className="flex flex-col gap-1">
               {quote.data.candidates.map((c) => (
                 <label key={c.symbol} className={`flex flex-wrap items-center gap-2 rounded-lg border px-3 py-2 text-sm ${picked === c.symbol
@@ -141,7 +149,7 @@ function NewOrder() {
               <button type="button" className="text-sky-700 underline" onClick={() => setChosen(new Set())}>none</button>
             </span>
           </div>
-          {accounts.error ? <ErrorLine error={accounts.error} /> : (
+          {accounts.error ? <Problem error={accounts.error} /> : (
             <div className="grid gap-2 md:grid-cols-2">
               {byTenant.map(([tenant, list]) => (
                 <div key={tenant} className="rounded-lg border border-line p-2">
@@ -160,7 +168,7 @@ function NewOrder() {
         </div>
         <input className={field} placeholder="Reason (audited, shown in each account's history)" value={reason} maxLength={300}
           onChange={(e) => setReason(e.target.value)} aria-label="Reason" />
-        {preview.error && <p className="text-sm text-down">{(preview.error as Error).message}</p>}
+        {preview.error && <p className="text-sm text-down">{plainError(preview.error)}</p>}
         <Big kind="primary" disabled={!ready || preview.isPending} onClick={() => preview.mutate()}>
           {preview.isPending ? "Working it out…" : "Preview"}</Big>
       </div>
@@ -219,7 +227,7 @@ function SendSheet({ preview, body, onClose, onSent }: { preview: Preview; body:
           {preview.depthWarning && <p className="text-sm font-semibold text-warn">{preview.depthWarning}</p>}
           <input className={`${field} uppercase`} placeholder={`Type ${phrase}`} autoCapitalize="characters" autoCorrect="off"
             value={typed} onChange={(e) => setTyped(e.target.value)} aria-label={`Type ${phrase}`} />
-          {send.error && <p className="text-sm text-down">{(send.error as Error).message}</p>}
+          {send.error && <p className="text-sm text-down">{plainError(send.error)}</p>}
           <Big kind="primary" disabled={ok.length === 0 || typed.trim().toUpperCase() !== phrase || send.isPending}
             onClick={() => { if (!sending.current) { sending.current = true; send.mutate(); } }}>
             {send.isPending ? "Sending…" : `Send to ${ok.length} paper book${ok.length === 1 ? "" : "s"}`}</Big>
@@ -237,7 +245,7 @@ function Orders() {
   return (
     <Card>
       <h2 className="mb-2 text-base font-semibold">Today&apos;s desk orders</h2>
-      <ErrorLine error={orders.error} />
+      <Problem error={orders.error} />
       {!orders.data ? <p className="text-sm text-muted">Loading…</p> : orders.data.length === 0
         ? <p className="text-sm text-muted">None today.</p> : (
         <div className="flex flex-col gap-3">
@@ -302,7 +310,7 @@ function ExitSheet({ order, onClose, onDone }: { order: DeskOrder; onClose: () =
             onChange={(e) => setReason(e.target.value)} aria-label="Reason" />
           <input className={`${field} uppercase`} placeholder="Type EXIT" autoCapitalize="characters" autoCorrect="off" value={typed}
             onChange={(e) => setTyped(e.target.value)} aria-label="Type EXIT" />
-          {exit.error && <p className="text-sm text-down">{(exit.error as Error).message}</p>}
+          {exit.error && <p className="text-sm text-down">{plainError(exit.error)}</p>}
           <Big kind="danger" disabled={typed.trim().toUpperCase() !== "EXIT" || reason.trim().length < 3 || exit.isPending}
             onClick={() => { if (!sending.current) { sending.current = true; exit.mutate(); } }}>
             {exit.isPending ? "Exiting…" : "Exit all holders"}</Big>

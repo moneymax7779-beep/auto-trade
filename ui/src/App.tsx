@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { type ComponentType, lazy, Suspense } from "react";
+import { type ComponentType, lazy, Suspense, useEffect, useRef, useState } from "react";
 import { Navigate, NavLink, Route, Routes, useLocation } from "react-router";
 import { get, type ExecMe, type ExecutionAccount } from "./api";
 import { MobileNav, type NavItem } from "./components/MobileNav";
@@ -85,8 +85,65 @@ const MEMBER_NAV: readonly NavItem[] = [
   ["/settings", "Settings"],
 ];
 
+/**
+ * The operator's desktop bar (23 Nov 2026: eleven pages and the admin ones no longer fitted, and those scrolled off the
+ * edge were hidden): the daily pages stay in the bar, the rest go under More, with the platform admin's pages under it.
+ * The phone menu (MobileNav) keeps the whole list.
+ */
+const BAR_KEEP = new Set(["/live", "/index/NIFTY", "/index/SENSEX", "/index/BANKNIFTY", "/accounts", "/household"]);
+const BAR_NAV = NAV.filter(([to]) => BAR_KEEP.has(to));
+/** Below the xl width (1280 px) these leave the bar for More too, so nothing is ever cut off at the edge (with the
+ * workspace selector the whole bar needs about 1,180 px). */
+const BAR_WIDE_ONLY = new Set(["/index/BANKNIFTY", "/accounts", "/household"]);
+const MORE_NAV = NAV.filter(([to]) => !BAR_KEEP.has(to));
+
 /** The platform admin's exit desk (20 Nov 2026): every open position of every workspace; shown to them only. */
-const ADMIN_NAV: readonly NavItem[] = [["/admin/positions", "Open positions"], ["/admin/desk", "Desk"]];
+// "User activity" is the Activity panel on the Family page (23 Nov 2026: "why I am unable to see the Users login sessions":
+// it was there, below the workspaces, and easy to miss)
+const ADMIN_NAV: readonly NavItem[] = [["/admin/positions", "Open positions"], ["/admin/desk", "Desk"],
+  ["/household#activity", "User activity"]];
+
+/** The pages not in the bar, in one menu beside it (sections: the rest of the pages, Admin); closes on a pick, a click
+ * outside or Escape. */
+function MoreMenu({ path, sections }: { path: string;
+  sections: { title?: string; items: readonly NavItem[]; narrowOnly?: boolean }[] }) {
+  const [open, setOpen] = useState(false);
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => setOpen(false), [path]);
+  useEffect(() => {
+    if (!open) return;
+    const outside = (e: MouseEvent) => { if (box.current && !box.current.contains(e.target as Node)) setOpen(false); };
+    const escape = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", outside);
+    document.addEventListener("keydown", escape);
+    return () => { document.removeEventListener("mousedown", outside); document.removeEventListener("keydown", escape); };
+  }, [open]);
+  // a narrow-only section's page shows in the button only below xl (above it the bar shows it)
+  const items = sections.filter((x) => !x.narrowOnly).flatMap((x) => x.items);
+  const current = items.find(([to]) => !to.includes("#") && (path === to || path.startsWith(`${to}/`)));
+  return (
+    <div ref={box} className="relative hidden shrink-0 md:block">
+      <button type="button" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((o) => !o)}
+        className={`whitespace-nowrap rounded px-3 py-1.5 text-sm ${current ? "bg-panel-2 font-semibold" : "text-muted hover:text-text"}`}>
+        {current ? current[1] : "More"} ▾</button>
+      {open && (
+        <div role="menu" className="absolute right-0 z-20 mt-1 min-w-48 rounded-lg border border-line bg-panel p-1 shadow-lg">
+          {sections.map((section, i) => (
+            <div key={i} className={`${section.narrowOnly ? "xl:hidden " : ""}${i > 0 && !sections[i - 1].narrowOnly
+              ? "mt-1 border-t border-line pt-1" : i > 0 ? "mt-1 border-t border-line pt-1 xl:mt-0 xl:border-t-0 xl:pt-0" : ""}`}>
+              {section.title && <p className="px-3 pb-1 pt-1 text-[11px] font-semibold uppercase tracking-wide text-muted">{section.title}</p>}
+              {section.items.map(([to, label]) => (
+                <NavLink key={to} to={to} role="menuitem"
+                  className={() => `block whitespace-nowrap rounded px-3 py-2 text-sm ${current?.[0] === to ? "bg-panel-2 font-semibold"
+                    : "hover:bg-panel-2"}`}>{label}</NavLink>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 /** The phone's bottom tabs (mobile phase 0); every other menu item is under More. "/index" covers the three charts. */
 // Phase 1: Home, Positions, Chart, Ledger for everyone; the rest of each menu (Overview, Accounts, Today, Brokers...) under More.
@@ -105,7 +162,10 @@ export function App() {
   // fails closed: if /api/me cannot be read, the member's menu (the server refuses the rest anyway)
   const member = !me.data || (me.data.mode === "oidc" && !me.data.operator);
   // the exit desk is the platform admin's (the server refuses everyone else too)
-  const nav = member ? MEMBER_NAV : execMe.data?.admin ? [...NAV, ...ADMIN_NAV] : NAV;
+  const nav = member ? MEMBER_NAV : NAV;
+  // the platform admin's pages sit in one Admin menu outside the scrolling bar (23 Nov 2026: with them in the bar it no
+  // longer fitted, "Open positions" wrapped and the bar pushed the page sideways)
+  const admin = !member && execMe.data?.admin === true;
   return (
     <WorkspaceProvider>
     <div className="min-h-full">
@@ -116,15 +176,19 @@ export function App() {
             <MoneyBadge />
           </div>
           {/* below md the menu is the bottom tab bar and its More sheet (MobileNav) */}
-          <nav className="hidden min-w-0 gap-1 overflow-x-auto md:flex">
-            {nav.map(([to, label]) => (
+          <nav className="hidden min-w-0 flex-1 gap-1 overflow-x-auto md:flex">
+            {(member ? nav : BAR_NAV).map(([to, label]) => (
               <NavLink key={to} to={to}
-                className={({ isActive }) => `rounded px-3 py-1.5 text-sm ${isActive ? "bg-panel-2 font-semibold" : "text-muted hover:text-text"}`}>
+                className={({ isActive }) => `shrink-0 whitespace-nowrap rounded px-3 py-1.5 text-sm ${!member && BAR_WIDE_ONLY.has(to)
+                  ? "hidden xl:block " : ""}${isActive ? "bg-panel-2 font-semibold" : "text-muted hover:text-text"}`}>
                 {label}
               </NavLink>
             ))}
           </nav>
-          <div className="hidden items-center gap-3 md:ml-auto md:flex">
+          {!member && <MoreMenu path={location.pathname} sections={[
+            { items: BAR_NAV.filter(([to]) => BAR_WIDE_ONLY.has(to)), narrowOnly: true }, { items: MORE_NAV },
+            ...(admin ? [{ title: "Admin", items: ADMIN_NAV }] : [])]} />}
+          <div className="hidden shrink-0 items-center gap-3 md:flex">
             <WorkspaceSwitcher />
             <SignedIn />
           </div>
@@ -181,7 +245,7 @@ export function App() {
         </PageBoundary>
       </main>
       <AppUpdate />
-      <MobileNav tabs={member ? MEMBER_TABS : TABS} nav={nav} more={PHONE_MORE} extra={<><WorkspaceSwitcher /><SignedIn /></>} />
+      <MobileNav tabs={member ? MEMBER_TABS : TABS} nav={admin ? [...nav, ...ADMIN_NAV] : nav} more={PHONE_MORE} extra={<><WorkspaceSwitcher /><SignedIn /></>} />
     </div>
     </WorkspaceProvider>
   );
