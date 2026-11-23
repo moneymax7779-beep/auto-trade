@@ -180,6 +180,23 @@ class FamilyMembersIT {
         // strategies she can take: what the shared group publishes; never the owner's own subscriptions
         decide("oi-burst-cross", "d1");
         assertThat(admin.strategyIds("mum")).contains("oi-burst-cross").doesNotContain("owner-only");
+        // user 23 Nov 2026: a strategy a deploy added (in the live PAPER session, no signal yet) is offered to whoever may
+        // follow the live set, not to a tenant nobody shared it with; the latest day's set counts, SIGNAL-/SHADOW- do not
+        jdbc.update("insert into trade.session (account, mode, session_date, feed, strategy_id, strategy_hash, configs, "
+                + "code_version, status) values ('PAPER-1', 'PAPER_LIVE', ?, 'it', 'old-one', 'sha256:it', '{}'::jsonb, 'it', "
+                + "'DONE'), ('PAPER-1', 'PAPER_LIVE', ?, 'it', 'oi-burst-cross+just-deployed', 'sha256:it', '{}'::jsonb, 'it', "
+                + "'RUNNING'), ('SHADOW-1', 'PAPER_LIVE', ?, 'it', 'shadow-only', 'sha256:it', '{}'::jsonb, 'it', 'RUNNING')",
+                DAY.minusDays(1), DAY, DAY);
+        try {
+            assertThat(admin.strategyIds("mum")).contains("just-deployed", "oi-burst-cross")
+                    .doesNotContain("old-one", "shadow-only", "owner-only");
+            assertThat(admin.strategyIds("stranger")).doesNotContain("just-deployed");
+            jdbc.update("insert into acct.strategy_off (strategy, changed_by) values ('just-deployed', 'it')");
+            assertThat(admin.strategyIds("mum")).as("OFF is never offered").doesNotContain("just-deployed");
+        } finally {
+            jdbc.update("delete from acct.strategy_off");
+            jdbc.update("delete from trade.session where account in ('PAPER-1', 'SHADOW-1')");
+        }
 
         // the fan-out: one batch per entitled tenant, one intent per subscribed account; the stranger gets nothing
         new FanOut(dataSource).fanOut(group, DAY);

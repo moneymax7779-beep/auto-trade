@@ -103,6 +103,26 @@ public final class LiveStrategies {
         return List.copyOf(out);
     }
 
+    /**
+     * The strategies the live PAPER sessions run: every primary PAPER_LIVE session (not SIGNAL-*, not SHADOW-*) of the
+     * latest day with one (trade.session.strategy_id is "a+b+c"). Before the day's session starts, it is the last day's
+     * set; a strategy added by a deploy shows from its first live session.
+     */
+    public Set<String> running() {
+        TreeSet<String> out = new TreeSet<>();
+        for (String ids : jdbc.queryForList("select strategy_id from trade.session where mode = 'PAPER_LIVE' and account "
+                + "not like 'SIGNAL-%' and account not like 'SHADOW-%' and session_date = (select max(session_date) from "
+                + "trade.session where mode = 'PAPER_LIVE' and account not like 'SIGNAL-%' and account not like 'SHADOW-%')",
+                String.class)) {
+            for (String id : ids == null ? new String[0] : ids.split("\\+")) {
+                if (!id.isBlank()) {
+                    out.add(id.trim());
+                }
+            }
+        }
+        return java.util.Collections.unmodifiableSortedSet(out);
+    }
+
     // ------------------------------------------------------------------------------------------- the OFF switch (V35)
 
     /** The strategies the owner turned OFF (V35), sorted: no new entry or add on any paper or LIVE account. */
