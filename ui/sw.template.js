@@ -1,5 +1,8 @@
 // auto-trade service worker (mobile phase 4, 17 Nov 2026). Written to dist/sw.js at build time with the build's id, so
-// every deploy is a new worker and the app offers "Update ready".
+// every deploy is a new worker. 23 Nov 2026: it takes over at once (skipWaiting): pages are network first and the code's
+// file names carry a content hash, so nothing stale is served by doing so; the app shows "A new version is ready" only
+// when the open page's own code is older than the deployed build (it asks the worker which build it is). Before, every
+// deploy left a waiting worker and the banner came back on every load until Reload was tapped in that browser.
 // - /api/** and anything not GET: never touched (trading data is never served from a cache)
 // - /assets/** (file names carry a content hash): cache first, kept until the next build's worker clears old caches
 // - pages: network first; the saved shell only when the network fails (the app then shows its own "not updated" times)
@@ -8,6 +11,7 @@ const CACHE = `autotrade-${BUILD}`;
 const PRECACHE = __PRECACHE__;   // the build's entry script and stylesheet (vite.config.ts writes them in)
 
 self.addEventListener("install", (event) => {
+  self.skipWaiting();
   event.waitUntil(caches.open(CACHE).then((c) => c.addAll(["/icons/icon-192.png", ...PRECACHE])).catch(() => undefined));
 });
 
@@ -18,6 +22,8 @@ self.addEventListener("activate", (event) => {
 
 self.addEventListener("message", (event) => {
   if (event.data === "SKIP_WAITING") self.skipWaiting();
+  // the build this worker serves: a page whose entry script is not in it runs older code than the deployed build
+  if (event.data === "BUILD?" && event.source) event.source.postMessage({ type: "BUILD", build: BUILD, precache: PRECACHE });
 });
 
 self.addEventListener("fetch", (event) => {
