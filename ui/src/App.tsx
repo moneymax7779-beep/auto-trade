@@ -103,11 +103,16 @@ const MORE_NAV = NAV.filter(([to]) => !BAR_KEEP.has(to));
 const ADMIN_NAV: readonly NavItem[] = [["/admin/positions", "Open positions"], ["/admin/desk", "Desk"],
   ["/household#activity", "User activity"]];
 
-/** The pages not in the bar, in one menu beside it (sections: the rest of the pages, Admin); closes on a pick, a click
- * outside or Escape. */
+/**
+ * The pages not in the bar, in one list behind a button (a disclosure, not an ARIA menu: Tab moves through its links,
+ * Escape or a click outside closes it); sections: the rest of the pages, Admin. Review 23 Nov 2026: a link to the same page
+ * with another #part (User activity on the Family page) left it open and did not scroll; below xl the pages moved out of
+ * the bar were not named on the button.
+ */
 function MoreMenu({ path, sections }: { path: string;
   sections: { title?: string; items: readonly NavItem[]; narrowOnly?: boolean }[] }) {
   const [open, setOpen] = useState(false);
+  const wide = useWide();
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => setOpen(false), [path]);
   useEffect(() => {
@@ -118,22 +123,27 @@ function MoreMenu({ path, sections }: { path: string;
     document.addEventListener("keydown", escape);
     return () => { document.removeEventListener("mousedown", outside); document.removeEventListener("keydown", escape); };
   }, [open]);
-  // a narrow-only section's page shows in the button only below xl (above it the bar shows it)
-  const items = sections.filter((x) => !x.narrowOnly).flatMap((x) => x.items);
+  // a narrow-only section's pages are in the bar from xl up: named on the button only below it
+  const items = sections.filter((x) => !x.narrowOnly || !wide).flatMap((x) => x.items);
   const current = items.find(([to]) => !to.includes("#") && (path === to || path.startsWith(`${to}/`)));
+  const pick = (to: string) => {
+    setOpen(false);
+    const [page, part] = to.split("#");
+    if (part && page === path) document.getElementById(part)?.scrollIntoView({ block: "start" });
+  };
   return (
     <div ref={box} className="relative hidden shrink-0 md:block">
-      <button type="button" aria-haspopup="menu" aria-expanded={open} onClick={() => setOpen((o) => !o)}
+      <button type="button" aria-expanded={open} aria-controls="more-pages" onClick={() => setOpen((o) => !o)}
         className={`whitespace-nowrap rounded px-3 py-1.5 text-sm ${current ? "bg-panel-2 font-semibold" : "text-muted hover:text-text"}`}>
         {current ? current[1] : "More"} ▾</button>
       {open && (
-        <div role="menu" className="absolute right-0 z-20 mt-1 min-w-48 rounded-lg border border-line bg-panel p-1 shadow-lg">
+        <div id="more-pages" className="absolute right-0 z-20 mt-1 min-w-48 rounded-lg border border-line bg-panel p-1 shadow-lg">
           {sections.map((section, i) => (
             <div key={i} className={`${section.narrowOnly ? "xl:hidden " : ""}${i > 0 && !sections[i - 1].narrowOnly
               ? "mt-1 border-t border-line pt-1" : i > 0 ? "mt-1 border-t border-line pt-1 xl:mt-0 xl:border-t-0 xl:pt-0" : ""}`}>
               {section.title && <p className="px-3 pb-1 pt-1 text-[11px] font-semibold uppercase tracking-wide text-muted">{section.title}</p>}
               {section.items.map(([to, label]) => (
-                <NavLink key={to} to={to} role="menuitem"
+                <NavLink key={to} to={to} onClick={() => pick(to)} aria-current={current?.[0] === to ? "page" : undefined}
                   className={() => `block whitespace-nowrap rounded px-3 py-2 text-sm ${current?.[0] === to ? "bg-panel-2 font-semibold"
                     : "hover:bg-panel-2"}`}>{label}</NavLink>
               ))}
@@ -143,6 +153,19 @@ function MoreMenu({ path, sections }: { path: string;
       )}
     </div>
   );
+}
+
+/** True from the xl width (1280 px) up, following the window. */
+function useWide(): boolean {
+  const query = "(min-width: 1280px)";
+  const [wide, setWide] = useState(() => typeof window !== "undefined" && window.matchMedia(query).matches);
+  useEffect(() => {
+    const m = window.matchMedia(query);
+    const on = () => setWide(m.matches);
+    m.addEventListener("change", on);
+    return () => m.removeEventListener("change", on);
+  }, []);
+  return wide;
 }
 
 /** The phone's bottom tabs (mobile phase 0); every other menu item is under More. "/index" covers the three charts. */

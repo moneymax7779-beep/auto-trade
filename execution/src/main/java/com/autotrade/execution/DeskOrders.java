@@ -62,6 +62,8 @@ public final class DeskOrders {
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
     /** The advisory lock class of desk orders (one written at a time). */
     private static final int LOCK_CLASS = 7104;
+    /** The advisory lock class of one desk order's exits (one holder's exit written at a time per order). */
+    private static final int EXIT_LOCK_CLASS = 7105;
 
     public enum Sizing { PCT_EQUITY, FIXED_LOTS }
 
@@ -237,10 +239,19 @@ public final class DeskOrders {
         return CapitalPolicy.equity(a, accounts.capitalMovements(a.id(), day), realised == null ? 0 : realised);
     }
 
+    /**
+     * The account's desk premium: open desk positions at their entry, and desk buys written but not yet run at their
+     * order's price (review 23 Nov 2026: only the positions counted, so a NIFTY order and a SENSEX order sent before the
+     * first ran could each take the whole cap).
+     */
     private double deskOpen(long accountId) {
         Double open = jdbc.queryForObject("select coalesce(sum(quantity_open * average_entry), 0) from exec.position where "
                 + "broker_account_id = ? and strategy_id = ? and status <> 'CLOSED'", Double.class, accountId, STRATEGY);
-        return open == null ? 0 : open;
+        Double waiting = jdbc.queryForObject("select coalesce(sum(i.quantity * d.reference_price), 0) from exec.trade_intent i "
+                + "join exec.trade_batch b on b.id = i.trade_batch_id join exec.signal_decision d on d.id = b.signal_decision_id "
+                + "where i.broker_account_id = ? and i.strategy_id = ? and i.action = 'ENTER' and i.state in ('CREATED', "
+                + "'VALIDATED', 'EXECUTING')", Double.class, accountId, STRATEGY);
+        return (open == null ? 0 : open) + (waiting == null ? 0 : waiting);
     }
 
     private void check(Spec s, List<Long> accountIds, LocalDate day) {
@@ -425,25 +436,8 @@ public final class DeskOrders {
                 + "and p.quantity_open > 0 order by p.id", order)) {
             long accountId = ((Number) p.get("broker_account_id")).longValue();
             String name = (String) p.get("display_name");
-            boolean waiting = !jdbc.queryForList("select 1 from exec.trade_intent where broker_account_id = ? and strategy_id "
-                    + "= ? and underlying = ? and action = 'EXIT' and state = 'CREATED'", Integer.class, accountId, STRATEGY,
-                    u).isEmpty();
-            if (waiting) {
-                lines.add(name + ": its exit is already waiting for its turn");
-                continue;
-            }
-            // an exit refused on its turn (no price) is sent again, at most every RETRY_EVERY, each attempt its own key
             long positionId = ((Number) p.get("id")).longValue();
             String prefix = "DESK-EXIT:" + order + ":" + accountId + ":" + positionId + ":";
-            Integer attempts = jdbc.queryForObject("select count(*) from exec.signal_decision where idempotency_key like ?",
-                    Integer.class, prefix + "%");
-            boolean recent = Boolean.TRUE.equals(jdbc.queryForObject("select exists (select 1 from exec.signal_decision where "
-                    + "idempotency_key like ? and created_at > now() - make_interval(secs => ?))", Boolean.class, prefix + "%",
-                    (double) RETRY_EVERY.toSeconds()));
-            if (recent) {
-                lines.add(name + ": an exit was sent less than " + RETRY_EVERY.toSeconds() + " s ago");
-                continue;
-            }
             if (bid == null) {
                 lines.add(name + ": no bid for " + symbol + " in the last " + BID_MAX_AGE.toSeconds() + " s: tried again "
                         + "on the next watch");
@@ -451,13 +445,33 @@ public final class DeskOrders {
             }
             BrokerAccount a = accounts.byId(accountId).orElseThrow();
             long quantity = ((Number) p.get("quantity_open")).longValue();
-            String idem = prefix + ((attempts == null ? 0 : attempts) + 1);
             Map<String, Double> context = new LinkedHashMap<>();
             context.put("quantity", (double) quantity);
             context.put("desk_order", (double) order);
             long group = groupOf.applyAsLong(a);
             Instant now = clock.instant();
-            transactions.executeWithoutResult(tx -> {
+            // review 23 Nov 2026: the owner's Exit and the watcher's stop at the same moment both passed the checks and
+            // wrote the same key (the second write failed: a 500 on Exit). One holder's exit is now decided and written
+            // under the order's lock, the checks again inside it
+            String said = transactions.execute(tx -> {
+                jdbc.query("select pg_advisory_xact_lock(?, ?)", (org.springframework.jdbc.core.RowCallbackHandler) rs -> { },
+                        EXIT_LOCK_CLASS, (int) order);
+                boolean waiting = !jdbc.queryForList("select 1 from exec.trade_intent where broker_account_id = ? and "
+                        + "strategy_id = ? and underlying = ? and action = 'EXIT' and state = 'CREATED'", Integer.class,
+                        accountId, STRATEGY, u).isEmpty();
+                if (waiting) {
+                    return name + ": its exit is already waiting for its turn";
+                }
+                // an exit refused on its turn (no price) is sent again, at most every RETRY_EVERY, each attempt its own key
+                boolean recent = Boolean.TRUE.equals(jdbc.queryForObject("select exists (select 1 from exec.signal_decision "
+                        + "where idempotency_key like ? and created_at > now() - make_interval(secs => ?))", Boolean.class,
+                        prefix + "%", (double) RETRY_EVERY.toSeconds()));
+                if (recent) {
+                    return name + ": an exit was sent less than " + RETRY_EVERY.toSeconds() + " s ago";
+                }
+                Integer attempts = jdbc.queryForObject("select count(*) from exec.signal_decision where idempotency_key like ?",
+                        Integer.class, prefix + "%");
+                String idem = prefix + ((attempts == null ? 0 : attempts) + 1);
                 new SignalDecisionStore(dataSource).insert(new SignalDecision(group, 0, day, now, STRATEGY, 0, u,
                         SignalDecision.Action.EXIT, side, null, "DESK", reason, token, InstrumentKeys.normalize(null, token),
                         symbol, lotSize, bid, Double.NaN, Double.NaN, (int) Math.max(1, quantity / lotSize), idem, context));
@@ -471,7 +485,12 @@ public final class DeskOrders {
                         + "quantity, state, idempotency_key) values (?, ?, ?, ?, 'PAPER', ?, 0, ?, 'EXIT', ?, ?, ?, ?, 'CREATED', "
                         + "?) on conflict do nothing", a.tenantId(), batch, a.id(), a.brokerType().name(), STRATEGY, u, side,
                         token, symbol, quantity, idem + ":" + a.id());
+                return null;
             });
+            if (said != null) {
+                lines.add(said);
+                continue;
+            }
             kills.audit(a, actor, "DESK_EXIT", Map.of("desk_order", order, "symbol", symbol, "quantity", quantity, "bid", bid,
                     "reason", reason));
             lines.add(name + ": exit sent at bid " + bid);

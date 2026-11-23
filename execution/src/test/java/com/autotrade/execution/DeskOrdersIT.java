@@ -98,6 +98,25 @@ class DeskOrdersIT {
         }
     }
 
+    /** SENSEX strikes around 80,050 (lot 20), PE ask 300: one lot Rs 6,000. */
+    private static final double[] SX = {79900, 80000, 80100, 80200};
+
+    private static long sxToken(double strike) {
+        return 900_000 + (long) (strike - 79_000) / 100;
+    }
+
+    private static void sensexMarket(Instant now) {
+        jdbc.update("insert into md.index_tick (manifest_id, session_date, underlying, recv_ts, src_seq, price) values "
+                + "(1, ?, 'SENSEX', ?, 1, ?)", DAY, Timestamp.from(now.minusSeconds(2)), 80_050.0);
+        for (double strike : SX) {
+            jdbc.update("insert into md.option_tick (manifest_id, session_date, underlying, recv_ts, src_seq, instrument_token, "
+                    + "symbol, expiry, strike, option_type, lot_size, ltp, bid_px, bid_qty, bid_orders, ask_px, ask_qty, "
+                    + "ask_orders, analytics_complete, depth_complete) values (1, ?, 'SENSEX', ?, 1, ?, ?, ?, ?, 'PE', 20, 299.5, "
+                    + "'{299.0}', '{2000}', '{3}', '{300.0}', '{2000}', '{3}', false, true)", DAY, Timestamp.from(now.minusSeconds(3)),
+                    sxToken(strike), "SENSEX " + (int) strike + " PE", DAY.plusDays(3), strike);
+        }
+    }
+
     @AfterAll
     static void stop() {
         dataSource.close();
@@ -115,6 +134,7 @@ class DeskOrdersIT {
             quote(strike, "PE", now.minusSeconds(3), 70.00, 70.20);
             quote(strike, "CE", now.minusSeconds(3), 80.00, 80.20);
         }
+        sensexMarket(now);
     }
 
     private static void quote(double strike, String side, Instant at, double bid, double ask) {
@@ -323,6 +343,63 @@ class DeskOrdersIT {
         assertThat(intentState(intent)).as("a desk PAPER buy is not refused for the day's switch").isEqualTo("EXECUTED");
         assertThat(jdbc.queryForObject("select count(*) from exec.trade_intent where broker_account_id = ? and strategy_id = "
                 + "'desk'", Integer.class, real.id())).isZero();
+    }
+
+    /** Review 23 Nov 2026: a desk buy not yet run counts against the cap, so a second index cannot take the cap again. */
+    @Test
+    void aBuyNotYetRunCountsAgainstTheDeskCapOnAnotherIndex() {
+        Group g = group();
+        BrokerAccount a = follower(g, "PAPER-CAP", BrokerType.PAPER, 200_000, true);
+        // 8 lots of NIFTY 23150 PE at 70.20 = Rs 36,504 of the Rs 40,000 cap, not yet run
+        desk().place(spec(DeskOrders.Sizing.FIXED_LOTS, 8), List.of(a.id()), "satya", "cap-1", DAY, GROUP_OF);
+        DeskOrders.Target sensex = desk().preview(new DeskOrders.Spec("SENSEX", "PE", "SENSEX 80000 PE",
+                DeskOrders.Sizing.FIXED_LOTS, 2, 25, null, "second index"), List.of(a.id()), DAY, GROUP_OF).targets().getFirst();
+        assertThat(sensex.deskOpen()).isEqualTo(36_504.0);
+        assertThat(sensex.refusal()).as("Rs 3,496 left, one SENSEX lot is Rs 6,000").contains("the desk cap");
+    }
+
+    /** Review 23 Nov 2026: the owner's Exit and the watcher's stop at once: one exit written, no error for either. */
+    @Test
+    void theOwnersExitAndTheStopAtOnceWriteOneExit() throws Exception {
+        Group g = group();
+        BrokerAccount a = follower(g, "PAPER-RACE", BrokerType.PAPER, 200_000, true);
+        DeskOrders.Placed placed = desk().place(spec(DeskOrders.Sizing.PCT_EQUITY, 5), List.of(a.id()), "satya", "race",
+                DAY, GROUP_OF);
+        paper().run(a, g.group(), DAY);
+        quote(23150, "PE", MORNING.instant().minusSeconds(1), 52.00, 52.40);          // at the stop
+        java.util.concurrent.ExecutorService two = java.util.concurrent.Executors.newFixedThreadPool(2);
+        java.util.concurrent.CountDownLatch go = new java.util.concurrent.CountDownLatch(1);
+        var owner = two.submit(() -> { go.await(); return desk().exit(placed.orderId(), "satya", "owner out", DAY, GROUP_OF); });
+        var watch = two.submit(() -> { go.await(); return desk().watch(DAY, GROUP_OF); });
+        go.countDown();
+        owner.get(30, java.util.concurrent.TimeUnit.SECONDS);
+        watch.get(30, java.util.concurrent.TimeUnit.SECONDS);
+        two.shutdown();
+        assertThat(jdbc.queryForObject("select count(*) from exec.trade_intent where broker_account_id = ? and strategy_id = "
+                + "'desk' and action = 'EXIT'", Integer.class, a.id())).isEqualTo(1);
+        paper().run(a, g.group(), DAY);
+        assertThat(jdbc.queryForObject("select status from exec.position where broker_account_id = ?", String.class, a.id()))
+                .isEqualTo("CLOSED");
+    }
+
+    /** No fresh bid: nothing is sent, the order stays exiting, and the watch sends it once a bid comes. */
+    @Test
+    void withoutABidTheExitWaitsAndTheWatchSendsItLater() {
+        Group g = group();
+        BrokerAccount a = follower(g, "PAPER-NOBID", BrokerType.PAPER, 200_000, true);
+        DeskOrders.Placed placed = desk().place(spec(DeskOrders.Sizing.PCT_EQUITY, 5), List.of(a.id()), "satya", "nobid",
+                DAY, GROUP_OF);
+        paper().run(a, g.group(), DAY);
+        Clock later = Clock.offset(MORNING, java.time.Duration.ofMinutes(2));            // the last quote is now 2 min old
+        DeskOrders stale = new DeskOrders(dataSource).withClock(later);
+        assertThat(stale.exit(placed.orderId(), "satya", "out", DAY, GROUP_OF)).singleElement().asString()
+                .contains("no bid for NIFTY 23150 PE");
+        assertThat(jdbc.queryForObject("select count(*) from exec.trade_intent where broker_account_id = ? and action = 'EXIT'",
+                Integer.class, a.id())).isZero();
+        quote(23150, "PE", later.instant().minusSeconds(1), 71.00, 71.20);
+        assertThat(stale.watch(DAY, GROUP_OF)).contains(placed.orderId());
+        assertThat(jdbc.queryForObject("select count(*) from exec.trade_intent where broker_account_id = ? and action = 'EXIT'",
+                Integer.class, a.id())).isEqualTo(1);
     }
 
     @Test

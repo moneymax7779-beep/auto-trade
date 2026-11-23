@@ -198,6 +198,13 @@ function SendSheet({ preview, body, onClose, onSent }: { preview: Preview; body:
           <p className="text-sm">{send.data.repeat ? "Already sent: this is that order. " : ""}Desk order #{send.data.orderId}:{" "}
             {send.data.targets.filter((t) => t.refusal == null).length} paper buy(s) written; each runs on its account&apos;s next
             turn, through its own checks.</p>
+          {/* review 23 Nov 2026: the send checks every account again; one refused now (not in the preview) is said here */}
+          <ul className="text-sm">
+            {send.data.targets.map((t) => (
+              <li key={t.requestedId}>{t.requested}{t.refusal ? <span className="text-down"> · not sent: {t.refusal}</span>
+                : <span className="text-muted"> · {t.lots} lot{t.lots === 1 ? "" : "s"} to {t.account}</span>}</li>
+            ))}
+          </ul>
           <Big onClick={onClose}>Done</Big>
         </div>
       ) : (
