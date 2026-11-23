@@ -238,14 +238,22 @@ class AccountAdminController {
 
     /**
      * Strategy ids a follower can take: those the copy groups its tenant may follow (its own and those shared with it)
-     * have published, and those its own accounts are subscribed to (never another tenant's subscriptions).
+     * have published, and those its own accounts are subscribed to (never another tenant's subscriptions). A tenant that
+     * may follow the live set's group (LIVE-SET) is also offered what the live PAPER sessions run, so a strategy a deploy
+     * added can be chosen from its first session, before its first signal (user 23 Nov 2026: ma-cross-open was missing).
      */
     @GetMapping("/api/execution/strategy-ids")
     List<String> strategyIds(@RequestHeader(value = Access.HEADER, required = false) String subject) {
         Access.User user = access.user(subject);
         Set<String> ids = new LinkedHashSet<>();
+        boolean liveSet = false;
         for (long tenant : user.tenants()) {
             Long[] groups = accounts.followableCopyGroups(tenant).toArray(new Long[0]);
+            if (!liveSet && jdbc.queryForObject("select count(*) from acct.copy_group where id = any(?) and name = 'LIVE-SET'",
+                    Integer.class, (Object) groups) > 0) {
+                liveSet = true;
+                ids.addAll(new com.autotrade.execution.LiveStrategies(jdbc.getDataSource()).running());
+            }
             ids.addAll(jdbc.queryForList("select distinct strategy_id from exec.signal_decision where copy_group_id = any(?) "
                     + "and session_date > current_date - 60 and strategy_id <> '"
                     + com.autotrade.execution.ManualOrders.STRATEGY + "'", String.class, (Object) groups));

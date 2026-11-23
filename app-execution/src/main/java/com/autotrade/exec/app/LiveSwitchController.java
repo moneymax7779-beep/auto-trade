@@ -358,24 +358,9 @@ class LiveSwitchController {
         return out;
     }
 
-    /**
-     * The strategies the live PAPER sessions run: every primary PAPER_LIVE session (not SIGNAL-*, not SHADOW-*) of the
-     * latest day with one (trade.session.strategy_id is "a+b+c"). Before the day's session starts, it is the last day's
-     * set; a strategy added by a deploy shows from its first live session.
-     */
+    /** The strategies the live PAPER sessions run ({@link com.autotrade.execution.LiveStrategies#running}). */
     private java.util.Set<String> running() {
-        java.util.Set<String> out = new java.util.TreeSet<>();
-        for (String ids : jdbc.queryForList("select strategy_id from trade.session where mode = 'PAPER_LIVE' and account "
-                + "not like 'SIGNAL-%' and account not like 'SHADOW-%' and session_date = (select max(session_date) from "
-                + "trade.session where mode = 'PAPER_LIVE' and account not like 'SIGNAL-%' and account not like 'SHADOW-%')",
-                String.class)) {
-            for (String id : ids == null ? new String[0] : ids.split("\\+")) {
-                if (!id.isBlank()) {
-                    out.add(id.trim());
-                }
-            }
-        }
-        return out;
+        return new com.autotrade.execution.LiveStrategies(jdbc.getDataSource()).running();
     }
 
     /** Every strategy that some enabled broker follower account's risk file lets trade LIVE. */
