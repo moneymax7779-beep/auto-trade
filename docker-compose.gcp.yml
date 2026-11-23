@@ -22,6 +22,10 @@ services:
       AUTOTRADE_TRADING_STARTAT: "07:30"
       # review 19 Nov 2026: the proxy signs the user it names to the execution worker (shared secret, root-only .env)
       AUTOTRADE_PROXY_SECRET: ${AUTOTRADE_PROXY_SECRET:?set in .env}
+      # user activity (23 Nov 2026): our own proxies in X-Forwarded-For, so the browser's address is the one to their
+      # left: loopback and private ranges, Google's front ends (35.191.0.0/16, 130.211.0.0/22) and the HTTPS load
+      # balancer's address (zt-https, EXTERNAL_MANAGED)
+      AUTOTRADE_ACTIVITY_TRUSTED_PROXIES: "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,35.191.0.0/16,130.211.0.0/22,::1/128,fc00::/7,${AUTOTRADE_LB_ADDRESS:-136.82.45.194}"
     volumes:
       - ./.local/zt-source.env:/run/zt/runtime.env:ro
 

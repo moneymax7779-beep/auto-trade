@@ -270,6 +270,15 @@ autotrade:
     client-secret: ${AUTOTRADE_AUTH_CLIENT_SECRET:}     # from the environment only, never in a file in the repo
     operator-role: operator
     max-session: 12h                                    # a sign-in ends after this however busy the page is (Keycloak's maximum)
+  # User activity (plan docs/plans/2026-11-23-user-activity-logging-plan.md): sign-ins, browsers, open tabs, time on
+  # screen. On with sign-in (auth mode oidc) unless enabled says otherwise; written by one background thread only.
+  activity:
+    enabled: ${AUTOTRADE_ACTIVITY_ENABLED:}
+    trusted-proxies: ${AUTOTRADE_ACTIVITY_TRUSTED_PROXIES:}   # blank: loopback, private ranges, Google's front ends
+    idle: 15m                                           # a sign-in with no request this long has ended (IDLE)
+    raw-days: 14                                        # tabs and per-minute rows (the daily totals are kept)
+    login-days: 180
+    ip-days: 30                                         # then the address is cut to /24 (IPv4) or /48 (IPv6)
   source:
     url: ${ZT_SOURCE_URL:jdbc:postgresql://127.0.0.1:5490/trading}
     username: ${ZT_SOURCE_USER:zerotrade}
