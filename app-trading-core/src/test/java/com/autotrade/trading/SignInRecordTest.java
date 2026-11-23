@@ -55,6 +55,34 @@ class SignInRecordTest {
         assertThat(response.getRedirectedUrl()).isEqualTo("http://localhost/index/NIFTY?date=2026-11-20&continue");
     }
 
+    /**
+     * 23 Nov 2026: after a deploy the worker fetched /assets/index-*.js with the session gone, and the sign-in returned to that
+     * file. Only a page a person opened is returned to.
+     */
+    @Test
+    void onlyAPageAPersonOpenedIsReturnedTo() {
+        assertThat(SecurityConfig.pageRequest(req("GET", "/accounts", "navigate", "text/html"))).isTrue();
+        assertThat(SecurityConfig.pageRequest(req("GET", "/index/NIFTY", null, null))).as("an older browser").isTrue();
+        assertThat(SecurityConfig.pageRequest(req("GET", "/assets/index-Gdb_LPPP.js", null, "*/*"))).isFalse();
+        assertThat(SecurityConfig.pageRequest(req("GET", "/assets/index-Gdb_LPPP.js", "no-cors", "*/*"))).isFalse();
+        assertThat(SecurityConfig.pageRequest(req("GET", "/sw.js", "same-origin", "*/*"))).isFalse();
+        assertThat(SecurityConfig.pageRequest(req("GET", "/favicon.ico", "no-cors", "image/*"))).isFalse();
+        assertThat(SecurityConfig.pageRequest(req("GET", "/accounts", "cors", "*/*"))).as("a background fetch").isFalse();
+        assertThat(SecurityConfig.pageRequest(req("GET", "/api/status", "cors", "application/json"))).isFalse();
+        assertThat(SecurityConfig.pageRequest(req("POST", "/accounts", "navigate", "text/html"))).isFalse();
+    }
+
+    private static MockHttpServletRequest req(String method, String path, String mode, String accept) {
+        MockHttpServletRequest r = new MockHttpServletRequest(method, path);
+        if (mode != null) {
+            r.addHeader("Sec-Fetch-Mode", mode);
+        }
+        if (accept != null) {
+            r.addHeader("Accept", accept);
+        }
+        return r;
+    }
+
     @Test
     void withNothingSavedItGoesHomeAndTheSignInIsKeptInTheSession() throws Exception {
         ActivityRecorder on = ActivityRecorder.manual(null, new ActivityProperties(true, null, null, null, null, null),

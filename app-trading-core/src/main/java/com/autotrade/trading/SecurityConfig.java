@@ -100,7 +100,11 @@ class SecurityConfig {
      * again, with a session's decisions and orders, research, replay, config and every POST.
      */
     /** Mobile phase 4: what an installed app's browser loads before (and without) a sign-in. */
-    static final String[] PWA_FILES = {"/manifest.json", "/sw.js", "/icons/*"};
+    static final String[] PWA_FILES = {"/manifest.json", "/sw.js", "/icons/*",
+            // 23 Nov 2026: the built code (content-hashed file names): the worker fetches it after a deploy, often while the
+            // session is gone (a restart ends it); sent to sign in, the sign-in returned to a .js file, and the worker
+            // could keep the sign-in page under the code's name
+            "/assets/*"};
 
     static final String[] MEMBER_CHART_GETS = {"/api/status", "/api/sessions", "/api/sessions/*/positions", "/api/surges",
             "/api/live/ticks", "/api/oi-tape/days"};
@@ -118,9 +122,10 @@ class SecurityConfig {
         ClientRegistrationRepository registrations = registrations(auth);
         OidcClientInitiatedLogoutSuccessHandler logout = new OidcClientInitiatedLogoutSuccessHandler(registrations);
         logout.setPostLogoutRedirectUri("{baseUrl}/");
-        // Only what a person opened in a browser is returned to after sign-in, never a script's API call.
+        // Only what a person opened in a browser is returned to after sign-in, never a script's API call, a file or a
+        // background fetch (23 Nov 2026: a worker's fetch of /assets/index-*.js was returned to after sign-in)
         HttpSessionRequestCache returnTo = new HttpSessionRequestCache();
-        returnTo.setRequestMatcher(request -> "GET".equals(request.getMethod()) && !scriptCall(request));
+        returnTo.setRequestMatcher(SecurityConfig::pageRequest);
         AuthenticationEntryPoint signInAgain = (request, response, e) -> {
             response.setHeader(SIGN_IN_HEADER, "required");
             response.sendError(HttpServletResponse.SC_UNAUTHORIZED);
@@ -168,6 +173,24 @@ class SecurityConfig {
     }
 
     /** An API call from a script (the UI's fetch, curl), not a page or link a person opened in a browser. */
+    /**
+     * A page a person opened (the one to return to after sign-in): a GET that is not a script's API call, not a file (a
+     * last path segment with an extension: code, icons, the manifest, the worker), and, when the browser says how it
+     * fetched (Sec-Fetch-Mode), a navigation.
+     */
+    static boolean pageRequest(HttpServletRequest request) {
+        if (!"GET".equals(request.getMethod()) || scriptCall(request)) {
+            return false;
+        }
+        String path = request.getRequestURI();
+        String last = path.substring(path.lastIndexOf('/') + 1);
+        if (path.startsWith("/assets/") || last.contains(".")) {
+            return false;
+        }
+        String mode = request.getHeader("Sec-Fetch-Mode");
+        return mode == null || "navigate".equals(mode);
+    }
+
     static boolean scriptCall(HttpServletRequest request) {
         String accept = request.getHeader("Accept");
         return request.getRequestURI().startsWith("/api/") && (accept == null || !accept.contains("text/html"));
