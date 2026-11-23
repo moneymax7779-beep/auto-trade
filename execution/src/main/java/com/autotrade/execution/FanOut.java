@@ -30,7 +30,8 @@ import org.springframework.jdbc.core.JdbcTemplate;
  * them).
  * <p>
  * <b>Manual orders</b> ({@link ManualOrders#STRATEGY}, 9 Nov 2026): never fanned out; followers do not copy a trader's
- * BUY CE / BUY PE.
+ * BUY CE / BUY PE. Nor desk orders ({@link DeskOrders#STRATEGY}, 23 Nov 2026): their intents are written for the chosen
+ * accounts only.
  */
 public final class FanOut {
 
@@ -61,6 +62,7 @@ public final class FanOut {
                 + "from exec.signal_decision d join (select g.id, g.tenant_id from acct.copy_group g "
                 + "union select s.copy_group_id, s.tenant_id from acct.copy_group_share s) t on t.id = d.copy_group_id "
                 + "where d.copy_group_id = ? and d.session_date = ? and d.strategy_id <> '" + ManualOrders.STRATEGY + "' "
+                + "and d.strategy_id <> '" + DeskOrders.STRATEGY + "' "
                 + "on conflict (tenant_id, idempotency_key) do nothing", copyGroupId, date);
         // one intent per subscribed, eligible follower
         // the accounts that may take a decision of the group's day (the switch rules of a DAILY_SWITCH entry come after)
@@ -74,7 +76,8 @@ public final class FanOut {
                 + "and (a.mirror_of is null or (d.action = 'EXIT' and exists (select 1 from exec.position hp where "
                 + "hp.broker_account_id = a.id and hp.status <> 'CLOSED'))) "
                 // a trader's manual order is never copied: its own batch and intent are written by ManualOrders
-                + "and d.strategy_id <> '" + ManualOrders.STRATEGY + "' "
+                + "and d.strategy_id <> '" + ManualOrders.STRATEGY + "' and d.strategy_id <> '" + DeskOrders.STRATEGY
+                + "' "
                 + "and a.tenant_id = b.tenant_id "
                 + "and (coalesce(s.mode_override, a.trade_mode) <> 'LIVE' or a.live_trading_enabled) "
                 + "and (d.action = 'EXIT' or s.enabled_at <= d.decided_at "

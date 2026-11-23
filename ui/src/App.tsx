@@ -49,6 +49,7 @@ const BrokerWizard = page(() => import("./mobile/BrokerWizard"), "BrokerWizard")
 const StrategiesScreen = page(() => import("./mobile/StrategiesScreen"), "StrategiesScreen");
 const NotificationsScreen = page(() => import("./mobile/NotificationsScreen"), "NotificationsScreen");
 const AdminPositionsPage = page(() => import("./pages/AdminPositionsPage"), "AdminPositionsPage");
+const DeskPage = page(() => import("./pages/DeskPage"), "DeskPage");
 
 /** Below the md breakpoint "/" opens the phone's Home instead of the desktop's first page. */
 const phone = () => typeof window !== "undefined" && window.matchMedia?.("(max-width: 767px)").matches;
@@ -85,7 +86,7 @@ const MEMBER_NAV: readonly NavItem[] = [
 ];
 
 /** The platform admin's exit desk (20 Nov 2026): every open position of every workspace; shown to them only. */
-const ADMIN_NAV: readonly NavItem[] = [["/admin/positions", "Open positions"]];
+const ADMIN_NAV: readonly NavItem[] = [["/admin/positions", "Open positions"], ["/admin/desk", "Desk"]];
 
 /** The phone's bottom tabs (mobile phase 0); every other menu item is under More. "/index" covers the three charts. */
 // Phase 1: Home, Positions, Chart, Ledger for everyone; the rest of each menu (Overview, Accounts, Today, Brokers...) under More.
@@ -173,6 +174,7 @@ export function App() {
             <Route path="/brokers/add" element={<BrokerWizard />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/admin/positions" element={<AdminPositionsPage />} />
+          <Route path="/admin/desk" element={<DeskPage />} />
         </Routes>
         )}
         </Suspense>

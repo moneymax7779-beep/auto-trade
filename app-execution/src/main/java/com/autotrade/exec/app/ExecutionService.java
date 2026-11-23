@@ -436,6 +436,51 @@ class ExecutionService implements DisposableBean {
         return started().manualGroup(accountId);
     }
 
+    // ------------------------------------------------------------------------------------------------- desk trades (V53)
+
+    /** The served copy group a desk order's paper account is written in (it must follow one this worker serves). */
+    private long deskGroup(com.autotrade.account.BrokerAccount a) {
+        return started().manualGroup(a.id());
+    }
+
+    com.autotrade.execution.ManualOrders.Pick deskQuote(String underlying, String side) {
+        started();
+        return new com.autotrade.execution.DeskOrders(dataSource).quote(underlying, side, day());
+    }
+
+    com.autotrade.execution.DeskOrders.Preview deskPreview(com.autotrade.execution.DeskOrders.Spec spec, List<Long> accounts) {
+        return new com.autotrade.execution.DeskOrders(dataSource).preview(spec, accounts, day(), this::deskGroup);
+    }
+
+    com.autotrade.execution.DeskOrders.Placed deskPlace(com.autotrade.execution.DeskOrders.Spec spec, List<Long> accounts,
+                                                         String actor, String key) {
+        return new com.autotrade.execution.DeskOrders(dataSource).place(spec, accounts, actor, key, day(), this::deskGroup);
+    }
+
+    List<String> deskExit(long order, String actor, String reason) {
+        return new com.autotrade.execution.DeskOrders(dataSource).exit(order, actor, reason, day(), this::deskGroup);
+    }
+
+    List<java.util.Map<String, Object>> deskOrders() {
+        return new com.autotrade.execution.DeskOrders(dataSource).orders(day());
+    }
+
+    /**
+     * Every 5 s while the worker runs: desk orders whose bid reached their stop or target are exited, and what an asked
+     * exit has not yet sold is sent again (DeskOrders.watch). Never stops the worker.
+     */
+    @Scheduled(fixedDelayString = "${autotrade.execution.desk-watch-ms:5000}", initialDelay = 15000)
+    void deskWatch() {
+        if (loop == null) {
+            return;
+        }
+        try {
+            new com.autotrade.execution.DeskOrders(dataSource).watch(day(), this::deskGroup);
+        } catch (RuntimeException e) {
+            log.warn("desk watch: {}", e.getMessage());
+        }
+    }
+
     private ExecutionLoop started() {
         ExecutionLoop current = loop;
         if (current == null) {

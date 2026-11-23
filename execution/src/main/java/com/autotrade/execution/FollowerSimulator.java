@@ -793,7 +793,9 @@ public final class FollowerSimulator {
             // V35 (user 11 Nov 2026): the owner turned the strategy OFF; a signal published before the switch opens nothing
             return reject(p, "STRATEGY_OFF", p.strategyId() + " is turned OFF by the owner (no new entry or add)");
         }
-        String switched = dailySwitchRefusal(day, add);
+        // a desk trade (23 Nov 2026, PAPER only) goes to the paper book the owner chose, whatever the workspace's day is
+        String switched = DeskOrders.STRATEGY.equals(p.strategyId()) && !TradeMode.LIVE.name().equals(p.mode()) ? null
+                : dailySwitchRefusal(day, add);
         if (switched != null) {
             return reject(p, switched.substring(0, switched.indexOf(':')), switched.substring(switched.indexOf(':') + 2));
         }
