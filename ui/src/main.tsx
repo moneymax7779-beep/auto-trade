@@ -5,6 +5,7 @@ import { BrowserRouter } from "react-router";
 import { App } from "./App";
 import "./index.css";
 import { watchErrors } from "./errors";
+import { watchPresence } from "./presence";
 
 watchErrors();
 
@@ -29,6 +30,10 @@ window.fetch = async (input, init) => {
   }
   return response;
 };
+
+// user activity (23 Nov 2026): this tab's time on screen, once a minute, through the browser's own fetch (a hidden tab's
+// beat must not reload it when the sign-in ends)
+watchPresence(nativeFetch);
 
 const queryClient = new QueryClient({ defaultOptions: { queries: { staleTime: 5_000, retry: 1 } } });
 

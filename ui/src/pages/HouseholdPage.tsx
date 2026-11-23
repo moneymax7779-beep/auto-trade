@@ -5,6 +5,7 @@ import { get, postJson, type HouseholdCard } from "../api";
 import { ErrorNote, Loading, Panel, Pnl } from "../components/ui";
 import { useWorkspace } from "../workspace";
 import { MembersPanel } from "./MembersPanel";
+import { ActivityPanel } from "../components/ActivityPanels";
 
 // Household (trader workspaces, 7 Nov 2026): the platform admin watches every family workspace on one screen without
 // operating any of them. Stop buttons (PAPER, kill) work without the member's grant; anything else opens their workspace.
@@ -85,6 +86,7 @@ export function HouseholdPage() {
           </div>
         )}
       </Panel>
+      <ActivityPanel />
       <MembersPanel onDone={(text, ok) => setMessage({ ok, text })} />
     </div>
   );

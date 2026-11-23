@@ -24,7 +24,11 @@ import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.security.oauth2.client.authentication.OAuth2AuthenticationToken;
+import com.autotrade.trading.activity.ActivityRecorder;
+import com.autotrade.trading.activity.ActivityWeb;
 import org.springframework.security.oauth2.client.oidc.userinfo.OidcUserRequest;
+import org.springframework.security.web.authentication.AuthenticationSuccessHandler;
+import org.springframework.security.web.authentication.SavedRequestAwareAuthenticationSuccessHandler;
 import org.springframework.security.oauth2.client.oidc.userinfo.OidcUserService;
 import org.springframework.security.oauth2.client.oidc.web.logout.OidcClientInitiatedLogoutSuccessHandler;
 import org.springframework.security.oauth2.client.registration.ClientRegistration;
@@ -82,7 +86,8 @@ class SecurityConfig {
      * execution API, which scopes every call to their tenants.
      */
     static final String[] MEMBER_APIS = {"/api/me", "/api/execution", "/api/execution/**",
-            "/api/client-errors"};   // mobile phase 5: everyone signed in may report their own page's errors
+            "/api/client-errors",    // mobile phase 5: everyone signed in may report their own page's errors
+            "/api/presence", "/api/me/devices"};   // user activity (23 Nov 2026): each page's beat, one's own sign-ins
 
     /**
      * And, read-only, what the NIFTY / SENSEX / BANKNIFTY chart pages read for a member: the live status (trimmed to the
@@ -100,7 +105,11 @@ class SecurityConfig {
             "/api/live/ticks", "/api/oi-tape/days"};
 
     @Bean
-    SecurityFilterChain securityChain(HttpSecurity http, AuthProperties auth) throws Exception {
+    SecurityFilterChain securityChain(HttpSecurity http, AuthProperties auth,
+                                      org.springframework.beans.factory.ObjectProvider<ActivityWeb> activityWeb) throws Exception {
+        // user activity (23 Nov 2026); off where no recorder is configured (the web slice tests)
+        ActivityWeb activity = activityWeb.getIfAvailable(() -> new ActivityWeb(ActivityRecorder.disabled(),
+                new com.autotrade.trading.activity.ClientAddress(null)));
         http.csrf(c -> c.disable()).httpBasic(b -> b.disable()).formLogin(f -> f.disable());
         if (!auth.oidc()) {
             return http.authorizeHttpRequests(a -> a.anyRequest().permitAll()).build();
@@ -116,6 +125,7 @@ class SecurityConfig {
             response.sendError(HttpServletResponse.SC_UNAUTHORIZED);
         };
         RequestMatcher scripts = SecurityConfig::scriptCall;
+        AuthenticationSuccessHandler signedIn = recordThenReturn(activity, returnTo);
         return http
                 .authorizeHttpRequests(a -> a
                         .requestMatchers("/actuator/health", "/actuator/health/**", "/login/**", "/oauth2/**", "/error")
@@ -130,12 +140,30 @@ class SecurityConfig {
                         .anyRequest().authenticated())
                 .oauth2Login(o -> o.clientRegistrationRepository(registrations)
                         .authorizedClientRepository(new HttpSessionOAuth2AuthorizedClientRepository())
-                        .userInfoEndpoint(u -> u.oidcUserService(rolesFromClaims())))
+                        .userInfoEndpoint(u -> u.oidcUserService(rolesFromClaims()))
+                        .successHandler(signedIn))
                 .requestCache(c -> c.requestCache(returnTo))
-                .logout(l -> l.logoutSuccessHandler(logout))
+                .logout(l -> l.addLogoutHandler((request, response, authentication) ->
+                                activity.ended(authentication, ActivityRecorder.EndReason.LOGOUT))
+                        .logoutSuccessHandler(logout))
                 .exceptionHandling(e -> e.defaultAuthenticationEntryPointFor(signInAgain, scripts))
-                .addFilterBefore(new MaxSessionAge(auth.maxSession(), Clock.systemUTC()), AuthorizationFilter.class)
+                .addFilterBefore(new MaxSessionAge(auth.maxSession(), Clock.systemUTC(),
+                        a -> activity.ended(a, ActivityRecorder.EndReason.MAX_AGE)), AuthorizationFilter.class)
+                .addFilterAfter(activity.seenFilter(), AuthorizationFilter.class)
                 .build();
+    }
+
+    /**
+     * User activity (23 Nov 2026): at a sign-in, record it, then return to the page that asked for it exactly as the
+     * default handler did (the saved request, else "/").
+     */
+    static AuthenticationSuccessHandler recordThenReturn(ActivityWeb activity, org.springframework.security.web.savedrequest.RequestCache cache) {
+        SavedRequestAwareAuthenticationSuccessHandler back = new SavedRequestAwareAuthenticationSuccessHandler();
+        back.setRequestCache(cache);
+        return (request, response, authentication) -> {
+            activity.signedIn(request, authentication);
+            back.onAuthenticationSuccess(request, response, authentication);
+        };
     }
 
     /** An API call from a script (the UI's fetch, curl), not a page or link a person opened in a browser. */
@@ -198,10 +226,17 @@ class SecurityConfig {
     static final class MaxSessionAge extends OncePerRequestFilter {
         private final Duration max;
         private final Clock clock;
+        private final java.util.function.Consumer<Authentication> ended;
 
         MaxSessionAge(Duration max, Clock clock) {
+            this(max, clock, a -> { });
+        }
+
+        /** {@code ended}: told of each sign-in ended here (user activity), before its session goes. */
+        MaxSessionAge(Duration max, Clock clock, java.util.function.Consumer<Authentication> ended) {
             this.max = max;
             this.clock = clock;
+            this.ended = ended;
         }
 
         @Override
@@ -211,6 +246,7 @@ class SecurityConfig {
             if (signedIn instanceof OAuth2AuthenticationToken token && token.getPrincipal() instanceof OidcUser user) {
                 Instant since = user.getAuthenticatedAt() != null ? user.getAuthenticatedAt() : user.getIssuedAt();
                 if (since == null || since.plus(max).isBefore(clock.instant())) {
+                    ended.accept(signedIn);
                     HttpSession session = request.getSession(false);
                     if (session != null) {
                         session.invalidate();

@@ -3,6 +3,7 @@ import { useState } from "react";
 import { get, postJson, type AdminExitConsent, type SupportGrant } from "../api";
 import { ErrorNote, Panel, Table } from "../components/ui";
 import { SupportBanner, useWorkspace } from "../workspace";
+import { MyDevicesPanel } from "../components/ActivityPanels";
 
 // Settings (trader workspaces, 7 Nov 2026): your own Telegram chat for login links and alerts, and who may help run your
 // workspace (support access: your grant, time-limited; the admin's break-glass hour is shown here and can be ended).
@@ -61,6 +62,7 @@ export function SettingsPage() {
           {message.text} <button className="ml-2 text-muted" onClick={() => setMessage(null)}>dismiss</button>
         </div>
       )}
+      <MyDevicesPanel />
       <Panel title="Telegram">
         <p className="text-sm">{me?.telegramLinked ? "Linked: your login links and alerts come to your chat."
           : "Not linked: link your Telegram chat to get your broker login links, LIVE switches and alerts yourself."}</p>
