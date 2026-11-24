@@ -481,6 +481,56 @@ class ExecutionService implements DisposableBean {
         }
     }
 
+    /** The manual targets on open positions (V54, user 24 Nov 2026); one watch at a time, off the scheduler's threads. */
+    private volatile com.autotrade.execution.PositionTargets targets;
+    private final java.util.concurrent.atomic.AtomicBoolean targetWatching = new java.util.concurrent.atomic.AtomicBoolean();
+
+    com.autotrade.execution.PositionTargets targets() {
+        com.autotrade.execution.PositionTargets t = targets;
+        if (t == null) {
+            synchronized (this) {
+                if (targets == null) {
+                    targets = new com.autotrade.execution.PositionTargets(dataSource);
+                }
+                t = targets;
+            }
+        }
+        return t;
+    }
+
+    /**
+     * Every second: the trader's manual targets ({@link com.autotrade.execution.PositionTargets}): arm those whose bid
+     * reached the price, sell those armed whose bid is back at or below it (the per-position Exit path, MANUAL_TARGET).
+     * The look runs on its own thread, never two at once; each sale it claims runs on a thread of its own (a sale can wait
+     * up to 120 s on its account's lane). Accounts another worker holds are left to that worker's watch.
+     */
+    @Scheduled(fixedDelayString = "${autotrade.execution.target-watch-ms:1000}", initialDelay = 15000)
+    void targetWatch() {
+        ExecutionLoop current = loop;
+        if (current == null || !targetWatching.compareAndSet(false, true)) {
+            return;
+        }
+        Thread.ofVirtual().name("exec-target-watch").start(() -> {
+            try {
+                targets().watch(new com.autotrade.execution.PositionTargets.Exiter() {
+                    @Override
+                    public List<String> exit(long account, long position, java.util.Map<String, ?> audit) throws Exception {
+                        return current.exitAtTarget(account, position, day(), audit);
+                    }
+
+                    @Override
+                    public boolean mine(long account) {
+                        return !current.leasedElsewhere(account);
+                    }
+                }).forEach(line -> log.info("manual target: {}", line));
+            } catch (RuntimeException e) {
+                log.warn("manual target watch: {}", e.getMessage());
+            } finally {
+                targetWatching.set(false);
+            }
+        });
+    }
+
     private ExecutionLoop started() {
         ExecutionLoop current = loop;
         if (current == null) {

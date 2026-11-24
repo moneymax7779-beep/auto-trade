@@ -513,7 +513,8 @@ public final class ExecutionLoop implements AutoCloseable {
      * last 5 minutes and refuses without one (never at the entry price). The automated ones (the end-of-day square-off)
      * keep the old fallback; every exit records where its price came from in the audit detail.
      */
-    static final java.util.Set<String> PERSON_EXITS = java.util.Set.of("TRADER_EXIT", "ADMIN_EXIT", "FLATTEN");
+    static final java.util.Set<String> PERSON_EXITS = java.util.Set.of("TRADER_EXIT", "ADMIN_EXIT", "FLATTEN",
+            PositionTargets.EXIT_REASON);
 
     /**
      * The square-off of every broker whose time ({@link BrokerRules#squareOff}) has come at {@code now} (IST) and that was
@@ -693,6 +694,35 @@ public final class ExecutionLoop implements AutoCloseable {
         List<String> lines = flattenOnLane(account, day, byAdmin ? "ADMIN_EXIT" : "TRADER_EXIT", positionId, quantity,
                 withActor(actor, audit));
         return lines.isEmpty() ? List.of("position " + positionId + " is not open") : lines;
+    }
+
+    /**
+     * The trader's manual target sells one whole position ({@link PositionTargets}, user 24 Nov 2026): the per-position Exit
+     * path (stop off first, sold at the broker or at a fresh stored bid, never the entry price), exit reason
+     * {@link PositionTargets#EXIT_REASON}; no kill switch, the account keeps trading.
+     */
+    public List<String> exitAtTarget(long accountId, long positionId, LocalDate day, Map<String, ?> audit) throws Exception {
+        BrokerAccount account = accounts.byId(accountId).orElseThrow(() -> new IllegalArgumentException("no account "
+                + accountId));
+        if (account.role() == com.autotrade.account.AccountRole.SIGNAL_SOURCE) {
+            throw new IllegalArgumentException(account.displayName() + " is a signal source: its positions are not orders");
+        }
+        List<String> lines = flattenOnLane(account, day, PositionTargets.EXIT_REASON, positionId, null,
+                withActor(PositionTargets.ACTOR, audit));
+        return lines.isEmpty() ? List.of("position " + positionId + " is not open") : lines;
+    }
+
+    /**
+     * Whether another worker holds the account now (a lease of another owner with a heartbeat in the last
+     * {@link #LEASE_SILENT}): that worker sells its targets ({@link PositionTargets.Exiter#mine}).
+     */
+    public boolean leasedElsewhere(long accountId) {
+        if (leases.containsKey(accountId)) {
+            return false;
+        }
+        return Boolean.TRUE.equals(jdbc.queryForObject("select exists (select 1 from exec.account_lease where "
+                + "broker_account_id = ? and owner <> ? and heartbeat_at > now() - make_interval(secs => ?))", Boolean.class,
+                accountId, workerId, (double) LEASE_SILENT.toSeconds()));
     }
 
     /**

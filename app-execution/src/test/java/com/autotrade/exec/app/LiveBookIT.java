@@ -196,6 +196,39 @@ class LiveBookIT {
                 .hasMessageContaining("400");
         assertThatThrownBy(() -> api.exitPreview("kc-nobody", account, openId, null)).isInstanceOf(ResponseStatusException.class);
 
+        // 24 Nov 2026: the trader's manual first target, 20 % above the entry (146.35 x 1.2 = 175.62 -> 175.60), shown on the
+        // open position; out of range is a 409, another tenant a 404; removed, it is gone from the book
+        PositionTargetController targets = new PositionTargetController(new Access(dataSource), dataSource);
+        Map<String, Object> set = targets.set("local-owner", account, openId, new PositionTargetController.TargetBody(20.0));
+        assertThat((Map<String, Object>) set.get("target")).containsEntry("pct", 20.0).containsEntry("price", 175.6)
+                .containsEntry("status", "WAITING").containsEntry("setBy", "local-owner");
+        assertThat(((List<Map<String, Object>>) api.liveBook("local-owner", account, 7).get("open")).getFirst())
+                .extractingByKey("manualTarget").satisfies(t -> assertThat((Map<String, Object>) t)
+                        .containsEntry("pct", 20.0).containsEntry("price", 175.6).containsEntry("status", "WAITING"));
+        assertThatThrownBy(() -> targets.set("local-owner", account, openId, new PositionTargetController.TargetBody(0.0)))
+                .isInstanceOf(ResponseStatusException.class).hasMessageContaining("400");
+        assertThatThrownBy(() -> targets.set("local-owner", account, openId, new PositionTargetController.TargetBody(0.004)))
+                .as("0 after rounding").isInstanceOf(ResponseStatusException.class).hasMessageContaining("400");
+        assertThat((Map<String, Object>) targets.set("local-owner", account, openId,
+                new PositionTargetController.TargetBody(20.0)).get("target")).as("the same % again: unchanged")
+                .containsEntry("status", "WAITING");
+        assertThat(jdbc.queryForObject("select generation from exec.position_target where position_id = ?", Integer.class,
+                openId)).isEqualTo(1);
+        assertThatThrownBy(() -> targets.set("local-owner", account, openId, new PositionTargetController.TargetBody(null)))
+                .isInstanceOf(ResponseStatusException.class).hasMessageContaining("400");
+        assertThatThrownBy(() -> targets.set("kc-nobody", account, openId, new PositionTargetController.TargetBody(20.0)))
+                .as("a user of no tenant").isInstanceOf(ResponseStatusException.class).hasMessageContaining("403");
+        // review 24 Nov 2026: SUPPORT (even with the member's grant) sets no target: a later sale without a reason
+        long support = accounts.ensureUser("kc-support-t", "support");
+        accounts.ensureMembership(tenant, support, "SUPPORT");
+        jdbc.update("insert into acct.support_grant (tenant_id, granted_to, granted_by, reason, expires_at) values (?, ?, ?, "
+                + "'it', now() + interval '1 hour')", tenant, support, owner);          // with the member's grant
+        assertThatThrownBy(() -> targets.set("kc-support-t", account, openId, new PositionTargetController.TargetBody(25.0)))
+                .isInstanceOf(ResponseStatusException.class).hasMessageContaining("403");
+        assertThat(targets.clear("local-owner", account, openId)).containsEntry("cleared", true);
+        assertThat(((List<Map<String, Object>>) api.liveBook("local-owner", account, 7).get("open")).getFirst())
+                .doesNotContainKey("manualTarget");
+
         // a stop being cancelled no longer protects the position: not working, nothing counted at risk
         jdbc.update("update exec.order_execution set status = 'CANCEL_PENDING' where role = 'STOP' and trade_intent_id = ?", live);
         Map<String, Object> cancelling = ((List<Map<String, Object>>) api.liveBook("local-owner", account, 7).get("open")).getFirst();
