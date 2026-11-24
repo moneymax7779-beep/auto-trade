@@ -1,0 +1,55 @@
+# obc-v31hm2g10 (A-641): obc-v31hm2 with skip_gap_continuation_pct 0.1 instead of 0.4.
+# obc-v31hm2 (A-631): obc-v31h, up to 5 trades a day, no strong-data check.
+# obc-v31h (A-621): v31 entering at half-strength bursts.
+# obc-v31 (A-472, 17 Nov 2026): obc-v28 + no PE entry when gexShare > 0.06 (middle of A-471's gap: PE winners <= 0.050, vetoed
+# PE losers >= 0.070) and no CE entry when gexShare > 0.25. Chosen on the tick days; the held-out read decides.
+# obc-v13 = obc-v11 (A-260) + A-266's gap rule: no entry in the direction of an opening gap of 0.4 % or more.
+version: obc-v31hm2g10
+strategy: oi-burst-cross
+status: UNCALIBRATED
+source: "user-request-2026-11-16 (A-472)"
+
+scope:
+  entry_from: "09:21"                  # the study's 09:20-11:00 minutes, seen by the engine one snapshot later
+  last_new_entry: "14:51"              # A-631: no time windows
+  flat_by: "15:15"                     # A-260: before the expiry-day index freeze (15:15-15:28)
+  time_stop_min: 0
+  skip_expiring_index: false           # the study included expiry days
+
+setup:
+  max_entries_per_day: 5               # A-631: multiple trades
+  reversal_ends_day: false             # A-631: a non-continuation burst no longer ends the day
+  refused_entry_refund: true           # A-616/A-631: a refused / unfilled entry does not use one of the five
+  second_entry_min_gap_min: 5          # A-631: a further entry at least 5 min after the last trade ended
+  second_entry_windows: "09:21-14:51"   # A-631: no time windows
+  second_entry_strong_scale: 0.5       # A-631: no strong-data check: the half threshold as for the first entry ...
+  second_entry_excellent_scale: 0.5
+  second_entry_require_rising: false   # A-631: no premium check either
+  entry_share_scale: 0.5              # A-621: enter at half the burst threshold (exits unchanged)
+  skip_gap_continuation_pct: 0.1                  # A-641: no entry in the gap's direction from a 0.1 % gap (was 0.4)
+  gex_veto_pe: 0.06                    # A-472
+  gex_veto_ce: 0.25                    # A-471
+  ema_period: 20                       # EMA of 1-minute closes, seeded with the previous close
+  cross_lookback_min: 3
+  fresh_cross: false                   # v3/v4: the close on the burst's side of the EMA is enough
+  share3_min_nifty: 0.0612             # ATM +- 2 net OI flow share over 3 minutes (A-250 P1 95th percentile)
+  share3_min_sensex: 0.0816
+  stop_lookback_min: 10                # stop: the 10-minute extreme of minute closes before entry
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  premium_stop_pct: 50                 # v2/v4: emergency only
+  below_entry_exit_min: 15             # A-469 (user 16 Nov: "go ahead, build it and run on tick days")
+  below_entry_0dte_only: true          # not on other days (A-468: all-day no-progress exits cost obc -5.3 / -3.1 L)
+  below_entry_minute_close: true       # A-470 (user 16 Nov: "go ahead, build the fix and run on tick days")
+  below_entry_no_reentry: true         # A-470
+  structure_buffer_pct: 0.1            # v2/v4: stop = a close beyond PDH/ORH (puts) or PDL/ORL (calls) +- 0.1 %
+  counter_burst: true                  # v2/v4: exit on a 3-minute burst beyond the threshold against the trade
+  atr_stop_mult: 2.0                   # A-254: stop = the tighter of the structure stop and entry -+ 2.0 x ATR3m
+  trail_arm_atr: 2.0                   # A-255: the trail arms once a close is +2.0 x ATR3m in favour
+  trail_atr: 3.0                       # A-255: then exit on a close 3.0 x ATR3m below the best close since entry
+  use_target: false

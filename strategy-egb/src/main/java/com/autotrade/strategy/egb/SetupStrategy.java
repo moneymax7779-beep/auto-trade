@@ -52,6 +52,8 @@ abstract class SetupStrategy implements Strategy {
     private LocalTime beMinute;
     private double beLastBid = Double.NaN;
     private boolean belowEntryExited;
+    /** A-603: the reason of the last exit this strategy sent (null before any). */
+    protected String lastExitReason;
     /** A-087: the entry needs the ATM IV percentile at least this, or the ATM IV rising over 3 minutes (NaN = off). */
     private final double ivPercentileMin;
     /** A-088: the entry needs mover breadth at least this far in its direction (+ for calls, - for puts; NaN = off). */
@@ -67,6 +69,8 @@ abstract class SetupStrategy implements Strategy {
     private final double quietIvPercentileMin;
     private final double quietBreadthMinAgree;
     private final boolean skipExpiringIndex;
+    /** A-586: new entries only on the traded index's expiry day (dteTradingDays 0); off by default. */
+    private final boolean expiryDayOnly;
     /** A-435 (sbr-v5): no new entry from this time when the traded index expires today (null = off). */
     private final LocalTime lastNewEntry0dte;
     private final double premiumStopPct;
@@ -112,6 +116,7 @@ abstract class SetupStrategy implements Strategy {
         this.profitLockArmPct = config.has("exits.profit_lock_arm_pct") ? config.getDouble("exits.profit_lock_arm_pct") : Double.NaN;
         this.profitLockFloorPct = config.has("exits.profit_lock_floor_pct") ? config.getDouble("exits.profit_lock_floor_pct") : Double.NaN;
         this.skipExpiringIndex = config.getBoolean("scope.skip_expiring_index");
+        this.expiryDayOnly = config.has("scope.expiry_day_only") && config.getBoolean("scope.expiry_day_only");
         this.lastNewEntry0dte = config.has("scope.last_new_entry_0dte") ? config.getTime("scope.last_new_entry_0dte") : null;
         this.premiumStopPct = config.getDouble("exits.premium_stop_pct");
         // A-407: a structure stop at least stop_min_atr x ATR3m from the entry spot, and no STOP in the first stop_grace_min
@@ -155,6 +160,7 @@ abstract class SetupStrategy implements Strategy {
 
     @Override
     public Decision decide(FeatureSnapshot s, PositionView position) {
+        current = s;                                         // A-649
         Instant now = s.time();
         LocalTime time = now.atZone(MarketTime.IST).toLocalTime();
         double spot = s.spot();
@@ -166,6 +172,10 @@ abstract class SetupStrategy implements Strategy {
         }
         boolean expiringIndex = skipExpiringIndex && s.regime().dteTradingDays() == 0;
         boolean window = !time.isBefore(entryFrom) && time.isBefore(lastNewEntry);
+        if (expiryDayOnly) {                                     // A-586
+            boolean expiryDay = s.regime().dteTradingDays() == 0;
+            window = window && expiryDay;
+        }
         Map<String, Boolean> c = new LinkedHashMap<>();
         if (lastNewEntry0dte != null && s.regime().dteTradingDays() == 0) {      // A-435: late 0DTE entries cut
             boolean early = time.isBefore(lastNewEntry0dte);
@@ -210,7 +220,7 @@ abstract class SetupStrategy implements Strategy {
                 }
                 beBid = newMinute ? closeBid : Double.NaN;
             }
-            if (exit == null && belowEntryExitMin > 0 && enteredAt != null && position.averagePremium() > 0
+            if (exit == null && belowEntryExitMin > 0 && !holdOnlyStructure() && enteredAt != null && position.averagePremium() > 0
                     && beBid > 0 && beBid < position.averagePremium()
                     && Duration.between(enteredAt, now).toMinutes() >= belowEntryExitMin
                     && (!belowEntry0dteOnly || (s.options() != null && s.options().expiry() != null
@@ -232,6 +242,7 @@ abstract class SetupStrategy implements Strategy {
             if (exit != null && !exitSent) {
                 orders.add(OrderIntent.exit(position.side(), Stage.CONFIRMED, exit));
                 exitSent = true;
+                lastExitReason = exit;                               // A-603: the family may act on how it left
             }
         } else {
             exitSent = false;
@@ -302,6 +313,11 @@ abstract class SetupStrategy implements Strategy {
     }
 
     /** A family's own exit signal for an open position, checked after the frame's exits; null = none (default). */
+    /** A-635: true while the open trade is held by its stop and structure only (no below-entry exit); none by default. */
+    protected boolean holdOnlyStructure() {
+        return false;
+    }
+
     protected String customExit(FeatureSnapshot s, OptionSide side, LocalTime time) {
         return null;
     }
@@ -330,10 +346,19 @@ abstract class SetupStrategy implements Strategy {
         if (vwapTrail3m && threeMinuteClose(time) && Double.isFinite(vwap) && sign * (spot - vwap) < 0) {
             return "VWAP_TRAIL";
         }
-        if (timeStopMin > 0 && enteredAt != null && Duration.between(enteredAt, now).toMinutes() >= timeStopMin) {
+        if (timeStopMin > 0 && enteredAt != null && Duration.between(enteredAt, now).toMinutes() >= timeStopMin
+                && !holdPastTimeStop(side)) {
             return "TIME_" + timeStopMin;
         }
         return null;
+    }
+
+    /** The snapshot being decided (set at the start of {@link #decide}); for families' exit hooks. */
+    protected FeatureSnapshot current;
+
+    /** A-649: true to hold the open trade past the time stop this minute (none by default). */
+    protected boolean holdPastTimeStop(OptionSide side) {
+        return false;
     }
 
     /**

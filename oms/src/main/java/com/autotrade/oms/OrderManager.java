@@ -523,6 +523,9 @@ public final class OrderManager implements Consumer<OrderUpdate> {
             if (position.contract.token() == tick.instrumentToken() && position.pendingEntryQuantity > 0
                     && working(position.entryOrders).isEmpty()) {
                 sendSlice(position);     // risk v12: the previous slice is done; buy the next on this quote
+            } else if (limits.entrySliceReprice() && position.contract.token() == tick.instrumentToken()
+                    && position.leg.isEmpty() && position.sliceStartedAt != null && !position.midEntry) {
+                repriceSlice(position, tick);   // A-615: a fast option ran above the working slice
             }
         }
         for (ManagedPosition position : live.values()) {
@@ -582,9 +585,10 @@ public final class OrderManager implements Consumer<OrderUpdate> {
                 chaseLegEntry(position, now);
             } else {
                 chaseEntry(position, now);
+                int timeout = position.midEntry ? limits.entryMidWaitSec() : limits.entryTimeoutSec();   // A-612
                 for (String id : working(position.entryOrders)) {
                     Instant sent = position.orderSentAt.get(id);
-                    if (sent != null && Duration.between(sent, now).toSeconds() >= limits.entryTimeoutSec()) {
+                    if (sent != null && Duration.between(sent, now).toSeconds() >= timeout) {
                         broker.cancel(id);
                         position.orderSentAt.remove(id);
                     }
@@ -603,7 +607,7 @@ public final class OrderManager implements Consumer<OrderUpdate> {
      * entry timeout still counts from the first send. A breakout's option often moves a rupee in the order's latency.
      */
     private void chaseEntry(ManagedPosition position, Instant now) {
-        if (limits.entryChaseMax() <= 0 || position.entryChases >= limits.entryChaseMax() || position.entryPricedAt == null
+        if (position.midEntry || limits.entryChaseMax() <= 0 || position.entryChases >= limits.entryChaseMax() || position.entryPricedAt == null
                 || Duration.between(position.entryPricedAt, now).toSeconds() < limits.entryChaseSec()) {
             return;
         }
@@ -811,6 +815,20 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         if (bid > 0 && ask > 0) {
             spreadPct = (ask - bid) / ((ask + bid) / 2) * 100;
         }
+        RiskLimits.StrategyGroupLoss group = limits.strategyGroupLoss();
+        if (group != null && group.strategies().contains(strategyId)) {   // A-638: the group's own daily loss limit
+            double groupPnl = 0;
+            for (ManagedPosition position : live.values()) {
+                groupPnl += group.strategies().contains(position.strategy) ? position.net() : 0;
+            }
+            for (ManagedPosition position : closed) {
+                groupPnl += group.strategies().contains(position.strategy) ? position.net() : 0;
+            }
+            double cap = limits.capital() * group.pct() / 100.0;
+            if (groupPnl <= -cap) {
+                return RiskDecision.rejected(String.format("strategy group daily loss %.0f reached (limit %.0f)", groupPnl, cap));
+            }
+        }
         return risk.checkEntry(new RiskCheck(account, strategyId, underlying, add, lots, held, openPositions, dayPnl(),
                 market.secondsSinceSpot(), market.secondsSinceOption(), spreadPct, market.time(), recentOrders.size(),
                 Double.isNaN(premium) ? 0 : premium, premiumInUse()), now);
@@ -868,6 +886,21 @@ public final class OrderManager implements Consumer<OrderUpdate> {
             }
         }
         position.committedPremium += remaining * ask;
+        double bid = quote != null ? quote[0] : Double.NaN;
+        position.midEntry = position.leg.isEmpty() && limits.entryAtMid() && bid > 0 && bid < ask;
+        if (position.midEntry) {
+            // A-612: one limit at the mid for the whole quantity, never above the ask; what is unfilled after
+            // entry_mid_wait_sec is cancelled (onTimer). No slicing, no re-price.
+            double mid = Math.min(ask, position.contract.roundUp((bid + ask) / 2.0));
+            position.entryLimit = mid;
+            long piece = (long) position.contract.maxLotsPerOrder() * position.contract.lotSize();
+            while (remaining > 0) {
+                long quantity = Math.min(remaining, piece);
+                send(position, "ENTRY", OrderSide.BUY, OrderType.LIMIT, quantity, mid, 0, position.entryOrders);
+                remaining -= quantity;
+            }
+            return;
+        }
         if (position.leg.isEmpty() && limits.entrySliceDepthPct() > 0) {
             // risk v12: buy in slices no larger than the ask within entry_slice_depth_pct; the rest on the next quotes
             position.pendingEntryQuantity = remaining;
@@ -889,6 +922,33 @@ public final class OrderManager implements Consumer<OrderUpdate> {
      * least one lot, at most the freeze quantity), priced at that depth. Stops when the entry timeout has passed since the
      * first slice or the ask has run entry_slice_max_drift_pct above the first slice's ask; the position keeps what it has.
      */
+    /**
+     * A-615 (risk v52, orders.entry_slice_reprice): a working entry slice whose limit is below the current best ask is
+     * re-priced to that ask's slice ceiling (ask + entry_slice_depth_pct), as long as the ask is within
+     * entry_slice_max_drift_pct of the first slice's ask and the entry timeout has not passed. Without it a slice priced
+     * just before the option jumps never fills (19 Nov 2026 SENSEX 82200 CE: 221 -> 232 in 10 s, nothing bought).
+     */
+    private void repriceSlice(ManagedPosition position, OptionTick tick) {
+        if (tick.asks().isEmpty() || !(tick.asks().price(0) > 0) || position.state == ManagedPosition.State.EXITING
+                || position.state == ManagedPosition.State.CLOSED || position.state == ManagedPosition.State.CANCELLING_FOR_EXIT) {
+            return;
+        }
+        double ask = tick.asks().price(0);
+        if (ask > position.sliceStartAsk * (1 + limits.entrySliceMaxDriftPct() / 100.0)
+                || Duration.between(position.sliceStartedAt, clock.get()).toSeconds() >= limits.entryTimeoutSec()) {
+            return;
+        }
+        double limit = position.contract.roundUp(ask * (1 + limits.entrySliceDepthPct() / 100.0));
+        if (!(position.entryLimit < ask)) {
+            return;
+        }
+        for (String id : working(position.entryOrders)) {
+            broker.modify(id, position.orderQuantity.getOrDefault(id, 0L), limit, 0);
+        }
+        position.entryLimit = limit;
+        position.entryPricedAt = clock.get();
+    }
+
     private void sendSlice(ManagedPosition position) {
         if (position.pendingEntryQuantity <= 0 || position.state == ManagedPosition.State.EXITING
                 || position.state == ManagedPosition.State.CLOSED || position.state == ManagedPosition.State.CANCELLING_FOR_EXIT) {

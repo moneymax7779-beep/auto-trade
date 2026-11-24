@@ -264,4 +264,504 @@ class OiBurstCrossTest {
                 Snapshots.SESSION)).as("A-260 obc-v11").isNotNull();
         assertThat(Map.of()).isEmpty();
     }
+
+    /** A-583: max_ema_dist_atr skips a burst whose close is too far beyond obc's EMA (in ATR3m), keeps one inside the limit. */
+    @Test
+    void anEntryTooFarBeyondTheEmaIsSkipped(@org.junit.jupiter.api.io.TempDir Path dir) throws java.io.IOException {
+        // the 09:31 close 22,720 sits about 26 points above the EMA (seeded 22,700, then 15 minutes at 22,690)
+        java.util.function.BiFunction<Strategy, Double, java.util.List<com.autotrade.strategy.OrderIntent>> run = (s, atr) -> {
+            for (int m = 556; m <= 570; m++) {
+                s.decide(snap(22690, 22680, 0.0, 0.0).set("structure.atr3m", atr).at(String.format("%02d:%02d", m / 60, m % 60)),
+                        PositionView.FLAT);
+            }
+            return s.decide(snap(22720, 22680, 0.07, 0.01).set("structure.atr3m", atr).at("09:31"), PositionView.FLAT).orders();
+        };
+        assertThat(run.apply(withLines(dir, "setup", "  max_ema_dist_atr: 1.5\n"), 10.0)).as("~2.6 ATR beyond: skipped").isEmpty();
+        assertThat(run.apply(withLines(dir, "setup", "  max_ema_dist_atr: 1.5\n"), 40.0)).as("~0.7 ATR beyond: entered").hasSize(1);
+        assertThat(run.apply(load(), 10.0)).as("off by default").hasSize(1);
+    }
+
+    /** A-584 Combo 1: a per-index VWAP-extension cap and a put veto on fresh futures longs; both off by default. */
+    @Test
+    void combo1VetoesAStretchedBurstAndAPutIntoFreshFuturesLongs(@org.junit.jupiter.api.io.TempDir Path dir)
+            throws java.io.IOException {
+        java.util.function.BiFunction<Strategy, Double, java.util.List<com.autotrade.strategy.OrderIntent>> up = (s, vwapAtr) -> {
+            for (int m = 556; m <= 570; m++) {
+                s.decide(snap(22690, 22680, 0.0, 0.0).at(String.format("%02d:%02d", m / 60, m % 60)), PositionView.FLAT);
+            }
+            return s.decide(snap(22720, 22680, 0.07, 0.01).set("structure.distVwapAtr", vwapAtr).at("09:31"),
+                    PositionView.FLAT).orders();
+        };
+        assertThat(up.apply(withLines(dir, "setup", "  max_vwap_ext_atr_nifty: 2.0\n"), 2.5)).as("2.5 ATR above VWAP").isEmpty();
+        assertThat(up.apply(withLines(dir, "setup", "  max_vwap_ext_atr_nifty: 2.0\n"), 1.5)).hasSize(1);
+        assertThat(up.apply(withLines(dir, "setup", "  max_vwap_ext_atr_sensex: 2.0\n"), 2.5)).as("the cap is per index").hasSize(1);
+        assertThat(up.apply(load(), 2.5)).as("off by default").hasSize(1);
+        // a down cross with a call-writing burst below the open buys the put, unless futures show fresh longs
+        java.util.function.BiFunction<Strategy, String, java.util.List<com.autotrade.strategy.OrderIntent>> down = (s, state) -> {
+            for (int m = 556; m <= 570; m++) {
+                s.decide(snap(22710, 22720, 0.0, 0.0).at(String.format("%02d:%02d", m / 60, m % 60)), PositionView.FLAT);
+            }
+            return s.decide(snap(22680, 22720, -0.07, -0.01).set("futures.oiState", state).at("09:31"),
+                    PositionView.FLAT).orders();
+        };
+        assertThat(down.apply(withLines(dir, "setup", "  veto_pe_fresh_long: true\n"), "FRESH_LONG")).isEmpty();
+        assertThat(down.apply(withLines(dir, "setup", "  veto_pe_fresh_long: true\n"), "LONG_UNWIND")).hasSize(1);
+        assertThat(down.apply(load(), "FRESH_LONG")).as("off by default").hasSize(1);
+    }
+
+    /** A-586: scope.expiry_day_only enters only when the index expires that day (dteTradingDays 0). */
+    @Test
+    void expiryDayOnlyTradesOnlyOnTheExpiryDay(@org.junit.jupiter.api.io.TempDir Path dir) throws java.io.IOException {
+        java.util.function.BiFunction<Strategy, Integer, java.util.List<com.autotrade.strategy.OrderIntent>> run = (s, dte) -> {
+            for (int m = 556; m <= 570; m++) {
+                s.decide(snap(22690, 22680, 0.0, 0.0).set("regime.dteTradingDays", dte).at(String.format("%02d:%02d", m / 60, m % 60)),
+                        PositionView.FLAT);
+            }
+            return s.decide(snap(22720, 22680, 0.07, 0.01).set("regime.dteTradingDays", dte).at("09:31"), PositionView.FLAT).orders();
+        };
+        assertThat(run.apply(withLines(dir, "scope", "  expiry_day_only: true\n"), 2)).as("not the expiry day").isEmpty();
+        assertThat(run.apply(withLines(dir, "scope", "  expiry_day_only: true\n"), 0)).hasSize(1);
+        assertThat(run.apply(load(), 2)).as("off by default").hasSize(1);
+    }
+
+    /** A-587: burst_mode print takes a 1-minute share at the threshold from 09:18; ema_seed open seeds the EMA at the day open. */
+    @Test
+    void perPrintBurstAndOpenSeededEma(@org.junit.jupiter.api.io.TempDir Path dir) throws java.io.IOException {
+        String lines = "  burst_mode: print\n  print_share_min_nifty: 0.0612\n  print_share_min_sensex: 0.0816\n";
+        // 09:16-09:30 below the EMA (seeded 22,700), then 09:31 above it with only a 1-minute burst (3-minute share small)
+        java.util.function.Function<Strategy, java.util.List<com.autotrade.strategy.OrderIntent>> run = s -> {
+            for (int m = 556; m <= 570; m++) {
+                s.decide(snap(22690, 22680, 0.0, 0.0).at(String.format("%02d:%02d", m / 60, m % 60)), PositionView.FLAT);
+            }
+            return s.decide(snap(22720, 22680, 0.02, 0.07).at("09:31"), PositionView.FLAT).orders();
+        };
+        assertThat(run.apply(load())).as("window mode: the 3-minute share 0.02 is no burst").isEmpty();
+        assertThat(run.apply(withLines(dir, "setup", lines))).as("print mode: the 1-minute share 0.07 is").hasSize(1);
+        // a gap-up open 22,800 above the previous close 22,700: at 09:18 price 22,760 is below the open-seeded EMA, a put burst
+        java.util.function.Function<Strategy, java.util.List<com.autotrade.strategy.OrderIntent>> gap = s -> {
+            s.decide(snap(22800, 22800, 0.0, 0.0).at("09:16"), PositionView.FLAT);
+            s.decide(snap(22790, 22800, 0.0, 0.0).at("09:17"), PositionView.FLAT);
+            return s.decide(snap(22760, 22800, -0.01, -0.09).at("09:18"), PositionView.FLAT).orders();
+        };
+        java.util.function.BiFunction<String, String, Strategy> from0918 = (name, setup) -> {
+            try {
+                String v1 = java.nio.file.Files.readString(Path.of("..", "config", "strategy", "oi-burst-cross.v1.yaml"));
+                assertThat(v1).contains("entry_from: \"09:21\"");
+                Path f = dir.resolve(name).resolve("oi-burst-cross.v1.yaml");
+                java.nio.file.Files.createDirectories(f.getParent());
+                java.nio.file.Files.writeString(f, v1.replace("entry_from: \"09:21\"", "entry_from: \"09:18\"")
+                        .replace("\nsetup:\n", "\nsetup:\n" + setup));
+                return Strategies.load(f).create("NIFTY", Snapshots.SESSION);
+            } catch (java.io.IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+        };
+        String v31like = lines + "  fresh_cross: false\n";   // as v31: the side of the EMA, no fresh cross needed
+        assertThat(gap.apply(from0918.apply("open", v31like + "  ema_seed: open\n"))).as("EMA from the open: the 09:18 put burst")
+                .singleElement().satisfies(o -> assertThat(o.side()).isEqualTo(OptionSide.PE));
+        assertThat(gap.apply(from0918.apply("prev", v31like))).as("EMA from the previous close: price still above it").isEmpty();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> withLines(dir, "setup", "  burst_mode: tick\n"))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    /** A-595: burst_mode relative: s1 or s3 against relative_k x the median of today's earlier non-zero minutes; no fixed share. */
+    @Test
+    void relativeBurstIsMeasuredAgainstTheDaysOwnFlow(@org.junit.jupiter.api.io.TempDir Path dir) throws java.io.IOException {
+        String lines = "  burst_mode: relative\n  relative_k: 3.0\n  relative_min_samples: 3\n";
+        // 09:16-09:30 below the EMA with small flows (|s1| = |s3| = 0.01, zero minutes ignored), then 09:31 above it
+        java.util.function.BiFunction<Strategy, double[], java.util.List<com.autotrade.strategy.OrderIntent>> run = (s, last) -> {
+            for (int m = 556; m <= 570; m++) {
+                double f = m % 2 == 0 ? 0.0 : -0.01;
+                s.decide(snap(22690, 22680, f, f).at(String.format("%02d:%02d", m / 60, m % 60)), PositionView.FLAT);
+            }
+            return s.decide(snap(22720, 22680, last[0], last[1]).at("09:31"), PositionView.FLAT).orders();
+        };
+        assertThat(run.apply(withLines(dir, "setup", lines), new double[] {0.02, 0.035})).as("s1 0.035 >= 3 x 0.01").hasSize(1);
+        assertThat(run.apply(withLines(dir, "setup", lines), new double[] {0.02, 0.025})).as("neither reaches 3 x 0.01").isEmpty();
+        assertThat(run.apply(withLines(dir, "setup", lines), new double[] {0.035, 0.005})).as("s3 0.035 with s1 on its side").hasSize(1);
+        assertThat(run.apply(load(), new double[] {0.02, 0.035})).as("window mode: fixed 0.0612 not reached").isEmpty();
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> withLines(dir, "setup", "  burst_mode: relative\n  relative_k: 0\n  relative_min_samples: 3\n"))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    /** A-596: setup.premium_rising_veto needs the ATM option of the side rising (1- and 3-minute mid change > 0). */
+    @Test
+    void premiumRisingVetoNeedsTheOptionAlreadyRising(@org.junit.jupiter.api.io.TempDir Path dir) throws java.io.IOException {
+        String lines = "  premium_rising_veto: true\n";
+        java.util.function.BiFunction<Double, Double, java.util.List<com.autotrade.strategy.OrderIntent>> run = (ch1, ch3) -> {
+            try {
+                Strategy s = withLines(dir, "setup", lines);
+                for (int m = 556; m <= 570; m++) {
+                    s.decide(snap(22690, 22680, 0.0, 0.0).at(String.format("%02d:%02d", m / 60, m % 60)), PositionView.FLAT);
+                }
+                return s.decide(snap(22720, 22680, 0.07, 0.01).set("premium.ceChange1mPct", ch1).set("premium.ceChange3mPct", ch3)
+                        .at("09:31"), PositionView.FLAT).orders();
+            } catch (java.io.IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+        };
+        assertThat(run.apply(-1.0, 5.0)).as("1-minute falling").isEmpty();
+        assertThat(run.apply(2.0, -1.0)).as("3-minute falling").isEmpty();
+        assertThat(run.apply(2.0, Double.NaN)).as("3-minute not yet known").hasSize(1);
+        assertThat(run.apply(2.0, 5.0)).hasSize(1);
+        assertThat(run.apply(Double.NaN, Double.NaN)).as("no premium data").isEmpty();
+        assertThat(cross(load(), 22680, 0.07, 0.01)).as("off by default").hasSize(1);
+    }
+
+    /** A-596: exits.level_mode: an unbroken level stalls the trade out; a broken one is held until a close back below it. */
+    @Test
+    void levelToLevelExitStallsAtAnUnbrokenLevelAndHoldsABrokenOne(@org.junit.jupiter.api.io.TempDir Path dir)
+            throws java.io.IOException {
+        String lines = "  level_mode: true\n  level_touch_atr: 1.0\n  level_break_pct: 0.05\n  level_stall_min: 5\n";
+        java.util.function.Function<Double, Snapshots> at = close -> snap(close, 22680, 0.0, 0.0).set("structure.pdh", 22760.0)
+                .set("structure.atr3m", 10.0).set("structure.lastMinuteClose", close);
+        PositionView open = new PositionView(true, OptionSide.CE, 1, 100, null, 110);
+        Strategy a = withLines(dir, "exits", lines);
+        for (int m = 556; m <= 570; m++) {
+            a.decide(at.apply(22690.0).at(String.format("%02d:%02d", m / 60, m % 60)), PositionView.FLAT);
+        }
+        assertThat(a.decide(snap(22720, 22680, 0.07, 0.01).set("structure.pdh", 22760.0).set("structure.atr3m", 10.0)
+                .at("09:31"), PositionView.FLAT).orders()).hasSize(1);
+        assertThat(a.decide(at.apply(22755.0).at("09:32"), open).orders()).as("touch: within 1 ATR of the PDH").isEmpty();
+        for (int m = 573; m <= 576; m++) {
+            assertThat(a.decide(at.apply(22757.0).at(String.format("%02d:%02d", m / 60, m % 60)), open).orders()).isEmpty();
+        }
+        assertThat(a.decide(at.apply(22757.0).at("09:37"), open).orders()).singleElement()
+                .satisfies(o -> assertThat(o.reason()).isEqualTo("LEVEL_STALL"));
+
+        Strategy b = withLines(dir, "exits", lines);
+        for (int m = 556; m <= 570; m++) {
+            b.decide(at.apply(22690.0).at(String.format("%02d:%02d", m / 60, m % 60)), PositionView.FLAT);
+        }
+        assertThat(b.decide(snap(22720, 22680, 0.07, 0.01).set("structure.pdh", 22760.0).set("structure.atr3m", 10.0)
+                .at("09:31"), PositionView.FLAT).orders()).hasSize(1);
+        assertThat(b.decide(at.apply(22755.0).at("09:32"), open).orders()).isEmpty();
+        assertThat(b.decide(at.apply(22775.0).at("09:33"), open).orders()).as("broken by more than 0.05 %").isEmpty();
+        for (int m = 574; m <= 580; m++) {
+            assertThat(b.decide(at.apply(22770.0).at(String.format("%02d:%02d", m / 60, m % 60)), open).orders())
+                    .as("above the broken PDH, nothing ahead: held").isEmpty();
+        }
+        assertThat(b.decide(at.apply(22745.0).at("09:41"), open).orders()).singleElement()
+                .satisfies(o -> assertThat(o.reason()).isEqualTo("LEVEL_LOST"));
+    }
+
+    /** A-597: exits.oi_trend_exit holds while the day's OI build-up widens on the trade's side, exits 20 % off its peak. */
+    @Test
+    void oiTrendExitHoldsWhileTheBuildUpWidensAndExitsOnItsTurn(@org.junit.jupiter.api.io.TempDir Path dir)
+            throws java.io.IOException {
+        Strategy s = withLines(dir, "exits", "  oi_trend_exit: true\n  oi_trend_retrace: 0.2\n");
+        for (int m = 556; m <= 570; m++) {
+            s.decide(snap(22690, 22680, 0.0, 0.0).at(String.format("%02d:%02d", m / 60, m % 60)), PositionView.FLAT);
+        }
+        assertThat(s.decide(snap(22720, 22680, 0.07, 0.01).at("09:31"), PositionView.FLAT).orders()).hasSize(1);
+        PositionView open = new PositionView(true, OptionSide.CE, 1, 100, null, 110);
+        // build-up so far 0.01; +0.02 a minute to 0.11 by 09:36 (peak), then a one-minute -0.015 (0.095 > 0.088): held
+        for (int m = 572; m <= 576; m++) {
+            assertThat(s.decide(snap(22725, 22680, 0.0, 0.02).at(String.format("%02d:%02d", m / 60, m % 60)), open).orders())
+                    .isEmpty();
+        }
+        assertThat(s.decide(snap(22725, 22680, 0.0, -0.015).at("09:37"), open).orders()).as("a 14 % dip is held").isEmpty();
+        assertThat(s.decide(snap(22725, 22680, 0.0, -0.01).at("09:38"), open).orders()).singleElement()
+                .satisfies(o -> assertThat(o.reason()).isEqualTo("OI_TURN"));
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> withLines(dir, "exits", "  oi_trend_exit: true\n  oi_trend_retrace: 1.5\n"))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    /** A-603: after a STOP exit, one same-side re-entry on a minute close beyond the day's extreme at the stop; off by default. */
+    @Test
+    void reentryAfterAStopOnANewDayExtreme(@org.junit.jupiter.api.io.TempDir Path dir) throws java.io.IOException {
+        java.util.function.Function<Strategy, java.util.List<String>> run = s -> {
+            java.util.List<String> out = new java.util.ArrayList<>();
+            for (int m = 556; m <= 570; m++) {
+                s.decide(snap(22690, 22680, 0.0, 0.0).set("structure.dayHigh", 22700.0).at(String.format("%02d:%02d", m / 60, m % 60)),
+                        PositionView.FLAT);
+            }
+            s.decide(snap(22720, 22680, 0.07, 0.01).set("structure.dayHigh", 22730.0).at("09:31"), PositionView.FLAT).orders()
+                    .forEach(o -> out.add("09:31 " + o.reason()));
+            PositionView open = new PositionView(true, OptionSide.CE, 1, 100, null, 90);
+            s.decide(snap(22680, 22680, 0.0, 0.0).set("structure.dayHigh", 22730.0).at("09:33"), open).orders()
+                    .forEach(o -> out.add("09:33 " + o.reason()));
+            for (String[] m : new String[][] {{"09:34", "22700"}, {"09:35", "22725"}, {"09:36", "22740"}, {"09:37", "22745"}}) {
+                double px = Double.parseDouble(m[1]);
+                s.decide(snap(px, 22680, 0.0, 0.0).set("structure.dayHigh", 22730.0).set("structure.lastMinuteClose", px).at(m[0]),
+                        PositionView.FLAT).orders().forEach(o -> out.add(m[0] + " " + o.side() + " " + o.reason()));
+            }
+            return out;
+        };
+        assertThat(run.apply(withLines(dir, "setup", "  reentry_after_stop_new_extreme: true\n")))
+                .contains("09:33 STOP").anySatisfy(x -> assertThat(x).startsWith("09:36 CE"))
+                .noneSatisfy(x -> assertThat(x).startsWith("09:35")).noneSatisfy(x -> assertThat(x).startsWith("09:37"));
+        assertThat(run.apply(load())).as("off by default").contains("09:33 STOP")
+                .noneSatisfy(x -> assertThat(x).startsWith("09:36"));
+    }
+
+    /** A-616: setup.refused_entry_refund: an entry the engine refused does not use up the day; a new burst may enter. */
+    @Test
+    void aRefusedEntryIsRefundedAndANewBurstMayEnter(@org.junit.jupiter.api.io.TempDir Path dir) throws java.io.IOException {
+        java.util.function.Function<Strategy, java.util.List<String>> run = s -> {
+            java.util.List<String> out = new java.util.ArrayList<>();
+            for (int m = 556; m <= 570; m++) {
+                s.decide(snap(22690, 22680, 0.0, 0.0).at(String.format("%02d:%02d", m / 60, m % 60)), PositionView.FLAT);
+            }
+            s.decide(snap(22720, 22680, 0.07, 0.01).at("09:31"), PositionView.FLAT).orders().forEach(o -> out.add("09:31"));
+            // the engine refused it: the position never opens
+            s.decide(snap(22722, 22680, 0.0, 0.0).at("09:32"), PositionView.FLAT).orders().forEach(o -> out.add("09:32"));
+            s.decide(snap(22724, 22680, 0.07, 0.01).at("09:33"), PositionView.FLAT).orders().forEach(o -> out.add("09:33"));
+            return out;
+        };
+        assertThat(run.apply(withLines(dir, "setup", "  refused_entry_refund: true\n"))).containsExactly("09:31", "09:33");
+        assertThat(run.apply(load())).as("off: the refused 09:31 entry was the day's one event").containsExactly("09:31");
+    }
+
+    /** A-618: after a STOP, the opposite side re-enters on a close beyond the day's opposite extreme. */
+    @Test
+    void reverseReentryAfterAStopOnTheOppositeExtreme(@org.junit.jupiter.api.io.TempDir Path dir) throws java.io.IOException {
+        java.util.function.Function<Strategy, java.util.List<String>> run = s -> {
+            java.util.List<String> out = new java.util.ArrayList<>();
+            java.util.function.Function<Double, Snapshots> at = px -> snap(px, 22680, 0.0, 0.0).set("structure.dayHigh", 22730.0)
+                    .set("structure.dayLow", 22670.0).set("structure.lastMinuteClose", px);
+            for (int m = 556; m <= 570; m++) {
+                s.decide(at.apply(22690.0).at(String.format("%02d:%02d", m / 60, m % 60)), PositionView.FLAT);
+            }
+            s.decide(snap(22720, 22680, 0.07, 0.01).set("structure.dayHigh", 22730.0).set("structure.dayLow", 22670.0)
+                    .at("09:31"), PositionView.FLAT).orders().forEach(o -> out.add("09:31 " + o.side()));
+            PositionView open = new PositionView(true, OptionSide.CE, 1, 100, null, 90);
+            s.decide(at.apply(22680.0).at("09:33"), open).orders().forEach(o -> out.add("09:33 " + o.reason()));
+            for (String[] m : new String[][] {{"09:34", "22675"}, {"09:35", "22668"}, {"09:36", "22660"}}) {
+                s.decide(at.apply(Double.parseDouble(m[1])).at(m[0]), PositionView.FLAT).orders()
+                        .forEach(o -> out.add(m[0] + " " + o.side()));
+            }
+            return out;
+        };
+        assertThat(run.apply(withLines(dir, "setup", "  reentry_reverse_after_stop: true\n")))
+                .containsExactly("09:31 CE", "09:33 STOP", "09:35 PE");
+        assertThat(run.apply(load())).as("off by default").containsExactly("09:31 CE", "09:33 STOP");
+    }
+
+    /** A-621: setup.entry_share_scale lowers the entry burst threshold only. */
+    @Test
+    void entryShareScaleEntersOnAHalfStrengthBurst(@org.junit.jupiter.api.io.TempDir Path dir) throws java.io.IOException {
+        assertThat(cross(load(), 22680, 0.04, 0.01)).as("0.04 < 0.0612").isEmpty();
+        assertThat(cross(withLines(dir, "setup", "  entry_share_scale: 0.5\n"), 22680, 0.04, 0.01)).as("0.04 >= 0.0306").hasSize(1);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> withLines(dir, "setup", "  entry_share_scale: 0\n"))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    /** A-622: setup.stale_burst_max_min skips a burst whose half-strength flow began long before it qualified. */
+    @Test
+    void aStaleBurstIsSkipped(@org.junit.jupiter.api.io.TempDir Path dir) throws java.io.IOException {
+        java.util.function.BiFunction<Strategy, Double, java.util.List<com.autotrade.strategy.OrderIntent>> run = (s, early) -> {
+            for (int m = 556; m <= 570; m++) {
+                double flow = m >= 560 ? early : 0.0;             // from 09:20 a half-strength up flow (or none)
+                s.decide(snap(22690 - (m == 556 ? 5 : 0), 22680, flow, 0.0).at(String.format("%02d:%02d", m / 60, m % 60)),
+                        PositionView.FLAT);
+            }
+            return s.decide(snap(22720, 22680, 0.07, 0.01).at("09:31"), PositionView.FLAT).orders();
+        };
+        String lines = "  stale_burst_max_min: 5\n";
+        assertThat(run.apply(withLines(dir, "setup", lines), 0.035)).as("flow half-strength since 09:20: 11 minutes").isEmpty();
+        assertThat(run.apply(withLines(dir, "setup", lines), 0.0)).as("a fresh burst").hasSize(1);
+        assertThat(run.apply(load(), 0.035)).as("off by default").hasSize(1);
+    }
+
+    /** A-630: a second entry needs a gap after the first trade and strong data (full burst, futures volume, premium rising). */
+    @Test
+    void aSecondEntryNeedsAGapAndStrongData(@org.junit.jupiter.api.io.TempDir Path dir) throws java.io.IOException {
+        java.util.function.BiFunction<String, double[], java.util.List<String>> run = (windows, flows) -> {
+            try {
+                Strategy s = withLines(dir, "setup", "  fresh_cross: false\n  max_entries_per_day: 2\n  second_entry_windows: \"" + windows + "\"\n"
+                        + "  second_entry_min_gap_min: 5\n  second_entry_min_fut_rvol: 1.0\n");
+                java.util.List<String> out = new java.util.ArrayList<>();
+                java.util.function.BiFunction<Double, Double, Snapshots> at = (px, f) -> snap(px, 22680, f, 0.01)
+                        .set("futures.rvolTod", 1.2).set("premium.ceChange1mPct", 1.0).set("premium.ceChange3mPct", 2.0);
+                for (int m = 556; m <= 570; m++) {
+                    s.decide(at.apply(22690.0, 0.0).at(String.format("%02d:%02d", m / 60, m % 60)), PositionView.FLAT);
+                }
+                s.decide(at.apply(22720.0, 0.07).at("09:31"), PositionView.FLAT).orders().forEach(o -> out.add("09:31"));
+                PositionView open = new PositionView(true, OptionSide.CE, 1, 100, null, 90);
+                s.decide(at.apply(22721.0, 0.0).at("09:32"), open);
+                s.decide(at.apply(22722.0, 0.0).at("09:33"), PositionView.FLAT);          // the first trade ended at 09:33
+                s.decide(at.apply(22725.0, flows[0]).at("09:35"), PositionView.FLAT).orders().forEach(o -> out.add("09:35"));
+                s.decide(at.apply(22726.0, 0.0).at("09:36"), PositionView.FLAT);
+                s.decide(at.apply(22730.0, flows[1]).at("09:40"), PositionView.FLAT).orders().forEach(o -> out.add("09:40"));
+                return out;
+            } catch (java.io.IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+        };
+        assertThat(run.apply("09:21-11:01", new double[] {0.07, 0.07})).as("09:35 inside the 5-min gap; 09:40 full burst")
+                .containsExactly("09:31", "09:40");
+        assertThat(run.apply("09:21-11:01", new double[] {0.0, 0.04})).as("a half-strength burst is not enough for a 2nd entry")
+                .containsExactly("09:31");
+        assertThat(run.apply("09:21-09:38", new double[] {0.0, 0.07})).as("outside the windows: needs 1.5 x").containsExactly("09:31");
+        assertThat(run.apply("09:21-09:38", new double[] {0.0, 0.10})).as("excellent: 0.10 >= 0.0918").containsExactly("09:31", "09:40");
+    }
+
+    /** A-636: v8's trail (arm +2 ATR, give back 3) with a 1.5 ATR give-back from +2.5 ATR, or a 20-minute stall exit. */
+    @Test
+    void tightTrailAndStallExit(@org.junit.jupiter.api.io.TempDir Path dir) throws java.io.IOException {
+        java.util.function.Function<String, String> run = lines -> {
+            try {
+                String v8 = java.nio.file.Files.readString(Path.of("..", "config", "strategy", "oi-burst-cross.v8.yaml"));
+                Path f = dir.resolve(Integer.toHexString(lines.hashCode())).resolve("oi-burst-cross.v8.yaml");
+                java.nio.file.Files.createDirectories(f.getParent());
+                java.nio.file.Files.writeString(f, v8.replace("\nexits:\n", "\nexits:\n" + lines));
+                Strategy s = Strategies.load(f).create("NIFTY", Snapshots.SESSION);
+                for (int m = 556; m <= 570; m++) {
+                    s.decide(snap(22720 + (m - 556), 22680, 0.0, 0.0).set("structure.dayLow", 22600.0).set("structure.atr3m", 10.0)
+                            .at(String.format("%02d:%02d", m / 60, m % 60)), PositionView.FLAT);
+                }
+                assertThat(s.decide(snap(22740, 22680, 0.07, 0.01).set("structure.dayLow", 22600.0).set("structure.atr3m", 10.0)
+                        .at("09:31"), PositionView.FLAT).orders()).hasSize(1);
+                PositionView open = new PositionView(true, OptionSide.CE, 1, 100, null, 130);
+                // 09:32-09:40 up to 22,770 (+3 ATR), then flat 22,760 to 10:10
+                double[] path = new double[40];
+                for (int i = 0; i < 40; i++) {
+                    path[i] = i < 9 ? 22740 + 30.0 * (i + 1) / 9 : 22760;
+                }
+                for (int i = 0; i < 40; i++) {
+                    int m = 572 + i;
+                    var o = s.decide(snap(path[i], 22680, 0.0, 0.0).at(String.format("%02d:%02d", m / 60, m % 60)), open).orders();
+                    if (!o.isEmpty()) {
+                        return String.format("%02d:%02d ", m / 60, m % 60) + o.get(0).reason();
+                    }
+                }
+                return "held";
+            } catch (java.io.IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+        };
+        assertThat(run.apply("")).as("off: 10 below the best is inside 3 ATR").isEqualTo("held");
+        assertThat(run.apply("  trail_tight_after_atr: 2.5\n  trail_tight_atr: 1.0\n")).as("+3 ATR best, 1 ATR give-back")
+                .isEqualTo("09:41 TRAIL_ATR");
+        assertThat(run.apply("  stall_exit_min: 20\n")).as("best at 09:40, no new best by 10:00").isEqualTo("10:00 STALL");
+    }
+
+    /** A-635: a further entry needs the day's and the 1/3/5/10-minute OI flow with it and volume and / or the EMA slope. */
+    @Test
+    void aFurtherEntryNeedsExcellentOiAndVolumeOrEma(@org.junit.jupiter.api.io.TempDir Path dir) throws java.io.IOException {
+        record Arm(String confirm, double rvol, double net10) { }
+        java.util.function.Function<Arm, java.util.List<String>> run = arm -> {
+            try {
+                Strategy s = withLines(dir, "setup", "  fresh_cross: false\n  max_entries_per_day: 3\n  second_entry_windows: \"09:21-14:51\"\n"
+                        + "  second_entry_min_gap_min: 5\n  second_entry_strong_scale: 0.5\n  second_entry_excellent_scale: 0.5\n"
+                        + "  second_entry_require_rising: false\n  second_entry_min_fut_rvol: 1.0\n  second_entry_excellent_oi: true\n"
+                        + "  second_entry_confirm: " + arm.confirm() + "\n");
+                java.util.List<String> out = new java.util.ArrayList<>();
+                java.util.function.BiFunction<Double, Double, Snapshots> at = (px, f) -> snap(px, 22680, f, f > 0 ? 0.01 : 0.0)
+                        .set("futures.rvolTod", arm.rvol()).set("options.peOiChange1m", 10.0).set("options.peOiChange3m", 30.0)
+                        .set("options.peOiChange5m", 50.0).set("options.peOiChange10m", 100.0 + arm.net10())
+                        .set("options.ceOiChange1m", 0.0).set("options.ceOiChange3m", 0.0).set("options.ceOiChange5m", 0.0).set("options.ceOiChange10m", 0.0);
+                for (int m = 556; m <= 570; m++) {
+                    s.decide(at.apply(22690.0, 0.0).at(String.format("%02d:%02d", m / 60, m % 60)), PositionView.FLAT);
+                }
+                s.decide(at.apply(22720.0, 0.07).at("09:31"), PositionView.FLAT).orders().forEach(o -> out.add("09:31"));
+                s.decide(at.apply(22721.0, 0.0).at("09:32"), new PositionView(true, OptionSide.CE, 1, 100, null, 110));
+                s.decide(at.apply(22722.0, 0.0).at("09:33"), PositionView.FLAT);
+                for (int m = 574; m <= 579; m++) {                // the EMA keeps rising
+                    s.decide(at.apply(22722.0 + (m - 573), 0.0).at(String.format("%02d:%02d", m / 60, m % 60)), PositionView.FLAT);
+                }
+                s.decide(at.apply(22735.0, 0.07).at("09:40"), PositionView.FLAT).orders().forEach(o -> out.add("09:40"));
+                return out;
+            } catch (java.io.IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+        };
+        assertThat(run.apply(new Arm("and", 1.2, 0))).as("all OI windows with it, volume and EMA").containsExactly("09:31", "09:40");
+        assertThat(run.apply(new Arm("and", 1.2, -150))).as("10-minute flow against").containsExactly("09:31");
+        assertThat(run.apply(new Arm("and", 0.8, 0))).as("no volume: AND fails").containsExactly("09:31");
+        assertThat(run.apply(new Arm("or", 0.8, 0))).as("no volume but the EMA rises: OR passes").containsExactly("09:31", "09:40");
+    }
+
+    /** A-635: a further trade is held while its structure holds and exits on a close below the previous 10 closes. */
+    @Test
+    void aFurtherTradeIsHeldByStructure(@org.junit.jupiter.api.io.TempDir Path dir) throws java.io.IOException {
+        java.util.function.Function<Boolean, String> run = hold -> {
+            try {
+                String v1 = java.nio.file.Files.readString(Path.of("..", "config", "strategy", "oi-burst-cross.v1.yaml"));
+                Path f = dir.resolve("h" + hold).resolve("oi-burst-cross.v1.yaml");
+                java.nio.file.Files.createDirectories(f.getParent());
+                java.nio.file.Files.writeString(f, v1.replace("\nsetup:\n", "\nsetup:\n  fresh_cross: false\n  max_entries_per_day: 3\n")
+                        .replace("\nexits:\n", "\nexits:\n  hold_structure_further: " + hold + "\n  trail_arm_atr: 2.0\n  trail_atr: 1.0\n"));
+                Strategy s = Strategies.load(f).create("NIFTY", Snapshots.SESSION);
+                java.util.function.Function<Double, Snapshots> at = px -> snap(px, 22680, 0.0, 0.0).set("structure.atr3m", 10.0);
+                for (int m = 556; m <= 570; m++) {
+                    s.decide(at.apply(22690.0).at(String.format("%02d:%02d", m / 60, m % 60)), PositionView.FLAT);
+                }
+                assertThat(s.decide(snap(22720, 22680, 0.07, 0.01).set("structure.atr3m", 10.0).at("09:31"), PositionView.FLAT).orders()).hasSize(1);
+                s.decide(at.apply(22721.0).at("09:32"), new PositionView(true, OptionSide.CE, 1, 100, null, 110));
+                s.decide(at.apply(22722.0).at("09:33"), PositionView.FLAT);
+                assertThat(s.decide(snap(22735, 22680, 0.07, 0.01).set("structure.atr3m", 10.0).at("09:40"), PositionView.FLAT).orders())
+                        .as("the second entry").hasSize(1);
+                PositionView open = new PositionView(true, OptionSide.CE, 1, 100, null, 120);
+                for (int m = 581; m <= 595; m++) {                // 09:41-09:55: up 5 a minute to 22,805
+                    var o = s.decide(at.apply(22735.0 + 5 * (m - 580)).at(String.format("%02d:%02d", m / 60, m % 60)), open).orders();
+                    if (!o.isEmpty()) {
+                        return String.format("%02d:%02d ", m / 60, m % 60) + o.get(0).reason();
+                    }
+                }
+                for (double px : new double[] {22775, 22755}) {   // 09:56 back 30 (3 ATR off the best), 09:57 below the 10-minute low
+                    var o = s.decide(at.apply(px).at(px == 22775 ? "09:56" : "09:57"), open).orders();
+                    if (!o.isEmpty()) {
+                        return (px == 22775 ? "09:56 " : "09:57 ") + o.get(0).reason();
+                    }
+                }
+                return "held";
+            } catch (java.io.IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+        };
+        assertThat(run.apply(true)).as("held through the trail; out when the structure breaks").isEqualTo("09:57 STRUCTURE_BREAK");
+        assertThat(run.apply(false)).as("off: the trail takes it").isEqualTo("09:56 TRAIL_ATR");
+    }
+
+    /** A-634: no_side_flip refuses the other side after a filled trade; max_losers_per_day stops the index after N losers. */
+    @Test
+    void noSideFlipAndMaxLosersPerDay(@org.junit.jupiter.api.io.TempDir Path dir) throws java.io.IOException {
+        java.util.function.BiFunction<String, Double, java.util.List<String>> run = (lines, secondPx) -> {
+            try {
+                Strategy s = withLines(dir, "setup", "  fresh_cross: false\n  max_entries_per_day: 3\n  reversal_ends_day: false\n" + lines);
+                java.util.List<String> out = new java.util.ArrayList<>();
+                for (int m = 556; m <= 570; m++) {
+                    s.decide(snap(22690, 22680, 0.0, 0.0).at(String.format("%02d:%02d", m / 60, m % 60)), PositionView.FLAT);
+                }
+                s.decide(snap(22720, 22680, 0.07, 0.01).at("09:31"), PositionView.FLAT).orders().forEach(o -> out.add("09:31 " + o.side()));
+                s.decide(snap(22721, 22680, 0.0, 0.0).at("09:32"), new PositionView(true, OptionSide.CE, 1, 100, null, 80, 0, 1, java.util.List.of()));
+                s.decide(snap(22722, 22680, 0.0, 0.0).at("09:33"), PositionView.FLAT);   // closed below cost: a loser
+                // the index drops under its EMA: a put burst (other side, below the open would be non-continuation, so keep it above)
+                for (int m = 574; m <= 580; m++) {
+                    s.decide(snap(22700, 22680, 0.0, 0.0).at(String.format("%02d:%02d", m / 60, m % 60)), PositionView.FLAT);
+                }
+                s.decide(snap(secondPx, 22680, -0.07, -0.01).at("09:41"), PositionView.FLAT).orders().forEach(o -> out.add("09:41 " + o.side()));
+                return out;
+            } catch (java.io.IOException e) {
+                throw new java.io.UncheckedIOException(e);
+            }
+        };
+        assertThat(run.apply("", 22660.0)).as("off: the put is taken").containsExactly("09:31 CE", "09:41 PE");
+        assertThat(run.apply("  no_side_flip: true\n", 22660.0)).as("no flip after a filled call").containsExactly("09:31 CE");
+        assertThat(run.apply("  max_losers_per_day: 1\n", 22660.0)).as("one loser and the index is done").containsExactly("09:31 CE");
+    }
+
+    /** A-591: setup.min_fut_rvol skips a burst on below-normal futures volume; a missing value passes; off by default. */
+    @Test
+    void lowFuturesRvolVetoesTheBurst(@org.junit.jupiter.api.io.TempDir Path dir) throws java.io.IOException {
+        java.util.function.BiFunction<Strategy, Double, java.util.List<com.autotrade.strategy.OrderIntent>> run = (s, rvol) -> {
+            for (int m = 556; m <= 570; m++) {
+                s.decide(snap(22690, 22680, 0.0, 0.0).at(String.format("%02d:%02d", m / 60, m % 60)), PositionView.FLAT);
+            }
+            Snapshots last = snap(22720, 22680, 0.07, 0.01);
+            if (rvol != null) {
+                last = last.set("futures.rvolTod", rvol);
+            }
+            return s.decide(last.at("09:31"), PositionView.FLAT).orders();
+        };
+        String on = "  min_fut_rvol: 1.0\n";
+        assertThat(run.apply(withLines(dir, "setup", on), 0.8)).as("RVOL 0.8").isEmpty();
+        assertThat(run.apply(withLines(dir, "setup", on), 1.2)).as("RVOL 1.2").hasSize(1);
+        assertThat(run.apply(withLines(dir, "setup", on), null)).as("missing RVOL passes").hasSize(1);
+        assertThat(run.apply(withLines(dir, "setup", on + "  fut_rvol_source: nifty\n"), 0.8))
+                .as("a NIFTY instance reads its own RVOL in nifty mode").isEmpty();
+        assertThat(run.apply(load(), 0.8)).as("off by default").hasSize(1);
+    }
 }

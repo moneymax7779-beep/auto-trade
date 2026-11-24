@@ -124,6 +124,12 @@ autotrade:
       # not low priority. LIVE only where the owner chooses it (follower-risk v16+ live.strategies; in no default list) and the
       # account subscribes to it.
       - config/strategy/ma-cross-open.v8.yaml
+      # F1 (obc-v31lvoirhh) added 2026-11-24 (A-646 LFH, user: "add LFH to the live PAPER/LIVE set on GCP directly"): the
+      # MT2 pair's only part not copied from obc-v31 (early 09:16-09:21 OI bursts, buying against a fading gap), at half
+      # budget (Rs 1.25 L), low priority by full id and capped at -5 % a day on its own (risk v64). 38 tick days +98.25 L vs
+      # the six's +92.14 L, worst day -1.33 L, drawdown -2.21 L, 9 loss days; A-646 rule FAIL (17 Oct-6 Nov -75K, without
+      # 23 Nov -1.02 L); stressed fills +85.12 L (87 %, +9.05 L vs the six); held-out 22-25 Sep +4.46 L vs +3.31 L (A-650).
+      - config/strategy/oi-burst-cross.v31lvoirhh.yaml
       # zbf-v10 removed 2026-10-19 after one live session (A-149, user 19 Oct ~16:50: "remove zbf-v10 from the live set"):
       # live 19 Oct only (A-148), 3 trades, 3 losses, -Rs 1,49,446 (the set's day -Rs 1,16,673; without it +Rs 32,774).
       # Its file and code stay; it returns only through a new registered test.
@@ -132,7 +138,7 @@ autotrade:
     costs-file: config/costs/india-index-options-costs.v2.yaml   # v2: Upstox Plus brokerage Rs 30/order from 2026-09-01 (A-044, user 2026-10-06)
     # A-358 (9 Nov 2026): v19 = v17 + the `shorts` section the PAPER expiry short straddle shadow needs (every long-path
     # value is v17's; a risk file without that section refuses every SELL_STRADDLE). Deploying it is the user's decision.
-    risk-file: config/risk/paper-risk.v44.yaml   # v44 from 18 Nov (A-476): v19 + priority.low [session-break-retest], keep 50 % free, pre-empted for the others. Before:   # v19 from the A-358 shadow deploy (= v17 + a `shorts` section; no long-path value changes); before: v17 from 15 Oct (A-106 PASS thin, A-107; user 15 Oct ~08:00: "deploy v17"): v12 + a single-leg entry at up to 1.5 x its budget when futures RVOL >= 1.5 at entry, using spare capital only (+Rs 66K over 193 days, worst day unchanged; review after 10 sessions). # v12 (A-063, user 2026-10-09 00:19: "switch to v12 and deploy before 09:00"): v10 + entries sliced to the visible book (0.5 % of the ask, 2 % drift, 10 s) + 2 % participation cap (A-062). v10 (A-054, user 2026-10-07 07:15: "start the sizing from 5,00,000 from today"): v9 with equity counted from 7 Oct (Rs 5L + live sessions from that date). v9 (A-047): capital = equity, budgets x equity/5L, daily loss 22 % of equity
+    risk-file: config/risk/paper-risk.v64.yaml   # v64 from 24 Nov (A-646 / A-650): v44 + F1 (oi-burst-cross@obc-v31lvoirhh) in priority.low with sbr and its own daily loss limit of 5 % (strategy_group_loss). Before: v44 from 18 Nov (A-476): v19 + priority.low [session-break-retest], keep 50 % free, pre-empted for the others. Before:   # v19 from the A-358 shadow deploy (= v17 + a `shorts` section; no long-path value changes); before: v17 from 15 Oct (A-106 PASS thin, A-107; user 15 Oct ~08:00: "deploy v17"): v12 + a single-leg entry at up to 1.5 x its budget when futures RVOL >= 1.5 at entry, using spare capital only (+Rs 66K over 193 days, worst day unchanged; review after 10 sessions). # v12 (A-063, user 2026-10-09 00:19: "switch to v12 and deploy before 09:00"): v10 + entries sliced to the visible book (0.5 % of the ask, 2 % drift, 10 s) + 2 % participation cap (A-062). v10 (A-054, user 2026-10-07 07:15: "start the sizing from 5,00,000 from today"): v9 with equity counted from 7 Oct (Rs 5L + live sessions from that date). v9 (A-047): capital = equity, budgets x equity/5L, daily loss 22 % of equity
     poll-interval-ms: 250
     replay-speed: 0                # --mode=replay only: market seconds per second (e.g. 60); 0 = as fast as possible
     replay-source: zt              # --mode=replay only: zt (zt-tiger-v2's capture), own (auto-trade's live capture, md.*; from 28 Sep 2026) or bars (Upstox one-minute bars in hist.candle; --mode=fetch-bars loads them)
