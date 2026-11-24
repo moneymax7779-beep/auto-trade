@@ -12,6 +12,7 @@ async function mock(page: Page, enabled: boolean) {
   await page.route("**/api/**", async (route) => {
     const req = route.request();
     const p = new URL(req.url()).pathname;
+    if (p === "/api/presence") return route.fulfill({ status: 204 });   // the tab's activity beat (presence.ts, 23 Nov 2026), not a user action
     if (req.method() === "POST") { posts.push({ url: p, body: req.postDataJSON() }); return route.fulfill(json({ removed: 1 })); }
     if (p === "/api/me") return route.fulfill(json({ mode: "none", user: "local-owner", operator: true, logout: false }));
     if (p === "/api/execution/push") return route.fulfill(json(STATE(enabled)));
