@@ -654,7 +654,7 @@ class SessionRunner implements ApplicationRunner {
             com.autotrade.core.event.SessionEventSource events = bars
                     ? new BarReplaySource(target, new IndexWeightFiles(Path.of("config", "reference", "weights")),
                             t.barOptionsWithoutExtremes())
-                    : t.replayFromOwnCapture() ? new OwnCaptureSource(target) : new ZtSessionSource(source, false);
+                    : t.replayFromOwnCapture() ? new OwnCaptureSource(target, source) : new ZtSessionSource(source, false);
             replayControl.reset(t.replaySpeed());
             feed = t.replaySpeed() > 0
                     ? new ReplayAsLiveFeed(events, session, t.underlyings(), t.replaySpeed(), replayControl)
