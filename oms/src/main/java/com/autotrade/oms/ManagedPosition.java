@@ -64,6 +64,8 @@ public final class ManagedPosition {
     int exitChases;
     /** Times a straddle leg's (or, risk v11, a single-leg position's) unfilled entries were re-priced at the new ask. */
     int entryChases;
+    /** A-612: this entry was priced at the mid and waits entry_mid_wait_sec instead of the entry timeout. */
+    boolean midEntry;
     /** risk v11: the limit of the latest entry orders and when it was set (a re-price only ever raises it). */
     double entryLimit;
     Instant entryPricedAt;

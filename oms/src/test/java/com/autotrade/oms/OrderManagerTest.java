@@ -326,6 +326,126 @@ class OrderManagerTest {
                 .satisfies(p -> assertThat(p.averageCost).isCloseTo(101.5, org.assertj.core.api.Assertions.within(0.01)));
     }
 
+    /** A-612 (risk v49): an entry is one limit at the mid, fills only when the ask comes down to it, cancelled after 60 s. */
+    @Test
+    void riskV49EntersAtTheMidAndCancelsWhatIsUnfilledAfterTheWait() {
+        RiskLimits v49 = RiskLimits.from(ThresholdConfig.load(Path.of("..", "config", "risk", "paper-risk.v49.yaml")));
+        assertThat(v49.entryAtMid()).isTrue();
+        assertThat(v49.entryMidWaitSec()).isEqualTo(60);
+        assertThat(RiskLimits.from(ThresholdConfig.load(Path.of("..", "config", "risk", "paper-risk.v48.yaml"))).entryAtMid())
+                .as("off before v49").isFalse();
+        java.util.function.Supplier<OrderManager> make = () -> new OrderManager("P1", "P1-S1", "ecr", SESSION, broker,
+                new RiskEngine(v49, killSwitch), COSTS, 25, clock::get, new OmsListener() {
+                    @Override
+                    public void orderSent(ManagedPosition position, String role, OrderRequest request) {
+                        sent.add(request);
+                    }
+
+                    @Override
+                    public void entryComplete(ManagedPosition position) {
+                        entriesComplete.add(position.quantity());
+                    }
+
+                    @Override
+                    public void alert(String message) {
+                        alerts.add(message);
+                    }
+                });
+        // fills: the ask comes down to the mid within the wait
+        oms = make.get();
+        quote("10:00:00", 99.6, 100.4, 100.0);            // spread 0.8 % (v44 refuses > 1.5 %)
+        var r1 = oms.enter("NIFTY", OptionSide.CE, CE, 1, "EARLY", market("10:00"));
+        assertThat(r1.approved()).as(String.valueOf(r1.reason())).isTrue();
+        assertThat(sent).singleElement().satisfies(o -> assertThat(o.limitPrice()).isEqualTo(100.0));
+        quote("10:00:01", 99.8, 100.4, 100.1);
+        oms.onTimer(at("10:00:20"));
+        assertThat(oms.livePositions()).singleElement().satisfies(p -> assertThat(p.boughtQuantity).isZero());
+        quote("10:00:30", 99.6, 100.0, 100.0);
+        quote("10:00:31", 99.6, 100.0, 100.0);
+        assertThat(oms.livePositions()).singleElement().satisfies(p -> {
+            assertThat(p.boughtQuantity).isEqualTo(65);
+            assertThat(p.averageCost).isLessThanOrEqualTo(100.0);
+        });
+        oms.exit("NIFTY", "TEST");
+        quote("10:00:32", 99.6, 100.0, 100.0);
+        quote("10:00:33", 99.6, 100.0, 100.0);
+
+        // never filled: cancelled after 60 s, the position closes as not filled
+        sent.clear();
+        quote("11:00:00", 99.6, 100.4, 100.0);
+        oms.enter("NIFTY", OptionSide.CE, CE, 1, "EARLY", market("11:00"));
+        assertThat(sent).singleElement().satisfies(o -> assertThat(o.limitPrice()).isEqualTo(100.0));
+        quote("11:00:30", 100.6, 101.2, 100.9);
+        oms.onTimer(at("11:00:30"));
+        assertThat(oms.livePositions()).as("still waiting at 30 s").hasSize(1);
+        oms.onTimer(at("11:01:01"));
+        quote("11:01:02", 100.6, 101.2, 100.9);
+        quote("11:01:03", 100.6, 101.2, 100.9);
+        assertThat(oms.livePositions()).isEmpty();
+        assertThat(sent).hasSize(1).as("no re-price");
+    }
+
+    /** A-615 (risk v52): a slice priced just before the option jumps is re-priced to the new ask and fills. */
+    @Test
+    void riskV52RepricesAWorkingSliceWhenTheAskRuns() {
+        RiskLimits v52 = RiskLimits.from(ThresholdConfig.load(Path.of("..", "config", "risk", "paper-risk.v52.yaml")));
+        assertThat(v52.entrySliceReprice()).isTrue();
+        assertThat(v52.entrySliceMaxDriftPct()).isEqualTo(10.0);
+        assertThat(v52.entryTimeoutSec()).isEqualTo(30);
+        oms = new OrderManager("P1", "P1-S1", "ecr", SESSION, broker, new RiskEngine(v52, killSwitch), COSTS, 25, clock::get,
+                new OmsListener() {
+                    @Override
+                    public void orderSent(ManagedPosition position, String role, OrderRequest request) {
+                        sent.add(request);
+                    }
+
+                    @Override
+                    public void entryComplete(ManagedPosition position) {
+                        entriesComplete.add(position.quantity());
+                    }
+
+                    @Override
+                    public void alert(String message) {
+                        alerts.add(message);
+                    }
+                });
+        quote("10:00:00", 99.8, 100.0, 100.0);
+        var r = oms.enter("NIFTY", OptionSide.CE, CE, 1, "EARLY", market("10:00"));
+        assertThat(r.approved()).as(String.valueOf(r.reason())).isTrue();
+        double first = sent.getFirst().limitPrice();
+        assertThat(first).isLessThan(101.0);
+        quote("10:00:01", 103.8, 104.0, 104.0);              // the option jumps 4 % before the slice fills
+        quote("10:00:02", 103.8, 104.0, 104.0);
+        quote("10:00:03", 103.8, 104.0, 104.0);
+        assertThat(oms.livePositions()).singleElement().satisfies(p -> {
+            assertThat(p.boughtQuantity).isEqualTo(65);
+            assertThat(p.averageCost).isBetween(104.0, 104.6);
+        });
+    }
+
+    /** A-638 (risk v58): the MT2 pair stops entering once its own day P&L reaches -5 % of capital; others still enter. */
+    @Test
+    void riskV58StopsTheStrategyGroupAtItsOwnDailyLoss() {
+        RiskLimits v58 = RiskLimits.from(ThresholdConfig.load(Path.of("..", "config", "risk", "paper-risk.v58.yaml")));
+        assertThat(v58.strategyGroupLoss().strategies())
+                .containsExactlyInAnyOrder("oi-burst-cross@obc-v31hm2", "oi-burst-cross@obc-v31lvoirh");
+        assertThat(v58.strategyGroupLoss().pct()).isEqualTo(5.0);
+        assertThat(RiskLimits.from(ThresholdConfig.load(Path.of("..", "config", "risk", "paper-risk.v44.yaml"))).strategyGroupLoss())
+                .as("off before v58").isNull();
+        oms = new OrderManager("P1", "P1-S1", "ecr", SESSION, broker, new RiskEngine(v58, killSwitch), COSTS, 25, clock::get,
+                new OmsListener() { });
+        quote("10:00:00", 99.8, 100.0, 100.0);
+        assertThat(oms.enter("oi-burst-cross@obc-v31hm2", "NIFTY", OptionSide.CE, CE, 10, "OBC", market("10:00"), Double.NaN)
+                .approved()).isTrue();
+        quote("10:00:01", 99.8, 100.0, 100.0);
+        quote("10:05:00", 60.0, 60.2, 60.0);                 // 650 bought near 100, bid 60: about -26,000 open
+        var group = oms.enter("oi-burst-cross@obc-v31lvoirh", "SENSEX", OptionSide.CE, CE, 1, "OBC", market("10:05"), Double.NaN);
+        assertThat(group.approved()).isFalse();
+        assertThat(group.reason()).startsWith("strategy group daily loss");
+        assertThat(oms.enter("ma-cross", "SENSEX", OptionSide.CE, CE, 1, "MAC", market("10:05"), Double.NaN).approved())
+                .as("outside the group").isTrue();
+    }
+
     private OrderManager v12() {
         RiskLimits v12 = RiskLimits.from(ThresholdConfig.load(Path.of("..", "config", "risk", "paper-risk.v12.yaml")));
         return new OrderManager("P1", "P1-S1", "ecr", SESSION, broker, new RiskEngine(v12, killSwitch), COSTS, 25, clock::get,

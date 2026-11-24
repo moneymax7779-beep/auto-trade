@@ -245,6 +245,43 @@ class SetupFamiliesTest {
                 .as("first quote 21 minutes in: past the 5-minute grace, no look").isEmpty();
     }
 
+    /** A-649 mac-v51 / v52: at the 60-min time stop the trade is held while the OI flow, EMA20 side (and RVOL) agree. */
+    @Test
+    void maCrossV51HoldsPastTheTimeStopWhileTheDataSupportsIt() {
+        Map<String, Object> swings = Map.of("structure.lastSwingLow", 22580.0, "structure.lastSwingHigh", 22700.0);
+        java.util.function.Function<String, Day> enter = file -> {
+            Day d = new Day(file, swings);
+            d.at("10:00", 22600, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22602.0);
+            assertThat(d.at("10:01", 22610, PositionView.FLAT, "structure.ema9", 22605.0, "structure.ema20", 22601.0).orders())
+                    .singleElement().extracting(OrderIntent::side).isEqualTo(OptionSide.CE);
+            d.at("10:16", 22612, new PositionView(true, OptionSide.CE, 1, 50, null, 51), "structure.ema9", 22606.0,
+                    "structure.ema20", 22602.0);
+            return d;
+        };
+        PositionView open = new PositionView(true, OptionSide.CE, 1, 50, null, 55);
+        Object[] good = {"structure.ema9", 22618.0, "structure.ema20", 22610.0, "options.peOiChange5m", 900.0,
+                "options.ceOiChange5m", 200.0, "options.peOiChange10m", 1500.0, "options.ceOiChange10m", 400.0, "futures.rvolTod", 1.3};
+        Day held = enter.apply("ma-cross.v51.yaml");
+        assertThat(held.at("11:01", 22620, open, good).orders()).as("60 min, the data agrees: held").isEmpty();
+        assertThat(held.at("11:05", 22622, open, good).orders()).as("still agrees").isEmpty();
+        Object[] turned = good.clone();
+        turned[7] = 1200.0;                                         // calls now added faster than puts over 5 min
+        assertThat(held.at("11:06", 22621, open, turned).orders()).singleElement().extracting(OrderIntent::reason)
+                .isEqualTo("DATA_TURN");
+
+        Day noData = enter.apply("ma-cross.v51.yaml");
+        assertThat(noData.at("11:01", 22620, open, turned).orders()).as("no support at 60 min: the time stop")
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("TIME_60");
+
+        Object[] quiet = good.clone();
+        quiet[13] = 0.8;                                            // futures volume below 1.0
+        assertThat(enter.apply("ma-cross.v51.yaml").at("11:01", 22620, open, quiet).orders()).as("v51 ignores volume").isEmpty();
+        assertThat(enter.apply("ma-cross.v52.yaml").at("11:01", 22620, open, quiet).orders()).as("v52 needs RVOL >= 1")
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("TIME_60");
+        assertThat(enter.apply("ma-cross.v34.yaml").at("11:01", 22620, open, good).orders()).as("v34 unchanged")
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("TIME_60");
+    }
+
     /** ma-cross-open v7 test day: carried swings 22,560 / 22,700 and carried ATR 20; no gap (open = previous close). */
     private static Day mcoV7() {
         return new Day("ma-cross-open.v7.yaml", Map.of("structure.carriedSwingLow", 22560.0,

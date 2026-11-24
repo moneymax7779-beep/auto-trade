@@ -88,6 +88,10 @@ final class MaCross extends SetupStrategy {
     // has not crossed today's last confirmed 3-min swing low (high for a put); any missing value = no support. While
     // holding, the first minute close without that support exits (HOLD_STRUCTURE); swing / premium stop and flat_by stay.
     private final boolean structureHold;
+    /** A-649: past the 60-min time stop, hold while near-ATM OI flow (5 and 10 min), EMA20 side and (optionally) futures RVOL agree. */
+    private final boolean dataHold;
+    private final double dataHoldRvolMin;
+    private boolean dataHolding;
     private final int structureHoldTimeMin;
     private boolean structureHolding;
     // A-560 (exits.structure_hold_floor_atr, off when absent): the index at the minute close where the hold started is a
@@ -119,6 +123,8 @@ final class MaCross extends SetupStrategy {
             throw new IllegalArgumentException("exits.level_hold needs scope.time_stop_min: 0 and exits.use_target: false");
         }
         structureHold = c.has("exits.structure_hold") && c.getBoolean("exits.structure_hold");
+        dataHold = c.has("exits.data_hold") && c.getBoolean("exits.data_hold");
+        dataHoldRvolMin = c.has("exits.data_hold_rvol_min") ? c.getDouble("exits.data_hold_rvol_min") : Double.NaN;
         structureHoldTimeMin = structureHold ? c.getInt("exits.structure_hold_time_min") : 0;
         holdFloorAtr = c.has("exits.structure_hold_floor_atr") ? c.getDouble("exits.structure_hold_floor_atr") : Double.NaN;
         String holdOn = c.has("exits.structure_hold_on") ? c.getString("exits.structure_hold_on") : "minute";
@@ -207,6 +213,9 @@ final class MaCross extends SetupStrategy {
         if (oppositeExit) {
             return "REVERSE";
         }
+        if (dataHolding && !dataSupports(s, side)) {
+            return "DATA_TURN";                               // A-649: held past the time stop, the data turned
+        }
         double ema9 = s.structure().ema9(), atr = s.structure().atr3m();
         if (Double.isFinite(stretchAtr) && atr > 0 && Double.isFinite(ema9)
                 && (side == OptionSide.CE ? spot - ema9 : ema9 - spot) / atr >= stretchAtr) {
@@ -226,6 +235,41 @@ final class MaCross extends SetupStrategy {
             return structureHoldExit(s, side, r, time);
         }
         return null;
+    }
+
+    /** A-649: at the time stop, hold while the data supports the trade (re-checked every minute in customExit). */
+    @Override
+    protected boolean holdPastTimeStop(OptionSide side) {
+        if (!dataHold || current == null) {
+            return false;
+        }
+        if (dataHolding) {
+            return true;                                      // already held: customExit leaves on DATA_TURN
+        }
+        dataHolding = dataSupports(current, side);
+        return dataHolding;
+    }
+
+    /**
+     * A-649: near-ATM put − call OI change over 5 and 10 minutes with the trade (puts added for a call, calls for a put:
+     * the near-ATM PCR moving the trade's way), the index on the trade's side of EMA20, and futures time-of-day RVOL at
+     * least data_hold_rvol_min when set; any value missing = no support.
+     */
+    boolean dataSupports(FeatureSnapshot s, OptionSide side) {
+        if (s.options() == null || s.structure() == null) {
+            return false;
+        }
+        int sign = side == OptionSide.CE ? 1 : -1;
+        double n5 = s.options().peOiChange5m() - s.options().ceOiChange5m();
+        double n10 = s.options().peOiChange10m() - s.options().ceOiChange10m();
+        double ema20 = s.structure().ema20(), spot = s.spot();
+        boolean ok = Double.isFinite(n5) && Double.isFinite(n10) && Double.isFinite(ema20) && Double.isFinite(spot)
+                && sign * n5 > 0 && sign * n10 > 0 && sign * (spot - ema20) > 0;
+        if (ok && Double.isFinite(dataHoldRvolMin)) {
+            double rv = s.futures() == null ? Double.NaN : s.futures().rvolTod();
+            ok = Double.isFinite(rv) && rv >= dataHoldRvolMin;
+        }
+        return ok;
     }
 
     /** A-559: target / time exits held while the price structure supports the trade; see the field comment. */
@@ -282,6 +326,7 @@ final class MaCross extends SetupStrategy {
         entryTime = s.time();
         bestR = Double.NaN;
         earlyChecked = false;
+        dataHolding = false;                                  // A-649
         holdLevel = levelHold ? nearestLevel(s.structure(), entrySpot, up) : Double.NaN;
         riding = false;
         deferred = false;

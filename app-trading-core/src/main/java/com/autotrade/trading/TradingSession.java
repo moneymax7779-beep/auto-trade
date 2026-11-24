@@ -334,7 +334,7 @@ public final class TradingSession {
 
     private boolean isLowPriority(String strategyId) {
         String base = strategyId.contains("@") ? strategyId.substring(0, strategyId.indexOf('@')) : strategyId;
-        return lowPriority.contains(base);
+        return lowPriority.contains(base) || lowPriority.contains(strategyId);   // A-639: one version by its full id
     }
 
     /**
@@ -420,8 +420,7 @@ public final class TradingSession {
 
     /** The refusal of a low-priority entry costing {@code cost} (A-475), or null when allowed or off. */
     String lowPriorityRefusal(String strategyId, double cost) {
-        String base = strategyId.contains("@") ? strategyId.substring(0, strategyId.indexOf('@')) : strategyId;
-        if (!lowPriority.contains(base)) {
+        if (!isLowPriority(strategyId)) {                     // A-639: by family or by full id
             return null;
         }
         double capital = risk.limits().capital();
@@ -648,7 +647,8 @@ public final class TradingSession {
                         intent.stage().name(), market, stopPct);
                 // risk v16 (A-101): refused by the daily loss limit, an A-grade entry releases the switch (once a day)
                 if (!result.approved() && result.reason() != null && result.reason().contains("daily loss limit")
-                        && autoReleaseDailyLoss(snapshot, intent.side(), strategyId, underlying, time)) {
+                        && (autoReleaseDailyLoss(snapshot, intent.side(), strategyId, underlying, time)
+                            || reentryReleaseDailyLoss(intent.reason(), intent.side(), strategyId, underlying, time))) {
                     result = oms.enter(strategyId, underlying, intent.side(), contract.get(), lots,
                             intent.stage().name(), market, stopPct);
                 }
@@ -917,6 +917,33 @@ public final class TradingSession {
         boolean iv = pct >= 50 || change > 0;
         boolean breadth = side == OptionSide.CE ? b >= 50 : b <= -50;
         return iv && breadth;
+    }
+
+    /**
+     * A-614 (risk v50, account.daily_loss_release_on_reentry): a strategy's same-side re-entry after its own stop (entry
+     * reason *_REENTRY_*) uses the day's daily-loss release (daily_loss_releases_per_day, raising the limit by
+     * daily_loss_release_raise_pct of equity), so the trend a stop shook it out of can still be caught; everything else
+     * stays refused.
+     */
+    private boolean reentryReleaseDailyLoss(String reason, OptionSide side, String strategyId, String underlying, LocalTime time) {
+        if (!settings.risk().dailyLossReleaseOnReentry() || reason == null || !reason.contains("_REENTRY_")
+                || risk.dailyLossReleasesLeft() <= 0 || !(oms.dayPnl() > -risk.dailyLossLimitAfterRelease())) {
+            return false;
+        }
+        String scope = "ACCOUNT:" + settings.account();
+        if (!risk.releaseDailyLoss()) {
+            return false;
+        }
+        releasedBy.set("risk");
+        try {
+            killSwitch.release(scope);
+        } finally {
+            releasedBy.remove();
+        }
+        log.warn("{} {} {} {}: re-entry, daily-loss kill switch RELEASED by the application (day {}, limit now {}, "
+                        + "releases left {})", time, underlying, strategyId, side, Math.round(oms.dayPnl()),
+                Math.round(risk.dailyLossLimit()), risk.dailyLossReleasesLeft());
+        return true;
     }
 
     /**

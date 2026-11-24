@@ -82,7 +82,111 @@ public record RiskLimits(
          */
         double shortMarginPerLot,
         /** v19 (A-358): the most lots a strategy may sell short in one entry (0 = none). */
-        int maxShortLots) {
+        int maxShortLots,
+        /** A-612 (risk v49): single-leg entries are one limit at the bid/ask mid instead of buying the ask. */
+        boolean entryAtMid,
+        /** A-612: how long a mid entry waits before what is unfilled is cancelled. */
+        int entryMidWaitSec,
+        /** A-614 (risk v50): a strategy's same-side re-entry after a stop may use the day's daily-loss release. */
+        boolean dailyLossReleaseOnReentry,
+        /** A-615 (risk v52): a working entry slice below the current ask is re-priced to the ask's slice ceiling. */
+        boolean entrySliceReprice,
+        /** A-638 (risk v58): these strategies stop entering for the day once their own day P&L reaches −pct % of capital. */
+        StrategyGroupLoss strategyGroupLoss) {
+
+    /** A-638: a group of strategies with its own daily loss limit (realised + open, as the account's), % of capital. */
+    public record StrategyGroupLoss(java.util.Set<String> strategies, double pct) { }
+
+    /** Before A-638: no strategy-group loss limit. */
+    public RiskLimits(String hash, double capital, double dailyLossLimit, int maxOpenPositions, int maxLotsPerUnderlying,
+                      int maxOrdersPerMinute, LocalTime noNewEntriesAfter, LocalTime squareOffAt, int maxFeedAgeSec,
+                      double maxSpreadPct, int entryBufferTicks, int exitBufferTicks, double exitBufferPct,
+                      int entryTimeoutSec, int exitChaseSec, int exitChaseMax, double stopLimitOffsetPct,
+                      int reconcileEverySec, LocalTime casEntryFrom, LocalTime casEntryTo, double maxLossPerTrade,
+                      double deltaRiskPerTrade, boolean equityMode, double startingCapital, double dailyLossPct,
+                      double premiumBudgetFraction, java.time.LocalDate equityFrom, double entryBufferPct,
+                      int entryChaseMax, int entryChaseSec, double entrySliceDepthPct, double entrySliceMaxDriftPct,
+                      double maxParticipationPct, int maxConsecutiveLosses, double expiryReservePct,
+                      int dailyLossReleasesPerDay, double dailyLossReleaseRaisePct, boolean dailyLossAutoRelease,
+                      double rvolBoostThreshold, double rvolBoostFactor, double shortMarginPerLot, int maxShortLots,
+                      boolean entryAtMid, int entryMidWaitSec, boolean dailyLossReleaseOnReentry, boolean entrySliceReprice) {
+        this(hash, capital, dailyLossLimit, maxOpenPositions, maxLotsPerUnderlying, maxOrdersPerMinute, noNewEntriesAfter,
+                squareOffAt, maxFeedAgeSec, maxSpreadPct, entryBufferTicks, exitBufferTicks, exitBufferPct, entryTimeoutSec,
+                exitChaseSec, exitChaseMax, stopLimitOffsetPct, reconcileEverySec, casEntryFrom, casEntryTo, maxLossPerTrade,
+                deltaRiskPerTrade, equityMode, startingCapital, dailyLossPct, premiumBudgetFraction, equityFrom,
+                entryBufferPct, entryChaseMax, entryChaseSec, entrySliceDepthPct, entrySliceMaxDriftPct,
+                maxParticipationPct, maxConsecutiveLosses, expiryReservePct, dailyLossReleasesPerDay,
+                dailyLossReleaseRaisePct, dailyLossAutoRelease, rvolBoostThreshold, rvolBoostFactor, shortMarginPerLot,
+                maxShortLots, entryAtMid, entryMidWaitSec, dailyLossReleaseOnReentry, entrySliceReprice, null);
+    }
+
+    /** Before A-615: entry slices are not re-priced. */
+    public RiskLimits(String hash, double capital, double dailyLossLimit, int maxOpenPositions, int maxLotsPerUnderlying,
+                      int maxOrdersPerMinute, LocalTime noNewEntriesAfter, LocalTime squareOffAt, int maxFeedAgeSec,
+                      double maxSpreadPct, int entryBufferTicks, int exitBufferTicks, double exitBufferPct,
+                      int entryTimeoutSec, int exitChaseSec, int exitChaseMax, double stopLimitOffsetPct,
+                      int reconcileEverySec, LocalTime casEntryFrom, LocalTime casEntryTo, double maxLossPerTrade,
+                      double deltaRiskPerTrade, boolean equityMode, double startingCapital, double dailyLossPct,
+                      double premiumBudgetFraction, java.time.LocalDate equityFrom, double entryBufferPct,
+                      int entryChaseMax, int entryChaseSec, double entrySliceDepthPct, double entrySliceMaxDriftPct,
+                      double maxParticipationPct, int maxConsecutiveLosses, double expiryReservePct,
+                      int dailyLossReleasesPerDay, double dailyLossReleaseRaisePct, boolean dailyLossAutoRelease,
+                      double rvolBoostThreshold, double rvolBoostFactor, double shortMarginPerLot, int maxShortLots,
+                      boolean entryAtMid, int entryMidWaitSec, boolean dailyLossReleaseOnReentry) {
+        this(hash, capital, dailyLossLimit, maxOpenPositions, maxLotsPerUnderlying, maxOrdersPerMinute, noNewEntriesAfter,
+                squareOffAt, maxFeedAgeSec, maxSpreadPct, entryBufferTicks, exitBufferTicks, exitBufferPct, entryTimeoutSec,
+                exitChaseSec, exitChaseMax, stopLimitOffsetPct, reconcileEverySec, casEntryFrom, casEntryTo, maxLossPerTrade,
+                deltaRiskPerTrade, equityMode, startingCapital, dailyLossPct, premiumBudgetFraction, equityFrom,
+                entryBufferPct, entryChaseMax, entryChaseSec, entrySliceDepthPct, entrySliceMaxDriftPct,
+                maxParticipationPct, maxConsecutiveLosses, expiryReservePct, dailyLossReleasesPerDay,
+                dailyLossReleaseRaisePct, dailyLossAutoRelease, rvolBoostThreshold, rvolBoostFactor, shortMarginPerLot,
+                maxShortLots, entryAtMid, entryMidWaitSec, dailyLossReleaseOnReentry, false);
+    }
+
+    /** Before A-614: no release for re-entries. */
+    public RiskLimits(String hash, double capital, double dailyLossLimit, int maxOpenPositions, int maxLotsPerUnderlying,
+                      int maxOrdersPerMinute, LocalTime noNewEntriesAfter, LocalTime squareOffAt, int maxFeedAgeSec,
+                      double maxSpreadPct, int entryBufferTicks, int exitBufferTicks, double exitBufferPct,
+                      int entryTimeoutSec, int exitChaseSec, int exitChaseMax, double stopLimitOffsetPct,
+                      int reconcileEverySec, LocalTime casEntryFrom, LocalTime casEntryTo, double maxLossPerTrade,
+                      double deltaRiskPerTrade, boolean equityMode, double startingCapital, double dailyLossPct,
+                      double premiumBudgetFraction, java.time.LocalDate equityFrom, double entryBufferPct,
+                      int entryChaseMax, int entryChaseSec, double entrySliceDepthPct, double entrySliceMaxDriftPct,
+                      double maxParticipationPct, int maxConsecutiveLosses, double expiryReservePct,
+                      int dailyLossReleasesPerDay, double dailyLossReleaseRaisePct, boolean dailyLossAutoRelease,
+                      double rvolBoostThreshold, double rvolBoostFactor, double shortMarginPerLot, int maxShortLots,
+                      boolean entryAtMid, int entryMidWaitSec) {
+        this(hash, capital, dailyLossLimit, maxOpenPositions, maxLotsPerUnderlying, maxOrdersPerMinute, noNewEntriesAfter,
+                squareOffAt, maxFeedAgeSec, maxSpreadPct, entryBufferTicks, exitBufferTicks, exitBufferPct, entryTimeoutSec,
+                exitChaseSec, exitChaseMax, stopLimitOffsetPct, reconcileEverySec, casEntryFrom, casEntryTo, maxLossPerTrade,
+                deltaRiskPerTrade, equityMode, startingCapital, dailyLossPct, premiumBudgetFraction, equityFrom,
+                entryBufferPct, entryChaseMax, entryChaseSec, entrySliceDepthPct, entrySliceMaxDriftPct,
+                maxParticipationPct, maxConsecutiveLosses, expiryReservePct, dailyLossReleasesPerDay,
+                dailyLossReleaseRaisePct, dailyLossAutoRelease, rvolBoostThreshold, rvolBoostFactor, shortMarginPerLot,
+                maxShortLots, entryAtMid, entryMidWaitSec, false, false);
+    }
+
+    /** Before A-612: entries buy the ask (entry_at_mid off). */
+    public RiskLimits(String hash, double capital, double dailyLossLimit, int maxOpenPositions, int maxLotsPerUnderlying,
+                      int maxOrdersPerMinute, LocalTime noNewEntriesAfter, LocalTime squareOffAt, int maxFeedAgeSec,
+                      double maxSpreadPct, int entryBufferTicks, int exitBufferTicks, double exitBufferPct,
+                      int entryTimeoutSec, int exitChaseSec, int exitChaseMax, double stopLimitOffsetPct,
+                      int reconcileEverySec, LocalTime casEntryFrom, LocalTime casEntryTo, double maxLossPerTrade,
+                      double deltaRiskPerTrade, boolean equityMode, double startingCapital, double dailyLossPct,
+                      double premiumBudgetFraction, java.time.LocalDate equityFrom, double entryBufferPct,
+                      int entryChaseMax, int entryChaseSec, double entrySliceDepthPct, double entrySliceMaxDriftPct,
+                      double maxParticipationPct, int maxConsecutiveLosses, double expiryReservePct,
+                      int dailyLossReleasesPerDay, double dailyLossReleaseRaisePct, boolean dailyLossAutoRelease,
+                      double rvolBoostThreshold, double rvolBoostFactor, double shortMarginPerLot, int maxShortLots) {
+        this(hash, capital, dailyLossLimit, maxOpenPositions, maxLotsPerUnderlying, maxOrdersPerMinute, noNewEntriesAfter,
+                squareOffAt, maxFeedAgeSec, maxSpreadPct, entryBufferTicks, exitBufferTicks, exitBufferPct, entryTimeoutSec,
+                exitChaseSec, exitChaseMax, stopLimitOffsetPct, reconcileEverySec, casEntryFrom, casEntryTo, maxLossPerTrade,
+                deltaRiskPerTrade, equityMode, startingCapital, dailyLossPct, premiumBudgetFraction, equityFrom,
+                entryBufferPct, entryChaseMax, entryChaseSec, entrySliceDepthPct, entrySliceMaxDriftPct,
+                maxParticipationPct, maxConsecutiveLosses, expiryReservePct, dailyLossReleasesPerDay,
+                dailyLossReleaseRaisePct, dailyLossAutoRelease, rvolBoostThreshold, rvolBoostFactor, shortMarginPerLot,
+                maxShortLots, false, 0, false);
+    }
 
     /** v17 shape: no short selling. */
     public RiskLimits(String hash, double capital, double dailyLossLimit, int maxOpenPositions, int maxLotsPerUnderlying,
@@ -199,7 +303,7 @@ public record RiskLimits(
                 premiumBudgetFraction, equityFrom, entryBufferPct, entryChaseMax, entryChaseSec, entrySliceDepthPct,
                 entrySliceMaxDriftPct, maxParticipationPct, maxConsecutiveLosses, expiryReservePct, dailyLossReleasesPerDay,
                 dailyLossReleaseRaisePct, dailyLossAutoRelease, rvolBoostThreshold, rvolBoostFactor, shortMarginPerLot,
-                maxShortLots);
+                maxShortLots, entryAtMid, entryMidWaitSec, dailyLossReleaseOnReentry, entrySliceReprice, strategyGroupLoss);
     }
 
     /** v19 (A-358): whether the file allows selling options short at all. */
@@ -291,6 +395,13 @@ public record RiskLimits(
                 c.has("sizing.rvol_boost_threshold") ? c.getDouble("sizing.rvol_boost_threshold") : Double.NaN,
                 c.has("sizing.rvol_boost_factor") ? c.getDouble("sizing.rvol_boost_factor") : 1.0,
                 c.has("shorts.margin_per_lot") ? c.getDouble("shorts.margin_per_lot") : Double.NaN,
-                c.has("shorts.max_lots") ? c.getInt("shorts.max_lots") : 0);
+                c.has("shorts.max_lots") ? c.getInt("shorts.max_lots") : 0,
+                c.has("orders.entry_at_mid") && c.getBoolean("orders.entry_at_mid"),   // A-612
+                c.has("orders.entry_mid_wait_sec") ? c.getInt("orders.entry_mid_wait_sec") : 0,
+                c.has("account.daily_loss_release_on_reentry") && c.getBoolean("account.daily_loss_release_on_reentry"),   // A-614
+                c.has("orders.entry_slice_reprice") && c.getBoolean("orders.entry_slice_reprice"),   // A-615
+                c.has("strategy_group_loss.pct") ? new StrategyGroupLoss(java.util.Set.copyOf(java.util.Arrays.asList(
+                        c.getString("strategy_group_loss.strategies").split("\\s*,\\s*"))), c.getDouble("strategy_group_loss.pct"))
+                        : null);   // A-638
     }
 }
