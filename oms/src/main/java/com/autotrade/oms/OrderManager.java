@@ -918,11 +918,6 @@ public final class OrderManager implements Consumer<OrderUpdate> {
     }
 
     /**
-     * risk v12: sends the next entry slice: the ask quantity within entry_slice_depth_pct of the best ask (whole lots, at
-     * least one lot, at most the freeze quantity), priced at that depth. Stops when the entry timeout has passed since the
-     * first slice or the ask has run entry_slice_max_drift_pct above the first slice's ask; the position keeps what it has.
-     */
-    /**
      * A-615 (risk v52, orders.entry_slice_reprice): a working entry slice whose limit is below the current best ask is
      * re-priced to that ask's slice ceiling (ask + entry_slice_depth_pct), as long as the ask is within
      * entry_slice_max_drift_pct of the first slice's ask and the entry timeout has not passed. Without it a slice priced
@@ -949,6 +944,11 @@ public final class OrderManager implements Consumer<OrderUpdate> {
         position.entryPricedAt = clock.get();
     }
 
+    /**
+     * risk v12: sends the next entry slice: the ask quantity within entry_slice_depth_pct of the best ask (whole lots, at
+     * least one lot, at most the freeze quantity), priced at that depth. Stops when the entry timeout has passed since the
+     * first slice or the ask has run entry_slice_max_drift_pct above the first slice's ask; the position keeps what it has.
+     */
     private void sendSlice(ManagedPosition position) {
         if (position.pendingEntryQuantity <= 0 || position.state == ManagedPosition.State.EXITING
                 || position.state == ManagedPosition.State.CLOSED || position.state == ManagedPosition.State.CANCELLING_FOR_EXIT) {
