@@ -57,7 +57,11 @@ test.describe("desktop", () => {
   test("keeps the top menu and has no tab bar", async ({ page }) => {
     await page.goto("/live");
     await expect(page.locator("header nav")).toBeVisible();
-    await expect(page.locator("header nav").getByRole("link", { name: "Config", exact: true })).toBeVisible();
+    await expect(page.locator("header nav").getByRole("link", { name: "Overview", exact: true })).toBeVisible();
+    // since 23 Nov 2026 (8383d69) the less-used pages, Config among them, sit under the More button beside the bar
+    await page.locator("header").getByRole("button", { name: /^More/ }).click();
+    await expect(page.locator("#more-pages").getByRole("link", { name: "Config", exact: true })).toBeVisible();
+    await page.keyboard.press("Escape");
     await expect(page.getByRole("navigation", { name: "Main" })).toBeHidden();
     await page.screenshot({ path: "e2e-out/desktop_live.png" });
   });

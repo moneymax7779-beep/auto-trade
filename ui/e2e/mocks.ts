@@ -50,6 +50,7 @@ export async function mock(page: Page): Promise<Mock> {
     const req: Request = route.request();
     const url = new URL(req.url());
     const p = url.pathname;
+    if (p === "/api/presence") return route.fulfill({ status: 204 });   // the tab's activity beat (presence.ts, 23 Nov 2026), not a user action
     if (req.method() === "POST") {
       const body = req.postDataJSON();
       m.posts.push({ url: p, body });
