@@ -312,12 +312,12 @@ abstract class SetupStrategy implements Strategy {
         return strikeOffset;
     }
 
-    /** A family's own exit signal for an open position, checked after the frame's exits; null = none (default). */
     /** A-635: true while the open trade is held by its stop and structure only (no below-entry exit); none by default. */
     protected boolean holdOnlyStructure() {
         return false;
     }
 
+    /** A family's own exit signal for an open position, checked after the frame's exits; null = none (default). */
     protected String customExit(FeatureSnapshot s, OptionSide side, LocalTime time) {
         return null;
     }

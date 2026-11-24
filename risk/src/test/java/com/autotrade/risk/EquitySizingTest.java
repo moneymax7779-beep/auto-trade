@@ -59,4 +59,27 @@ class EquitySizingTest {
         RiskLimits v9 = RiskLimits.from(ThresholdConfig.load(Path.of("..", "config", "risk", "paper-risk.v9.yaml")));
         assertThat(v9.equityFrom()).isNull();
     }
+
+    /** Code review 24 Nov 2026: the live engine sizes from withEquity(), which must keep F1's own 5 % cap (risk v64). */
+    @Test
+    void v64KeepsTheStrategyGroupLossThroughTheEquity() {
+        RiskLimits v64 = limits("paper-risk.v64.yaml");
+        assertThat(v64.equityMode()).isTrue();
+        assertThat(v64.strategyGroupLoss().strategies()).containsExactly("oi-burst-cross@obc-v31lvoirhh");
+        RiskLimits grown = v64.withEquity(1_200_000);
+        assertThat(grown.capital()).isEqualTo(1_200_000);
+        assertThat(grown.strategyGroupLoss()).isEqualTo(v64.strategyGroupLoss());
+        assertThat(grown.capital() * grown.strategyGroupLoss().pct() / 100.0).as("5 % of today's equity").isEqualTo(60_000);
+    }
+
+    @Test
+    void aStrategyGroupLossNeedsAPositivePercentAndPlainIds() {
+        assertThat(RiskLimits.StrategyGroupLoss.parse(" a@v1 ,b ", 5).strategies()).containsExactlyInAnyOrder("a@v1", "b");
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> RiskLimits.StrategyGroupLoss.parse("a", 0))
+                .isInstanceOf(IllegalArgumentException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> RiskLimits.StrategyGroupLoss.parse("[a, b]", 5))
+                .isInstanceOf(IllegalArgumentException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> RiskLimits.StrategyGroupLoss.parse("a,,b", 5))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
 }

@@ -867,6 +867,7 @@ final class OiBurstCross extends SetupStrategy {
         reentryArmed = false;
         inTrade = true;
         everOpen = true;                                      // A-616: a re-entry is outside the allowance, never refunded
+        heldEntryNo = entries + 1;                            // a further trade (code review 24 Nov: was the previous one's)
         heldSide = reSide;
         entrySpot = spot;
         entryAtr = st.atr3m();

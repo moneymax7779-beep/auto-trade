@@ -95,7 +95,25 @@ public record RiskLimits(
         StrategyGroupLoss strategyGroupLoss) {
 
     /** A-638: a group of strategies with its own daily loss limit (realised + open, as the account's), % of capital. */
-    public record StrategyGroupLoss(java.util.Set<String> strategies, double pct) { }
+    public record StrategyGroupLoss(java.util.Set<String> strategies, double pct) {
+        public StrategyGroupLoss {
+            if (!(pct > 0)) {
+                throw new IllegalArgumentException("strategy_group_loss.pct must be > 0, not " + pct);
+            }
+            if (strategies == null || strategies.isEmpty() || strategies.stream().anyMatch(id -> id == null || id.isBlank()
+                    || !id.equals(id.strip()) || id.startsWith("[") || id.endsWith("]"))) {
+                throw new IllegalArgumentException("strategy_group_loss.strategies must be strategy ids separated by commas: "
+                        + strategies);
+            }
+            strategies = java.util.Set.copyOf(strategies);
+        }
+
+        /** "a, b" -> {a, b}, each id trimmed (code review 24 Nov 2026). */
+        static StrategyGroupLoss parse(String strategies, double pct) {
+            return new StrategyGroupLoss(java.util.Arrays.stream(String.valueOf(strategies).split(","))
+                    .map(String::strip).collect(java.util.stream.Collectors.toSet()), pct);
+        }
+    }
 
     /** Before A-638: no strategy-group loss limit. */
     public RiskLimits(String hash, double capital, double dailyLossLimit, int maxOpenPositions, int maxLotsPerUnderlying,
@@ -400,8 +418,7 @@ public record RiskLimits(
                 c.has("orders.entry_mid_wait_sec") ? c.getInt("orders.entry_mid_wait_sec") : 0,
                 c.has("account.daily_loss_release_on_reentry") && c.getBoolean("account.daily_loss_release_on_reentry"),   // A-614
                 c.has("orders.entry_slice_reprice") && c.getBoolean("orders.entry_slice_reprice"),   // A-615
-                c.has("strategy_group_loss.pct") ? new StrategyGroupLoss(java.util.Set.copyOf(java.util.Arrays.asList(
-                        c.getString("strategy_group_loss.strategies").split("\\s*,\\s*"))), c.getDouble("strategy_group_loss.pct"))
-                        : null);   // A-638
+                c.has("strategy_group_loss.pct") ? StrategyGroupLoss.parse(c.getString("strategy_group_loss.strategies"),
+                        c.getDouble("strategy_group_loss.pct")) : null);   // A-638
     }
 }
