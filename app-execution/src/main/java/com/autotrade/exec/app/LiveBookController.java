@@ -110,7 +110,11 @@ class LiveBookController {
         this.rules = rules;
         this.freezes = new com.autotrade.execution.FreezeQuantities(dataSource);
         this.quotes = new ContractQuotes(this.jdbc);
+        this.targets = new com.autotrade.execution.PositionTargets(dataSource);
     }
+
+    /** The trader's manual first targets (V54, user 24 Nov 2026), shown on each open position. */
+    private final com.autotrade.execution.PositionTargets targets;
 
     @GetMapping("/api/execution/accounts/{id}/live-book")
     Map<String, Object> liveBook(@RequestHeader(value = Access.HEADER, required = false) String subject,
@@ -157,6 +161,7 @@ class LiveBookController {
                 + "order by engaged_at", a.tradeMode() == com.autotrade.account.TradeMode.LIVE, id, a.tenantId());
 
         LocalDate today = LocalDate.now(IST);
+        Map<Long, com.autotrade.execution.PositionTargets.View> manualTargets = targets.forAccount(id);
         List<Map<String, Object>> open = new ArrayList<>();
         List<Map<String, Object>> closed = new ArrayList<>();
         double openPnl = 0, atRisk = 0, realisedToday = 0, bookedOnOpen = 0;
@@ -218,6 +223,10 @@ class LiveBookController {
                         realisedToday += soFar;
                         bookedOnOpen += soFar;
                     }
+                }
+                com.autotrade.execution.PositionTargets.View target = manualTargets.get(((Number) r.get("id")).longValue());
+                if (target != null) {
+                    out.put("manualTarget", target.toMap());
                 }
                 Map<String, Object> hint = handSaleHint(r, killRows);
                 if (hint != null) {

@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import { get, postJson, type ExecutionAccount, type ExitCheck, type ExitPreview, type LiveBook,
   type LiveOpenPosition } from "../api";
+import { PositionTarget } from "../components/PositionTarget";
 import { activeAccounts, Big, Card, ErrorLine, Freshness, istTime, ModeBadge, Sheet, signed, tone, useAccess,
   useAccounts } from "./common";
 
@@ -59,7 +60,7 @@ function AccountBook({ account }: { account: ExecutionAccount }) {
             {b.squareOff ? ` · square-off ${b.squareOff}` : ""}</div>
           <ul className="mt-2 flex flex-col gap-2">
             {b.open.map((p) => <OpenCard key={p.id} accountId={account.id} p={p} mode={mode} canAct={b.canAct || !!b.canStop}
-              reasonRequired={b.reasonRequired} />)}
+              canTarget={b.canAct && !b.mirrorOf && !b.reasonRequired} reasonRequired={b.reasonRequired} />)}
           </ul>
           {b.open.length === 0 && <p className="mt-2 text-sm text-muted">Nothing open.</p>}
           {b.closed.length > 0 && (
@@ -88,8 +89,10 @@ function AccountBook({ account }: { account: ExecutionAccount }) {
   );
 }
 
-function OpenCard({ accountId, p, mode, canAct, reasonRequired }: { accountId: number; p: LiveOpenPosition; mode: string;
-  canAct: boolean; reasonRequired?: boolean }) {
+function OpenCard({ accountId, p, mode, canAct, canTarget, reasonRequired }: { accountId: number; p: LiveOpenPosition;
+  mode: string; canAct: boolean;
+  /** may set the manual first target (24 Nov 2026): a role that may act, never on a mirror */
+  canTarget?: boolean; reasonRequired?: boolean }) {
   const [exiting, setExiting] = useState(false);
   const lots = p.lotSize ? Math.round(p.quantity / p.lotSize) : null;
   const pnl = p.pnl ?? (p.bid != null ? (p.bid - p.entry) * p.quantity : null);
@@ -108,6 +111,8 @@ function OpenCard({ accountId, p, mode, canAct, reasonRequired }: { accountId: n
       </div>
       {p.strategyExitedAt && <p className="mt-1 text-xs font-semibold text-warn">The strategy exited at {istTime(p.strategyExitedAt)}: only you or the square-off close this.</p>}
       {p.notAtBroker && <p className="mt-1 text-xs font-semibold text-warn">The broker no longer holds this: book the hand exit on the desktop Accounts page.</p>}
+      {canTarget && !p.notAtBroker ? <PositionTarget accountId={accountId} p={p} live={mode === "LIVE"} phone />
+        : <PositionTarget accountId={accountId} p={p} readOnly phone />}
       {canAct && !p.notAtBroker && (
         <div className="mt-2 flex justify-end"><Big kind="danger" onClick={() => setExiting(true)}>Exit…</Big></div>
       )}

@@ -1,6 +1,7 @@
 import { type ReactNode, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { get, postJson, type ExecutionAccount, type ExitPreview, type LiveBook, type LiveOpenPosition, type PositionRow, type Status } from "../api";
+import { PositionTarget, targetActive } from "./PositionTarget";
 import { ErrorNote } from "./ui";
 
 /**
@@ -163,6 +164,7 @@ export function LiveBookPanel({ accountId, hideEmpty }: { accountId: number; hid
   const open: OpenView[] = b.open.map((p) => ({
     key: p.id, strategy: p.strategy, symbol: p.symbol, quantity: p.quantity, lotSize: p.lotSize, entry: p.entry,
     opened: p.opened, bid: p.bid, quoteAt: p.quoteAt ?? null, best: p.best, stop: p.stop, pnl: p.pnl ?? null,
+    target: targetActive(p.manualTarget) ? p.manualTarget!.price : null,
     pnlPct: p.pnlPct ?? null, perPoint: p.perPoint ?? null, underlying: p.underlying,
     stopNote: b.mirrorOf ? `${b.mirrorOf}'s position: it exits on its strategy's signal or the square-off`
       : paper ? "paper: exits on the strategy's signal, your Exit or the square-off"
@@ -170,7 +172,8 @@ export function LiveBookPanel({ accountId, hideEmpty }: { accountId: number; hid
       : p.stopWorking ? <>stop resting at the broker{p.bid != null ? <> · {px(p.bid - p.stop)} pts below the bid · {money(p.atRisk ?? null, false)} at risk</> : null}</>
       : <span className="text-down">stop {p.stopStatus?.toLowerCase() ?? "not working"} at the broker</span>,
     actions: b.canAct || b.canStop ? <PositionActions accountId={accountId} p={p} paper={paper}
-      reasonRequired={b.reasonRequired} /> : undefined,
+      reasonRequired={b.reasonRequired} canTarget={b.canAct && !b.mirrorOf && !b.reasonRequired} />
+      : p.manualTarget ? <div className="md:col-span-4"><PositionTarget accountId={accountId} p={p} readOnly /></div> : undefined,
     flags: p.strategyExitedAt || p.lateJoin ? (
       <div className="space-y-0.5 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 md:col-span-4">
         {p.strategyExitedAt && <div><b>Not managed by its strategy:</b> {p.strategy} exited this contract at {p.strategyExitedAt.slice(11, 19)}.
@@ -238,9 +241,12 @@ const istNow = () => new Date(Date.now() + 330 * 60_000).toISOString().slice(0, 
  * - Book hand exit: it was sold outside the app (in Kite): our record closes as MANUAL at the price and time the trader
  *   enters; nothing is sent to the broker. Opened by itself when the reconciler found the broker holds none of it.
  */
-function PositionActions({ accountId, p, paper, reasonRequired }: { accountId: number; p: LiveOpenPosition; paper?: boolean;
+function PositionActions({ accountId, p, paper, reasonRequired, canTarget }: { accountId: number; p: LiveOpenPosition;
+  paper?: boolean;
   /** admin exit desk (20 Nov 2026): SUPPORT exiting a member's position gives a reason (the member is told) */
-  reasonRequired?: boolean }) {
+  reasonRequired?: boolean;
+  /** may set the manual first target (24 Nov 2026): a role that may act, never on a mirror */
+  canTarget?: boolean }) {
   const client = useQueryClient();
   const [reason, setReason] = useState("");
   const hint = p.notAtBroker;
@@ -308,6 +314,8 @@ function PositionActions({ accountId, p, paper, reasonRequired }: { accountId: n
           {done && <span className="text-sm text-muted">{done}</span>}
         </div>
       )}
+      {mode === "idle" && (canTarget && !hint ? <PositionTarget accountId={accountId} p={p} live={!paper} />
+        : <PositionTarget accountId={accountId} p={p} readOnly />)}
       {mode === "exit" && (
         <div className="space-y-2 rounded-md border border-rose-300 bg-rose-50 px-3 py-2 text-sm">
           <div className="flex flex-wrap items-center gap-2">
@@ -607,7 +615,7 @@ function Tag({ children, strategy }: { children: ReactNode; strategy?: boolean }
 }
 
 const REASONS: Record<string, string> = { STOP: "stop", MANUAL: "sold by hand", TARGET: "target", FLAT_BY: "end of day",
-  TRAIL: "trail", EOD_SQUARE_OFF: "square-off", FLATTEN: "flattened", TIME_60: "60-min time stop", TRADER_EXIT: "exited by you",
+  TRAIL: "trail", EOD_SQUARE_OFF: "square-off", FLATTEN: "flattened", TIME_60: "60-min time stop", TRADER_EXIT: "exited by you", MANUAL_TARGET: "your target",
   ADMIN_EXIT: "exited by the admin",
   EARLY_FAIL_15: "15-min early exit" };
 

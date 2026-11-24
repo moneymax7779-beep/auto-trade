@@ -728,6 +728,30 @@ export interface LiveOpenPosition extends LiveBookRow {
   bookedSoFar?: number;
   /** rupees per index point (delta x quantity) at the newest quote */
   perPoint?: number;
+  /** the trader's manual first target on this position (24 Nov 2026), when one is set */
+  manualTarget?: ManualTarget;
+}
+
+/**
+ * The trader's manual first target (POST .../positions/{id}/target {pct}; .../target/clear): a lock at entry x (1 + pct %).
+ * WAITING until the bid reaches the price; ARMED after that (the price fixed): a bid back at or below it sells the whole
+ * position (FIRING, then DONE); SELLING: triggered, the rest sold again at nextTryAt whatever the bid; ENDED: closed by
+ * something else; FAILED after its tries (the Exit button still works).
+ */
+export interface ManualTarget {
+  pct: number;
+  price: number;
+  status: "WAITING" | "ARMED" | "FIRING" | "SELLING" | "DONE" | "ENDED" | "FAILED";
+  setBy?: string;
+  setAt?: string | null;
+  armedAt?: string | null;
+  armedBid?: number | null;
+  firedAt?: string | null;
+  firedBid?: number | null;
+  tries?: number;
+  lastResult?: string | null;
+  /** SELLING: when the rest is sold again (ISO instant) */
+  nextTryAt?: string | null;
 }
 
 /** What an Exit of part or all of one open position would do now (GET .../positions/{id}/exit-preview). */
