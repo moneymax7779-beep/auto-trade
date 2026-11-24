@@ -40,7 +40,8 @@ class ExecutionAlerts {
             "LIVE_ROUTE_REFUSED",                 // review 16 Nov 2026: the same for any other LIVE refusal
             "CANARY_LEFTOVER",                    // 16 Nov 2026: a canary left a fill or an order at the broker
             "NO_MARKET_DATA", "MODE_PAPER_NO_MARKET_DATA", "MODE_PAPER_CANARY_FAILED",   // 23 Nov 2026: the broker refuses this app prices
-            "ENTRY_TO_PAPER_TWIN");               // 23 Nov 2026: an entry the broker could not take went to the twin
+            "ENTRY_TO_PAPER_TWIN",                // 23 Nov 2026: an entry the broker could not take went to the twin
+            "SIGNAL_NOT_FILLED");                 // 24 Nov 2026: the signal's entry did not fill; this fill is kept
 
     /** One message, and the member workspace it is also for (null: the admin's only). */
     record Alert(String text, Long memberTenant) {
@@ -120,6 +121,9 @@ class ExecutionAlerts {
                     + "signals paper-trade. Switch LIVE again after a canary passes."
                     : action.equals("ENTRY_TO_PAPER_TWIN") ? "\nThe broker could not take this entry; it was made on the "
                     + "paper twin instead (no real order)."
+                    : action.equals("SIGNAL_NOT_FILLED") ? "\nThe signal account's own entry did not fill, so the "
+                    + "strategy is not managing this position: it was NOT sold. It keeps its broker stop and the end-of-day "
+                    + "square-off; exit it from Positions when you want."
                     : action.equals("DAILY_LOSS_STOP") ? "\nThe daily loss limit (closed + open) is reached: every open "
                     + "position is being sold and no new entries today. It trades again tomorrow." : ""), member));
         }

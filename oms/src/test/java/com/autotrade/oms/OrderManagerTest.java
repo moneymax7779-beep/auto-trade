@@ -250,6 +250,55 @@ class OrderManagerTest {
         assertThat(oms.view("NIFTY").closedToday()).as("an entry that never filled is not a trade").isZero();
     }
 
+    /** The signal account under {@code file}, on a paper broker filling as that file says. */
+    private OrderManager signalSource(String file) {
+        RiskLimits limits = RiskLimits.from(ThresholdConfig.load(Path.of("..", "config", "risk", file)));
+        broker = new PaperBroker("signal", Duration.ofMillis(250), 0, clock::get, limits.entryFillsAtDecision());
+        return new OrderManager("SIG", "SIG-S1", "ecr", SESSION, broker, new RiskEngine(limits, killSwitch), COSTS, 25,
+                clock::get, new OmsListener() {
+                    @Override
+                    public void orderSent(ManagedPosition position, String role, OrderRequest request) {
+                        sent.add(request);
+                    }
+                });
+    }
+
+    /** The option runs above the entry's limit at once and stays there past the 10 s entry timeout. */
+    private void optionRunsAway() {
+        quote("10:00:00", 99.5, 100, 100);
+        assertThat(oms.enter("NIFTY", OptionSide.CE, CE, 1, "EARLY", market("10:00")).approved()).isTrue();
+        for (String t : List.of("10:00:01", "10:00:06", "10:00:11", "10:00:12", "10:00:13")) {
+            quote(t, 101.5, 103, 102);
+        }
+    }
+
+    /**
+     * 24 Nov 2026: under signal-source v2 the signal account's own entry could fill nothing (ENTRY_NOT_FILLED) on a fast
+     * option, and that close reached every follower as an EXIT, selling LIVE fills seconds after they were bought.
+     */
+    @Test
+    void signalSourceV2LosesAnEntryWhoseOptionRunsAway() {
+        oms = signalSource("signal-source.v2.yaml");
+        optionRunsAway();
+        assertThat(oms.livePositions()).isEmpty();
+        assertThat(oms.closedPositions()).singleElement()
+                .satisfies(p -> assertThat(p.exitReason()).isEqualTo("ENTRY_NOT_FILLED"));
+    }
+
+    /** signal-source v3: the same entry fills at its limit (the decision's ask + 4 ticks) and is protected by its stop. */
+    @Test
+    void signalSourceV3FillsTheSameEntryAtItsDecisionLimit() {
+        oms = signalSource("signal-source.v3.yaml");
+        optionRunsAway();
+        assertThat(oms.closedPositions()).isEmpty();
+        assertThat(oms.livePositions()).singleElement().satisfies(p -> {
+            assertThat(p.quantity()).isEqualTo(65);
+            assertThat(p.averageCost()).isEqualTo(100.20);
+        });
+        assertThat(sent).filteredOn(r -> r.type() == OrderType.STOP_LIMIT).hasSize(1);
+        assertThat(oms.reconcile()).isTrue();
+    }
+
     @Test
     void slicesAboveTheFreezeQuantity() {
         quote("10:00:00", 99.5, 100, 100);

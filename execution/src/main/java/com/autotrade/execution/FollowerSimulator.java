@@ -74,6 +74,11 @@ public final class FollowerSimulator {
 
     /** A broker exit is sent this many times at most, this far apart (code review 3 Nov 2026). */
     static final int EXIT_ATTEMPTS = 5;
+    /**
+     * The signal account's exit reasons that mean its own simulated entry did not fill (OrderManager), not a strategy
+     * decision: a follower holding its own fill never sells on them (24 Nov 2026; signal-source v3 makes them rare).
+     */
+    static final Set<String> SIGNAL_NOT_FILLED = Set.of("ENTRY_NOT_FILLED", "LEG_NOT_FILLED");
     static final java.time.Duration EXIT_RETRY_AFTER = java.time.Duration.ofSeconds(10);
     /**
      * A LIVE entry older than this is refused (code review 3 Nov 2026); so is one from its broker's last LIVE entry
@@ -1073,6 +1078,17 @@ public final class FollowerSimulator {
             // the end-of-day square-off or a flatten
             return skip(p, "CONTRACT_MISMATCH", "the exit is for " + p.symbol() + " but the account holds another contract "
                     + "of this strategy (instrument " + heldToken + ")");
+        }
+        if (p.reason() != null && SIGNAL_NOT_FILLED.contains(p.reason())) {
+            // 24 Nov 2026 (user: "in LIVE it may place the order so in that case it immediately closes the LIVE
+            // position?"): the signal account's own simulated entry did not fill, so it closed with nothing bought. That
+            // is not a strategy exit: this account's position is its own fill. Nothing is sold; the position keeps its
+            // broker stop, the end-of-day square-off and the trader's Exit. An alert says it has no strategy exits.
+            long held = ((Number) position.get("id")).longValue();
+            kills.audit(day.account, "execution", "SIGNAL_NOT_FILLED", Map.of("intent", p.intentId(), "position", held,
+                    "strategy", p.strategyId(), "symbol", p.symbol() == null ? "" : p.symbol(), "signal_reason", p.reason()));
+            return skip(p, "SIGNAL_NOT_FILLED", "the signal account's entry did not fill (" + p.reason() + "): not a "
+                    + "strategy exit; position " + held + " is kept with its broker stop and the end-of-day square-off");
         }
         if (!(p.price() > 0) && !venue.broker()) {
             return reject(p, "NO_EXIT_PRICE", "the signal's exit price is unknown");

@@ -80,6 +80,11 @@ public final class PaperBroker implements BrokerGateway, ExpirySettlement, Consu
     private final Duration latency;
     private final double adverseBps;
     private final Supplier<Instant> clock;
+    /**
+     * signal-source v3 (24 Nov 2026): a buy fills in full at its limit once accepted, whatever the book shows. For the
+     * virtual signal account only: its entries record the strategies' decisions and must never miss.
+     */
+    private final boolean buysFillAtLimit;
     private final Map<String, Order> orders = new LinkedHashMap<>();
     private final Map<Long, Holding> holdings = new HashMap<>();
     private final List<Consumer<OrderUpdate>> listeners = new ArrayList<>();
@@ -93,10 +98,17 @@ public final class PaperBroker implements BrokerGateway, ExpirySettlement, Consu
      * @param clock the market clock: the latest event time in replay, wall-clock time live
      */
     public PaperBroker(String name, Duration latency, double adverseBps, Supplier<Instant> clock) {
+        this(name, latency, adverseBps, clock, false);
+    }
+
+    /** {@code buysFillAtLimit}: signal-source v3's decision fills (see the field). */
+    public PaperBroker(String name, Duration latency, double adverseBps, Supplier<Instant> clock,
+                       boolean buysFillAtLimit) {
         this.name = name;
         this.latency = latency;
         this.adverseBps = adverseBps;
         this.clock = clock;
+        this.buysFillAtLimit = buysFillAtLimit;
     }
 
     @Override
@@ -214,6 +226,16 @@ public final class PaperBroker implements BrokerGateway, ExpirySettlement, Consu
                 order.trigger = order.pendingTrigger;
                 order.modifyAt = null;
                 emit(order, 0, 0, "modified");
+            }
+            if (buysFillAtLimit && order.request.side() == OrderSide.BUY && order.request.type() != OrderType.STOP_LIMIT
+                    && order.limit > 0) {
+                long quantity = order.remaining();
+                order.filled += quantity;
+                order.notional += quantity * order.limit;
+                order.status = OrderStatus.FILLED;
+                book(order, quantity, order.limit);
+                emit(order, quantity, order.limit, "filled at its limit (decision fill)");
+                continue;
             }
             if (tick == null || order.request.instrumentToken() != tick.instrumentToken()) {
                 continue;

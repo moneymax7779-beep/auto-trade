@@ -138,12 +138,17 @@ class BrokerVenueIT {
     }
 
     private void decide(Setup s, String time, SignalDecision.Action action, double price) {
+        decide(s, time, action, price, "TARGET");
+    }
+
+    /** {@code exitReason}: the signal's reason on an EXIT (an ENTER or ADD says IT). */
+    private void decide(Setup s, String time, SignalDecision.Action action, double price, String exitReason) {
         int i = jdbc.queryForObject("select count(*) from exec.signal_decision where copy_group_id = ?", Integer.class,
                 s.group()) + 1;
         Map<String, Double> context = action == SignalDecision.Action.EXIT ? Map.of()
                 : Map.of("strategy_lots", 1.0, "intended_lots", 1.0, "liquidity_lots", 1000.0, "stop_pct", 25.0);
         new SignalDecisionStore(dataSource).insert(new SignalDecision(s.group(), s.session(), DAY, ist(time), "opening-drive", 2,
-                "NIFTY", action, "PE", null, "CONFIRMED", action == SignalDecision.Action.EXIT ? "TARGET" : "IT", 3000047168L,
+                "NIFTY", action, "PE", null, "CONFIRMED", action == SignalDecision.Action.EXIT ? exitReason : "IT", 3000047168L,
                 KEY, SYMBOL, LOT, price, action == SignalDecision.Action.ENTER ? 260_000 : Double.NaN, 500_000, 0,
                 s.group() + ":" + s.session() + ":" + i, context));
         new FanOut(dataSource).fanOut(s.group(), DAY);
@@ -336,6 +341,39 @@ class BrokerVenueIT {
         decide(s, "10:00:00", SignalDecision.Action.EXIT, 70);
         kite.run(s.broker(), s.group(), DAY);
         assertThat(intentState(s.broker(), "EXIT")).isEqualTo("SKIPPED_NOT_HELD");
+        assertThat(sim.netQuantities()).containsEntry("NIFTY26O2023100PE", 0L);
+    }
+
+    @Test
+    void theSignalsOwnUnfilledEntryNeverSellsAFollowersFill() throws Exception {
+        // 24 Nov 2026: the signal account's simulated entry did not fill (ENTRY_NOT_FILLED, nothing bought), so it
+        // closed and an EXIT reached every follower; one whose own entry filled sold it seconds later. Now it keeps it.
+        Setup s = setup(true);
+        decide(s, "09:25:00", SignalDecision.Action.ENTER, 100);
+        FollowerSimulator kite = brokerFollower();
+        FollowerSimulator paper = paperFollower();
+        kite.run(s.broker(), s.group(), DAY);
+        paper.run(s.paper(), s.group(), DAY);
+        long held = ((Number) position(s.broker()).get("quantity_open")).longValue();
+        assertThat(held).isPositive();
+        decide(s, "09:25:12", SignalDecision.Action.EXIT, 100, "ENTRY_NOT_FILLED");
+        kite.run(s.broker(), s.group(), DAY);
+        paper.run(s.paper(), s.group(), DAY);
+        for (BrokerAccount a : List.of(s.broker(), s.paper())) {
+            assertThat(intentState(a, "EXIT")).isEqualTo("SKIPPED_SIGNAL_NOT_FILLED");
+            assertThat(position(a)).satisfies(p -> {
+                assertThat(p.get("status")).isNotEqualTo("CLOSED");
+                assertThat(((Number) p.get("quantity_open")).longValue()).isEqualTo(held);
+            });
+            assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where broker_account_id = ? "
+                    + "and action = 'SIGNAL_NOT_FILLED'", Integer.class, a.id())).isEqualTo(1);
+        }
+        assertThat(orders(s.broker())).extracting(o -> o.get("role")).doesNotContain("EXIT");
+        assertThat(sim.netQuantities()).containsEntry("NIFTY26O2023100PE", held);
+        // a strategy exit after it is still obeyed
+        decide(s, "10:00:00", SignalDecision.Action.EXIT, 120);
+        kite.run(s.broker(), s.group(), DAY);
+        assertThat(position(s.broker()).get("exit_reason")).isEqualTo("TARGET");
         assertThat(sim.netQuantities()).containsEntry("NIFTY26O2023100PE", 0L);
     }
 

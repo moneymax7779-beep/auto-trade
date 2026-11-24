@@ -203,7 +203,10 @@ public final class TradingSession {
             store.snapshotRun(sessionId, snapshotWriter.runId());
         }
         // Order ids carry the session id so they never repeat across runs of the same day.
-        broker = new PaperBroker(settings.account(), settings.fills().latency(), settings.fills().adverseBps(), clock);
+        // signal-source v3 (24 Nov 2026): the signal account's buys fill at their limit, so a decision is never lost to
+        // its own simulated fill (an ENTRY_NOT_FILLED close reached the followers as an EXIT)
+        broker = new PaperBroker(settings.account(), settings.fills().latency(), settings.fills().adverseBps(), clock,
+                risk.limits().entryFillsAtDecision());
         StrategyFactory primary = settings.strategies().getFirst();
         oms = new OrderManager(settings.account(), settings.account() + "-S" + sessionId, primary.id(),
                 settings.session(), broker, risk, settings.costs(), primary.premiumStopPct(), clock,
