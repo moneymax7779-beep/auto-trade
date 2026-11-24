@@ -470,7 +470,7 @@ market protection, order tag length, postbacks and autoslice.
 
 **Built:**
 - `SignalRecorder`: an optional hook on TradingSession; only the signal-source session has one.
-- `autotrade.signal-source.*`: a replay option, run as account SIGNAL-1 under `config/risk/signal-source.v2.yaml`
+- `autotrade.signal-source.*`: a replay option, run as account SIGNAL-1 under `config/risk/signal-source.v3.yaml` (v3, 24 Nov 2026: its buys fill at their limit, so an `ENTRY_NOT_FILLED` close never reaches followers as an EXIT; followers also skip such an EXIT as `SIGNAL_NOT_FILLED`)
   (never refuses for capital or loss; risk v17's liquidity rules).
 - The `execution` module:
   - `SignalDecisionStore`;

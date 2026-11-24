@@ -46,6 +46,30 @@ class PaperBrokerTest {
         assertThat(broker.positions().getFirst().netQuantity()).isEqualTo(130);
     }
 
+    /** signal-source v3 (24 Nov 2026): a buy fills in full at its limit once accepted, whatever the book; sells do not. */
+    @Test
+    void decisionFillsBuyInFullAtTheLimitAndLeaveSellsAndStopsToTheBook() {
+        PaperBroker decision = new PaperBroker("signal", Duration.ofMillis(250), 0, clock::get, true);
+        List<OrderUpdate> seen = new ArrayList<>();
+        decision.onUpdate(seen::add);
+        decision.place(limit("b1", OrderSide.BUY, 1300, 100.0));
+        decision.accept(tick(100, 99.5, 100.5, 100, 65));          // before the latency: nothing yet
+        assertThat(seen.getLast().status()).isEqualTo(OrderStatus.PENDING);
+        decision.accept(tick(300, 101.5, 103.0, 102, 65));         // the ask ran past the limit, 65 shown
+        assertThat(seen.getLast().status()).isEqualTo(OrderStatus.FILLED);
+        assertThat(seen.getLast().filledQuantity()).isEqualTo(1300);
+        assertThat(seen.getLast().averagePrice()).isEqualTo(100.0);
+        assertThat(decision.positions().getFirst().netQuantity()).isEqualTo(1300);
+        decision.place(new OrderRequest("s1", 7, "k", "NIFTY 23100 CE", "NSE", OrderSide.SELL, OrderType.STOP_LIMIT, 1300,
+                71.0, 75.0, "t"));
+        decision.place(limit("x1", OrderSide.SELL, 1300, 110.0));
+        decision.accept(tick(600, 101.5, 103.0, 102, 65));
+        assertThat(seen.stream().filter(u -> u.clientOrderId().equals("x1")).toList().getLast().status())
+                .as("a sell still needs a bid at its limit").isEqualTo(OrderStatus.OPEN);
+        assertThat(seen.stream().filter(u -> u.clientOrderId().equals("s1")).toList().getLast().status())
+                .as("a stop still waits for its trigger").isEqualTo(OrderStatus.TRIGGER_PENDING);
+    }
+
     @Test
     void cancelIsAcknowledgedOnAnyEventAfterLatency() {
         broker.place(limit("b1", OrderSide.BUY, 65, 90.0));

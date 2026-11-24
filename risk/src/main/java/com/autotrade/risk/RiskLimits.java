@@ -82,7 +82,36 @@ public record RiskLimits(
          */
         double shortMarginPerLot,
         /** v19 (A-358): the most lots a strategy may sell short in one entry (0 = none). */
-        int maxShortLots) {
+        int maxShortLots,
+        /**
+         * signal-source v3 (24 Nov 2026): every buy fills in full at its limit as soon as the broker has it
+         * ({@code orders.entry_fill: decision}; false = against the visible depth, every file before it). Only for the
+         * virtual signal account, whose job is to record the strategies' decisions: a follower's fills are its own.
+         */
+        boolean entryFillsAtDecision) {
+
+    /** v19 shape: buys fill against the visible depth (every file before signal-source v3). */
+    public RiskLimits(String hash, double capital, double dailyLossLimit, int maxOpenPositions,
+                      int maxLotsPerUnderlying, int maxOrdersPerMinute, LocalTime noNewEntriesAfter,
+                      LocalTime squareOffAt, int maxFeedAgeSec, double maxSpreadPct, int entryBufferTicks,
+                      int exitBufferTicks, double exitBufferPct, int entryTimeoutSec, int exitChaseSec,
+                      int exitChaseMax, double stopLimitOffsetPct, int reconcileEverySec, LocalTime casEntryFrom,
+                      LocalTime casEntryTo, double maxLossPerTrade, double deltaRiskPerTrade, boolean equityMode,
+                      double startingCapital, double dailyLossPct, double premiumBudgetFraction,
+                      java.time.LocalDate equityFrom, double entryBufferPct, int entryChaseMax, int entryChaseSec,
+                      double entrySliceDepthPct, double entrySliceMaxDriftPct, double maxParticipationPct,
+                      int maxConsecutiveLosses, double expiryReservePct, int dailyLossReleasesPerDay,
+                      double dailyLossReleaseRaisePct, boolean dailyLossAutoRelease, double rvolBoostThreshold,
+                      double rvolBoostFactor, double shortMarginPerLot, int maxShortLots) {
+        this(hash, capital, dailyLossLimit, maxOpenPositions, maxLotsPerUnderlying, maxOrdersPerMinute,
+                noNewEntriesAfter, squareOffAt, maxFeedAgeSec, maxSpreadPct, entryBufferTicks, exitBufferTicks,
+                exitBufferPct, entryTimeoutSec, exitChaseSec, exitChaseMax, stopLimitOffsetPct, reconcileEverySec,
+                casEntryFrom, casEntryTo, maxLossPerTrade, deltaRiskPerTrade, equityMode, startingCapital, dailyLossPct,
+                premiumBudgetFraction, equityFrom, entryBufferPct, entryChaseMax, entryChaseSec, entrySliceDepthPct,
+                entrySliceMaxDriftPct, maxParticipationPct, maxConsecutiveLosses, expiryReservePct,
+                dailyLossReleasesPerDay, dailyLossReleaseRaisePct, dailyLossAutoRelease, rvolBoostThreshold,
+                rvolBoostFactor, shortMarginPerLot, maxShortLots, false);
+    }
 
     /** v17 shape: no short selling. */
     public RiskLimits(String hash, double capital, double dailyLossLimit, int maxOpenPositions, int maxLotsPerUnderlying,
@@ -199,7 +228,7 @@ public record RiskLimits(
                 premiumBudgetFraction, equityFrom, entryBufferPct, entryChaseMax, entryChaseSec, entrySliceDepthPct,
                 entrySliceMaxDriftPct, maxParticipationPct, maxConsecutiveLosses, expiryReservePct, dailyLossReleasesPerDay,
                 dailyLossReleaseRaisePct, dailyLossAutoRelease, rvolBoostThreshold, rvolBoostFactor, shortMarginPerLot,
-                maxShortLots);
+                maxShortLots, entryFillsAtDecision);
     }
 
     /** v19 (A-358): whether the file allows selling options short at all. */
@@ -256,6 +285,15 @@ public record RiskLimits(
         return casEntryFrom != null && !time.isBefore(casEntryFrom) && time.isBefore(casEntryTo);
     }
 
+    /** {@code orders.entry_fill}: {@code depth} (the default) or {@code decision} (signal-source v3); anything else is refused. */
+    static boolean entryFill(String value) {
+        return switch (value) {
+            case "decision" -> true;
+            case "depth" -> false;
+            default -> throw new IllegalArgumentException("orders.entry_fill must be depth or decision, not " + value);
+        };
+    }
+
     public static RiskLimits from(ThresholdConfig c) {
         return new RiskLimits(c.contentHash(),
                 c.getDouble("account.capital"), c.getDouble("account.daily_loss_limit"),
@@ -291,6 +329,7 @@ public record RiskLimits(
                 c.has("sizing.rvol_boost_threshold") ? c.getDouble("sizing.rvol_boost_threshold") : Double.NaN,
                 c.has("sizing.rvol_boost_factor") ? c.getDouble("sizing.rvol_boost_factor") : 1.0,
                 c.has("shorts.margin_per_lot") ? c.getDouble("shorts.margin_per_lot") : Double.NaN,
-                c.has("shorts.max_lots") ? c.getInt("shorts.max_lots") : 0);
+                c.has("shorts.max_lots") ? c.getInt("shorts.max_lots") : 0,
+                c.has("orders.entry_fill") && entryFill(c.getString("orders.entry_fill")));
     }
 }

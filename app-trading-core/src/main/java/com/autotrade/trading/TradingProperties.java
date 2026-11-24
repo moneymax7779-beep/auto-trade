@@ -9,7 +9,7 @@ public record TradingProperties(Trading trading, Source source, Upstox upstox, S
 
     /**
      * Live execution L1 (docs/LIVE-TRADING-PLAN.md): {@code autotrade.signal-source.enabled=true} runs the session as the
-     * copy group's signal source: account {@code account} (SIGNAL-1) with {@code riskFile} (signal-source.v2, never
+     * copy group's signal source: account {@code account} (SIGNAL-1) with {@code riskFile} (signal-source.v3, never
      * refuses), its approved entries and every close recorded as exec.signal_decision. Absent or false = off (default).
      */
     public record SignalSource(Boolean enabled, String account, String riskFile, String copyGroup, String tenant,
@@ -33,7 +33,7 @@ public record TradingProperties(Trading trading, Source source, Upstox upstox, S
         }
 
         public String riskFileOr() {
-            return riskFile == null || riskFile.isBlank() ? "config/risk/signal-source.v2.yaml" : riskFile;
+            return riskFile == null || riskFile.isBlank() ? "config/risk/signal-source.v3.yaml" : riskFile;
         }
 
         public String copyGroupName() {
