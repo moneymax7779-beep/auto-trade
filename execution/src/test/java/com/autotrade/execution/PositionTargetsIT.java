@@ -446,6 +446,18 @@ class PositionTargetsIT {
         tick(12, v.price() + 3);
         t.watch(ENGINE);
         assertThat(target(12)).containsEntry("status", "ARMED");
+        // review 25 Nov 2026: the same % by the owner makes it theirs and keeps the armed lock; the admin's again, theirs
+        PositionTargets.View mine = t.set(account(12), ids[12], 10, "kc-tara");
+        assertThat(mine.byAdmin()).isFalse();
+        assertThat(mine.adminReason()).isNull();
+        assertThat(mine.status()).isEqualTo("ARMED");
+        assertThat(PositionTargets.changed(java.util.Optional.of(v), java.util.Optional.of(mine))).isTrue();
+        assertThat(PositionTargets.changed(java.util.Optional.of(mine), t.view(ids[12]))).as("read again").isFalse();
+        PositionTargets.View back = t.set(account(12), ids[12], 10, "kc-admin", admin);
+        assertThat(back.byAdmin()).isTrue();
+        assertThat(back.status()).isEqualTo("ARMED");
+        assertThat(jdbc.queryForObject("select detail ->> 'taken_over_from' from exec.audit_log where broker_account_id = ? "
+                + "and action = 'TARGET_SET' order by id desc limit 1", String.class, accounts[12])).isEqualTo("owner");
         List<Map<String, ?>> seen = new java.util.ArrayList<>();
         PositionTargets.Exiter capture = (account, position, audit) -> {
             seen.add(audit);

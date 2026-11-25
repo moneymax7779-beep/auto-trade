@@ -1009,7 +1009,7 @@ class AdminDeskIT {
         // alice's in-app notice says the admin set a first target, with the reason and the line
         assertThat(desk.notices("kc-alice")).filteredOn(n -> "TARGET_SET".equals(n.get("action"))).hasSize(2)
                 .allSatisfy(n -> assertThat(n).containsEntry("reason", "lock the morning gains")
-                        .extractingByKey("positions").asString().contains("first target +20.0 % = "));
+                        .extractingByKey("positions").asString().contains("first target +20 % = "));
         assertThat(desk.notices("kc-admin")).as("the admin's own action").isEmpty();
         // the same again: unchanged (an armed lock would be kept); then removed
         assertThat((List<Map<String, Object>>) desk.setTargets("kc-admin", all).get("results"))

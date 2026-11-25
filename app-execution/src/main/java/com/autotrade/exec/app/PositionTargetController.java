@@ -88,8 +88,10 @@ class PositionTargetController {
                     + (int) PositionTargets.MAX_PCT + " (two decimals)");
         }
         try {
+            java.util.Optional<PositionTargets.View> before = targets.view(positionId);
             PositionTargets.View v = targets.set(a, positionId, body.pct(), user.subject(), admin);
-            if (admin != null && adminExits != null) {
+            // review 25 Nov 2026: the members hear of a change only (the same % again by the admin tells nobody twice)
+            if (admin != null && adminExits != null && PositionTargets.changed(before, java.util.Optional.of(v))) {
                 adminExits.targetSet(a, user.subject(), (String) admin.get("admin_reason"), List.of(line(v)));
             }
             Map<String, Object> out = new LinkedHashMap<>();
@@ -111,7 +113,7 @@ class PositionTargetController {
         try {
             boolean cleared = targets.clear(a, positionId, user.subject(), admin);
             if (cleared && admin != null && adminExits != null) {
-                adminExits.targetSet(a, user.subject(), (String) admin.get("admin_reason"), List.of("position " + positionId
+                adminExits.targetSet(a, user.subject(), (String) admin.get("admin_reason"), List.of(symbol(positionId)
                         + ": first target removed"));
             }
             return Map.of("account", a.displayName(), "positionId", positionId, "cleared", cleared);
@@ -154,9 +156,12 @@ class PositionTargetController {
 
     /** "NIFTY 25450 CE: first target +20 % = 145.20" (the members' message). */
     String line(PositionTargets.View v) {
-        String symbol = jdbc.queryForList("select symbol from exec.position where id = ?", String.class, v.positionId())
-                .stream().findFirst().orElse("position " + v.positionId());
         return String.format(java.util.Locale.ROOT, "%s: first target +%s %% = %.2f (if the bid reaches it and falls back "
-                + "to it, the whole position is sold)", symbol, PositionTargets.pctText(v.pct()), v.price());
+                + "to it, the whole position is sold)", symbol(v.positionId()), PositionTargets.pctText(v.pct()), v.price());
+    }
+
+    private String symbol(long positionId) {
+        return jdbc.queryForList("select symbol from exec.position where id = ?", String.class, positionId).stream()
+                .findFirst().orElse("position " + positionId);
     }
 }

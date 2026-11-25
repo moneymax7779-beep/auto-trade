@@ -235,7 +235,25 @@ public final class PositionTargets {
         Optional<View> now = view(positionId);
         if (now.isPresent() && now.get().pct() == rounded
                 && List.of("WAITING", "ARMED", "FIRING", "SELLING").contains(now.get().status())) {
-            return now.get();                                   // unchanged: an armed lock is not thrown away
+            if (now.get().byAdmin() == byAdmin) {
+                return now.get();                               // unchanged: an armed lock is not thrown away
+            }
+            // review 25 Nov 2026: the same % by the other side (the owner over the admin's, or the admin over the owner's)
+            // makes it theirs, keeping the lock as it stands (its window, its armed price): only who and why change
+            int took = jdbc.update("update exec.position_target set set_by = ?, by_admin = ?, admin_reason = ?, updated_at = "
+                    + "now() where position_id = ? and generation = ? and status in ('WAITING', 'ARMED', 'SELLING')", actor,
+                    byAdmin, adminReason, positionId, generation(positionId));
+            if (took == 0) {
+                throw new IllegalArgumentException("the target is selling this position now: wait for the sale");
+            }
+            Map<String, Object> detail = new LinkedHashMap<>(Map.of("position", positionId, "symbol", p.get("symbol"),
+                    "pct", rounded, "replaced", now.get().status(), "taken_over_from", now.get().byAdmin() ? "admin"
+                            : "owner"));
+            if (admin != null) {
+                detail.putAll(admin);
+            }
+            audit.audit(account, actor, "TARGET_SET", detail);
+            return view(positionId).orElseThrow();
         }
         int changed = jdbc.update("insert into exec.position_target (position_id, broker_account_id, target_pct, status, set_by, "
                 + "set_at, by_admin, admin_reason) values (?, ?, ?, 'WAITING', ?, now(), ?, ?) on conflict (position_id) do "
@@ -256,6 +274,21 @@ public final class PositionTargets {
         }
         audit.audit(account, actor, "TARGET_SET", detail);
         return view(positionId).orElseThrow();
+    }
+
+    /** Whether a set or clear changed anything between two reads of a position's target (what to tell, what to count). */
+    public static boolean changed(Optional<View> before, Optional<View> after) {
+        if (before.isEmpty() || after.isEmpty()) {
+            return before.isPresent() != after.isPresent();
+        }
+        View b = before.get(), a = after.get();
+        return b.pct() != a.pct() || b.byAdmin() != a.byAdmin() || !b.status().equals(a.status())
+                || !java.util.Objects.equals(b.setAt(), a.setAt());
+    }
+
+    private int generation(long positionId) {
+        return jdbc.queryForObject("select generation from exec.position_target where position_id = ?", Integer.class,
+                positionId);
     }
 
     /** Removes the target (nothing more is sold by it, a pending sale of the rest included); false when there was none. */

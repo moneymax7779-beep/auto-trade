@@ -898,6 +898,31 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
         return t == null || t.positions() == null ? 0 : t.positions().size();
     }
 
+    /** One position of a target batch as found before anything is set: its account, book and symbol, or why it is refused. */
+    private record TargetPlan(BatchPosition asked, BrokerAccount account, String mode, String symbol, String refused) {
+    }
+
+    private TargetPlan targetPlan(BatchPosition p) {
+        BrokerAccount a = accounts.byId(p.accountId()).orElse(null);
+        Map<String, Object> pos = jdbc.queryForList("select p.symbol, i.execution_mode from exec.position p join "
+                + "exec.trade_intent i on i.id = p.entry_trade_intent_id where p.id = ? and p.broker_account_id = ?",
+                p.positionId(), p.accountId()).stream().findFirst().orElse(null);
+        String mode = pos == null ? null : (String) pos.get("execution_mode");
+        String symbol = pos == null ? null : (String) pos.get("symbol");
+        if (a == null) {
+            return new TargetPlan(p, null, mode, symbol, "no account " + p.accountId());
+        }
+        if (a.role() == com.autotrade.account.AccountRole.SIGNAL_SOURCE) {
+            return new TargetPlan(p, a, mode, symbol, a.displayName() + " is a signal source: its positions are the engine's");
+        }
+        String mirror = Mirrors.of(jdbc, a.id());
+        if (mirror != null) {
+            return new TargetPlan(p, a, mode, symbol, a.displayName() + " is a mirror of " + mirror + ": set it at the source");
+        }
+        return new TargetPlan(p, a, mode, symbol, pos == null ? "no position " + p.positionId() + " in " + a.displayName()
+                : null);
+    }
+
     private Map<String, Object> targetBatch(Access.User user, Targets t, String phrase, boolean set) {
         List<BatchPosition> asked = t == null || t.positions() == null ? List.of() : t.positions();
         if (asked.isEmpty() || asked.size() > MAX_BATCH) {
@@ -907,7 +932,7 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
         String reason = AdminExits.requireReason(t.reason());
         Scope scope = t.scope() == null || t.scope().isBlank() ? Scope.LIVE : Scope.of(t.scope());
         Set<String> seen = new LinkedHashSet<>();
-        List<Object[]> plan = new ArrayList<>();                  // {asked, account, mode, symbol, answer}
+        List<TargetPlan> plans = new ArrayList<>();
         for (BatchPosition p : asked) {
             if (p == null || p.accountId() == null || p.positionId() == null) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "each position needs accountId and positionId");
@@ -915,22 +940,10 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
             if (!seen.add(p.accountId() + ":" + p.positionId())) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "position " + p.positionId() + " is listed twice");
             }
-            BrokerAccount a = accounts.byId(p.accountId()).orElse(null);
-            Map<String, Object> pos = jdbc.queryForList("select p.symbol, i.execution_mode from exec.position p join "
-                    + "exec.trade_intent i on i.id = p.entry_trade_intent_id where p.id = ? and p.broker_account_id = ?",
-                    p.positionId(), p.accountId()).stream().findFirst().orElse(null);
-            String mode = pos == null ? null : (String) pos.get("execution_mode");
-            String symbol = pos == null ? null : (String) pos.get("symbol");
-            String why = a == null ? "no account " + p.accountId()
-                    : a.role() == com.autotrade.account.AccountRole.SIGNAL_SOURCE ? a.displayName() + " is a signal source: "
-                            + "its positions are the engine's"
-                    : Mirrors.of(jdbc, a.id()) != null ? a.displayName() + " is a mirror of " + Mirrors.of(jdbc, a.id())
-                            + ": set it at the source"
-                    : pos == null ? "no position " + p.positionId() + " in " + a.displayName() : null;
-            plan.add(new Object[] {p, a, mode, symbol, why});
+            plans.add(targetPlan(p));
         }
-        List<String> outside = plan.stream().filter(x -> x[2] != null && !scope.holds((String) x[2]))
-                .map(x -> ((BrokerAccount) x[1]).displayName() + " " + x[3] + " (" + x[2] + ")").toList();
+        List<String> outside = plans.stream().filter(x -> x.mode() != null && !scope.holds(x.mode()))
+                .map(x -> x.account().displayName() + " " + x.symbol() + " (" + x.mode() + ")").toList();
         if (!outside.isEmpty()) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, "not in the " + scope + " book chosen: "
                     + String.join(", ", outside) + "; nothing was set");
@@ -938,13 +951,12 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
         List<Map<String, Object>> results = new ArrayList<>();
         Map<Long, List<String>> lines = new LinkedHashMap<>(), told = new LinkedHashMap<>();
         Map<Long, BrokerAccount> touched = new LinkedHashMap<>();
-        for (Object[] x : plan) {
-            BatchPosition p = (BatchPosition) x[0];
-            BrokerAccount a = (BrokerAccount) x[1];
-            String symbol = (String) x[3];
-            Map<String, Object> r = answer(p.accountId(), a == null ? null : a.displayName(), p.positionId(), symbol,
-                    (String) x[2], "REFUSED", (String) x[4], List.of());
-            if (x[4] == null) {
+        for (TargetPlan x : plans) {
+            BatchPosition p = x.asked();
+            BrokerAccount a = x.account();
+            Map<String, Object> r = answer(p.accountId(), a == null ? null : a.displayName(), p.positionId(), x.symbol(),
+                    x.mode(), "REFUSED", x.refused(), List.of());
+            if (x.refused() == null) {
                 boolean byAdmin = user.byAdmin(a.tenantId());
                 Map<String, Object> audit = null;
                 if (byAdmin) {
@@ -954,14 +966,12 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
                     audit.put("admin_target_batch", true);
                 }
                 try {
+                    Optional<com.autotrade.execution.PositionTargets.View> before = targets.view(p.positionId());
                     if (set) {
-                        Optional<com.autotrade.execution.PositionTargets.View> before = targets.view(p.positionId());
-                        double rounded = com.autotrade.execution.PositionTargets.pct(t.pct());
-                        boolean same = before.isPresent() && before.get().pct() == rounded && List.of("WAITING", "ARMED",
-                                "FIRING", "SELLING").contains(before.get().status());
                         com.autotrade.execution.PositionTargets.View v = targets.set(a, p.positionId(), t.pct(),
                                 user.subject(), audit);
-                        r.put("outcome", same ? "UNCHANGED" : "SET");
+                        r.put("outcome", com.autotrade.execution.PositionTargets.changed(before, Optional.of(v)) ? "SET"
+                                : "UNCHANGED");
                         r.put("detail", String.format(java.util.Locale.ROOT, "first target +%s %% = %.2f (%s)",
                                 com.autotrade.execution.PositionTargets.pctText(v.pct()), v.price(), v.status()));
                         r.put("target", v.toMap());
@@ -974,10 +984,10 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
                     r.put("detail", e.getMessage());
                 }
                 touched.putIfAbsent(a.id(), a);
-                String line = symbol + ": " + r.get("outcome") + " (" + r.get("detail") + ")";
-                lines.computeIfAbsent(a.id(), k -> new ArrayList<>()).add(line);
-                if (byAdmin && !"REFUSED".equals(r.get("outcome")) && !"UNCHANGED".equals(r.get("outcome"))) {
-                    told.computeIfAbsent(a.id(), k -> new ArrayList<>()).add(symbol + ": " + r.get("detail"));
+                lines.computeIfAbsent(a.id(), k -> new ArrayList<>()).add(x.symbol() + ": " + r.get("outcome") + " ("
+                        + r.get("detail") + ")");
+                if (byAdmin && List.of("SET", "CLEARED").contains(r.get("outcome"))) {
+                    told.computeIfAbsent(a.id(), k -> new ArrayList<>()).add(x.symbol() + ": " + r.get("detail"));
                 }
             }
             results.add(r);
@@ -1074,7 +1084,8 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
         for (Map<String, Object> r : jdbc.queryForList("select l.id, " + Iso.of("l.at") + " at, l.action, "
                 + "a.display_name account, l.detail ->> 'admin_reason' reason, coalesce((l.detail -> 'positions')::text, "
                 + "case when l.action = 'TARGET_SET' then json_build_array((l.detail ->> 'symbol') || ': first target +' || "
-                + "(l.detail ->> 'pct') || ' % = ' || (l.detail ->> 'price'))::text end) positions "
+                + "trim_scale((l.detail ->> 'pct')::numeric) || ' %' || coalesce(' = ' || to_char((l.detail ->> 'price')"
+                + "::numeric, 'FM999999990.00'), ''))::text end) positions "
                 + "from exec.audit_log l join acct.broker_account a on a.id = l.broker_account_id "
                 + "where l.broker_account_id = any(array(select b.id from acct.broker_account b where b.tenant_id = any(?))) "
                 + "and l.at > now() - interval '24 hours' and l.action in ('POSITION_EXIT', 'FLATTEN', 'TARGET_SET', "

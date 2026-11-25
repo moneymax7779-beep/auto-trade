@@ -387,7 +387,11 @@ function BatchSheet({ rows, title, kill, everything, partial, scope, onClose, on
   const maxLots = Math.max(1, ...snapshot.map((r) => r.lots ?? 1));
   // plan 2026-11-23 decision 3: the LIVE accounts' kill switches on by default, the paper ones only when asked;
   // "Exit everything" also engages GLOBAL_LIVE first and exits the engine's own positions (25 Nov 2026: in its book only)
-  const [killAfter, setKillAfter] = useState(kill ?? snapshot.some((r) => r.mode === "LIVE"));
+  const killDefault = kill ?? snapshot.some((r) => r.mode === "LIVE");
+  const [killAfter, setKillAfter] = useState(killDefault);
+  // review 25 Nov 2026: trimming part of a position does not stop the account by default (selling all of it does, decision
+  // 2); a choice made by hand is kept
+  const [killTouched, setKillTouched] = useState(false);
   const [killPaper, setKillPaper] = useState(false);
   const [globalLive, setGlobalLive] = useState(everything != null && scope !== "PAPER");
   const engineAllowed = everything != null && scope !== "LIVE";
@@ -409,6 +413,7 @@ function BatchSheet({ rows, title, kill, everything, partial, scope, onClose, on
   const choosePart = (p: Part) => {
     if (run.data || run.isPending) return;
     setPart(p); setTyped(""); setLiveOk(false); setKey(newKey()); run.reset();
+    if (!killTouched) setKillAfter(p.kind === "all" ? killDefault : false);
   };
   // review 20 Nov 2026: the batch runs in the background (a LIVE batch can outlast the proxy's 150 s); POST answers at
   // once with its id and this sheet follows it every 1.5 s, showing each row as it answers
@@ -545,8 +550,10 @@ function BatchSheet({ rows, title, kill, everything, partial, scope, onClose, on
                 {`${account} · ${p.strategy} · ${p.symbol} · ${p.quantity} qty`}</li>)}
             </ul></>}
           {scope !== "PAPER" && <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={killAfter} onChange={(e) => setKillAfter(e.target.checked)} className="h-5 w-5 shrink-0" />
-            Stop new entries on the LIVE accounts (kill switch, engaged before any exit){anyLive ? " · on by default" : ""}
+            <input type="checkbox" checked={killAfter} onChange={(e) => { setKillAfter(e.target.checked); setKillTouched(true); }}
+              className="h-5 w-5 shrink-0" />
+            Stop new entries on the LIVE accounts (kill switch, engaged before any exit){anyLive ? (part.kind === "all"
+              ? " · on by default" : " · off by default for a part") : ""}
           </label>}
           {scope !== "LIVE" && <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={killPaper} onChange={(e) => setKillPaper(e.target.checked)} className="h-5 w-5 shrink-0" />

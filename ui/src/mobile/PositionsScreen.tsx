@@ -154,6 +154,8 @@ export function ExitSheet({ accountId, p, mode, onClose, reasonRequired, title, 
   const [reason, setReason] = useState("");
   const allLots = p.lotSize ? Math.max(1, Math.round(p.quantity / p.lotSize)) : 1;
   const [lots, setLots] = useState(allLots);
+  // review 25 Nov 2026: what is typed in the lots box, kept as typed (clearing it no longer snaps to 1 mid-edit)
+  const [lotsText, setLotsText] = useState(String(allLots));
   const [typed, setTyped] = useState("");
   const [key, setKey] = useState(newKey);
   const [done, setDone] = useState<string | null>(null);
@@ -195,7 +197,8 @@ export function ExitSheet({ accountId, p, mode, onClose, reasonRequired, title, 
   const sellLots = pv?.lots ?? (all ? allLots : lots);
   const choose = (n: number) => {
     if (unknown) return;                                           // the first sale may have gone through
-    setLots(Math.max(1, Math.min(allLots, n))); setTyped(""); exit.reset(); setKey(newKey());
+    const next = Math.max(1, Math.min(allLots, n));
+    setLots(next); setLotsText(String(next)); setTyped(""); exit.reset(); setKey(newKey());
   };
   return (
     <Sheet title={title ?? `Exit ${p.symbol}`} onClose={onClose}>
@@ -217,8 +220,11 @@ export function ExitSheet({ accountId, p, mode, onClose, reasonRequired, title, 
               <div className="flex items-center gap-2">
                 <div className="flex items-center justify-between rounded-lg border border-line">
                   <button type="button" aria-label="One lot fewer" className="min-h-11 w-10 text-lg" onClick={() => choose(lots - 1)}>−</button>
-                  <input type="number" inputMode="numeric" min={1} max={allLots} step={1} value={lots} aria-label="Lots to exit"
-                    disabled={unknown} onChange={(e) => choose(Math.floor(Number(e.target.value) || 1))}
+                  <input type="number" inputMode="numeric" min={1} max={allLots} step={1} value={lotsText} aria-label="Lots to exit"
+                    disabled={unknown} onBlur={() => setLotsText(String(lots))}
+                    onChange={(e) => { const n = Math.floor(Number(e.target.value));
+                      if (e.target.value.trim() === "" || !(n >= 1)) { setLotsText(e.target.value); return; }
+                      choose(n); }}
                     className="num w-14 bg-transparent text-center text-sm font-semibold" />
                   <button type="button" aria-label="One lot more" className="min-h-11 w-10 text-lg" onClick={() => choose(lots + 1)}>+</button>
                 </div>
