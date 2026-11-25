@@ -54,7 +54,7 @@ class LiveIT {
     private static final DockerImageName TIMESCALE =
             DockerImageName.parse("timescale/timescaledb:2.30.1-pg17").asCompatibleSubstituteFor("postgres");
     private static final ZoneId IST = ZoneId.of("Asia/Kolkata");
-    private static final LocalDate DAY = LocalDate.now(IST);
+    private static final LocalDate DAY = IstMidnight.awaitClear();     // a member test reads the database clock too
     /**
      * The tests' one clock, today at 10:00 IST ({@code -Dexecution.it.time=HH:mm} for another time; the entries that
      * should reach Kite need one before the 15:10 last LIVE entry): subscriptions, decisions and the LIVE checks read it,
@@ -515,16 +515,21 @@ class LiveIT {
         jdbc.update("update acct.broker_credential_profile set tenant_id = ? where id = (select credential_profile_id from "
                 + "acct.broker_account where id = ?)", member, a.id());
         accounts.shareCopyGroup(group, member, owner);
-        // the switch is LIVE only after today's broker login (acct.entry_target): a login at 08:00, LIVE at 09:00
+        // the switch is LIVE only after today's broker login (acct.entry_target), and before both the signal's own time
+        // (the fan-out's target as of the decision, 10:00 on the test clock) and the wall clock: the fan-out drops an
+        // entry whose batch (stamped by the database) predates the switch, and the follower's last check reads the
+        // database's clock (25 Nov 2026: LIVE pinned at 09:00 today lay ahead of the wall clock before 09:00 IST)
+        Instant switched = CLOCK.instant().minusSeconds(3600);
+        if (Instant.now().minusSeconds(300).isBefore(switched)) {
+            switched = Instant.now().minusSeconds(300);
+        }
         jdbc.update("update acct.broker_account set connection_status = 'ACTIVE' where id = ?", a.id());
         jdbc.update("insert into acct.broker_session (broker_account_id, token_ref, acquired_at, expires_at, status, created_at) "
-                + "values (?, 'file:kite-it.token', ?, ?, 'ACTIVE', ?)", a.id(), java.sql.Timestamp.from(CLOCK.instant()
-                .minusSeconds(7200)), java.sql.Timestamp.from(CLOCK.instant().plusSeconds(21600)),
-                java.sql.Timestamp.from(CLOCK.instant().minusSeconds(7200)));
+                + "values (?, 'file:kite-it.token', ?, ?, 'ACTIVE', ?)", a.id(), java.sql.Timestamp.from(switched
+                .minusSeconds(300)), java.sql.Timestamp.from(CLOCK.instant().plusSeconds(21600)),
+                java.sql.Timestamp.from(switched.minusSeconds(300)));
         long live = new TradingDay(dataSource).append(member, a.id(), TradingDay.Mode.LIVE, "IT", null);
-        // LIVE before the signal's own time (the fan-out takes the target as of the decision, 10:00 on the test clock)
-        jdbc.update("update acct.trading_day_event set changed_at = ? where id = ?",
-                java.sql.Timestamp.from(CLOCK.instant().minusSeconds(3600)), live);
+        jdbc.update("update acct.trading_day_event set changed_at = ? where id = ?", java.sql.Timestamp.from(switched), live);
         a = accounts.byId(a.id()).orElseThrow();
         enter(group, signalSession(group), "ma-cross", 0);
         try (BrokerConnections registry = registry()) {
