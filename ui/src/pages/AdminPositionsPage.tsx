@@ -411,7 +411,9 @@ function BatchSheet({ rows, title, kill, everything, partial, scope, onClose, on
   const countPhrase = `EXIT ${sent.length} POSITIONS`;
   const phrase = everything ? "EXIT EVERYTHING" : countPhrase;
   const choosePart = (p: Part) => {
-    if (run.data || run.isPending) return;
+    // review 25 Nov 2026: after an unclear result (the batch may have started) the request stays exactly as sent: a new
+    // part would be a new key and a second batch selling again
+    if (run.data || run.isPending || unknown) return;
     setPart(p); setTyped(""); setLiveOk(false); setKey(newKey()); run.reset();
     if (!killTouched) setKillAfter(p.kind === "all" ? killDefault : false);
   };
@@ -519,7 +521,7 @@ function BatchSheet({ rows, title, kill, everything, partial, scope, onClose, on
           {partial && snapshot.length > 0 && (
             <div className="flex flex-col gap-2">
               <span className="text-sm font-semibold">How much of each</span>
-              <div className="flex flex-wrap gap-2" role="group" aria-label="How much of each position">
+              <fieldset disabled={unknown} className="flex flex-wrap gap-2 disabled:opacity-50" aria-label="How much of each position">
                 <Big kind={part.kind === "all" ? "primary" : "plain"} onClick={() => choosePart({ kind: "all" })}>All</Big>
                 {SHARES.map((p) => <Big key={(p as { label: string }).label} kind={partOn(p) ? "primary" : "plain"}
                   onClick={() => choosePart(p)}>{(p as { label: string }).label}</Big>)}
@@ -529,7 +531,7 @@ function BatchSheet({ rows, title, kill, everything, partial, scope, onClose, on
                     onChange={(e) => { const n = Math.floor(Number(e.target.value));
                       choosePart(n >= 1 ? { kind: "lots", n: Math.min(n, maxLots) } : { kind: "all" }); }}
                     className="num min-h-11 w-14 bg-transparent text-center font-semibold" /> lots of each</label>
-              </div>
+              </fieldset>
               {snapshot.length === 1 && snapshot[0].lots != null && snapshot[0].lots > 1 && <p className="text-xs text-muted">
                 Shares of {lotWord(snapshot[0].lots)}: {shareChoices(snapshot[0].lots).map((c) => `${c.label} = ${c.lots}`).join(", ")}.</p>}
               {part.kind !== "all" && <p className="text-xs text-muted">Whole lots, rounded down; the rest of each stays open with its stop.</p>}
@@ -704,7 +706,7 @@ function TargetSheet({ rows, title, scope, onClose, onDone }: { rows: DeskPositi
           {mode === "set" && (
             <label className="flex flex-wrap items-center gap-2 text-sm">
               Target % above each entry
-              <input type="number" inputMode="decimal" step="any" value={text} onChange={(e) => { setText(e.target.value); setTyped(""); }}
+              <input type="number" inputMode="decimal" step="any" value={text} onChange={(e) => { setText(e.target.value); setTyped(""); setLiveOk(false); }}
                 aria-label="Target % above each entry" className="num min-h-11 w-24 rounded-lg border border-line bg-bg px-2 text-base" /> %
             </label>
           )}

@@ -431,8 +431,26 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
         BatchRun run;
         List<Planned> plans = new ArrayList<>();
         try {
+            // review 25 Nov 2026: a position another batch is still exiting (its row PENDING or RUNNING) is not sent again
+            // (a second key for the same intent, e.g. after an unclear answer, would sell it twice)
+            Map<String, String> busy = new LinkedHashMap<>();
+            for (BatchRun other : runs.values()) {
+                if (other.finished != null || other.id.equals(id)) {
+                    continue;
+                }
+                other.rows.values().stream().filter(r -> List.of("PENDING", "RUNNING").contains(r.get("outcome")))
+                        .forEach(r -> busy.putIfAbsent(r.get("accountId") + ":" + r.get("positionId"), other.id));
+            }
             for (int i = 0; i < asked.size(); i++) {
-                plans.add(plan(i, asked.get(i)));
+                BatchPosition p = asked.get(i);
+                String running = busy.get(p.accountId() + ":" + p.positionId());
+                Planned planned = plan(i, p, scope);
+                if (running != null && planned.answer() == null) {
+                    planned = new Planned(i, planned.accountId(), planned.positionId(), planned.account(), planned.mode(),
+                            planned.symbol(), planned.open(), 0, null, withDetail(answer(planned, "REFUSED", List.of()),
+                            "another batch (" + running + ") is exiting it now: nothing sent; read its result first"));
+                }
+                plans.add(planned);
             }
             // user 25 Nov 2026: a batch never touches the book that is not chosen; refused as a whole, before any kill
             // switch or exit (a page showing one book sends only that book's rows: anything else is stale or wrong)
@@ -477,6 +495,11 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
                 plans.stream().filter(Planned::live).forEach(p -> liveAccounts.add(p.accountId()));
                 for (BrokerAccount a : involved(plans).values()) {
                     if (!liveAccounts.contains(a.id()) && !paperToo) {
+                        continue;
+                    }
+                    // review 25 Nov 2026: an account switch is account-wide; a PAPER-only batch never stops an account that
+                    // trades LIVE now (it would stop its LIVE entries too)
+                    if (scope == Scope.PAPER && a.tradeMode() == com.autotrade.account.TradeMode.LIVE) {
                         continue;
                     }
                     try {
@@ -713,7 +736,7 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
     }
 
     /** A position as found now: its account, mode and risk, or the answer it gets without being run. */
-    private Planned plan(int index, BatchPosition asked) {
+    private Planned plan(int index, BatchPosition asked, Scope scope) {
         long accountId = asked.accountId(), positionId = asked.positionId();
         BrokerAccount account = accounts.byId(accountId).orElse(null);
         if (account == null) {
@@ -749,6 +772,15 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
         String mode = (String) p.get("execution_mode");
         String symbol = (String) p.get("symbol");
         long open = ((Number) p.get("quantity_open")).longValue();
+        // review 25 Nov 2026: the exit is routed by the account's trade mode now, not the entry's: a paper entry on an
+        // account that trades LIVE now would be sold through its broker (a real order); a PAPER-only batch never sends it
+        if (scope == Scope.PAPER && !"LIVE".equals(mode) && account.tradeMode() == com.autotrade.account.TradeMode.LIVE
+                && !"CLOSED".equals(p.get("status")) && open > 0) {
+            return new Planned(index, accountId, positionId, account, mode, symbol, open, 0, null, answer(accountId,
+                    account.displayName(), positionId, symbol, mode, "REFUSED", account.displayName() + " trades LIVE now: "
+                            + "its exit would go to the broker, not the paper book; exit it with Both chosen or from the "
+                            + "account page", List.of()));
+        }
         if ("CLOSED".equals(p.get("status")) || open <= 0) {
             return new Planned(index, accountId, positionId, account, mode, symbol, 0, 0, null, answer(accountId,
                     account.displayName(), positionId, symbol, mode, "ALREADY_CLOSED", null, List.of()));
@@ -982,6 +1014,12 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
                     }
                 } catch (IllegalArgumentException e) {
                     r.put("detail", e.getMessage());
+                } catch (RuntimeException e) {
+                    // review 25 Nov 2026: one row's failure never hides what the rows before it set (audit, members told)
+                    log.error("admin target batch: position {} failed", p.positionId(), e);
+                    r.put("outcome", "ERROR");
+                    r.put("detail", "not known whether it was " + (set ? "set" : "removed") + " (" + e.getMessage()
+                            + "): read the desk again");
                 }
                 touched.putIfAbsent(a.id(), a);
                 lines.computeIfAbsent(a.id(), k -> new ArrayList<>()).add(x.symbol() + ": " + r.get("outcome") + " ("

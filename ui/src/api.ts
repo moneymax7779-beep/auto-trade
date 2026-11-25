@@ -834,7 +834,7 @@ export interface DeskPosition {
 export interface TargetBatchResult {
   scope: DeskScope; count: number;
   results: { accountId: number; account: string | null; positionId: number; symbol: string | null; mode: string | null;
-    outcome: "SET" | "UNCHANGED" | "CLEARED" | "REFUSED"; detail: string | null; target?: ManualTarget }[];
+    outcome: "SET" | "UNCHANGED" | "CLEARED" | "REFUSED" | "ERROR"; detail: string | null; target?: ManualTarget }[];
 }
 
 export interface DeskOpenPositions {

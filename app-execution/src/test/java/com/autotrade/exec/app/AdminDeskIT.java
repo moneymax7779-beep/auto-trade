@@ -147,6 +147,8 @@ class AdminDeskIT {
         throwAfterOrder.clear();
         throwBefore.clear();
         killedWhenRun.clear();
+        hold.values().forEach(java.util.concurrent.CountDownLatch::countDown);
+        hold.clear();
         jdbc.update("update exec.position set status = 'CLOSED', quantity_open = 0, closed_at = now() where status <> 'CLOSED'");
         jdbc.update("update exec.kill_switch set released_at = now(), released_by = 'it' where released_at is null");
         jdbc.update("delete from acct.broker_session");                    // nobody logged in
@@ -179,6 +181,8 @@ class AdminDeskIT {
     private static final Set<Long> throwAfterOrder = ConcurrentHashMap.newKeySet();
     /** Positions whose exit throws before any order. */
     private static final Set<Long> throwBefore = ConcurrentHashMap.newKeySet();
+    /** Positions whose exit waits on the lane until released (a batch still running). */
+    private static final Map<Long, java.util.concurrent.CountDownLatch> hold = new ConcurrentHashMap<>();
     /** Per position: whether its account's kill switch was already engaged when its exit ran. */
     private static final Map<Long, Boolean> killedWhenRun = new ConcurrentHashMap<>();
 
@@ -189,6 +193,10 @@ class AdminDeskIT {
     private static AdminDeskController.BatchRunner runner() {
         return (account, position, quantity, actor, day, byAdmin, audit) -> {
             ran.add(new Ran(account, position, byAdmin, audit, quantity));
+            java.util.concurrent.CountDownLatch wait = hold.get(position);
+            if (wait != null) {
+                wait.await(20, java.util.concurrent.TimeUnit.SECONDS);
+            }
             killedWhenRun.put(position, jdbc.queryForObject("select exists (select 1 from exec.kill_switch where scope = "
                     + "'ACCOUNT' and broker_account_id = ? and released_at is null)", Boolean.class, account));
             if (closedFirst.contains(position)) {
@@ -1028,5 +1036,65 @@ class AdminDeskIT {
                 .isFalse();
         // the other notice tests count alice's last 24 h: these rows are aged out of it
         jdbc.update("update exec.audit_log set at = at - interval '2 days' where action in ('TARGET_SET', 'TARGET_CLEARED')");
+    }
+
+    /**
+     * Review 25 Nov 2026: a position another batch is still exiting is refused in a second batch (another key, e.g. after
+     * an unclear answer and a changed part), so it is never sold twice; once the first has answered it may be sent again.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void aPositionAnotherBatchIsStillExitingIsNotSentAgain() throws Exception {
+        long busy = position(bobTenant, bobPaper, bobGroup, "PAPER", 80);
+        long other = position(aliceTenant, alicePaper, aliceGroup, "PAPER", 70);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        hold.put(busy, release);
+        AdminDeskController desk = desk();
+        String first = (String) desk.exitBatch("kc-admin", scoped("first", "PAPER", null,
+                new AdminDeskController.BatchPosition(bobPaper, busy, 65L))).getBody().get("batchId");
+        for (int i = 0; i < 100 && ran.stream().noneMatch(r -> r.position() == busy); i++) {
+            Thread.sleep(20);
+        }
+        Map<String, Object> second = runBatch(desk, scoped("second", "PAPER", null,
+                new AdminDeskController.BatchPosition(bobPaper, busy, 65L), new AdminDeskController.BatchPosition(alicePaper, other)));
+        List<Map<String, Object>> rows = (List<Map<String, Object>>) second.get("results");
+        assertThat(rows.get(0)).containsEntry("outcome", "REFUSED").extractingByKey("detail").asString()
+                .contains("another batch (" + first + ") is exiting it now");
+        assertThat(rows.get(1)).containsEntry("outcome", "SOLD");
+        assertThat(ran).filteredOn(r -> r.position() == busy).hasSize(1);
+        release.countDown();
+        for (int i = 0; i < 200 && !"DONE".equals(desk.batch("kc-admin", first).get("status")); i++) {
+            Thread.sleep(25);
+        }
+        assertThat(((List<Map<String, Object>>) desk.batch("kc-admin", first).get("results")).getFirst())
+                .containsEntry("outcome", "SOLD");
+    }
+
+    /**
+     * Review 25 Nov 2026: the exit and the kill switch go by the account, the book by the entry. A paper entry on an account
+     * that trades LIVE now would be sold through its broker: a PAPER-only batch refuses it (nothing sent) and never stops
+     * that account; another paper row in the same batch goes as before.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void aPaperOnlyBatchNeverSendsToOrStopsAnAccountThatTradesLiveNow() throws Exception {
+        long paperOnLive = position(aliceTenant, kite2, aliceGroup, "PAPER", 90);
+        long paper = position(bobTenant, bobPaper, bobGroup, "PAPER", 80);
+        jdbc.update("update acct.broker_account set trade_mode = 'LIVE' where id = ?", kite2);
+        try {
+            Map<String, Object> out = runBatch(desk(), new AdminDeskController.Batch(List.of(
+                    new AdminDeskController.BatchPosition(kite2, paperOnLive), new AdminDeskController.BatchPosition(bobPaper,
+                            paper)), "risk check", true, "paper-on-live", "EXIT 2 POSITIONS", true, null, "PAPER"));
+            List<Map<String, Object>> rows = (List<Map<String, Object>>) out.get("results");
+            assertThat(rows.get(0)).containsEntry("outcome", "REFUSED").extractingByKey("detail").asString()
+                    .contains("trades LIVE now");
+            assertThat(rows.get(1)).containsEntry("outcome", "SOLD");
+            assertThat(ran).extracting(Ran::position).containsExactly(paper);
+            assertThat((List<String>) out.get("killed")).containsExactly("BOB-PAPER");
+            assertThat(jdbc.queryForObject("select count(*) from exec.kill_switch where released_at is null and "
+                    + "broker_account_id = ?", Integer.class, kite2)).isZero();
+        } finally {
+            jdbc.update("update acct.broker_account set trade_mode = 'DRY_RUN' where id = ?", kite2);
+        }
     }
 }

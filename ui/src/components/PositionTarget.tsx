@@ -71,6 +71,11 @@ export function PositionTarget({ accountId, p, live, phone, readOnly, reasonRequ
   const [reason, setReason] = useState("");
   const why = reasonRequired ? { reason: reason.trim() } : {};
   const noReason = reasonRequired === true && reason.trim() === "";
+  // review 25 Nov 2026: on the exit desk ({@code account} given) a LIVE target is real money: a tick naming the account,
+  // the quantity and LIVE, as every LIVE action there (the Overview keeps its one click for the trader's own)
+  const [liveOk, setLiveOk] = useState(false);
+  const needsTick = live === true && account != null;
+  const unticked = needsTick && !liveOk;
   const base = `/api/execution/accounts/${accountId}/positions/${p.id}/target`;
   // the card shows the new state at once (the book's next poll confirms it), never the old one for up to 5 s
   const put = (target: ManualTarget | undefined) => client.setQueryData<LiveBook>(["live-book", accountId], (b) => b && ({
@@ -94,7 +99,8 @@ export function PositionTarget({ accountId, p, live, phone, readOnly, reasonRequ
   const active = targetActive(t);
   const btn = phone ? "min-h-11 rounded-lg border px-3 text-sm font-semibold disabled:opacity-40"
     : "rounded-md border px-3 py-1.5 text-sm font-medium disabled:opacity-50";
-  const open = () => { save.reset(); remove.reset(); setText(active ? String(t!.pct) : ""); setReason(""); setEditing(true); };
+  const open = () => { save.reset(); remove.reset(); setText(active ? String(t!.pct) : ""); setReason(""); setLiveOk(false);
+    setEditing(true); };
   const tone = t?.status === "ARMED" || t?.status === "FIRING" || t?.status === "SELLING" ? "text-accent font-semibold"
     : t?.status === "FAILED" ? "text-down" : "text-muted";
   const status = t ? <span className={`min-w-0 ${tone}`}>{targetText(t)}</span>
@@ -120,11 +126,11 @@ export function PositionTarget({ accountId, p, live, phone, readOnly, reasonRequ
   return (
     // noValidate: the browser's own number checks (step, min) would block a valid % with a bubble and no message here
     <form noValidate className="mt-2 space-y-2 rounded-md border border-line bg-panel-2 px-3 py-2 text-sm"
-      onSubmit={(e) => { e.preventDefault(); if (pct != null && !busy && !noReason) save.mutate(pct); }}>
+      onSubmit={(e) => { e.preventDefault(); if (pct != null && !busy && !noReason && !unticked) save.mutate(pct); }}>
       <label className="flex flex-wrap items-center gap-2">
         <span>Target % above entry {px(p.entry)}</span>
         <input type="number" inputMode="decimal" step="any" value={text} autoFocus
-          aria-label="Target % above entry" onChange={(e) => setText(e.target.value)}
+          aria-label="Target % above entry" onChange={(e) => { setText(e.target.value); setLiveOk(false); }}
           className={`num w-24 rounded border border-line bg-white px-2 ${phone ? "min-h-11 text-base" : "py-1"} text-text`} />
         <span>%</span>
         {price != null && <b className="num">= {px(price)}</b>}
@@ -145,16 +151,24 @@ export function PositionTarget({ accountId, p, live, phone, readOnly, reasonRequ
             ({p.quantity} qty); in a fast fall it can fill below {px(price)}.</b></>}
         </div>
       )}
+      {needsTick && (
+        <label className="flex items-start gap-2 rounded border border-down bg-down/10 p-2 font-semibold text-down">
+          <input type="checkbox" checked={liveOk} onChange={(e) => setLiveOk(e.target.checked)} className="mt-0.5 h-5 w-5 shrink-0"
+            aria-label="Confirm the LIVE target" />
+          <span>LIVE · real money · {account}: {price != null ? `first target +${pct} % = ${px(price)} on` : "the first target of"}{" "}
+            {all} ({p.quantity} qty); when it triggers, the whole position is sold at the broker.</span>
+        </label>
+      )}
       {reasonRequired && (
         <input value={reason} maxLength={300} onChange={(e) => setReason(e.target.value)} aria-label="Reason for the target"
           placeholder="Reason (the members are told; needed to set or remove it)"
           className={`w-full rounded border border-line bg-white px-2 ${phone ? "min-h-11 text-base" : "py-1"} text-text`} />
       )}
       <div className="flex flex-wrap items-center gap-2">
-        <button type="submit" className={`${btn} border-accent bg-accent text-white`} disabled={pct == null || busy || noReason}>
+        <button type="submit" className={`${btn} border-accent bg-accent text-white`} disabled={pct == null || busy || noReason || unticked}>
           {save.isPending ? "Saving…" : "Save target"}</button>
         {active && (
-          <button type="button" className={`${btn} border-line bg-white text-down`} disabled={busy || noReason}
+          <button type="button" className={`${btn} border-line bg-white text-down`} disabled={busy || noReason || unticked}
             onClick={() => remove.mutate()}>{remove.isPending ? "Removing…" : "Remove target"}</button>
         )}
         <button type="button" className={`${btn} border-line bg-white text-text`} disabled={busy}
