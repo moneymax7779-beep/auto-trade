@@ -408,7 +408,7 @@ class BrokerLoginIT {
     /** Review 8 Nov 2026: zt-tiger-v2's Upstox app key and Upstox user are refused at the key save and the login. */
     @Test
     void ztTigersUpstoxAppAndUserAreNeverSavedOrLoggedIn() {
-        UpstoxDenyList deny = new UpstoxDenyList(List.of("zt-app-key-1"), List.of("BM6462", "7AB12C"));
+        UpstoxDenyList deny = new UpstoxDenyList(List.of("zt-app-key-1"), List.of("BM6462", "7AB12C"), List.of());
         BrokerAppController denying = new BrokerAppController(new Access(db.ds()), db.ds(), transactions, kiteProps,
                 brokerProps, deny, TestBrokers.live(db.ds()));
         UpstoxLogin denyingLogin = new UpstoxLogin(activation, db.ds(), brokerProps, deny);
@@ -444,6 +444,14 @@ class BrokerLoginIT {
         long acc2 = account("zara", t, "Upstox Z2", "UPSTOX", "BM6462");
         apps.link("zara", acc2, new BrokerAppController.Link(id));
         assertThatThrownByMessage(() -> denyingLogin.start(zara, acc2), "market data service");
+
+        // user 25 Nov 2026: listed for zt's user, the account's own app may log in; zt's app key is still refused
+        UpstoxLogin listedLogin = new UpstoxLogin(activation, db.ds(), brokerProps, new UpstoxDenyList(
+                List.of("zt-app-key-1"), List.of("BM6462", "7AB12C"), List.of(Long.toString(acc2))));
+        assertThat(listedLogin.start(zara, acc2)).as("listed, own app").isNotNull();
+        apps.keys("zara", id, new BrokerAppController.Keys("zt-app-key-1", "zt-secret-1", null));
+        assertThatThrownByMessage(() -> listedLogin.start(zara, acc2), "market data service");
+        apps.keys("zara", id, new BrokerAppController.Keys("own-app-key-9", "up-secret", null));
     }
 
     private static void assertThatThrownByMessage(Runnable call, String part) {

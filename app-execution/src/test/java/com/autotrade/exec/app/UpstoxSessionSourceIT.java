@@ -144,10 +144,10 @@ class UpstoxSessionSourceIT {
     void ztTigersUpstoxUserOrAppIsNoSession() {
         tokenFile(upstox.id(), upstox.id(), "UX1234", Instant.now().plusSeconds(3600));
         assertThat(new UpstoxSessionSource(dataSource, secrets).access(upstox)).as("not denied: a session").isPresent();
-        assertThat(new UpstoxSessionSource(dataSource, secrets, new UpstoxDenyList(List.of(), List.of("ux1234")))
+        assertThat(new UpstoxSessionSource(dataSource, secrets, new UpstoxDenyList(List.of(), List.of("ux1234"), null))
                 .access(upstox)).as("a denied Upstox user").isEmpty();
         assertThat(new UpstoxSessionSource(dataSource, secrets, new UpstoxDenyList(List.of("MEMBER-UPSTOX-API-KEY"),
-                null)).access(upstox)).as("zt's Upstox app key").isEmpty();
+                null, null)).access(upstox)).as("zt's Upstox app key").isEmpty();
         // 16 Nov 2026: zt-tiger-v2's own user BM6462 is denied whatever the configured list says (even none)
         jdbc.update("update acct.broker_account set external_broker_user_id = 'BM6462' where id = ?", upstox.id());
         try {
@@ -155,6 +155,14 @@ class UpstoxSessionSourceIT {
             tokenFile(zt.id(), zt.id(), "BM6462", Instant.now().plusSeconds(3600));
             assertThat(new UpstoxSessionSource(dataSource, secrets, UpstoxDenyList.NONE).access(zt))
                     .as("zt's Upstox user, nothing configured").isEmpty();
+            // user 25 Nov 2026: an account listed for zt's user reads its own session; another listed account does not
+            // make this one allowed, and zt's app key stays refused even for a listed account
+            assertThat(new UpstoxSessionSource(dataSource, secrets, new UpstoxDenyList(List.of(), List.of(),
+                    List.of(Long.toString(zt.id())))).access(zt)).as("listed for zt's user").isPresent();
+            assertThat(new UpstoxSessionSource(dataSource, secrets, new UpstoxDenyList(List.of(), List.of(),
+                    List.of(Long.toString(zt.id() + 1000)))).access(zt)).as("another account listed").isEmpty();
+            assertThat(new UpstoxSessionSource(dataSource, secrets, new UpstoxDenyList(List.of("MEMBER-UPSTOX-API-KEY"),
+                    List.of(), List.of(Long.toString(zt.id())))).access(zt)).as("listed, but zt's app key").isEmpty();
         } finally {
             jdbc.update("update acct.broker_account set external_broker_user_id = 'UX1234' where id = ?", upstox.id());
             secrets.deleteToken(upstox.id());

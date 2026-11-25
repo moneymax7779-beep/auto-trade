@@ -466,6 +466,56 @@ class MultiBrokerLiveIT {
         }
     }
 
+    /**
+     * User 25 Nov 2026: zt-tiger-v2's Upstox user is LIVE for a listed account only; the same client on an unlisted
+     * account, or another denied user on a listed one, stays refused.
+     */
+    @Test
+    void ztTigersUpstoxUserIsLiveOnlyForAListedAccount() throws Exception {
+        try (UpstoxSimulator upstox = new UpstoxSimulator(0, 1_500)) {
+            upstox.list(new UpstoxSimulator.Listing(KEY, SYMBOL, "NIFTY", DAY.plusDays(2), 23100, "PE", LOT, 0.05));
+            String token = upstox.login().accessToken();
+            BrokerAccount listed = liveAccount(BrokerType.UPSTOX, "BM6462");
+            BrokerAdapter.Live live = new UpstoxDryRunAdapter(dataSource, 1e9,
+                    a -> Optional.of(new BrokerSessions.Access("member-api-key", token)), UpstoxConfig.at(upstox.baseUri()),
+                    upstox::book, ReadLiveProbe.Settings.OFF, UpstoxConfig.liveSimulator(upstox.baseUri()),
+                    loopbackFor(listed), List.of("zz9999"), Set.of(listed.id())).live(listed, ONE_LOT);
+            assertThat(live.isRefused()).as(live.description()).isFalse();
+            jdbc.update("update acct.broker_account set enabled = false where id = ?", listed.id());
+
+            // user 25 Nov 2026 (review): a LIVE connection prices only from a quote at most 3 s old
+            java.util.concurrent.atomic.AtomicReference<java.time.Instant> at =
+                    new java.util.concurrent.atomic.AtomicReference<>(java.time.Instant.now().minusMillis(3_500));
+            BrokerAccount priced = liveAccount(BrokerType.UPSTOX, "AB7777");
+            BrokerAdapter.Live pricedLive = new UpstoxDryRunAdapter(dataSource, 1e9,
+                    a -> Optional.of(new BrokerSessions.Access("member-api-key", token)), UpstoxConfig.at(upstox.baseUri()),
+                    k -> new com.autotrade.broker.Quote(k, 99.5, 65, 100.0, 65, 99.8, at.get(), List.of(), List.of()),
+                    ReadLiveProbe.Settings.OFF, UpstoxConfig.liveSimulator(upstox.baseUri()), loopbackFor(priced),
+                    List.of()).live(priced, ONE_LOT);
+            assertThatThrownBy(() -> pricedLive.connection().quote(KEY)).isInstanceOf(BrokerException.class)
+                    .hasMessageContaining("s old")
+                    .satisfies(e -> assertThat(((BrokerException) e).kind()).isEqualTo(BrokerException.Kind.RETRYABLE));
+            at.set(java.time.Instant.now().minusMillis(500));
+            assertThat(pricedLive.connection().quote(KEY).ask()).isEqualTo(100.0);
+            jdbc.update("update acct.broker_account set enabled = false where id = ?", priced.id());
+
+            BrokerAccount other = liveAccount(BrokerType.UPSTOX, "BM6462");
+            assertThat(new UpstoxDryRunAdapter(dataSource, 1e9, a -> Optional.of(new BrokerSessions.Access("k", "t")),
+                    UpstoxConfig.at(upstox.baseUri()), upstox::book, ReadLiveProbe.Settings.OFF,
+                    UpstoxConfig.liveSimulator(upstox.baseUri()), loopbackFor(other), List.of(), Set.of(listed.id()))
+                    .live(other, ONE_LOT).description()).as("not listed").contains("never traded LIVE here");
+            jdbc.update("update acct.broker_account set enabled = false where id = ?", other.id());
+
+            BrokerAccount denied = liveAccount(BrokerType.UPSTOX, "ZZ9999");
+            assertThat(new UpstoxDryRunAdapter(dataSource, 1e9, a -> Optional.of(new BrokerSessions.Access("k", "t")),
+                    UpstoxConfig.at(upstox.baseUri()), upstox::book, ReadLiveProbe.Settings.OFF,
+                    UpstoxConfig.liveSimulator(upstox.baseUri()), loopbackFor(denied), List.of("zz9999"),
+                    Set.of(denied.id())).live(denied, ONE_LOT).description())
+                    .as("listing never frees another denied user").contains("never traded LIVE here");
+            jdbc.update("update acct.broker_account set enabled = false where id = ?", denied.id());
+        }
+    }
+
     // ------------------------------------------------------------------ Groww
 
     @Test
