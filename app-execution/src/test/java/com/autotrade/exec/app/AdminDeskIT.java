@@ -254,6 +254,11 @@ class AdminDeskIT {
             void exited(BrokerAccount account, String actor, String reason, List<String> lines) {
                 told.add(account.displayName() + "|" + reason + "|" + String.join(";", lines));
             }
+
+            @Override
+            void targetSet(BrokerAccount account, String actor, String reason, List<String> lines) {
+                told.add("TARGET " + account.displayName() + "|" + reason + "|" + String.join(";", lines));
+            }
         };
     }
 
@@ -944,5 +949,84 @@ class AdminDeskIT {
         long paper2 = position(bobTenant, bobPaper, bobGroup, "PAPER", 40);
         assertThat(runBatch(desk, batch("s-6", "EXIT 2 POSITIONS", false, new long[] {kite2, live2},
                 new long[] {bobPaper, paper2}))).containsEntry("scope", "BOTH");
+    }
+
+    private static AdminDeskController.Targets targets(String scope, Double pct, String confirm, long[]... positions) {
+        List<AdminDeskController.BatchPosition> list = new ArrayList<>();
+        for (long[] p : positions) {
+            list.add(new AdminDeskController.BatchPosition(p[0], p[1]));
+        }
+        return new AdminDeskController.Targets(list, pct, "lock the morning gains", confirm, scope);
+    }
+
+    /**
+     * User 25 Nov 2026 ("Members too with reason, also admin for global ... all LIVE all workspaces with the first target,
+     * admin target"): the desk shows each position's first target and whether a reason is needed; one % is set on every
+     * LIVE position sent, across workspaces, as the admin's on members' accounts (by_admin, reason, members told) and as
+     * the owner's own on their own workspace's; a mirror is refused per row; a position of the other book refuses all.
+     * Removed again the same way.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void theAdminTargetIsSetOnEveryLivePositionAcrossWorkspacesWithAReason() {
+        long alice = position(aliceTenant, kite1, aliceGroup, "LIVE", 100);
+        long alice2 = position(aliceTenant, kite2, aliceGroup, "LIVE", 200);
+        long paper = position(bobTenant, bobPaper, bobGroup, "PAPER", 80);
+        AdminDeskController desk = desk();
+        AdminDeskController.Targets all = targets(null, 20.0, "TARGET 3 POSITIONS", new long[] {kite1, alice},
+                new long[] {kite2, alice2}, new long[] {demo, 999_999});
+        // refused as a whole: no phrase, no reason, a bad %, a paper position in the LIVE book, not the admin
+        assertThat(code(() -> desk.setTargets("kc-admin", targets(null, 20.0, "TARGET 2 POSITIONS", new long[] {kite1, alice},
+                new long[] {kite2, alice2}, new long[] {demo, 999_999})))).isEqualTo(403);
+        assertThat(code(() -> desk.setTargets("kc-admin", new AdminDeskController.Targets(all.positions(), 20.0, " ",
+                "TARGET 3 POSITIONS", null)))).isEqualTo(400);
+        assertThat(code(() -> desk.setTargets("kc-admin", targets(null, 0.0, "TARGET 3 POSITIONS", new long[] {kite1, alice},
+                new long[] {kite2, alice2}, new long[] {demo, 999_999})))).isEqualTo(400);
+        assertThat(code(() -> desk.setTargets("kc-admin", targets("LIVE", 20.0, "TARGET 2 POSITIONS",
+                new long[] {kite1, alice}, new long[] {bobPaper, paper})))).as("a paper position, LIVE book").isEqualTo(409);
+        assertThat(code(() -> desk.setTargets("kc-alice", all))).isEqualTo(403);
+        assertThat(jdbc.queryForObject("select count(*) from exec.position_target", Integer.class)).as("nothing set").isZero();
+
+        Map<String, Object> out = desk.setTargets("kc-admin", all);
+        assertThat(out).containsEntry("scope", "LIVE");
+        List<Map<String, Object>> results = (List<Map<String, Object>>) out.get("results");
+        assertThat(results).extracting(r -> r.get("outcome")).containsExactly("SET", "SET", "REFUSED");
+        assertThat(results.get(0)).extractingByKey("detail").asString().contains("first target +20 % = 120.00");
+        assertThat(results.get(2)).extractingByKey("detail").asString().contains("mirror of PAPER-1");
+        assertThat(jdbc.queryForList("select by_admin::text || ':' || admin_reason || ':' || (target_pct = 20)::text from "
+                + "exec.position_target order by position_id", String.class))
+                .containsExactly("true:lock the morning gains:true", "true:lock the morning gains:true");
+        // members told once per account; the batch audited per account
+        assertThat(told).filteredOn(m -> m.startsWith("TARGET ")).extracting(m -> m.substring(7, m.indexOf('|')))
+                .containsExactlyInAnyOrder("ALICE-KITE", "ALICE-KITE-2");
+        assertThat(jdbc.queryForObject("select count(*) from exec.audit_log where action = 'ADMIN_TARGET_BATCH' and detail "
+                + "->> 'scope' = 'LIVE' and detail ->> 'admin_reason' = 'lock the morning gains'", Integer.class)).isEqualTo(2);
+        // the desk shows them, and that a reason is needed on alice's (the admin is SUPPORT there)
+        Map<String, Object> row = ((List<Map<String, Object>>) desk.openPositions("kc-admin").get("positions")).stream()
+                .filter(r -> r.get("positionId").equals(alice)).findFirst().orElseThrow();
+        assertThat(row).containsEntry("targetNeedsReason", true).extractingByKey("manualTarget")
+                .satisfies(t -> assertThat((Map<String, Object>) t).containsEntry("pct", 20.0).containsEntry("byAdmin", true));
+        // alice's in-app notice says the admin set a first target, with the reason and the line
+        assertThat(desk.notices("kc-alice")).filteredOn(n -> "TARGET_SET".equals(n.get("action"))).hasSize(2)
+                .allSatisfy(n -> assertThat(n).containsEntry("reason", "lock the morning gains")
+                        .extractingByKey("positions").asString().contains("first target +20.0 % = "));
+        assertThat(desk.notices("kc-admin")).as("the admin's own action").isEmpty();
+        // the same again: unchanged (an armed lock would be kept); then removed
+        assertThat((List<Map<String, Object>>) desk.setTargets("kc-admin", all).get("results"))
+                .extracting(r -> r.get("outcome")).containsExactly("UNCHANGED", "UNCHANGED", "REFUSED");
+        Map<String, Object> cleared = desk.clearTargets("kc-admin", targets("LIVE", null, "CLEAR 2 TARGETS",
+                new long[] {kite1, alice}, new long[] {kite2, alice2}));
+        assertThat((List<Map<String, Object>>) cleared.get("results")).extracting(r -> r.get("outcome"))
+                .containsExactly("CLEARED", "CLEARED");
+        assertThat(jdbc.queryForList("select status from exec.position_target", String.class)).containsOnly("CLEARED");
+        // the admin's own workspace: set as the owner's own (no admin mark)
+        long own = position(platform, adminPaper, adminGroup, "PAPER", 60);
+        assertThat((List<Map<String, Object>>) desk.setTargets("kc-admin", targets("PAPER", 15.0, "TARGET 1 POSITIONS",
+                new long[] {adminPaper, own})).get("results")).singleElement().satisfies(r -> assertThat(r)
+                .containsEntry("outcome", "SET"));
+        assertThat(jdbc.queryForObject("select by_admin from exec.position_target where position_id = ?", Boolean.class, own))
+                .isFalse();
+        // the other notice tests count alice's last 24 h: these rows are aged out of it
+        jdbc.update("update exec.audit_log set at = at - interval '2 days' where action in ('TARGET_SET', 'TARGET_CLEARED')");
     }
 }

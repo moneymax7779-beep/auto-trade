@@ -137,6 +137,22 @@ class AdminExits {
         }
     }
 
+    /**
+     * Tells the account's members that the admin set or removed a first target on their positions (user 25 Nov 2026, the
+     * exit desk); as {@link #exited}, a failed send is logged, never thrown.
+     */
+    void targetSet(BrokerAccount account, String actor, String reason, List<String> lines) {
+        String text = "Admin target on " + account.displayName() + " (" + account.tradeMode() + "):\n" + String.join("\n", lines)
+                + "\nReason: " + reason;
+        try {
+            int sent = telegram == null ? 0 : telegram.sendToMembers(account.tenantId(), text);
+            log.info("admin target on {} by {}: members told ({} Telegram chats): {}", account.displayName(), actor, sent,
+                    text.replace('\n', ' '));
+        } catch (RuntimeException e) {
+            log.warn("admin target on {}: members not told: {}", account.displayName(), e.getMessage());
+        }
+    }
+
     /** "Admin exited positions on ZERODHA-1 (LIVE): NIFTY 25450 CE: 130 sold at 131.20. Reason: ..." */
     static String message(BrokerAccount account, String reason, List<String> lines) {
         return "Admin exited positions on " + account.displayName() + " (" + account.tradeMode() + "):\n"

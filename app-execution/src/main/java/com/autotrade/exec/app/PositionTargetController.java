@@ -1,6 +1,7 @@
 package com.autotrade.exec.app;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 import javax.sql.DataSource;
@@ -27,9 +28,10 @@ import com.autotrade.execution.PositionTargets;
  *       it (it starts over, waiting for the bid to reach the new price); answers the target with its price;</li>
  *   <li>{@code POST .../target/clear}: removes it.</li>
  * </ul>
- * Who: the workspace's own people who may act on the account (OWNER, ADMIN, TRADER); never SUPPORT or the platform admin
- * from outside (a target is a later sale: they use Exit, which takes a reason and tells the members); never on a mirror
- * (it holds no positions of its own). Only a position of the account's own book (PAPER for a paper account, LIVE for a
+ * Who: the workspace's own people who may act on the account (OWNER, ADMIN, TRADER); and (user 25 Nov 2026, the exit desk:
+ * "Members too with reason") SUPPORT or the platform admin from outside, as an exit: with a reason ({@code reason}, required
+ * then), audited by_admin with the role and the member's consent, the members told (Telegram, push), the target marked as the
+ * admin's (V55); never on a mirror (it holds no positions of its own). Only a position of the account's own book (PAPER for a paper account, LIVE for a
  * broker account). A bad % is a 400, a refusal a 409 with the reason; the live book shows each open position's target.
  */
 @RestController
@@ -47,7 +49,29 @@ class PositionTargetController {
         this.targets = new PositionTargets(dataSource);
     }
 
-    record TargetBody(Double pct) {
+    /** {@code reason}: required when the caller is not of the workspace (SUPPORT, the platform admin). */
+    record TargetBody(Double pct, String reason) {
+
+        TargetBody(Double pct) {
+            this(pct, null);
+        }
+    }
+
+    record ClearBody(String reason) {
+    }
+
+    /** The members' message and the admin's audit detail (null in tests that never act as the admin). */
+    private AdminExits adminExits;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    void adminExits(AdminExits adminExits) {
+        this.adminExits = adminExits;
+    }
+
+    /** Tests: the admin exits' helper (a recording one). */
+    PositionTargetController withAdminExits(AdminExits adminExits) {
+        this.adminExits = adminExits;
+        return this;
     }
 
     @PostMapping("/api/execution/accounts/{id}/positions/{positionId}/target")
@@ -55,6 +79,7 @@ class PositionTargetController {
                             @PathVariable long positionId, @RequestBody TargetBody body) {
         Access.User user = access.user(subject);
         BrokerAccount a = actable(user, id);
+        Map<String, Object> admin = admin(user, a, body == null ? null : body.reason());
         if (body == null || body.pct() == null) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "pct is required");
         }
@@ -63,7 +88,10 @@ class PositionTargetController {
                     + (int) PositionTargets.MAX_PCT + " (two decimals)");
         }
         try {
-            PositionTargets.View v = targets.set(a, positionId, body.pct(), user.subject());
+            PositionTargets.View v = targets.set(a, positionId, body.pct(), user.subject(), admin);
+            if (admin != null && adminExits != null) {
+                adminExits.targetSet(a, user.subject(), (String) admin.get("admin_reason"), List.of(line(v)));
+            }
             Map<String, Object> out = new LinkedHashMap<>();
             out.put("account", a.displayName());
             out.put("positionId", positionId);
@@ -76,31 +104,59 @@ class PositionTargetController {
 
     @PostMapping("/api/execution/accounts/{id}/positions/{positionId}/target/clear")
     Map<String, Object> clear(@RequestHeader(value = Access.HEADER, required = false) String subject, @PathVariable long id,
-                              @PathVariable long positionId) {
+                              @PathVariable long positionId, @RequestBody(required = false) ClearBody body) {
         Access.User user = access.user(subject);
         BrokerAccount a = actable(user, id);
+        Map<String, Object> admin = admin(user, a, body == null ? null : body.reason());
         try {
-            return Map.of("account", a.displayName(), "positionId", positionId, "cleared",
-                    targets.clear(a, positionId, user.subject()));
+            boolean cleared = targets.clear(a, positionId, user.subject(), admin);
+            if (cleared && admin != null && adminExits != null) {
+                adminExits.targetSet(a, user.subject(), (String) admin.get("admin_reason"), List.of("position " + positionId
+                        + ": first target removed"));
+            }
+            return Map.of("account", a.displayName(), "positionId", positionId, "cleared", cleared);
         } catch (IllegalArgumentException e) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage());
         }
     }
 
     private BrokerAccount actable(Access.User user, long id) {
-        BrokerAccount a = accounts.byId(id).filter(x -> user.sees(x.tenantId()))
+        // the platform admin reaches every tenant's accounts (as the exit desk does); anyone else only their own tenants'
+        BrokerAccount a = accounts.byId(id).filter(x -> user.sees(x.tenantId()) || user.admin())
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "no account " + id));
-        Access.require(user.mayAct(a.tenantId()), user.support(a.tenantId())
-                ? "SUPPORT needs the member's grant for this" : "read-only role for this account");
-        // review 24 Nov 2026: a target is a sale later, so it follows the admin exit desk's rule: someone other than the
-        // workspace's own people (SUPPORT, the platform admin) exits with a reason the members are told, now, by Exit
-        Access.require(!user.byAdmin(a.tenantId()), "a target is set by the workspace's own people; "
-                + "SUPPORT and the platform admin use Exit (with a reason)");
+        // review 24 Nov 2026: a target is a sale later, so it follows the admin exit desk's rule; user 25 Nov 2026: someone
+        // other than the workspace's own people (SUPPORT, the platform admin) may set it as they may exit, with a reason
+        Access.require(user.byAdmin(a.tenantId()) ? user.mayExit(a.tenantId()) : user.mayAct(a.tenantId()),
+                "read-only role for this account");
         String mirror = Mirrors.of(jdbc, a.id());
         if (mirror != null) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, a.displayName() + " is a mirror of " + mirror
                     + ": it holds no positions of its own; set the target at the source (" + mirror + ")");
         }
         return a;
+    }
+
+    /**
+     * The admin's audit detail when the caller is not of the account's workspace (a reason is then required: 400), null
+     * for the workspace's own people.
+     */
+    private Map<String, Object> admin(Access.User user, BrokerAccount a, String reason) {
+        if (!user.byAdmin(a.tenantId())) {
+            return null;
+        }
+        String r = AdminExits.requireReason(reason);
+        Map<String, Object> out = adminExits != null ? new LinkedHashMap<>(adminExits.audit(user, a, r))
+                : new LinkedHashMap<>(Map.of("by_admin", true, "admin_reason", r));
+        out.put("by_admin", true);
+        out.put("admin_reason", r);
+        return out;
+    }
+
+    /** "NIFTY 25450 CE: first target +20 % = 145.20" (the members' message). */
+    String line(PositionTargets.View v) {
+        String symbol = jdbc.queryForList("select symbol from exec.position where id = ?", String.class, v.positionId())
+                .stream().findFirst().orElse("position " + v.positionId());
+        return String.format(java.util.Locale.ROOT, "%s: first target +%s %% = %.2f (if the bid reaches it and falls back "
+                + "to it, the whole position is sold)", symbol, PositionTargets.pctText(v.pct()), v.price());
     }
 }

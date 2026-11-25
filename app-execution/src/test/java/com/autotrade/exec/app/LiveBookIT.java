@@ -198,7 +198,8 @@ class LiveBookIT {
 
         // 24 Nov 2026: the trader's manual first target, 20 % above the entry (146.35 x 1.2 = 175.62 -> 175.60), shown on the
         // open position; out of range is a 409, another tenant a 404; removed, it is gone from the book
-        PositionTargetController targets = new PositionTargetController(new Access(dataSource), dataSource);
+        PositionTargetController targets = new PositionTargetController(new Access(dataSource), dataSource)
+                .withAdminExits(new AdminExits(dataSource, null));
         Map<String, Object> set = targets.set("local-owner", account, openId, new PositionTargetController.TargetBody(20.0));
         assertThat((Map<String, Object>) set.get("target")).containsEntry("pct", 20.0).containsEntry("price", 175.6)
                 .containsEntry("status", "WAITING").containsEntry("setBy", "local-owner");
@@ -218,14 +219,28 @@ class LiveBookIT {
                 .isInstanceOf(ResponseStatusException.class).hasMessageContaining("400");
         assertThatThrownBy(() -> targets.set("kc-nobody", account, openId, new PositionTargetController.TargetBody(20.0)))
                 .as("a user of no tenant").isInstanceOf(ResponseStatusException.class).hasMessageContaining("403");
-        // review 24 Nov 2026: SUPPORT (even with the member's grant) sets no target: a later sale without a reason
+        // user 25 Nov 2026 (was refused since the 24 Nov review): SUPPORT sets a target as the admin, only with a reason;
+        // it is marked as the admin's (the member's book says so), audited by_admin with the reason and the consent
         long support = accounts.ensureUser("kc-support-t", "support");
         accounts.ensureMembership(tenant, support, "SUPPORT");
-        jdbc.update("insert into acct.support_grant (tenant_id, granted_to, granted_by, reason, expires_at) values (?, ?, ?, "
-                + "'it', now() + interval '1 hour')", tenant, support, owner);          // with the member's grant
         assertThatThrownBy(() -> targets.set("kc-support-t", account, openId, new PositionTargetController.TargetBody(25.0)))
-                .isInstanceOf(ResponseStatusException.class).hasMessageContaining("403");
-        assertThat(targets.clear("local-owner", account, openId)).containsEntry("cleared", true);
+                .as("no reason").isInstanceOf(ResponseStatusException.class).hasMessageContaining("400");
+        assertThat((Map<String, Object>) targets.set("kc-support-t", account, openId,
+                new PositionTargetController.TargetBody(25.0, "lock gains into the close")).get("target"))
+                .containsEntry("pct", 25.0).containsEntry("byAdmin", true).containsEntry("adminReason", "lock gains into the close");
+        assertThat(((List<Map<String, Object>>) api.liveBook("local-owner", account, 7).get("open")).getFirst())
+                .extractingByKey("manualTarget").satisfies(t -> assertThat((Map<String, Object>) t)
+                        .containsEntry("byAdmin", true).containsEntry("setBy", "kc-support-t"));
+        assertThat(jdbc.queryForMap("select detail ->> 'by_admin' by_admin, detail ->> 'admin_reason' reason, detail ->> "
+                + "'consent' consent from exec.audit_log where broker_account_id = ? and action = 'TARGET_SET' order by id desc "
+                + "limit 1", account)).containsEntry("by_admin", "true").containsEntry("reason", "lock gains into the close")
+                .containsEntry("consent", "not given");
+        assertThatThrownBy(() -> targets.clear("kc-support-t", account, openId, null)).as("removing it needs a reason too")
+                .isInstanceOf(ResponseStatusException.class).hasMessageContaining("400");
+        // the owner's own setting is the owner's again (not the admin's)
+        assertThat((Map<String, Object>) targets.set("local-owner", account, openId,
+                new PositionTargetController.TargetBody(20.0)).get("target")).containsEntry("byAdmin", false);
+        assertThat(targets.clear("local-owner", account, openId, null)).containsEntry("cleared", true);
         assertThat(((List<Map<String, Object>>) api.liveBook("local-owner", account, 7).get("open")).getFirst())
                 .doesNotContainKey("manualTarget");
 

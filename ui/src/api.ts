@@ -752,6 +752,9 @@ export interface ManualTarget {
   lastResult?: string | null;
   /** SELLING: when the rest is sold again (ISO instant) */
   nextTryAt?: string | null;
+  /** set by the platform admin from the exit desk (V55, 25 Nov 2026), and why */
+  byAdmin?: boolean;
+  adminReason?: string | null;
 }
 
 /** What an Exit of part or all of one open position would do now (GET .../positions/{id}/exit-preview). */
@@ -821,6 +824,17 @@ export interface DeskPosition {
   bid: number | null; ask: number | null; quoteAt: string | null; quoteAgeSec: number | null; quoteStale: boolean;
   pnl: number | null; premiumAtRisk: number; stop: number | null; stopStatus: string | null;
   consent: AdminExitConsent;
+  /** the position's first target (25 Nov 2026), as on the Overview */
+  manualTarget?: ManualTarget | null;
+  /** the admin is not of this workspace: setting or removing its target takes a reason (the members are told) */
+  targetNeedsReason?: boolean;
+}
+
+/** The admin target on many positions (POST /api/execution/admin/targets, .../targets/clear). */
+export interface TargetBatchResult {
+  scope: DeskScope; count: number;
+  results: { accountId: number; account: string | null; positionId: number; symbol: string | null; mode: string | null;
+    outcome: "SET" | "UNCHANGED" | "CLEARED" | "REFUSED"; detail: string | null; target?: ManualTarget }[];
 }
 
 export interface DeskOpenPositions {

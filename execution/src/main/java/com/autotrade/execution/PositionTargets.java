@@ -56,6 +56,11 @@ import com.autotrade.broker.BrokerException;
  * whichever comes first closes the position. A paper sale fills at the stored bid like any paper exit; a LIVE one is a real
  * sell at the account's broker (stop cancelled first, then a limit sell in the broker's product, MIS for Kotak), so in a
  * fast fall it can fill below the target price.
+ * <p>
+ * The admin's target (V55, user 25 Nov 2026): the platform admin may set or remove a target on a member's position from the
+ * exit desk ({@link #set(BrokerAccount, long, double, String, Map)} with the admin's audit detail: a reason, by_admin, the
+ * role and the member's consent). It is the same lock; the row says {@code by_admin} and why, the TARGET_SET audit carries
+ * the detail, and its sale's POSITION_EXIT audit says by_admin with the reason (the member's in-app notice).
  */
 public final class PositionTargets {
 
@@ -100,7 +105,7 @@ public final class PositionTargets {
     /** One position's target as stored; {@code price} is the armed price once armed, else entry x (1 + %) now. */
     public record View(long positionId, long accountId, double pct, double price, String status, String setBy, Instant setAt,
                        Instant armedAt, Double armedBid, Instant firedAt, Double firedBid, int tries, String lastResult,
-                       Instant nextTryAt) {
+                       Instant nextTryAt, boolean byAdmin, String adminReason) {
 
         public Map<String, Object> toMap() {
             Map<String, Object> m = new LinkedHashMap<>();
@@ -116,6 +121,8 @@ public final class PositionTargets {
             m.put("tries", tries);
             m.put("lastResult", lastResult);
             m.put("nextTryAt", nextTryAt == null ? null : nextTryAt.toString());
+            m.put("byAdmin", byAdmin);                     // set by the platform admin from the exit desk (V55)
+            m.put("adminReason", adminReason);
             return m;
         }
     }
@@ -163,6 +170,11 @@ public final class PositionTargets {
     }
 
     /** Entry x (1 + pct %), to the nearest 0.05. */
+    /** A % as people read it: "20", "12.5". */
+    public static String pctText(double pct) {
+        return pct == Math.rint(pct) ? String.valueOf((long) pct) : String.valueOf(pct);
+    }
+
     public static double priceOf(double entry, double pct) {
         return Math.round(entry * (1 + pct / 100) * 20) / 20.0;
     }
@@ -201,6 +213,17 @@ public final class PositionTargets {
      * changes nothing (an armed lock stays armed), unless it FAILED. IllegalArgumentException when refused.
      */
     public View set(BrokerAccount account, long positionId, double pct, String actor) {
+        return set(account, positionId, pct, actor, null);
+    }
+
+    /**
+     * As above; {@code admin}: the audit detail of the platform admin acting from outside the workspace (by_admin true,
+     * admin_reason, actor_role, consent; null: the workspace's own people). It marks the target as the admin's (V55) and
+     * goes into the TARGET_SET audit. The same % again by someone else changes nothing either (an armed lock is kept).
+     */
+    public View set(BrokerAccount account, long positionId, double pct, String actor, Map<String, ?> admin) {
+        boolean byAdmin = admin != null && Boolean.TRUE.equals(admin.get("by_admin"));
+        String adminReason = byAdmin && admin.get("admin_reason") != null ? String.valueOf(admin.get("admin_reason")) : null;
         if (account.role() == AccountRole.SIGNAL_SOURCE) {
             throw new IllegalArgumentException(account.displayName() + " is a signal source: its positions are not orders");
         }
@@ -215,22 +238,33 @@ public final class PositionTargets {
             return now.get();                                   // unchanged: an armed lock is not thrown away
         }
         int changed = jdbc.update("insert into exec.position_target (position_id, broker_account_id, target_pct, status, set_by, "
-                + "set_at) values (?, ?, ?, 'WAITING', ?, now()) on conflict (position_id) do update set target_pct = "
-                + "excluded.target_pct, generation = exec.position_target.generation + 1, status = 'WAITING', set_by = "
-                + "excluded.set_by, set_at = now(), armed_at = null, armed_bid = null, armed_price = null, armed_entry = null, "
+                + "set_at, by_admin, admin_reason) values (?, ?, ?, 'WAITING', ?, now(), ?, ?) on conflict (position_id) do "
+                + "update set target_pct = excluded.target_pct, generation = exec.position_target.generation + 1, status = "
+                + "'WAITING', set_by = excluded.set_by, set_at = now(), by_admin = excluded.by_admin, admin_reason = "
+                + "excluded.admin_reason, armed_at = null, armed_bid = null, armed_price = null, armed_entry = null, "
                 + "fired_at = null, fired_bid = null, last_try_at = null, next_try_at = null, tries = 0, last_result = null, "
-                + "updated_at = now() where exec.position_target.status <> 'FIRING'", positionId, account.id(), rounded, actor);
+                + "updated_at = now() where exec.position_target.status <> 'FIRING'", positionId, account.id(), rounded, actor,
+                byAdmin, adminReason);
         if (changed == 0) {
             throw new IllegalArgumentException("the target is selling this position now: wait for the sale");
         }
         double entry = ((Number) p.get("average_entry")).doubleValue();
-        audit.audit(account, actor, "TARGET_SET", Map.of("position", positionId, "symbol", p.get("symbol"), "pct", rounded,
-                "entry", entry, "price", priceOf(entry, rounded), "replaced", now.map(View::status).orElse("none")));
+        Map<String, Object> detail = new LinkedHashMap<>(Map.of("position", positionId, "symbol", p.get("symbol"), "pct",
+                rounded, "entry", entry, "price", priceOf(entry, rounded), "replaced", now.map(View::status).orElse("none")));
+        if (admin != null) {
+            detail.putAll(admin);
+        }
+        audit.audit(account, actor, "TARGET_SET", detail);
         return view(positionId).orElseThrow();
     }
 
     /** Removes the target (nothing more is sold by it, a pending sale of the rest included); false when there was none. */
     public boolean clear(BrokerAccount account, long positionId, String actor) {
+        return clear(account, positionId, actor, null);
+    }
+
+    /** As above; {@code admin}: the platform admin's audit detail (reason, by_admin; see {@link #set}), into TARGET_CLEARED. */
+    public boolean clear(BrokerAccount account, long positionId, String actor, Map<String, ?> admin) {
         openPosition(account, positionId);
         int changed = jdbc.update("update exec.position_target set status = 'CLEARED', generation = generation + 1, "
                 + "updated_at = now() where position_id = ? and broker_account_id = ? and status in ('WAITING', 'ARMED', "
@@ -241,7 +275,11 @@ public final class PositionTargets {
             }
             return false;
         }
-        audit.audit(account, actor, "TARGET_CLEARED", Map.of("position", positionId));
+        Map<String, Object> detail = new LinkedHashMap<>(Map.of("position", positionId));
+        if (admin != null) {
+            detail.putAll(admin);
+        }
+        audit.audit(account, actor, "TARGET_CLEARED", detail);
         return true;
     }
 
@@ -272,7 +310,7 @@ public final class PositionTargets {
 
     private static final String SELECT = "select t.position_id, t.broker_account_id, t.target_pct, t.status, t.set_by, "
             + "t.set_at, t.armed_at, t.armed_bid, t.armed_price, t.fired_at, t.fired_bid, t.tries, t.last_result, "
-            + "t.next_try_at, p.average_entry from exec.position_target t join exec.position p on p.id = t.position_id ";
+            + "t.next_try_at, t.by_admin, t.admin_reason, p.average_entry from exec.position_target t join exec.position p on p.id = t.position_id ";
 
     private static View viewOf(Map<String, Object> r) {
         double pct = ((Number) r.get("target_pct")).doubleValue();
@@ -281,7 +319,8 @@ public final class PositionTargets {
                 armed != null ? armed : priceOf(((Number) r.get("average_entry")).doubleValue(), pct),
                 (String) r.get("status"), (String) r.get("set_by"), instant(r.get("set_at")), instant(r.get("armed_at")),
                 dbl(r.get("armed_bid")), instant(r.get("fired_at")), dbl(r.get("fired_bid")),
-                ((Number) r.get("tries")).intValue(), (String) r.get("last_result"), instant(r.get("next_try_at")));
+                ((Number) r.get("tries")).intValue(), (String) r.get("last_result"), instant(r.get("next_try_at")),
+                Boolean.TRUE.equals(r.get("by_admin")), (String) r.get("admin_reason"));
     }
 
     private static Instant instant(Object o) {
@@ -311,7 +350,8 @@ public final class PositionTargets {
         boolean marketOpen = marketOpen();
         List<String> lines = new ArrayList<>();
         List<Map<String, Object>> rows = jdbc.queryForList("select t.position_id, t.broker_account_id, t.target_pct, "
-                + "t.generation, t.status, t.set_at, t.armed_price, t.tries, t.last_result, (t.next_try_at is null or "
+                + "t.generation, t.status, t.set_at, t.armed_price, t.tries, t.last_result, t.by_admin, t.admin_reason, "
+                + "(t.next_try_at is null or "
                 + "t.next_try_at <= now()) due, now() db_now, p.average_entry, p.instrument_token, p.instrument_key, "
                 + "p.underlying, p.symbol, p.tenant_id from exec.position_target t join exec.position p on p.id = "
                 + "t.position_id where t.status in ('WAITING', 'ARMED', 'SELLING') and p.status = 'OPEN' and "
@@ -403,8 +443,16 @@ public final class PositionTargets {
         }
         String why = bid != null ? String.format(Locale.ROOT, "bid %.2f back at or below the target %.2f", bid, price)
                 : String.format(Locale.ROOT, "the rest of the triggered target %.2f", price);
-        Map<String, Object> detail = Map.of("target_pct", pct, "target_price", price, "bid", bid == null ? "-" : bid,
-                "why", why);
+        Map<String, Object> detail = new LinkedHashMap<>(Map.of("target_pct", pct, "target_price", price, "bid",
+                bid == null ? "-" : bid, "why", why));
+        if (Boolean.TRUE.equals(r.get("by_admin"))) {
+            // the admin's target (V55): its sale is the admin's exit in the audit, with the reason (the member's notice)
+            detail.put("by_admin", true);
+            detail.put("admin_target", true);
+            if (r.get("admin_reason") != null) {
+                detail.put("admin_reason", r.get("admin_reason"));
+            }
+        }
         Sale sale = new Sale(positionId, account, tenant, generation, (String) r.get("symbol"), price, bid,
                 ((Number) r.get("tries")).intValue(), (String) r.get("last_result"));
         sales.execute(() -> sell(sale, exiter, detail));

@@ -1,7 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { get, postJson, type BatchResult, type DeskOpenPositions, type DeskPosition, type DeskScope,
-  type EngineSessionPositions, type ExecMe, type PositionRow } from "../api";
+  type EngineSessionPositions, type ExecMe, type PositionRow, type TargetBatchResult } from "../api";
+import { PositionTarget, targetActive, targetPct, targetPrice } from "../components/PositionTarget";
 import { Big, Card, ErrorLine, Freshness, istTime, ModeBadge, Sheet, signed, tone } from "../mobile/common";
 import { ExitSheet, shareChoices } from "../mobile/PositionsScreen";
 
@@ -18,6 +19,11 @@ import { ExitSheet, shareChoices } from "../mobile/PositionsScreen";
  * batch with a position of the other book. Exit (per position) and Exit selected sell all of it or a part: a share (¾,
  * ½, ¼) or a number of lots, in whole lots, through the same exits. A LIVE exit is confirmed in words naming the account,
  * the quantity and LIVE.
+ *
+ * The first target (25 Nov 2026, user: "first safe target like we have for Open positions in overview for LIVE ... Members
+ * too with reason, also admin for global ... all LIVE all workspaces"): each position shows and sets its first target as
+ * the Overview does (a reason on a member's account: the members are told, it is marked as the admin's); "First target"
+ * sets one % on every position of the book shown (or the selected ones), or removes it, in one confirmation.
  */
 
 const SCOPE_KEY = "exit-desk-scope";
@@ -65,6 +71,7 @@ export function AdminPositionsPage() {
   const [engineExit, setEngineExit] = useState<{ session: EngineSessionPositions; p: PositionRow } | null>(null);
   const [exiting, setExiting] = useState<DeskPosition | null>(null);
   const [flatten, setFlatten] = useState<{ accountId: number; account: string; mode: string; open: number } | null>(null);
+  const [targeting, setTargeting] = useState<{ rows: DeskPosition[]; title: string; scope: DeskScope } | null>(null);
 
   if (me.data && !me.data.admin) {
     return <p className="text-sm text-muted">The exit desk is the platform admin's.</p>;
@@ -120,17 +127,21 @@ export function AdminPositionsPage() {
           <Big kind="danger" disabled={rows.length === 0 && engineOpen === 0}
             onClick={() => setBatch({ rows, title: `EXIT EVERYTHING · ${book}`, everything: true, scope })}>
             Exit everything · {book} ({rows.length + engineOpen})</Big>
+          <Big kind="primary" disabled={rows.length === 0}
+            onClick={() => { const r = chosen.length > 0 ? chosen : rows;
+              setTargeting({ rows: r, scope, title: `First target · ${chosen.length > 0 ? `${r.length} selected` : `all ${book}`}` }); }}>
+            First target · {chosen.length > 0 ? `selected (${chosen.length})` : `all ${book} (${rows.length})`}</Big>
           {chosen.length > 0 && <Big onClick={() => setSelected(new Set())}>Clear selection</Big>}
         </div>
       )}
       {hidden > 0 && <p className="text-sm font-semibold text-warn">{scope === "PAPER" ? "LIVE" : "PAPER"} book: {hidden} open
         position{hidden === 1 ? "" : "s"} not shown (choose {scope === "PAPER" ? "LIVE" : "PAPER"} or Both to see and exit them).</p>}
-      {inBook(scope, "LIVE") && <Group title="LIVE" rows={live} selected={selected} toggle={toggle} onExit={setExiting}
+      {inBook(scope, "LIVE") && <Group title="LIVE" onTargetChanged={() => desk.refetch()} rows={live} selected={selected} toggle={toggle} onExit={setExiting}
         onExitAccount={(accountRows) => setBatch({ rows: accountRows, title: `Exit all in ${accountRows[0].account} · LIVE`,
           kill: false, scope: "LIVE" })}
         onFlatten={(r, n) => setFlatten({ accountId: r.accountId, account: r.account, mode: r.mode, open: n })}
         bothBooks={bothBooks} staleSec={desk.data?.staleQuoteSec ?? 10} loading={desk.isPending} />}
-      {inBook(scope, "PAPER") && <Group title="PAPER" rows={paper} selected={selected} toggle={toggle} onExit={setExiting}
+      {inBook(scope, "PAPER") && <Group title="PAPER" onTargetChanged={() => desk.refetch()} rows={paper} selected={selected} toggle={toggle} onExit={setExiting}
         onExitAccount={(accountRows) => setBatch({ rows: accountRows, title: `Exit all in ${accountRows[0].account} · PAPER`,
           kill: false, scope: "PAPER" })}
         onFlatten={(r, n) => setFlatten({ accountId: r.accountId, account: r.account, mode: r.mode, open: n })}
@@ -162,16 +173,17 @@ export function AdminPositionsPage() {
       {engineExit && <EngineExitSheet session={engineExit.session} p={engineExit.p} followers={allRows} scope={scope}
         onClose={() => setEngineExit(null)} onDone={() => { engine.refetch(); desk.refetch(); }} />}
       {flatten && <FlattenSheet {...flatten} onClose={() => setFlatten(null)} onDone={() => desk.refetch()} />}
+      {targeting && <TargetSheet {...targeting} onClose={() => setTargeting(null)} onDone={() => desk.refetch()} />}
     </div>
   );
 }
 
-function Group({ title, rows, selected, toggle, onExit, onExitAccount, onFlatten, bothBooks, staleSec, loading }: {
+function Group({ title, rows, selected, toggle, onExit, onExitAccount, onFlatten, bothBooks, staleSec, loading, onTargetChanged }: {
   title: "LIVE" | "PAPER"; rows: DeskPosition[]; selected: Set<string>; toggle: (r: DeskPosition) => void;
   onExit: (r: DeskPosition) => void; onExitAccount: (rows: DeskPosition[]) => void;
   onFlatten: (r: DeskPosition, open: number) => void;
   /** accounts holding positions of both books: Flatten sells every one of them, so it is not offered from one book */
-  bothBooks: Set<number>; staleSec: number; loading: boolean;
+  bothBooks: Set<number>; staleSec: number; loading: boolean; onTargetChanged: () => void;
 }) {
   const byAccount = useMemo(() => {
     const m = new Map<number, DeskPosition[]>();
@@ -214,7 +226,7 @@ function Group({ title, rows, selected, toggle, onExit, onExitAccount, onFlatten
                 </div>
                 <ul className="divide-y divide-line">
                   {acct.map((r) => <Row key={rowKey(r)} r={r} checked={selected.has(rowKey(r))} toggle={() => toggle(r)}
-                    onExit={() => onExit(r)} staleSec={staleSec} />)}
+                    onExit={() => onExit(r)} staleSec={staleSec} onTargetChanged={onTargetChanged} />)}
                 </ul>
               </div>
             );
@@ -225,8 +237,8 @@ function Group({ title, rows, selected, toggle, onExit, onExitAccount, onFlatten
   );
 }
 
-function Row({ r, checked, toggle, onExit, staleSec }: { r: DeskPosition; checked: boolean; toggle: () => void;
-  onExit: () => void; staleSec: number }) {
+function Row({ r, checked, toggle, onExit, staleSec, onTargetChanged }: { r: DeskPosition; checked: boolean;
+  toggle: () => void; onExit: () => void; staleSec: number; onTargetChanged: () => void }) {
   const stale = r.quoteStale;
   return (
     <li className="grid grid-cols-[auto_1fr_auto] items-center gap-x-3 gap-y-1 px-3 py-2 text-sm md:grid-cols-[auto_2fr_1.2fr_1fr_1fr_auto]">
@@ -249,6 +261,13 @@ function Row({ r, checked, toggle, onExit, staleSec }: { r: DeskPosition; checke
       <div className={`num col-start-2 font-semibold md:col-start-auto ${tone(r.pnl)}`}>{signed(r.pnl)}</div>
       <button type="button" className="row-span-2 min-h-9 rounded-lg border border-down px-3 text-xs font-semibold text-down md:row-span-1"
         onClick={onExit}>Exit…</button>
+      {/* the first target (25 Nov 2026), as on the Overview; a member's account takes a reason */}
+      <div className="col-span-full">
+        <PositionTarget accountId={r.accountId} live={r.mode === "LIVE"} reasonRequired={r.targetNeedsReason}
+          account={`${r.account} (${r.tenant})`} onChanged={onTargetChanged}
+          p={{ id: r.positionId, entry: r.entry, bid: r.bid, quantity: r.quantity, lotSize: r.lotSize,
+            manualTarget: r.manualTarget ?? undefined }} />
+      </div>
     </li>
   );
 }
@@ -614,6 +633,102 @@ function EngineExitSheet({ session, p, followers, scope, onClose, onDone }: { se
           <Big kind="danger" disabled={typed.trim().toUpperCase() !== "EXIT" || reason.trim().length < 3 || exit.isPending}
             onClick={() => { if (!sending.current) { sending.current = true; exit.mutate(); } }}>
             {exit.isPending ? "Exiting…" : "Exit now"}</Big>
+          <Big onClick={onClose}>Cancel</Big>
+        </div>
+      )}
+    </Sheet>
+  );
+}
+
+/**
+ * The admin target (25 Nov 2026, user: "admin for global to be exited from all LIVE all workspaces with the first
+ * target"): one % above each position's own entry, set on every position sent (the book shown, or the selected ones), or
+ * removed from them; a reason (the members are told, per account), the count typed, a tick for LIVE naming the accounts.
+ * Each position answers SET, UNCHANGED, CLEARED or REFUSED (why).
+ */
+function TargetSheet({ rows, title, scope, onClose, onDone }: { rows: DeskPosition[]; title: string; scope: DeskScope;
+  onClose: () => void; onDone: () => void }) {
+  const [snapshot] = useState(rows);
+  const [mode, setMode] = useState<"set" | "clear">("set");
+  const [text, setText] = useState("");
+  const [reason, setReason] = useState("");
+  const [typed, setTyped] = useState("");
+  const [liveOk, setLiveOk] = useState(false);
+  const sending = useRef(false);
+  const pct = targetPct(text);
+  const sent = mode === "set" ? snapshot : snapshot.filter((r) => targetActive(r.manualTarget));
+  const phrase = mode === "set" ? `TARGET ${sent.length} POSITIONS` : `CLEAR ${sent.length} TARGETS`;
+  const live = sent.filter((r) => r.mode === "LIVE");
+  const run = useMutation({
+    mutationFn: () => postJson<TargetBatchResult>(`/api/execution/admin/targets${mode === "clear" ? "/clear" : ""}`, {
+      positions: sent.map((r) => ({ accountId: r.accountId, positionId: r.positionId })), pct: mode === "set" ? pct : null,
+      reason: reason.trim(), confirm: phrase, scope }),
+    onSettled: () => { sending.current = false; onDone(); },
+  });
+  const ready = !run.isPending && sent.length > 0 && (mode === "clear" || pct != null) && reason.trim() !== ""
+    && typed.trim().toUpperCase() === phrase && (live.length === 0 || liveOk);
+  const switchTo = (m: "set" | "clear") => { setMode(m); setTyped(""); setLiveOk(false); run.reset(); };
+  const tint = (o: string) => (o === "SET" || o === "CLEARED" ? "text-up" : o === "UNCHANGED" ? "text-muted" : "text-down");
+  return (
+    <Sheet title={`${title} · ${scopeName(scope)}`} onClose={onClose}>
+      {run.data ? (
+        <div className="flex flex-col gap-3">
+          <p className="text-sm"><ScopeBadge scope={run.data.scope} /> book · {run.data.count} position{run.data.count === 1 ? "" : "s"}</p>
+          <ul className="flex flex-col gap-1 text-sm">
+            {run.data.results.map((r, i) => (
+              <li key={`${r.accountId}:${r.positionId}:${i}`} className="rounded border border-line px-2 py-1">
+                <b className={tint(r.outcome)}>{r.outcome}</b> {r.mode && <ModeBadge mode={r.mode} />} {r.account} · {r.symbol ?? `position ${r.positionId}`}
+                {r.detail && <div className="text-xs text-muted">{r.detail}</div>}
+              </li>
+            ))}
+          </ul>
+          <Big onClick={onClose}>Done</Big>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          <p className={`rounded-lg border p-2 text-sm ${scope === "PAPER" ? "border-warn/50 bg-warn/10" : "border-down/50 bg-down/10"}`}>
+            <ScopeBadge scope={scope} /> A first target is a lock: nothing happens until the bid reaches entry × (1 + %); if the
+            bid then falls back to that price, the whole position is sold (beside its strategy, stop and Exit). On members&apos;
+            accounts it is the admin&apos;s target: they are told, with the reason.</p>
+          <div className="grid grid-cols-2 gap-2">
+            <Big kind={mode === "set" ? "primary" : "plain"} onClick={() => switchTo("set")}>Set a target</Big>
+            <Big kind={mode === "clear" ? "primary" : "plain"} onClick={() => switchTo("clear")}>Remove targets</Big>
+          </div>
+          {mode === "set" && (
+            <label className="flex flex-wrap items-center gap-2 text-sm">
+              Target % above each entry
+              <input type="number" inputMode="decimal" step="any" value={text} onChange={(e) => { setText(e.target.value); setTyped(""); }}
+                aria-label="Target % above each entry" className="num min-h-11 w-24 rounded-lg border border-line bg-bg px-2 text-base" /> %
+            </label>
+          )}
+          {mode === "set" && text.trim() !== "" && pct == null && <p className="text-sm text-down">A % above 0 and at most 1000.</p>}
+          <ol className="max-h-56 list-decimal overflow-y-auto pl-5 text-sm">
+            {sent.map((r) => <li key={rowKey(r)}><ModeBadge mode={r.mode} /> {r.account} ({r.tenant}) · {r.symbol} ·{" "}
+              {r.lots != null ? `${r.lots} lot${r.lots === 1 ? "" : "s"}` : `${r.quantity} qty`}
+              {mode === "set" ? (pct != null ? ` · entry ${r.entry.toFixed(2)} → target ${targetPrice(r.entry, pct).toFixed(2)}` : "")
+                : r.manualTarget ? ` · removes +${r.manualTarget.pct} % (${r.manualTarget.price.toFixed(2)})` : ""}
+              {mode === "set" && targetActive(r.manualTarget) ? <span className="text-warn"> · replaces +{r.manualTarget!.pct} %{r.manualTarget!.status === "ARMED" ? " (armed: starts over)" : ""}</span> : null}
+              {r.targetNeedsReason ? <span className="text-muted"> · member told</span> : null}</li>)}
+          </ol>
+          {sent.length === 0 && <p className="text-sm text-muted">{mode === "clear" ? "None of these has a first target." : "Nothing to set."}</p>}
+          {live.length > 0 && (
+            <label className="flex items-start gap-2 rounded-lg border border-down bg-down/10 p-2 text-sm font-semibold text-down">
+              <input type="checkbox" checked={liveOk} onChange={(e) => setLiveOk(e.target.checked)} className="mt-0.5 h-5 w-5 shrink-0"
+                aria-label="Confirm the LIVE target" />
+              <span>LIVE · real money: {mode === "set" ? `a ${pct ?? "?"} % first target on` : "remove the first target from"}{" "}
+                {live.length} LIVE position{live.length === 1 ? "" : "s"} in {[...new Set(live.map((r) => r.account))].join(", ")}
+                {mode === "set" ? ": when it triggers, a real sell order of the whole position at the broker (it can fill below the target in a fast fall)" : ""}.</span>
+            </label>
+          )}
+          <input className="min-h-11 rounded-lg border border-line bg-bg px-3 text-base" placeholder="Reason (each member is told)"
+            value={reason} maxLength={300} onChange={(e) => setReason(e.target.value)} aria-label="Reason" />
+          <input className="min-h-11 rounded-lg border border-line bg-bg px-3 text-base uppercase" placeholder={`Type ${phrase}`}
+            autoCapitalize="characters" autoCorrect="off" value={typed} onChange={(e) => setTyped(e.target.value)} aria-label={`Type ${phrase}`} />
+          {run.error && <p className="text-sm text-down">{(run.error as Error).message}</p>}
+          <Big kind="danger" disabled={!ready}
+            onClick={() => { if (!sending.current) { sending.current = true; run.mutate(); } }}>
+            {run.isPending ? "Saving…" : mode === "set" ? `Set +${pct ?? "?"} % on ${sent.length} position${sent.length === 1 ? "" : "s"} · ${scopeName(scope)}`
+              : `Remove ${sent.length} target${sent.length === 1 ? "" : "s"} · ${scopeName(scope)}`}</Big>
           <Big onClick={onClose}>Cancel</Big>
         </div>
       )}
