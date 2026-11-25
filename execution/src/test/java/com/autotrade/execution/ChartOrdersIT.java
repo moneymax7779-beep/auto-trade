@@ -344,7 +344,7 @@ class ChartOrdersIT {
                     .hasMessageContaining("PAPER only");
             jdbc.update("delete from md.index_tick");
             assertThatThrownBy(() -> orders().arm(s.account(), group, arm("CE", 23_170, 23_120, 23_260), "kc", DAY))
-                    .hasMessageContaining("the market feed is not running");
+                    .hasMessageContaining("index price in the last 60 s");   // "market is closed" or "feed is not running" by the clock
         }
     }
 
