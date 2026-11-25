@@ -415,7 +415,7 @@ public final class ChartOrders {
                 + "and recv_ts <= ? order by recv_ts desc limit 1", Double.class, underlying, Date.valueOf(day),
                 Timestamp.from(now.minus(SPOT_MAX_AGE)), Timestamp.from(now.plusSeconds(5))).stream().findFirst()
                 .orElseThrow(() -> new IllegalArgumentException("no " + underlying + " index price in the last "
-                        + SPOT_MAX_AGE.toSeconds() + " s: the market feed is not running"));
+                        + SPOT_MAX_AGE.toSeconds() + " s: " + ManualOrders.noSpotReason(now)));
     }
 
     /** How old the engine's heartbeat may be for arm and move (it beats about once a second). */

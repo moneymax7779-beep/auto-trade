@@ -273,7 +273,7 @@ class ManualOrdersIT {
 
         jdbc.update("delete from md.index_tick");
         spot(MORNING.instant().minusSeconds(300), SPOT);
-        assertThatThrownBy(() -> manual().pick("NIFTY", "PE", DAY)).hasMessageContaining("market feed is not running");
+        assertThatThrownBy(() -> manual().pick("NIFTY", "PE", DAY)).hasMessageContaining("spot in the last 60 s");   // "market is closed" or "feed is not running" by the clock
     }
 
     @Test

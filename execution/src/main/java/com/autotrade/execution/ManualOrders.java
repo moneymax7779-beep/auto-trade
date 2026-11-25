@@ -112,6 +112,24 @@ public final class ManualOrders {
         return pick(underlying, side, day, LOTS, Map.of());
     }
 
+    /**
+     * Why no index price is there (user 25 Nov 2026: before the open the desk said "the market feed is not running", which
+     * read as a fault): outside 09:15-15:30 IST on a weekday, or on a weekend, the market is closed; inside those hours the
+     * feed is not running. Exchange holidays are not known here and read as the feed not running.
+     */
+    static String noSpotReason(Instant now) {
+        java.time.ZonedDateTime t = now.atZone(IST);
+        boolean weekend = t.getDayOfWeek() == java.time.DayOfWeek.SATURDAY || t.getDayOfWeek() == java.time.DayOfWeek.SUNDAY;
+        LocalTime time = t.toLocalTime();
+        if (weekend || time.isBefore(MARKET_OPEN) || !time.isBefore(MARKET_CLOSE)) {
+            return "the market is closed (it trades 09:15-15:30 IST on weekdays)";
+        }
+        return "the market feed is not running";
+    }
+
+    static final LocalTime MARKET_OPEN = LocalTime.of(9, 15);
+    static final LocalTime MARKET_CLOSE = LocalTime.of(15, 30);
+
     /** The contract a buy on {@code account} would take now: a contract the account already holds is not bought again. */
     public Pick pick(BrokerAccount account, String underlying, String side, LocalDate day) {
         return pick(underlying, side, day, LOTS, held(account.id()));
@@ -133,7 +151,7 @@ public final class ManualOrders {
                 Timestamp.from(now.minus(SPOT_MAX_AGE)), Timestamp.from(now.plusSeconds(5)));
         if (spot.isEmpty()) {
             throw new IllegalArgumentException("no " + u + " spot in the last " + SPOT_MAX_AGE.toSeconds()
-                    + " s: the market feed is not running, nothing bought");
+                    + " s: " + noSpotReason(now) + ", nothing bought");
         }
         double price = ((Number) spot.getFirst().get("price")).doubleValue();
         Instant spotAt = ((Timestamp) spot.getFirst().get("recv_ts")).toInstant();
