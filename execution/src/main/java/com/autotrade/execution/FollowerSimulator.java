@@ -1610,6 +1610,25 @@ public final class FollowerSimulator {
     }
 
     /**
+     * Why this account's venue must not exit a position entered in {@code mode} (review 25 Nov 2026), or null. The exit
+     * goes by the account's route now, the position's book by its entry: a PAPER or DRY_RUN entry on a venue that is a
+     * LIVE broker would be a real sell order (possibly of the holder's own contracts); a LIVE entry on a venue that is not
+     * would close our record while the real position stays at the broker. Every mode change (the LIVE switch, the daily
+     * switch, a broker app or eligibility change) requires the account to hold no position, so this is the backstop.
+     */
+    String routeMismatch(String mode) {
+        boolean liveEntry = "LIVE".equals(mode);
+        if (liveEntry == venue.live()) {
+            return null;
+        }
+        return liveEntry
+                ? "it was entered LIVE but this account's orders no longer go to its LIVE broker: the real position is "
+                        + "at the broker and is not sold here; sell it in the broker app, then book that exit by hand"
+                : "it was entered " + mode + " but this account trades LIVE now: its exit would be a real order at the "
+                        + "broker; nothing was sent: book its exit by hand (no order)";
+    }
+
+    /**
      * As above, priced by {@code price}, with {@code audit} added to the audit row's detail (who asked, whether it was
      * the platform admin, their reason and the member's consent; admin exit desk, user 20 Nov 2026).
      */
@@ -1630,6 +1649,14 @@ public final class FollowerSimulator {
                 onlyPosition, onlyPosition)) {
             long positionId = ((Number) pos.get("id")).longValue();
             String symbol = (String) pos.get("symbol");
+            String why = routeMismatch((String) pos.get("execution_mode"));
+            if (why != null) {
+                // nothing sent, its stop untouched: the exit would not reach the book the position is in
+                lines.add(symbol + ": NOT exited, " + why);
+                sources.add(symbol + ": refused (route)");
+                log.error("account {} ({}): position {} not exited: {}", account.id(), account.displayName(), positionId, why);
+                continue;
+            }
             ExitPrice priced;
             if (venue.broker()) {
                 // second review 20 Nov 2026: a broker prices the sale from its own quote; the estimate only stands in for a

@@ -866,6 +866,18 @@ class ExecutionLoopIT {
             assertThat(jdbc.queryForObject("select detail->>'quantity' from exec.audit_log where broker_account_id = ? "
                     + "and action = 'POSITION_EXIT' order by id desc limit 1", String.class, paper)).isEqualTo("130");
 
+            // review 25 Nov 2026, the backstop: a LIVE entry on this paper account's simulated route is never "sold" here
+            // (our record would close while the real position stayed at the broker); nothing booked
+            long intent = jdbc.queryForObject("select entry_trade_intent_id from exec.position where id = ?", Long.class, id);
+            String entryMode = jdbc.queryForObject("select execution_mode from exec.trade_intent where id = ?", String.class,
+                    intent);
+            jdbc.update("update exec.trade_intent set execution_mode = 'LIVE' where id = ?", intent);
+            assertThat(loop.exitPosition(paper, id, "kc-pia", today, null)).singleElement().asString()
+                    .contains("NOT exited, it was entered LIVE but this account's orders no longer go to its LIVE broker");
+            assertThat(jdbc.queryForObject("select quantity_open from exec.position where id = ?", Long.class, id))
+                    .isEqualTo(held - 130);
+            jdbc.update("update exec.trade_intent set execution_mode = ? where id = ?", entryMode, intent);
+
             // asking for more than is open sells what is open
             assertThat(loop.exitPosition(paper, id, "kc-pia", today, held * 10)).singleElement().asString()
                     .contains((held - 130) + " sold");

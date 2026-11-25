@@ -206,6 +206,26 @@ class KotakTargetLiveIT {
             int placesAfterBuy = kotak.requests("place");
             assertThat(placesAfterBuy).as("the entry and its resting stop reached Kotak").isEqualTo(2);
 
+            // review 25 Nov 2026, the backstop: a position whose entry is not LIVE on this LIVE route (it cannot happen
+            // through the app: every mode change needs the account flat) is never sent to Kotak, its stop untouched
+            long intent = jdbc.queryForObject("select entry_trade_intent_id from exec.position where id = ?", Long.class,
+                    positionId);
+            jdbc.update("update exec.trade_intent set execution_mode = 'DRY_RUN' where id = ?", intent);
+            int requestsBefore = kotak.requests();
+            try (ExecutionLoop loop = new ExecutionLoop(dataSource, "t-kotak-target", "KOTAK-TARGET", "worker-KT", RULES,
+                    (d, u, t, at) -> Double.NaN, 1e9, List.of(adapter)).liveBrokers(liveBrokers)) {
+                assertThat(loop.exitPosition(id, positionId, "kc-kotak-target", DAY)).singleElement().asString()
+                        .contains("NOT exited").contains("entered DRY_RUN but this account trades LIVE now");
+                assertThat(loop.exitPositionOutcome(id, positionId, "kc-kotak-target", DAY, false, Map.of()).outcome())
+                        .isEqualTo(ExitOutcome.REFUSED);
+            }
+            assertThat(kotak.requests("place")).as("nothing placed").isEqualTo(placesAfterBuy);
+            assertThat(kotak.requests("cancel")).as("its stop never cancelled").isZero();
+            assertThat(kotak.netQuantities()).containsEntry(kotakSymbol(23100), (long) LOT);
+            assertThat(position(id)).containsEntry("status", "OPEN");
+            assertThat(kotak.requests()).as("only reads").isGreaterThanOrEqualTo(requestsBefore);
+            jdbc.update("update exec.trade_intent set execution_mode = 'LIVE' where id = ?", intent);
+
             // the trader's target: 10 % above the entry, armed by our captured bid
             double entry = ((Number) opened.get("average_entry")).doubleValue();
             // the market-hours gate at 10:00 IST (bids and retries go by the database's clock); sales on this thread
