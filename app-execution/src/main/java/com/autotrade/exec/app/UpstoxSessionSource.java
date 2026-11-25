@@ -76,7 +76,7 @@ class UpstoxSessionSource implements BrokerSessions {
             if (token.isEmpty() || user.isEmpty() || expires.isEmpty() || !Instant.parse(expires).isAfter(Instant.now())) {
                 return Optional.empty();
             }
-            if (denied.deniedUser(user)) {
+            if (denied.deniedUser(user, account.id())) {
                 log.warn("account {}: Upstox session refused: a denied Upstox user (zt-tiger-v2's)", account.id());
                 return Optional.empty();                    // zt-tiger-v2's Upstox user: never read here
             }

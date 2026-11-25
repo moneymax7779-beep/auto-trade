@@ -77,7 +77,7 @@ class UpstoxLogin {
     URI start(Access.User user, long accountId) {
         BrokerAccount account = sessions.account(user, accountId, BrokerType.UPSTOX);
         SessionActivation.App app = sessions.app(account);
-        String refusal = deniedApp(app);
+        String refusal = deniedApp(app, account.id());
         if (refusal != null) {
             throw new IllegalArgumentException(refusal);
         }
@@ -111,7 +111,7 @@ class UpstoxLogin {
         SessionActivation.App app = null;
         try {
             app = sessions.app(account);
-            String refusal = deniedApp(app);
+            String refusal = deniedApp(app, account.id());
             if (refusal != null) {
                 sessions.failed(account, app, p.subject(), refusal);
                 return new KiteLogin.Result(false, account.displayName(), refusal + " Nothing was stored.");
@@ -126,7 +126,7 @@ class UpstoxLogin {
             if (access.isEmpty()) {
                 throw new BrokerHttp.Failure(0, "Upstox returned no access token");
             }
-            if (denied.deniedUser(user)) {
+            if (denied.deniedUser(user, account.id())) {
                 // never stored (review 8 Nov 2026): the token is dropped here, and the session source refuses it as well
                 sessions.failed(account, app, p.subject(), "logged in as a denied Upstox user");
                 return new KiteLogin.Result(false, account.displayName(), "Upstox client " + user + " is the market data "
@@ -166,8 +166,8 @@ class UpstoxLogin {
      * Why this account's Upstox app may not log in (zt-tiger-v2's app key or Upstox user, {@link UpstoxDenyList}), or
      * null. The key is read from the secret store and never shown.
      */
-    private String deniedApp(SessionActivation.App app) {
-        if (app.clientId() != null && denied.deniedUser(app.clientId())) {
+    private String deniedApp(SessionActivation.App app, long accountId) {
+        if (app.clientId() != null && denied.deniedUser(app.clientId(), accountId)) {
             return "Upstox client " + app.clientId() + " is the market data service's (zt-tiger-v2): it cannot be logged in "
                     + "here.";
         }

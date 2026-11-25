@@ -123,3 +123,6 @@ autotrade:
       denied-api-keys: ${AUTOTRADE_UPSTOX_DENIED_API_KEYS:}
       # validation 16 Nov 2026: BM6462 (zt-tiger-v2's Upstox user) is always denied; the variable adds to it
       denied-user-ids: BM6462,${AUTOTRADE_UPSTOX_DENIED_USER_IDS:}
+      # user 25 Nov 2026: the broker account ids (comma-separated) that may use BM6462 through their own Upstox app;
+      # empty = none (zt's app key stays denied whatever this says)
+      zt-user-accounts: ${AUTOTRADE_UPSTOX_ZT_USER_ACCOUNTS:}

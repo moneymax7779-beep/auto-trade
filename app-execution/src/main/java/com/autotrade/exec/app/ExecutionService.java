@@ -181,7 +181,7 @@ class ExecutionService implements DisposableBean {
                 new com.autotrade.execution.UpstoxDryRunAdapter(dataSource, brokerFunds, sessions,
                         upstox == null ? com.autotrade.upstox.orders.UpstoxConfig.real() : upstox, captured, probe,
                         upstoxLive == null ? com.autotrade.upstox.orders.UpstoxConfig.live() : upstoxLive, egress,
-                        upstoxDenied.deniedUserIds()),
+                        upstoxDenied.deniedUserIds(), upstoxDenied.ztUserAccountIds()),
                 new com.autotrade.execution.GrowwDryRunAdapter(dataSource, brokerFunds, sessions,
                         groww == null ? com.autotrade.groww.GrowwConfig.real() : groww, captured, probe,
                         growwLive == null ? com.autotrade.groww.GrowwConfig.live() : growwLive, egress));

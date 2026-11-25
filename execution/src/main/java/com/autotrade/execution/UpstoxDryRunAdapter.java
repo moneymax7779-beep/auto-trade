@@ -56,7 +56,8 @@ import com.autotrade.upstox.orders.UpstoxSimulator;
  * gateway for the route's life (a new token is set on it, never a new gateway), so its listeners, placed tags and last
  * reports survive a login during the day. Only from the account's own egress address ({@link AccountEgress}; Upstox
  * takes orders only from the user's registered IP), and never for zt-tiger-v2's Upstox user ({@link #ZT_UPSTOX_USER}:
- * registering a static IP for it would log zt out) or another denied user. The order budget is the Upstox user's,
+ * registering a static IP for it would log zt out) except on the accounts the owner listed for it (user 25 Nov 2026),
+ * or for another denied user. The order budget is the Upstox user's,
  * shared by every gateway of that user. LIVE needs the READ_LIVE sessions, the static IP and the canary of the plan
  * first.
  */
@@ -77,10 +78,18 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
     private final UpstoxConfig liveConfig;
     private final AccountEgress egress;
     private final Set<String> deniedUsers;
+    private final Set<Long> ztUserAccounts;
+
+    /**
+     * User 25 Nov 2026: a LIVE order is priced from our own capture only when it is at most this old (the READ_LIVE
+     * reads keep {@link CapturedQuotes#MAX_AGE}); the capture lands every second, so 3 s leaves room for one late flush.
+     * Older: no quote, no order (an exit is retried the next turn).
+     */
+    static final java.time.Duration LIVE_QUOTE_MAX_AGE = java.time.Duration.ofSeconds(3);
 
     /**
      * zt-tiger-v2's Upstox user: never a LIVE account here, whatever the configuration (as UpstoxDenyList in the app;
-     * enforced again at {@link #live}, 16 Nov 2026).
+     * enforced again at {@link #live}, 16 Nov 2026), except the accounts listed for it (user 25 Nov 2026).
      */
     public static final String ZT_UPSTOX_USER = "BM6462";
 
@@ -121,6 +130,18 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
     public UpstoxDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
                                UpstoxConfig upstox, Function<String, Quote> liveQuotes, ReadLiveProbe.Settings probe,
                                UpstoxConfig liveConfig, AccountEgress egress, java.util.Collection<String> deniedUsers) {
+        this(dataSource, simulatedBrokerFunds, sessions, upstox, liveQuotes, probe, liveConfig, egress, deniedUsers,
+                Set.of());
+    }
+
+    /**
+     * As above, with {@code ztUserAccounts}: the broker accounts that may trade zt-tiger-v2's Upstox user LIVE through
+     * their own Upstox app (user 25 Nov 2026; every other account stays refused for it).
+     */
+    public UpstoxDryRunAdapter(DataSource dataSource, double simulatedBrokerFunds, BrokerSessions sessions,
+                               UpstoxConfig upstox, Function<String, Quote> liveQuotes, ReadLiveProbe.Settings probe,
+                               UpstoxConfig liveConfig, AccountEgress egress, java.util.Collection<String> deniedUsers,
+                               java.util.Collection<Long> ztUserAccounts) {
         if (liveConfig == null || !liveConfig.isLive()) {
             throw new IllegalArgumentException("the Upstox LIVE connection takes a LIVE config (UpstoxConfig.live)");
         }
@@ -142,6 +163,7 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
                     .filter(u -> !u.isEmpty()).forEach(denied::add);
         }
         this.deniedUsers = Set.copyOf(denied);
+        this.ztUserAccounts = ztUserAccounts == null ? Set.of() : Set.copyOf(ztUserAccounts);
     }
 
     @Override
@@ -183,7 +205,13 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
         if (user == null) {
             return Live.refused(account.displayName() + " has no Upstox client pinned (log in once first)");
         }
-        if (deniedUsers.contains(user.trim().toUpperCase(java.util.Locale.ROOT))) {
+        String upper = user.trim().toUpperCase(java.util.Locale.ROOT);
+        boolean ztAllowed = upper.equals(ZT_UPSTOX_USER) && ztUserAccounts.contains(account.id());
+        if (ztAllowed) {
+            log.warn("account {} ({}): LIVE on zt-tiger-v2's Upstox user {}, allowed for this account only (user 25 Nov "
+                    + "2026)", account.id(), account.displayName(), ZT_UPSTOX_USER);
+        }
+        if (deniedUsers.contains(upper) && !ztAllowed) {
             log.error("account {} ({}): LIVE refused: a denied Upstox user (zt-tiger-v2's or configured)", account.id(),
                     account.displayName());
             return Live.refused("Upstox client " + user + " is never traded LIVE here (zt-tiger-v2's or denied)");
@@ -195,6 +223,29 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
                 .map(java.net.InetAddress::getHostAddress).orElse("the default route") + ", product "
                 + liveConfig.product() + ", at most " + limits.maxLotsPerOrder() + " lot(s) a buy and "
                 + limits.maxOpenPositions() + " contracts, book from our live capture");
+    }
+
+    /**
+     * {@code quotes} refusing a quote older than {@code maxAge} (RETRYABLE: the venue sends no order); a quote without a
+     * time passes. Null stays null (no quote source: the gateway refuses).
+     */
+    static Function<String, Quote> fresh(Function<String, Quote> quotes, java.time.Duration maxAge,
+                                         java.util.function.Supplier<Instant> clock) {
+        if (quotes == null) {
+            return null;
+        }
+        return key -> {
+            Quote q = quotes.apply(key);
+            if (q != null && q.time() != null) {
+                java.time.Duration age = java.time.Duration.between(q.time(), clock.get());
+                if (age.compareTo(maxAge) > 0) {
+                    throw new BrokerException(BrokerException.Kind.RETRYABLE, "the captured quote of " + key + " is "
+                            + String.format(java.util.Locale.ROOT, "%.1f", age.toMillis() / 1000.0) + " s old: a LIVE "
+                            + "order takes one at most " + maxAge.toSeconds() + " s old");
+                }
+            }
+            return q;
+        };
     }
 
     /** The Upstox client (UCC) pinned on the account (the login and the session source check the session against it). */
@@ -358,6 +409,8 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
         private LocalDate loadedDay;
         private Instant lastAttempt = Instant.EPOCH;
 
+        private final Function<String, Quote> quoteSource;
+
         /** @param user the pinned Upstox client (LIVE: its order budget); null for reads */
         UpstoxSession(BrokerAccount account, UpstoxConfig config, String user) {
             this.account = account;
@@ -365,7 +418,10 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
             // the configured address, on this host or not: the registry refused the route if not, and every call checks
             UpstoxConfig own = config.withEgress(egress.configured(account.id()).orElse(null));
             this.http = new UpstoxHttp(own);
-            this.gateway = new UpstoxGateway(own, http, instruments, liveQuotes, orders ? user : null);
+            // user 25 Nov 2026: a LIVE session's every quote (the venue's limit price, the guard, the canary, the gateway)
+            // is at most LIVE_QUOTE_MAX_AGE old; the READ_LIVE reads keep the capture's own window
+            this.quoteSource = orders ? fresh(liveQuotes, LIVE_QUOTE_MAX_AGE, Instant::now) : liveQuotes;
+            this.gateway = new UpstoxGateway(own, http, instruments, quoteSource, orders ? user : null);
         }
 
         void tap(java.util.function.BiConsumer<String, String> tap) {
@@ -485,10 +541,16 @@ public final class UpstoxDryRunAdapter implements BrokerAdapter {
             return gateway().availableFunds();
         }
 
-        /** Our live capture: no Upstox call and no session needed (code review 8 Nov 2026). */
+        /**
+         * Our live capture: no Upstox call and no session needed (code review 8 Nov 2026); on a LIVE session at most
+         * {@link #LIVE_QUOTE_MAX_AGE} old (user 25 Nov 2026).
+         */
         @Override
         public Quote quote(String instrumentKey) {
-            Quote q = liveQuotes.apply(instrumentKey);
+            if (quoteSource == null) {
+                throw new BrokerException(Kind.RETRYABLE, "no quote source for " + instrumentKey);
+            }
+            Quote q = quoteSource.apply(instrumentKey);
             if (q == null) {
                 throw new BrokerException(Kind.RETRYABLE, "no quote for " + instrumentKey);
             }

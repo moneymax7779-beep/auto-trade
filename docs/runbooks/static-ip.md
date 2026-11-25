@@ -68,6 +68,29 @@ Slots: 7 (region quota 8 static IPs, 1 used by `zt-egress-ip`). More needs a quo
 
 Nothing. `journalctl -u autotrade-egress --since today` on the VM; `sudo /srv/auto-trade/bin/egress list`.
 
+## zt-tiger-v2's Upstox user (BM6462) on one account (user 25 Nov 2026)
+
+BM6462 is the Upstox user zt-tiger-v2 reads market data with. It is refused everywhere unless the account's id is in
+`AUTOTRADE_UPSTOX_ZT_USER_ACCOUNTS` (root-only `.env`, comma-separated ids; an entry that is no id is left out and
+logged). Order, after hours, never 08:50–15:50 IST:
+
+1. **Disable every other enabled account on BM6462** (V50 allows one; Ravali's "Upstox" 15 and its twin 16 on 25 Nov).
+2. **zt's own Upstox app key** must be in `AUTOTRADE_UPSTOX_DENIED_API_KEYS` (`.env`) before any id is listed: for a
+   listed account it is the only check left between BM6462 and zt's app (a login with zt's app ends zt's token). Check
+   it inside the container: `sudo docker exec autotrade-execution env | grep UPSTOX`.
+3. The member creates **their own** Upstox app on BM6462 (never zt's), links it to the new account and requests the
+   account's static IP on the Brokers page (a slot as above).
+4. **Registering that IP at Upstox can log zt-tiger-v2 out** (Upstox ties order IPs to the user; changing them ends
+   tokens). Do it on an evening, then sign zt in again and check its feed before the next session.
+5. List the account id in `AUTOTRADE_UPSTOX_ZT_USER_ACCOUNTS`, recreate the execution container, check
+   `UPSTOX_ZT_USER_ACCOUNTS` in `env` and the log line "LIVE on zt-tiger-v2's Upstox user ... allowed for this account".
+6. READ_LIVE days, the canary (an Upstox LIVE quote is at most 3 s old: our capture writes each subscribed contract
+   about every second, 25 Nov max gap 3.6 s; the canary needs no LIVE broker list), then the LIVE switch-on: a code
+   change (`UpstoxDryRunAdapter.offersLive()` true, as Kotak's on 18 Nov) **and** UPSTOX in `AUTOTRADE_LIVE_BROKERS`,
+   the admin's LIVE eligibility, the member's daily switch, the 1-lot pilot.
+
+Undo: remove the id from `.env` and recreate the container (the account is refused again at login, session and LIVE).
+
 ## Retiring an account
 
 `bin/egress retire --account <id>` prints, `--apply` removes the NAT gateway, alias and Docker network (needs delete
