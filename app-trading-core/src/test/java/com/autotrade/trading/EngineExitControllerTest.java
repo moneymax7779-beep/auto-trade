@@ -107,4 +107,55 @@ class EngineExitControllerTest {
         assertThatThrownBy(() -> api.releaseEntries(12, null, () -> "satya"))
                 .isInstanceOfSatisfying(ResponseStatusException.class, e -> assertThat(e.getStatusCode().value()).isEqualTo(409));
     }
+
+    /**
+     * User 25 Nov 2026 (the exit desk's book choice): PAPER acts only on a session that says it is not a signal source
+     * (PAPER-1); a signal source (SIGNAL-1, whose close reaches its LIVE and paper followers) or a session that does not
+     * say is left alone; LIVE acts on no engine session; BOTH or none, every live session as before.
+     */
+    @Test
+    void theBookChosenDecidesWhichSessionsAreTouched() {
+        TradingSession paper = session(11, "PAPER-1", TradingSession.Mode.PAPER_LIVE, 2);
+        paper.status().put("signalSource", false);
+        TradingSession signal = session(12, "SIGNAL-1", TradingSession.Mode.PAPER_LIVE, 1);
+        signal.status().put("signalSource", true);
+        TradingSession unsaid = session(14, "OTHER-1", TradingSession.Mode.PAPER_LIVE, 1);
+        SessionRunner runner = mock(SessionRunner.class);
+        when(runner.sessions()).thenReturn(List.of(paper, signal, unsaid));
+        when(paper.exitPosition("etr", "NIFTY", EngineExitController.REASON)).thenReturn(true);
+        EngineExitController api = new EngineExitController(runner, null);
+
+        Map<String, Object> out = api.exitEverything(new EngineExitController.Everything("paper off", "EXIT EVERYTHING",
+                true, true, "paper"), () -> "satya");
+        assertThat(out).containsEntry("scope", "PAPER");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> sessions = (List<Map<String, Object>>) out.get("sessions");
+        assertThat(sessions).extracting(r -> r.get("account")).containsExactly("PAPER-1");
+        verify(paper).exitAll("ADMIN_EXIT");
+        verify(paper).engageKillSwitch(org.mockito.ArgumentMatchers.eq("GLOBAL"), anyString(), org.mockito.ArgumentMatchers.eq("satya"));
+        for (TradingSession other : List.of(signal, unsaid)) {
+            verify(other, never()).exitAll(anyString());
+            verify(other, never()).engageKillSwitch(anyString(), anyString(), anyString());
+        }
+        // LIVE: no engine session is in the LIVE book alone
+        assertThat(api.exitEverything(new EngineExitController.Everything("live off", "EXIT EVERYTHING", true, true, "LIVE"),
+                () -> "satya")).containsEntry("sessions", List.of());
+        verify(signal, never()).exitAll(anyString());
+        assertThatThrownBy(() -> api.exitEverything(new EngineExitController.Everything("x off", "EXIT EVERYTHING", true,
+                true, "DEMO"), () -> "satya")).isInstanceOfSatisfying(ResponseStatusException.class,
+                e -> assertThat(e.getStatusCode().value()).isEqualTo(400));
+
+        // one position: SIGNAL-1 under PAPER or LIVE is refused (409), nothing sent; PAPER-1 under PAPER goes
+        for (String scope : List.of("PAPER", "LIVE")) {
+            assertThatThrownBy(() -> api.exitPosition(12, new EngineExitController.PositionExit("etr", "NIFTY", "risk off",
+                    scope), () -> "satya")).isInstanceOfSatisfying(ResponseStatusException.class,
+                    e -> assertThat(e.getStatusCode().value()).isEqualTo(409));
+        }
+        verify(signal, never()).exitPosition(anyString(), anyString(), anyString());
+        assertThat(api.exitPosition(11, new EngineExitController.PositionExit("etr", "NIFTY", "risk off", "PAPER"),
+                () -> "satya")).containsEntry("outcome", "EXITING").containsEntry("scope", "PAPER");
+        assertThatThrownBy(() -> api.exitPosition(11, new EngineExitController.PositionExit("etr", "NIFTY", "risk off",
+                "LIVE"), () -> "satya")).isInstanceOfSatisfying(ResponseStatusException.class,
+                e -> assertThat(e.getStatusCode().value()).isEqualTo(409));
+    }
 }

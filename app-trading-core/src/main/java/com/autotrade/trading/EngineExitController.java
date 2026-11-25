@@ -33,6 +33,11 @@ import tools.jackson.databind.json.JsonMapper;
  * plan: "exit all" means everyone out); a PAPER-1 close touches PAPER-1 (and DEMO-1, which mirrors it) only. Each call
  * needs a reason, is logged and audited (ENGINE_EXIT, ENGINE_EXIT_EVERYTHING); the exit reason on the positions is
  * ADMIN_EXIT. Replays are never touched.
+ * <p>
+ * The desk's book choice (user 25 Nov 2026: choose LIVE or PAPER, and the exits never touch the other book): with
+ * {@code scope} PAPER only a session that says it is not a signal source (PAPER-1: its close touches PAPER-1 and DEMO-1
+ * only) is acted on; LIVE acts on no session (SIGNAL-1's close reaches its paper followers too; PAPER-1 is paper); BOTH,
+ * or no scope, every live session as before.
  */
 @RestController
 @RequestMapping("/api/sessions")
@@ -51,14 +56,24 @@ class EngineExitController {
         this.jdbc = dataSource == null ? null : new JdbcTemplate(dataSource);
     }
 
-    record PositionExit(String strategy, String underlying, String reason) {
+    /** @param scope the desk's book (LIVE, PAPER or BOTH; null: BOTH): a session outside it is refused (409) */
+    record PositionExit(String strategy, String underlying, String reason, String scope) {
+
+        PositionExit(String strategy, String underlying, String reason) {
+            this(strategy, underlying, reason, null);
+        }
     }
 
     /**
      * @param stopEntries   engage each live session's GLOBAL kill switch before its exits (null: false)
      * @param exitPositions exit every position (null: true); false with stopEntries only stops the sessions' new entries
+     * @param scope         the desk's book (LIVE, PAPER or BOTH; null: BOTH): only the sessions in it are stopped or exited
      */
-    record Everything(String reason, String confirm, Boolean stopEntries, Boolean exitPositions) {
+    record Everything(String reason, String confirm, Boolean stopEntries, Boolean exitPositions, String scope) {
+
+        Everything(String reason, String confirm, Boolean stopEntries, Boolean exitPositions) {
+            this(reason, confirm, stopEntries, exitPositions, null);
+        }
     }
 
     record Release(String reason) {
@@ -70,9 +85,15 @@ class EngineExitController {
         if (body.strategy() == null || body.strategy().isBlank() || body.underlying() == null || body.underlying().isBlank()) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "strategy and underlying are required");
         }
+        String scope = scope(body.scope());
         TradingSession s = live().stream().filter(x -> session == sessionId(x)).findFirst()
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "no running live session " + session));
         String account = String.valueOf(s.status().get("account"));
+        if (!inScope(s, scope)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, account + " is not in the " + scope + " book chosen"
+                    + (isPaperOnly(s) ? "" : " (a signal source's close reaches its LIVE and paper followers): choose BOTH")
+                    + "; nothing was sent");
+        }
         boolean started = s.exitPosition(body.strategy(), body.underlying(), REASON);
         String actor = actor(principal);
         Map<String, Object> out = new LinkedHashMap<>();
@@ -81,6 +102,7 @@ class EngineExitController {
         out.put("strategy", body.strategy());
         out.put("underlying", body.underlying());
         out.put("outcome", started ? "EXITING" : "NOT_HELD");
+        out.put("scope", scope);
         if (started) {
             log.warn("ENGINE EXIT by {}: {} {} {} on {} ({})", actor, account, body.strategy(), body.underlying(), session,
                     reason);
@@ -96,9 +118,13 @@ class EngineExitController {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "confirm with \"" + EVERYTHING + "\"");
         }
         String actor = actor(principal);
+        String scope = scope(body.scope());
         List<Map<String, Object>> sessions = new ArrayList<>();
         boolean stop = Boolean.TRUE.equals(body.stopEntries());
         for (TradingSession s : live()) {
+            if (!inScope(s, scope)) {
+                continue;                                         // the other book's: never touched
+            }
             Map<String, Object> status = s.status();
             Object open = status.getOrDefault("openPositions", List.of());
             int count = open instanceof List<?> l ? l.size() : 0;
@@ -117,8 +143,9 @@ class EngineExitController {
             sessions.add(row);
         }
         Map<String, Object> out = new LinkedHashMap<>();
+        out.put("scope", scope);
         out.put("sessions", sessions);
-        log.warn("ENGINE EXIT EVERYTHING by {}: {} ({})", actor, sessions, reason);
+        log.warn("ENGINE EXIT EVERYTHING by {} ({}): {} ({})", actor, scope, sessions, reason);
         audit("ENGINE_EXIT_EVERYTHING", actor, out, reason);
         return out;
     }
@@ -147,6 +174,29 @@ class EngineExitController {
     /** The running live sessions (PAPER-1 and its signal source); a replay is never touched. */
     private List<TradingSession> live() {
         return runner.sessions().stream().filter(s -> "PAPER_LIVE".equals(String.valueOf(s.status().get("mode")))).toList();
+    }
+
+    /** LIVE, PAPER or BOTH (null or blank: BOTH); anything else is a 400. */
+    static String scope(String scope) {
+        String s = scope == null || scope.isBlank() ? "BOTH" : scope.trim().toUpperCase(java.util.Locale.ROOT);
+        if (!List.of("LIVE", "PAPER", "BOTH").contains(s)) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "scope: LIVE, PAPER or BOTH");
+        }
+        return s;
+    }
+
+    /** A session that says it is not a signal source (PAPER-1): its close touches paper only; unknown is not. */
+    private static boolean isPaperOnly(TradingSession s) {
+        return Boolean.FALSE.equals(s.status().get("signalSource"));
+    }
+
+    /** Whether an exit of this session stays in the book chosen (see the class comment). */
+    private static boolean inScope(TradingSession s, String scope) {
+        return switch (scope) {
+            case "BOTH" -> true;
+            case "PAPER" -> isPaperOnly(s);
+            default -> false;                                     // LIVE: every engine session reaches the paper book
+        };
     }
 
     private static long sessionId(TradingSession s) {

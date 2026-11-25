@@ -752,6 +752,9 @@ export interface ManualTarget {
   lastResult?: string | null;
   /** SELLING: when the rest is sold again (ISO instant) */
   nextTryAt?: string | null;
+  /** set by the platform admin from the exit desk (V55, 25 Nov 2026), and why */
+  byAdmin?: boolean;
+  adminReason?: string | null;
 }
 
 /** What an Exit of part or all of one open position would do now (GET .../positions/{id}/exit-preview). */
@@ -821,6 +824,17 @@ export interface DeskPosition {
   bid: number | null; ask: number | null; quoteAt: string | null; quoteAgeSec: number | null; quoteStale: boolean;
   pnl: number | null; premiumAtRisk: number; stop: number | null; stopStatus: string | null;
   consent: AdminExitConsent;
+  /** the position's first target (25 Nov 2026), as on the Overview */
+  manualTarget?: ManualTarget | null;
+  /** the admin is not of this workspace: setting or removing its target takes a reason (the members are told) */
+  targetNeedsReason?: boolean;
+}
+
+/** The admin target on many positions (POST /api/execution/admin/targets, .../targets/clear). */
+export interface TargetBatchResult {
+  scope: DeskScope; count: number;
+  results: { accountId: number; account: string | null; positionId: number; symbol: string | null; mode: string | null;
+    outcome: "SET" | "UNCHANGED" | "CLEARED" | "REFUSED" | "ERROR"; detail: string | null; target?: ManualTarget }[];
 }
 
 export interface DeskOpenPositions {
@@ -835,13 +849,20 @@ export interface EngineSessionPositions {
   session: number; account: string; mode: string; date: string; status: string; lastEvent: string | null;
   /** the session's engaged kill switches; "GLOBAL" = its new entries are stopped (23 Nov 2026) */
   killSwitches?: string[];
+  /** false: PAPER-1 (its exit touches paper only); true: SIGNAL-1 (its exit reaches every follower, LIVE and paper) */
+  signalSource?: boolean;
   positions: PositionRow[];
 }
+
+/** The book the exit desk acts on (25 Nov 2026): its Exit selected / Exit everything never touch the other. */
+export type DeskScope = "LIVE" | "PAPER" | "BOTH";
 
 export interface BatchResultRow {
   accountId: number; account: string | null; positionId: number; symbol: string | null; mode: string | null;
   outcome: "PENDING" | "RUNNING" | "SOLD" | "PARTLY" | "REFUSED" | "ALREADY_CLOSED" | "UNKNOWN"; detail: string | null;
   lines: string[]; mirrorOf?: string; before?: number | null; after?: number | null;
+  /** a part of the position asked for (quantity, whole lots; 25 Nov 2026); absent: all of it */
+  asked?: number;
 }
 
 /** A batch running in the background (POST answers 202 at once; GET .../exit-batch/{batchId} follows it). */
@@ -851,6 +872,8 @@ export interface BatchResult {
   startedAt: string; finishedAt: string | null;
   /** GLOBAL_LIVE when asked (23 Nov 2026): "ENGAGED", "ALREADY", "FAILED: why"; null when not asked */
   globalLive?: string | null;
+  /** the book it acted on (25 Nov 2026) */
+  scope?: DeskScope;
 }
 
 /** An admin exit on one of the caller's accounts (the in-app banner). */

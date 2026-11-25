@@ -69,7 +69,7 @@ class TradingController {
                 continue;                                   // a replay's positions are not money anyone holds
             }
             Map<String, Object> s = new LinkedHashMap<>();
-            for (String key : List.of("session", "account", "mode", "date", "status", "lastEvent")) {
+            for (String key : List.of("session", "account", "mode", "date", "status", "lastEvent", "signalSource")) {
                 s.put(key, status.get(key));
             }
             // review 23 Nov 2026: the desk shows a session whose new entries are stopped (GLOBAL), with its Resume

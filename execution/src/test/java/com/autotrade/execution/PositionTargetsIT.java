@@ -52,7 +52,7 @@ class PositionTargetsIT {
     private static final LocalDate TODAY = LocalDate.now(IST);
     /** The market-hours gate's clock: 10:00 IST today (bids and retries go by the database's own clock). */
     private static final Clock OPEN = Clock.fixed(TODAY.atTime(10, 0).atZone(IST).toInstant(), IST);
-    private static final int N = 12;
+    private static final int N = 13;
 
     private static PostgreSQLContainer postgres;
     private static HikariDataSource dataSource;
@@ -424,5 +424,52 @@ class PositionTargetsIT {
         }
         assertThat(target(10)).containsEntry("status", "DONE");
         assertThat(target(11)).containsEntry("status", "DONE");
+    }
+
+    /**
+     * V55 (user 25 Nov 2026): the admin's target is the same lock, marked by_admin with its reason (shown on the member's
+     * book, in TARGET_SET's audit); its sale reaches the exit with by_admin and the reason (the member's notice); the owner
+     * setting it again makes it theirs.
+     */
+    @Test
+    void theAdminsTargetIsMarkedAndItsSaleSaysSo() {
+        PositionTargets t = targets();
+        Map<String, Object> admin = Map.of("by_admin", true, "admin_reason", "lock gains", "actor_role", "PLATFORM_ADMIN",
+                "consent", "not given");
+        PositionTargets.View v = t.set(account(12), ids[12], 10, "kc-admin", admin);
+        assertThat(v.byAdmin()).isTrue();
+        assertThat(v.adminReason()).isEqualTo("lock gains");
+        assertThat(v.toMap()).containsEntry("byAdmin", true).containsEntry("adminReason", "lock gains");
+        assertThat(jdbc.queryForMap("select detail ->> 'by_admin' a, detail ->> 'admin_reason' r, detail ->> 'pct' pct from "
+                + "exec.audit_log where broker_account_id = ? and action = 'TARGET_SET' order by id desc limit 1", accounts[12]))
+                .containsEntry("a", "true").containsEntry("r", "lock gains").containsEntry("pct", "10.0");
+        tick(12, v.price() + 3);
+        t.watch(ENGINE);
+        assertThat(target(12)).containsEntry("status", "ARMED");
+        // review 25 Nov 2026: the same % by the owner makes it theirs and keeps the armed lock; the admin's again, theirs
+        PositionTargets.View mine = t.set(account(12), ids[12], 10, "kc-tara");
+        assertThat(mine.byAdmin()).isFalse();
+        assertThat(mine.adminReason()).isNull();
+        assertThat(mine.status()).isEqualTo("ARMED");
+        assertThat(PositionTargets.changed(java.util.Optional.of(v), java.util.Optional.of(mine))).isTrue();
+        assertThat(PositionTargets.changed(java.util.Optional.of(mine), t.view(ids[12]))).as("read again").isFalse();
+        PositionTargets.View back = t.set(account(12), ids[12], 10, "kc-admin", admin);
+        assertThat(back.byAdmin()).isTrue();
+        assertThat(back.status()).isEqualTo("ARMED");
+        assertThat(jdbc.queryForObject("select detail ->> 'taken_over_from' from exec.audit_log where broker_account_id = ? "
+                + "and action = 'TARGET_SET' order by id desc limit 1", String.class, accounts[12])).isEqualTo("owner");
+        List<Map<String, ?>> seen = new java.util.ArrayList<>();
+        PositionTargets.Exiter capture = (account, position, audit) -> {
+            seen.add(audit);
+            return ENGINE.exit(account, position, audit);
+        };
+        tick(12, v.price() - 0.5);
+        t.watch(capture);
+        assertThat(seen).singleElement().satisfies(d -> assertThat((Map<String, Object>) d).containsEntry("by_admin", true)
+                .containsEntry("admin_reason", "lock gains").containsEntry("admin_target", true));
+        assertThat(jdbc.queryForMap("select detail ->> 'by_admin' a, detail ->> 'admin_reason' r from exec.audit_log where "
+                + "broker_account_id = ? and action = 'POSITION_EXIT' order by id desc limit 1", accounts[12]))
+                .containsEntry("a", "true").containsEntry("r", "lock gains");
+        assertThat(positionStatus(12)).isEqualTo("CLOSED:MANUAL_TARGET");
     }
 }

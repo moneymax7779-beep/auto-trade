@@ -371,12 +371,19 @@ class ExecutionService implements DisposableBean {
     com.autotrade.execution.ExitOutcome exitPositionOutcome(long accountId, long positionId, String actor, LocalDate day,
                                                             boolean byAdmin, java.util.Map<String, ?> audit)
             throws Exception {
+        return exitPositionOutcome(accountId, positionId, actor, day, null, byAdmin, audit);
+    }
+
+    /** As above, {@code quantity} of it (whole lots; null: all), the rest staying open (exit desk partials, 25 Nov 2026). */
+    com.autotrade.execution.ExitOutcome exitPositionOutcome(long accountId, long positionId, String actor, LocalDate day,
+                                                            Long quantity, boolean byAdmin, java.util.Map<String, ?> audit)
+            throws Exception {
         ExecutionLoop current = loop;
         if (current == null) {
             return com.autotrade.execution.ExitOutcome.refused(List.of("the worker has not started"),
                     "the worker has not started");
         }
-        return current.exitPositionOutcome(accountId, positionId, actor, day, byAdmin, audit);
+        return current.exitPositionOutcome(accountId, positionId, actor, day, quantity, byAdmin, audit);
     }
 
     /** {@link #flatten} with {@code audit} added to the FLATTEN audit detail (an admin's flatten). */

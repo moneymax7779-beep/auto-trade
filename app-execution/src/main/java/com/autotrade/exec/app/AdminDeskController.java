@@ -11,6 +11,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -48,6 +49,9 @@ import com.autotrade.execution.KillSwitches;
  *   <li>{@code POST /api/execution/admin/exit-batch}: exits the chosen positions, LIVE first (largest premium at risk
  *       first), then PAPER; each through its account's own lane and the per-position Exit's path; LIVE order starts paced
  *       per broker app ({@link OrderPacer}); a result per position; the accounts' kill switches after, when asked.</li>
+ *   <li>{@code POST /api/execution/admin/targets} and {@code .../targets/clear}: the admin's first target (user 25 Nov 2026:
+ *       "admin for global to be exited from all LIVE all workspaces with the first target"): one % set on (or removed from)
+ *       every position sent, in one book, a reason given and the members told per account; a result per position.</li>
  *   <li>{@code GET/POST /api/execution/workspaces/{tenant}/admin-exit-consent}: the member's standing consent (V51).</li>
  *   <li>{@code GET /api/execution/notices}: admin exits on the caller's accounts in the last 24 h (the in-app banner).</li>
  * </ul>
@@ -73,11 +77,45 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
      * {@link com.autotrade.execution.ExecutionLoop#exitPositionOutcome}; tests give their own).
      */
     interface BatchRunner {
-        com.autotrade.execution.ExitOutcome run(long accountId, long positionId, String actor, LocalDate day,
+        com.autotrade.execution.ExitOutcome run(long accountId, long positionId, Long quantity, String actor, LocalDate day,
                                                 boolean byAdmin, Map<String, Object> audit) throws Exception;
     }
 
-    record BatchPosition(Long accountId, Long positionId) {
+    /**
+     * @param quantity how many of it to sell (whole lots), the rest staying open: the per-position Exit's partial (user 25
+     *                 Nov 2026: "partial exits like the Overview page's open positions"); null, or at least what is open:
+     *                 all of it
+     */
+    record BatchPosition(Long accountId, Long positionId, Long quantity) {
+
+        BatchPosition(Long accountId, Long positionId) {
+            this(accountId, positionId, null);
+        }
+    }
+
+    /**
+     * The book a batch acts on (user 25 Nov 2026: choose LIVE or PAPER on the exit desk): a position whose entry was LIVE
+     * is the LIVE book's, every other the PAPER book's. A batch with LIVE or PAPER is refused as a whole (nothing sent, no
+     * kill switch) when a position of the other book is in it, and PAPER never engages GLOBAL_LIVE.
+     */
+    enum Scope {
+        LIVE, PAPER, BOTH;
+
+        static Scope of(String s) {
+            if (s == null || s.isBlank()) {
+                return BOTH;                                      // as before the choice: older pages
+            }
+            try {
+                return valueOf(s.trim().toUpperCase(java.util.Locale.ROOT));
+            } catch (IllegalArgumentException e) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "scope: LIVE, PAPER or BOTH");
+            }
+        }
+
+        /** Whether a position of this entry mode is in this book. */
+        boolean holds(String mode) {
+            return this == BOTH || (this == LIVE) == "LIVE".equals(mode);
+        }
     }
 
     /**
@@ -89,12 +127,29 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
      *                   killAfter true without it stops paper accounts too, as before)
      * @param globalLive engage GLOBAL_LIVE first (no LIVE entry anywhere until it is released; "Exit everything", plan
      *                   2026-11-23 decision 3; null: false)
+     * @param scope      the book it acts on, LIVE, PAPER or BOTH ({@link Scope}; null: BOTH)
      */
     record Batch(List<BatchPosition> positions, String reason, Boolean killAfter, String key, String confirm,
-                 Boolean killPaper, Boolean globalLive) {
+                 Boolean killPaper, Boolean globalLive, String scope) {
+
+        Batch(List<BatchPosition> positions, String reason, Boolean killAfter, String key, String confirm,
+              Boolean killPaper, Boolean globalLive) {
+            this(positions, reason, killAfter, key, confirm, killPaper, globalLive, null);
+        }
     }
 
     record Consent(Boolean on) {
+    }
+
+    /**
+     * The admin's first target on many positions at once (user 25 Nov 2026).
+     *
+     * @param pct     the % above each position's average entry (as the per-position target; null for a removal)
+     * @param confirm exactly "TARGET &lt;n&gt; POSITIONS" (set) or "CLEAR &lt;n&gt; TARGETS" (removal), n the positions sent
+     * @param scope   the book (LIVE, PAPER or BOTH; null: LIVE, the book this is for): a position of another book refuses
+     *                the whole request (409, nothing set)
+     */
+    record Targets(List<BatchPosition> positions, Double pct, String reason, String confirm, String scope) {
     }
 
     /**
@@ -108,6 +163,8 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
         volatile Instant finished;
         final int count;
         final boolean killAfter;
+        /** The book it acts on (LIVE, PAPER or BOTH). */
+        volatile Scope scope = Scope.BOTH;
         final List<String> killed = new java.util.concurrent.CopyOnWriteArrayList<>();
         /** The accounts whose kill switch this batch engaged (their members' message says entries are stopped). */
         final Set<Long> killedIds = ConcurrentHashMap.newKeySet();
@@ -131,6 +188,7 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
             out.put("status", finished == null ? "RUNNING" : "DONE");
             out.put("count", count);
             out.put("killAfter", killAfter);
+            out.put("scope", scope.name());
             out.put("killed", List.copyOf(killed));
             out.put("killFailed", Map.copyOf(killFailed));
             out.put("globalLive", globalLive);
@@ -155,6 +213,7 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
     private final AdminExits adminExits;
     private final ContractQuotes quotes;
     private final KillSwitches kills;
+    private final com.autotrade.execution.PositionTargets targets;
     /** Batches by id, and the id each (admin, key) started (the same key never runs twice). */
     private final Map<String, BatchRun> runs = new ConcurrentHashMap<>();
     private final Map<String, String> byKey = new ConcurrentHashMap<>();
@@ -176,6 +235,7 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
         this.adminExits = adminExits;
         this.quotes = new ContractQuotes(jdbc);
         this.kills = new KillSwitches(dataSource);
+        this.targets = new com.autotrade.execution.PositionTargets(dataSource);
     }
 
     /** Tests: the exits run by {@code runner} instead of the worker. */
@@ -224,14 +284,22 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
 
     @GetMapping("/api/execution/admin/open-positions")
     Map<String, Object> openPositions(@RequestHeader(value = Access.HEADER, required = false) String subject) {
-        admin(subject);
+        Access.User user = admin(subject);
         List<Map<String, Object>> rows = new ArrayList<>();
         Map<Long, Map<String, Object>> consents = new LinkedHashMap<>();
+        Map<Long, Map<Long, com.autotrade.execution.PositionTargets.View>> byAccount = new LinkedHashMap<>();
         for (Map<String, Object> r : jdbc.queryForList(OPEN + " order by i.execution_mode = 'LIVE' desc, t.name, "
                 + "a.display_name, p.opened_at")) {
             long tenant = ((Number) r.get("tenant_id")).longValue();
             Map<String, Object> consent = consents.computeIfAbsent(tenant, adminExits::consent);
-            rows.add(row(r, consent));
+            Map<String, Object> row = row(r, consent);
+            // the first target (user 25 Nov 2026): as the Overview's open positions show it; from outside the workspace it
+            // is set with a reason (targetNeedsReason)
+            com.autotrade.execution.PositionTargets.View target = byAccount.computeIfAbsent(((Number) r.get(
+                    "broker_account_id")).longValue(), targets::forAccount).get(((Number) r.get("id")).longValue());
+            row.put("manualTarget", target == null ? null : target.toMap());
+            row.put("targetNeedsReason", user.byAdmin(tenant));
+            rows.add(row);
         }
         Map<String, Object> out = new LinkedHashMap<>();
         out.put("at", Instant.now().toString());
@@ -322,22 +390,31 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
         if (b.key() == null || b.key().isBlank() || b.key().length() > 100) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "key: 1 to 100 characters (one per confirmation)");
         }
+        Scope scope = Scope.of(b.scope());
+        if (scope == Scope.PAPER && Boolean.TRUE.equals(b.globalLive())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "GLOBAL_LIVE stops the LIVE book: not with scope PAPER");
+        }
         Set<String> seen = new LinkedHashSet<>();
         for (BatchPosition p : asked) {
             if (p == null || p.accountId() == null || p.positionId() == null) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "each position needs accountId and positionId");
+            }
+            if (p.quantity() != null && p.quantity() <= 0) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "position " + p.positionId() + ": quantity must "
+                        + "be above 0 (none: all of it)");
             }
             if (!seen.add(p.accountId() + ":" + p.positionId())) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "position " + p.positionId() + " is listed twice");
             }
         }
         synchronized (starting) {
-            return start(user, b, asked, reason);
+            return start(user, b, scope, asked, reason);
         }
     }
 
     /** The key's check, the plan, the kill switches and the batch's start (under {@link #starting}). */
-    private ResponseEntity<Map<String, Object>> start(Access.User user, Batch b, List<BatchPosition> asked, String reason) {
+    private ResponseEntity<Map<String, Object>> start(Access.User user, Batch b, Scope scope, List<BatchPosition> asked,
+                                                      String reason) {
         forgetOld();
         String k = user.subject() + ":" + b.key();
         String id = java.util.UUID.randomUUID().toString();
@@ -354,8 +431,35 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
         BatchRun run;
         List<Planned> plans = new ArrayList<>();
         try {
+            // review 25 Nov 2026: a position another batch is still exiting (its row PENDING or RUNNING) is not sent again
+            // (a second key for the same intent, e.g. after an unclear answer, would sell it twice)
+            Map<String, String> busy = new LinkedHashMap<>();
+            for (BatchRun other : runs.values()) {
+                if (other.finished != null || other.id.equals(id)) {
+                    continue;
+                }
+                other.rows.values().stream().filter(r -> List.of("PENDING", "RUNNING").contains(r.get("outcome")))
+                        .forEach(r -> busy.putIfAbsent(r.get("accountId") + ":" + r.get("positionId"), other.id));
+            }
             for (int i = 0; i < asked.size(); i++) {
-                plans.add(plan(i, asked.get(i)));
+                BatchPosition p = asked.get(i);
+                String running = busy.get(p.accountId() + ":" + p.positionId());
+                Planned planned = plan(i, p, scope);
+                if (running != null && planned.answer() == null) {
+                    planned = new Planned(i, planned.accountId(), planned.positionId(), planned.account(), planned.mode(),
+                            planned.symbol(), planned.open(), 0, null, withDetail(answer(planned, "REFUSED", List.of()),
+                            "another batch (" + running + ") is exiting it now: nothing sent; read its result first"));
+                }
+                plans.add(planned);
+            }
+            // user 25 Nov 2026: a batch never touches the book that is not chosen; refused as a whole, before any kill
+            // switch or exit (a page showing one book sends only that book's rows: anything else is stale or wrong)
+            List<String> outside = plans.stream().filter(p -> p.mode() != null && !scope.holds(p.mode()))
+                    .map(p -> (p.account() == null ? "" : p.account().displayName() + " ") + p.symbol() + " (" + p.mode()
+                            + ")").toList();
+            if (!outside.isEmpty()) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "not in the " + scope + " book chosen: "
+                        + String.join(", ", outside) + "; nothing was sent");
             }
             List<Planned> runnable = plans.stream().filter(p -> p.answer() == null)
                     .sorted(Comparator.comparing((Planned p) -> !p.live()).thenComparing(Comparator.comparingDouble(
@@ -363,6 +467,7 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
             boolean anyLive = plans.stream().anyMatch(Planned::live);   // any LIVE row sent, open or already closed
             run = new BatchRun(id, b.key(), asked.size(), b.killAfter() != null ? b.killAfter() : anyLive,
                     runnable.stream().map(Planned::positionId).toList());
+            run.scope = scope;
             plans.forEach(p -> run.rows.put(p.index(), p.answer() != null ? p.answer() : answer(p, "PENDING", List.of())));
             runs.put(id, run);
             // 23 Nov 2026 (plan decision 3): GLOBAL_LIVE first, when asked: no LIVE entry anywhere while the batch runs
@@ -384,11 +489,17 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
             // 23 Nov 2026 (plan decision 3): by default (killAfter not sent) the accounts with a LIVE position only; the
             // paper ones too when killPaper says so, or when killAfter was asked for explicitly without killPaper (as before)
             if (run.killAfter) {
-                boolean paperToo = b.killPaper() != null ? b.killPaper() : Boolean.TRUE.equals(b.killAfter());
+                boolean paperToo = scope != Scope.LIVE
+                        && (b.killPaper() != null ? b.killPaper() : Boolean.TRUE.equals(b.killAfter()));
                 Set<Long> liveAccounts = new java.util.HashSet<>();
                 plans.stream().filter(Planned::live).forEach(p -> liveAccounts.add(p.accountId()));
                 for (BrokerAccount a : involved(plans).values()) {
                     if (!liveAccounts.contains(a.id()) && !paperToo) {
+                        continue;
+                    }
+                    // review 25 Nov 2026: an account switch is account-wide; a PAPER-only batch never stops an account that
+                    // trades LIVE now (it would stop its LIVE entries too)
+                    if (scope == Scope.PAPER && a.tradeMode() == com.autotrade.account.TradeMode.LIVE) {
                         continue;
                     }
                     try {
@@ -481,8 +592,15 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
     }
 
     /** One position of a batch as found before it is run. */
+    /** {@code quantity}: part of it to sell (whole lots), null: all of it. */
     private record Planned(int index, long accountId, long positionId, BrokerAccount account, String mode, String symbol,
-                           long open, double atRisk, String paceKey, Map<String, Object> answer) {
+                           long open, double atRisk, String paceKey, Map<String, Object> answer, Long quantity) {
+
+        Planned(int index, long accountId, long positionId, BrokerAccount account, String mode, String symbol, long open,
+                double atRisk, String paceKey, Map<String, Object> answer) {
+            this(index, accountId, positionId, account, mode, symbol, open, atRisk, paceKey, answer, null);
+        }
+
         boolean live() {
             return "LIVE".equals(mode);
         }
@@ -566,8 +684,9 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
                     if (!Long.valueOf(a.id()).equals(r.get("accountId"))) {
                         continue;
                     }
-                    String line = r.get("symbol") + ": " + r.get("outcome") + (r.get("detail") == null ? ""
-                            : " (" + r.get("detail") + ")");
+                    String line = r.get("symbol") + ": " + r.get("outcome") + (r.get("asked") == null ? ""
+                            : " [" + r.get("asked") + " asked]") + (r.get("detail") == null ? "" : " (" + r.get("detail")
+                            + ")");
                     all.add(line);
                     if (List.of("SOLD", "PARTLY", "UNKNOWN").contains(r.get("outcome"))) {
                         // the exit's own lines when it has them ("NIFTY 25450 CE: 130 sold at 131.20"): the member sees
@@ -586,6 +705,7 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
                 detail.put("batch", run.id);
                 detail.put("positions", all);
                 detail.put("kill_after", run.killAfter);
+                detail.put("scope", run.scope.name());
                 kills.audit(a, user.subject(), "ADMIN_EXIT_BATCH", detail);
                 if (run.killedIds.contains(a.id())) {
                     told.add(AdminExits.STOPPED);                     // its kill's alert went to the admin chat only
@@ -616,7 +736,7 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
     }
 
     /** A position as found now: its account, mode and risk, or the answer it gets without being run. */
-    private Planned plan(int index, BatchPosition asked) {
+    private Planned plan(int index, BatchPosition asked, Scope scope) {
         long accountId = asked.accountId(), positionId = asked.positionId();
         BrokerAccount account = accounts.byId(accountId).orElse(null);
         if (account == null) {
@@ -639,9 +759,11 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
             return new Planned(index, accountId, positionId, account, null, null, 0, 0, null, a);
         }
         Map<String, Object> p = jdbc.queryForList("select p.status, p.quantity_open, p.average_entry, p.symbol, "
-                + "p.instrument_key, p.underlying, p.instrument_token, i.execution_mode from exec.position p join "
-                + "exec.trade_intent i on i.id = p.entry_trade_intent_id where p.id = ? and p.broker_account_id = ?",
-                positionId, accountId).stream().findFirst().orElse(null);
+                + "p.instrument_key, p.underlying, p.instrument_token, i.execution_mode, d0.lot_size from exec.position p "
+                + "join exec.trade_intent i on i.id = p.entry_trade_intent_id "
+                + "left join exec.trade_batch b0 on b0.id = i.trade_batch_id "
+                + "left join exec.signal_decision d0 on d0.id = b0.signal_decision_id "
+                + "where p.id = ? and p.broker_account_id = ?", positionId, accountId).stream().findFirst().orElse(null);
         if (p == null) {
             return new Planned(index, accountId, positionId, account, null, null, 0, 0, null, answer(accountId,
                     account.displayName(), positionId, null, null, "REFUSED", "no position " + positionId + " in "
@@ -650,9 +772,32 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
         String mode = (String) p.get("execution_mode");
         String symbol = (String) p.get("symbol");
         long open = ((Number) p.get("quantity_open")).longValue();
+        // review 25 Nov 2026: the exit is routed by the account's trade mode now, not the entry's: a paper entry on an
+        // account that trades LIVE now would be sold through its broker (a real order); a PAPER-only batch never sends it
+        if (scope == Scope.PAPER && !"LIVE".equals(mode) && account.tradeMode() == com.autotrade.account.TradeMode.LIVE
+                && !"CLOSED".equals(p.get("status")) && open > 0) {
+            return new Planned(index, accountId, positionId, account, mode, symbol, open, 0, null, answer(accountId,
+                    account.displayName(), positionId, symbol, mode, "REFUSED", account.displayName() + " trades LIVE now: "
+                            + "its exit would go to the broker, not the paper book; exit it with Both chosen or from the "
+                            + "account page", List.of()));
+        }
         if ("CLOSED".equals(p.get("status")) || open <= 0) {
             return new Planned(index, accountId, positionId, account, mode, symbol, 0, 0, null, answer(accountId,
                     account.displayName(), positionId, symbol, mode, "ALREADY_CLOSED", null, List.of()));
+        }
+        // a part of it (25 Nov 2026): whole lots, checked here so a wrong count sends nothing (at a broker the worker's
+        // own check would come after the lane started, an UNKNOWN); at least what is open is all of it
+        Long part = asked.quantity() == null || asked.quantity() >= open ? null : asked.quantity();
+        if (part != null) {
+            int lot = p.get("lot_size") == null ? 0 : ((Number) p.get("lot_size")).intValue();
+            String why = lot <= 0 ? "its lot size is not known: only all of it can be exited"
+                    : part % lot != 0 ? part + " is not a whole number of lots of " + lot : null;
+            if (why != null) {
+                Map<String, Object> a = answer(accountId, account.displayName(), positionId, symbol, mode, "REFUSED", why,
+                        List.of());
+                a.put("asked", part);
+                return new Planned(index, accountId, positionId, account, mode, symbol, open, 0, null, a);
+            }
         }
         Map<String, Object> q = quotes.latest((String) p.get("instrument_key"), (String) p.get("underlying"),
                 ((Number) p.get("instrument_token")).longValue(), LiveBookController.QUOTE_MAX_AGE_MIN);
@@ -661,7 +806,8 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
         String pace = !"LIVE".equals(mode) ? null : jdbc.queryForList("select credential_profile_id from "
                 + "acct.broker_account where id = ?", Long.class, accountId).stream().filter(java.util.Objects::nonNull)
                 .findFirst().map(id -> "app:" + id).orElse("account:" + accountId);
-        return new Planned(index, accountId, positionId, account, mode, symbol, open, price * open, pace, null);
+        return new Planned(index, accountId, positionId, account, mode, symbol, open, price * (part == null ? open : part),
+                pace, null, part);
     }
 
     /**
@@ -681,9 +827,9 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
         }
         com.autotrade.execution.ExitOutcome o;
         try {
-            BatchRunner run = runner != null ? runner : (account, position, actor, d, admin, detail) ->
-                    service.exitPositionOutcome(account, position, actor, d, admin, detail);
-            o = run.run(p.accountId(), p.positionId(), user.subject(), day, byAdmin, audit);
+            BatchRunner run = runner != null ? runner : (account, position, quantity, actor, d, admin, detail) ->
+                    service.exitPositionOutcome(account, position, actor, d, quantity, admin, detail);
+            o = run.run(p.accountId(), p.positionId(), p.quantity(), user.subject(), day, byAdmin, audit);
         } catch (IllegalArgumentException e) {
             return withDetail(answer(p, "REFUSED", List.of()), String.valueOf(e.getMessage()));
         } catch (InterruptedException e) {
@@ -728,8 +874,12 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
     }
 
     private static Map<String, Object> answer(Planned p, String outcome, List<String> lines) {
-        return answer(p.accountId(), p.account() == null ? null : p.account().displayName(), p.positionId(), p.symbol(),
-                p.mode(), outcome, null, lines);
+        Map<String, Object> a = answer(p.accountId(), p.account() == null ? null : p.account().displayName(), p.positionId(),
+                p.symbol(), p.mode(), outcome, null, lines);
+        if (p.quantity() != null) {
+            a.put("asked", p.quantity());                         // a part of it: how many were asked for
+        }
+        return a;
     }
 
     private static Map<String, Object> answer(long accountId, String account, long positionId, String symbol, String mode,
@@ -744,6 +894,164 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
         a.put("detail", detail);
         a.put("lines", lines);
         return a;
+    }
+
+    // ------------------------------------------------------------------------------------------------- admin target
+
+    /**
+     * Sets one first target % on every position sent (user 25 Nov 2026: "admin for global to be exited from all LIVE all
+     * workspaces with the first target, admin target"): the per-position target's lock ({@link
+     * com.autotrade.execution.PositionTargets}), set as the admin's (V55) on members' accounts and as the owner's own on
+     * their own workspace's. Refused as a whole (4xx, nothing set) without the phrase, a reason or a valid %, or with a
+     * position of another book than the scope's. Each position answers SET, UNCHANGED (that % already stands) or REFUSED
+     * (why: a mirror, a signal source, closed, the target selling now). Then per account an ADMIN_TARGET_BATCH audit row and,
+     * on members' accounts, one message to the members.
+     */
+    @PostMapping("/api/execution/admin/targets")
+    Map<String, Object> setTargets(@RequestHeader(value = Access.HEADER, required = false) String subject,
+                                   @RequestBody Targets t) {
+        Access.User user = admin(subject);
+        if (t == null || t.pct() == null || com.autotrade.execution.PositionTargets.pct(t.pct()) == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "pct: more than 0 and at most "
+                    + (int) com.autotrade.execution.PositionTargets.MAX_PCT + " (two decimals)");
+        }
+        return targetBatch(user, t, "TARGET " + count(t) + " POSITIONS", true);
+    }
+
+    /** Removes the first target from every position sent (the admin target's undo); as {@link #setTargets}. */
+    @PostMapping("/api/execution/admin/targets/clear")
+    Map<String, Object> clearTargets(@RequestHeader(value = Access.HEADER, required = false) String subject,
+                                     @RequestBody Targets t) {
+        Access.User user = admin(subject);
+        return targetBatch(user, t, "CLEAR " + count(t) + " TARGETS", false);
+    }
+
+    private static int count(Targets t) {
+        return t == null || t.positions() == null ? 0 : t.positions().size();
+    }
+
+    /** One position of a target batch as found before anything is set: its account, book and symbol, or why it is refused. */
+    private record TargetPlan(BatchPosition asked, BrokerAccount account, String mode, String symbol, String refused) {
+    }
+
+    private TargetPlan targetPlan(BatchPosition p) {
+        BrokerAccount a = accounts.byId(p.accountId()).orElse(null);
+        Map<String, Object> pos = jdbc.queryForList("select p.symbol, i.execution_mode from exec.position p join "
+                + "exec.trade_intent i on i.id = p.entry_trade_intent_id where p.id = ? and p.broker_account_id = ?",
+                p.positionId(), p.accountId()).stream().findFirst().orElse(null);
+        String mode = pos == null ? null : (String) pos.get("execution_mode");
+        String symbol = pos == null ? null : (String) pos.get("symbol");
+        if (a == null) {
+            return new TargetPlan(p, null, mode, symbol, "no account " + p.accountId());
+        }
+        if (a.role() == com.autotrade.account.AccountRole.SIGNAL_SOURCE) {
+            return new TargetPlan(p, a, mode, symbol, a.displayName() + " is a signal source: its positions are the engine's");
+        }
+        String mirror = Mirrors.of(jdbc, a.id());
+        if (mirror != null) {
+            return new TargetPlan(p, a, mode, symbol, a.displayName() + " is a mirror of " + mirror + ": set it at the source");
+        }
+        return new TargetPlan(p, a, mode, symbol, pos == null ? "no position " + p.positionId() + " in " + a.displayName()
+                : null);
+    }
+
+    private Map<String, Object> targetBatch(Access.User user, Targets t, String phrase, boolean set) {
+        List<BatchPosition> asked = t == null || t.positions() == null ? List.of() : t.positions();
+        if (asked.isEmpty() || asked.size() > MAX_BATCH) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "positions: 1 to " + MAX_BATCH);
+        }
+        Access.require(phrase.equals(t.confirm()), "confirm with \"" + phrase + "\" (the number of positions sent)");
+        String reason = AdminExits.requireReason(t.reason());
+        Scope scope = t.scope() == null || t.scope().isBlank() ? Scope.LIVE : Scope.of(t.scope());
+        Set<String> seen = new LinkedHashSet<>();
+        List<TargetPlan> plans = new ArrayList<>();
+        for (BatchPosition p : asked) {
+            if (p == null || p.accountId() == null || p.positionId() == null) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "each position needs accountId and positionId");
+            }
+            if (!seen.add(p.accountId() + ":" + p.positionId())) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "position " + p.positionId() + " is listed twice");
+            }
+            plans.add(targetPlan(p));
+        }
+        List<String> outside = plans.stream().filter(x -> x.mode() != null && !scope.holds(x.mode()))
+                .map(x -> x.account().displayName() + " " + x.symbol() + " (" + x.mode() + ")").toList();
+        if (!outside.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "not in the " + scope + " book chosen: "
+                    + String.join(", ", outside) + "; nothing was set");
+        }
+        List<Map<String, Object>> results = new ArrayList<>();
+        Map<Long, List<String>> lines = new LinkedHashMap<>(), told = new LinkedHashMap<>();
+        Map<Long, BrokerAccount> touched = new LinkedHashMap<>();
+        for (TargetPlan x : plans) {
+            BatchPosition p = x.asked();
+            BrokerAccount a = x.account();
+            Map<String, Object> r = answer(p.accountId(), a == null ? null : a.displayName(), p.positionId(), x.symbol(),
+                    x.mode(), "REFUSED", x.refused(), List.of());
+            if (x.refused() == null) {
+                boolean byAdmin = user.byAdmin(a.tenantId());
+                Map<String, Object> audit = null;
+                if (byAdmin) {
+                    audit = new LinkedHashMap<>(auditOf(user, a, reason));
+                    audit.put("by_admin", true);
+                    audit.put("admin_reason", reason);
+                    audit.put("admin_target_batch", true);
+                }
+                try {
+                    Optional<com.autotrade.execution.PositionTargets.View> before = targets.view(p.positionId());
+                    if (set) {
+                        com.autotrade.execution.PositionTargets.View v = targets.set(a, p.positionId(), t.pct(),
+                                user.subject(), audit);
+                        r.put("outcome", com.autotrade.execution.PositionTargets.changed(before, Optional.of(v)) ? "SET"
+                                : "UNCHANGED");
+                        r.put("detail", String.format(java.util.Locale.ROOT, "first target +%s %% = %.2f (%s)",
+                                com.autotrade.execution.PositionTargets.pctText(v.pct()), v.price(), v.status()));
+                        r.put("target", v.toMap());
+                    } else {
+                        boolean cleared = targets.clear(a, p.positionId(), user.subject(), audit);
+                        r.put("outcome", cleared ? "CLEARED" : "UNCHANGED");
+                        r.put("detail", cleared ? "first target removed" : "no first target on it");
+                    }
+                } catch (IllegalArgumentException e) {
+                    r.put("detail", e.getMessage());
+                } catch (RuntimeException e) {
+                    // review 25 Nov 2026: one row's failure never hides what the rows before it set (audit, members told)
+                    log.error("admin target batch: position {} failed", p.positionId(), e);
+                    r.put("outcome", "ERROR");
+                    r.put("detail", "not known whether it was " + (set ? "set" : "removed") + " (" + e.getMessage()
+                            + "): read the desk again");
+                }
+                touched.putIfAbsent(a.id(), a);
+                lines.computeIfAbsent(a.id(), k -> new ArrayList<>()).add(x.symbol() + ": " + r.get("outcome") + " ("
+                        + r.get("detail") + ")");
+                if (byAdmin && List.of("SET", "CLEARED").contains(r.get("outcome"))) {
+                    told.computeIfAbsent(a.id(), k -> new ArrayList<>()).add(x.symbol() + ": " + r.get("detail"));
+                }
+            }
+            results.add(r);
+        }
+        for (BrokerAccount a : touched.values()) {
+            try {
+                Map<String, Object> detail = new LinkedHashMap<>(auditOf(user, a, reason));
+                detail.put("set", set);
+                if (set) {
+                    detail.put("pct", com.autotrade.execution.PositionTargets.pct(t.pct()));
+                }
+                detail.put("scope", scope.name());
+                detail.put("positions", lines.get(a.id()));
+                kills.audit(a, user.subject(), "ADMIN_TARGET_BATCH", detail);
+                if (told.containsKey(a.id())) {
+                    adminExits.targetSet(a, user.subject(), reason, told.get(a.id()));
+                }
+            } catch (RuntimeException e) {
+                log.error("admin target batch: {}'s audit or message failed", a.displayName(), e);
+            }
+        }
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("scope", scope.name());
+        out.put("count", results.size());
+        out.put("results", results);
+        return out;
     }
 
     // ------------------------------------------------------------------------------------------------- consent (V51)
@@ -799,7 +1107,8 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
 
     /**
      * The admin's exits on the caller's accounts in the last 24 h, newest first (the in-app banner, decision 3); never the
-     * caller's own actions. Second review 20 Nov 2026: a POSITION_EXIT that sold nothing (a refused paper exit, "position 7
+     * caller's own actions; and (25 Nov 2026) the admin's first target set or removed (TARGET_SET / TARGET_CLEARED by_admin).
+     * Second review 20 Nov 2026: a POSITION_EXIT that sold nothing (a refused paper exit, "position 7
      * is not open" after its strategy closed it) is not shown as "the admin exited" (a flatten always is: it stopped the
      * account); and the rows are read through the audit's (account, time) index, not by scanning the whole log backwards
      * for every member's 30-second poll.
@@ -809,12 +1118,17 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
         Access.User user = access.user(subject);
         Long[] tenants = user.tenants().toArray(new Long[0]);
         List<Map<String, Object>> out = new ArrayList<>();
+        // 25 Nov 2026: the admin's first target set or removed on the member's position (its symbol and % as the line)
         for (Map<String, Object> r : jdbc.queryForList("select l.id, " + Iso.of("l.at") + " at, l.action, "
-                + "a.display_name account, l.detail ->> 'admin_reason' reason, (l.detail -> 'positions')::text positions "
+                + "a.display_name account, l.detail ->> 'admin_reason' reason, coalesce((l.detail -> 'positions')::text, "
+                + "case when l.action = 'TARGET_SET' then json_build_array((l.detail ->> 'symbol') || ': first target +' || "
+                + "trim_scale((l.detail ->> 'pct')::numeric) || ' %' || coalesce(' = ' || to_char((l.detail ->> 'price')"
+                + "::numeric, 'FM999999990.00'), ''))::text end) positions "
                 + "from exec.audit_log l join acct.broker_account a on a.id = l.broker_account_id "
                 + "where l.broker_account_id = any(array(select b.id from acct.broker_account b where b.tenant_id = any(?))) "
-                + "and l.at > now() - interval '24 hours' and l.action in ('POSITION_EXIT', 'FLATTEN') "
-                + "and l.detail ->> 'by_admin' = 'true' and coalesce(l.detail ->> 'actor', '') not in (?, ?) "
+                + "and l.at > now() - interval '24 hours' and l.action in ('POSITION_EXIT', 'FLATTEN', 'TARGET_SET', "
+                + "'TARGET_CLEARED') "
+                + "and l.detail ->> 'by_admin' = 'true' and coalesce(l.detail ->> 'actor', l.actor, '') not in (?, ?) "
                 + "order by l.at desc, l.id desc limit 100", tenants, user.subject(), "telegram:" + user.subject())) {
             Map<String, Object> m = new LinkedHashMap<>(r);
             String positions = (String) m.get("positions");

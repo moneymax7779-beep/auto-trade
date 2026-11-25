@@ -615,7 +615,7 @@ function Tag({ children, strategy }: { children: ReactNode; strategy?: boolean }
 }
 
 const REASONS: Record<string, string> = { STOP: "stop", MANUAL: "sold by hand", TARGET: "target", FLAT_BY: "end of day",
-  TRAIL: "trail", EOD_SQUARE_OFF: "square-off", FLATTEN: "flattened", TIME_60: "60-min time stop", TRADER_EXIT: "exited by you", MANUAL_TARGET: "your target",
+  TRAIL: "trail", EOD_SQUARE_OFF: "square-off", FLATTEN: "flattened", TIME_60: "60-min time stop", TRADER_EXIT: "exited by you", MANUAL_TARGET: "first target",
   ADMIN_EXIT: "exited by the admin",
   EARLY_FAIL_15: "15-min early exit" };
 

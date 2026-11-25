@@ -1024,6 +1024,19 @@ public final class ExecutionLoop implements AutoCloseable {
      */
     public ExitOutcome exitPositionOutcome(long accountId, long positionId, String actor, LocalDate day, boolean byAdmin,
                                            Map<String, ?> audit) throws Exception {
+        return exitPositionOutcome(accountId, positionId, actor, day, null, byAdmin, audit);
+    }
+
+    /**
+     * As above, selling {@code quantity} of it (whole lots, the rest stays open: the per-position Exit's partial, 17 Nov
+     * 2026; the exit desk's partial batch, 25 Nov 2026); null, or at least what is open on the lane: all of it. A partial
+     * that sold exactly what was asked is SOLD (its detail says how many stay open); less than asked is PARTLY.
+     */
+    public ExitOutcome exitPositionOutcome(long accountId, long positionId, String actor, LocalDate day, Long quantity,
+                                           boolean byAdmin, Map<String, ?> audit) throws Exception {
+        if (quantity != null && quantity <= 0) {
+            throw new IllegalArgumentException("quantity must be above 0");
+        }
         BrokerAccount account = accounts.byId(accountId).orElseThrow(() -> new IllegalArgumentException("no account "
                 + accountId));
         if (account.role() == com.autotrade.account.AccountRole.SIGNAL_SOURCE) {
@@ -1062,11 +1075,13 @@ public final class ExecutionLoop implements AutoCloseable {
                 }
                 long intent = ((Number) before.get("entry_trade_intent_id")).longValue();
                 long mark = jdbc.queryForObject("select coalesce(max(id), 0) from exec.order_execution", Long.class);
+                // what is open on the lane decides: asking for all of it (or more) is a whole exit
+                Long sell = quantity == null || quantity >= open ? null : quantity;
                 List<String> lines;
                 RuntimeException failure = null;
                 try {
                     lines = flattenHere(account, risk, route, epoch, borrowed, day, byAdmin ? "ADMIN_EXIT" : "TRADER_EXIT",
-                            positionId, null, detail);
+                            positionId, sell, detail);
                 } catch (RuntimeException e) {
                     failure = e;
                     lines = List.of("the exit failed: " + e.getMessage());
@@ -1078,8 +1093,14 @@ public final class ExecutionLoop implements AutoCloseable {
                             positionId);
                     List<String> orders = jdbc.queryForList("select status from exec.order_execution where trade_intent_id = ? "
                             + "and role = 'EMERGENCY_EXIT' and id > ? order by id", String.class, intent, mark);
-                    return ExitOutcome.classify(open, ((Number) after.get("quantity_open")).longValue(),
-                            "CLOSED".equals(after.get("status")), lines, orders, failure, route.venue().broker());
+                    long left = ((Number) after.get("quantity_open")).longValue();
+                    ExitOutcome o = ExitOutcome.classify(open, left, "CLOSED".equals(after.get("status")), lines, orders,
+                            failure, route.venue().broker());
+                    if (sell != null && ExitOutcome.PARTLY.equals(o.outcome()) && open - left == sell) {
+                        return new ExitOutcome(ExitOutcome.SOLD, open, left, lines, sell + " of " + open + " sold as asked, "
+                                + left + " stay open");
+                    }
+                    return o;
                 } catch (RuntimeException e) {
                     return new ExitOutcome(ExitOutcome.UNKNOWN, open, null, lines, "the exit was sent but its result could "
                             + "not be read (" + e.getMessage() + "): " + ExitOutcome.UNKNOWN_ADVICE);

@@ -1203,6 +1203,8 @@ public final class TradingSession {
             status.put("mode", settings.mode());
             status.put("date", settings.session().toString());
             status.put("account", settings.account());
+            // the exit desk's book choice (25 Nov 2026): a signal source's close reaches every follower, LIVE and paper
+            status.put("signalSource", signals != null);
             status.put("feed", feed.name());
             status.put("events", events.get());
             Instant last = feed.lastEventTime();
