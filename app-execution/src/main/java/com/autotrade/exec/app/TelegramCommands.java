@@ -948,7 +948,7 @@ class TelegramCommands {
         return lines.stream().map(l -> l.toLowerCase(Locale.ROOT)).anyMatch(l -> l.contains("not flattened")
                 || l.contains("not exited")
                 || l.contains("has not started") || l.contains("keeps its broker stop") || l.contains("unknown outcome")
-                || l.contains(" sold (") || l.contains("not placed yet"));
+                || l.contains(" sold (") || l.contains("not placed yet") || l.contains("not confirmed yet"));
     }
 
     /** Runs a confirmed command (the rights checked again) and edits its card with the result. */
