@@ -130,11 +130,11 @@ function OpenCard({ accountId, p, mode, canAct, canTarget, reasonRequired }: { a
 /**
  * The shares of a position offered for a partial exit (25 Nov 2026, the exit desk: "a quantity in lots, or a share of the
  * position", as the Overview's All / Half / lots): ¾, ½ and ¼ of the lots held, rounded down to whole lots, each at least
- * one lot and less than all; a count two shares round to is named once, by ½ first (2 lots: "½ (1)", not "¾ (1)").
+ * one lot and less than all; a count two shares round to is named once, by Half first (2 lots: "Half (1)", not "¾ (1)"); "Half" as the sheet always said it.
  */
 export function shareChoices(allLots: number): { label: string; lots: number }[] {
   const out: { label: string; lots: number }[] = [];
-  for (const [label, f] of [["½", 0.5], ["¼", 0.25], ["¾", 0.75]] as const) {
+  for (const [label, f] of [["Half", 0.5], ["¼", 0.25], ["¾", 0.75]] as const) {
     const lots = Math.floor(allLots * f);
     if (lots >= 1 && lots < allLots && !out.some((o) => o.lots === lots)) out.push({ label, lots });
   }
