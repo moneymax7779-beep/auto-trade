@@ -51,6 +51,7 @@ class TradingDayIT {
 
     @BeforeAll
     static void start() {
+        IstMidnight.awaitClear();            // the TradingDay.today() tests read the database clock: never across midnight
         postgres = new PostgreSQLContainer(TIMESCALE);
         postgres.start();
         HikariConfig config = new HikariConfig();
@@ -97,10 +98,16 @@ class TradingDayIT {
         if (liveEligible) {
             jdbc.update("update acct.broker_account set trade_mode = 'LIVE', live_trading_enabled = true, "
                     + "connection_status = 'ACTIVE' where id = ?", real);
-            // the day's login, before any LIVE switch of the tests (LIVE counts only when switched during the session)
+            // the day's login, before any LIVE switch of the tests (LIVE counts only when switched during the session):
+            // 08:00 on the day, or for today 10 minutes before the wall clock when that is earlier (25 Nov 2026: 08:00
+            // of today lay ahead of the database's clock before 08:00 IST, so every LIVE switch "preceded" the login)
+            Instant login = ist(day, "08:00:00");
+            if (Instant.now().minusSeconds(600).isBefore(login)) {
+                login = Instant.now().minusSeconds(600);
+            }
             jdbc.update("insert into acct.broker_session (broker_account_id, token_ref, acquired_at, expires_at, status, "
                     + "created_at) values (?, 'session-file:kite-x.token', ?, now() + interval '1 day', 'ACTIVE', ?)", real,
-                    Timestamp.from(ist(day, "08:00:00")), Timestamp.from(ist(day, "08:00:00")));
+                    Timestamp.from(login), Timestamp.from(login));
         }
         new FanOut(dataSource).subscribe(group, real, List.of("ma-cross"), 1.0);
         long twin = accounts.ensurePaperTwin(real);
