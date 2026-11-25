@@ -839,10 +839,23 @@ class ExecutionLoopIT {
             loop.tick(today, 20_000);
             Map<String, Object> pos = jdbc.queryForMap("select id, quantity_open from exec.position where broker_account_id = ? "
                     + "and status = 'OPEN'", paper);
-            long id = ((Number) pos.get("id")).longValue(), held = ((Number) pos.get("quantity_open")).longValue();
-            assertThat(held).isGreaterThan(130);
+            long id = ((Number) pos.get("id")).longValue(), first = ((Number) pos.get("quantity_open")).longValue();
+            assertThat(first).isGreaterThan(130);
             // 20 Nov 2026: a person's paper exit sells at a bid of the last 5 minutes only (never the entry price)
             tick(3000047169L, "NIFTY 23150 PE", 101.5, "20 seconds");
+
+            // 25 Nov 2026 (the exit desk's partial batch): the lane-judged exit sells the part asked, SOLD as asked
+            ExitOutcome part = loop.exitPositionOutcome(paper, id, "kc-admin", today, 65L, true, Map.of("by_admin", true));
+            assertThat(part.outcome()).isEqualTo(ExitOutcome.SOLD);
+            assertThat(part.detail()).isEqualTo("65 of " + first + " sold as asked, " + (first - 65) + " stay open");
+            assertThat(part.after()).isEqualTo(first - 65);
+            assertThat(jdbc.queryForObject("select detail->>'quantity' from exec.audit_log where broker_account_id = ? "
+                    + "and action = 'POSITION_EXIT'", String.class, paper)).isEqualTo("65");
+            assertThat(loop.exitPositionOutcome(paper, id, "kc-admin", today, 100L, true, Map.of()).outcome())
+                    .as("not whole lots: nothing sold").isEqualTo(ExitOutcome.REFUSED);
+            long held = jdbc.queryForObject("select quantity_open from exec.position where id = ?", Long.class, id);
+            assertThat(held).isEqualTo(first - 65);
+            assertThat(held).as("room for the 130 below and a rest").isGreaterThan(130);
 
             assertThatThrownBy(() -> loop.exitPosition(paper, id, "kc-pia", today, 100L))
                     .isInstanceOf(IllegalArgumentException.class).hasMessageContaining("whole number of lots");
@@ -851,7 +864,7 @@ class ExecutionLoopIT {
             assertThat(jdbc.queryForObject("select status || ':' || quantity_open || ':' || (realised_gross is not null) "
                     + "from exec.position where id = ?", String.class, id)).isEqualTo("OPEN:" + (held - 130) + ":true");
             assertThat(jdbc.queryForObject("select detail->>'quantity' from exec.audit_log where broker_account_id = ? "
-                    + "and action = 'POSITION_EXIT'", String.class, paper)).isEqualTo("130");
+                    + "and action = 'POSITION_EXIT' order by id desc limit 1", String.class, paper)).isEqualTo("130");
 
             // asking for more than is open sells what is open
             assertThat(loop.exitPosition(paper, id, "kc-pia", today, held * 10)).singleElement().asString()

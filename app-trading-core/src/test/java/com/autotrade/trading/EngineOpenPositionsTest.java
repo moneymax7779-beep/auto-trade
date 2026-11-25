@@ -19,6 +19,11 @@ class EngineOpenPositionsTest {
     private static final AuthProperties NONE = new AuthProperties("none", null, null, null, null, null, null, null);
 
     private static TradingSession session(String account, TradingSession.Mode mode, List<Map<String, Object>> open) {
+        return session(account, mode, open, account.startsWith("SIGNAL"));
+    }
+
+    private static TradingSession session(String account, TradingSession.Mode mode, List<Map<String, Object>> open,
+                                          boolean signalSource) {
         TradingSession s = mock(TradingSession.class);
         Map<String, Object> status = new LinkedHashMap<>();
         status.put("session", 7L);
@@ -27,6 +32,7 @@ class EngineOpenPositionsTest {
         status.put("date", "2026-11-20");
         status.put("account", account);
         status.put("lastEvent", "11:02:03");
+        status.put("signalSource", signalSource);
         status.put("capital", 500_000);                         // not passed on
         status.put("openPositions", open);
         when(s.status()).thenReturn(status);
@@ -45,9 +51,11 @@ class EngineOpenPositionsTest {
 
         List<Map<String, Object>> out = new TradingController(runner, NONE).openPositions();
         assertThat(out).extracting(s -> s.get("account")).containsExactly("PAPER-1", "SIGNAL-1");
-        assertThat(out.getFirst()).containsOnlyKeys("session", "account", "mode", "date", "status", "lastEvent", "killSwitches",
-                        "positions")
-                .containsEntry("positions", List.of(position));
+        assertThat(out.getFirst()).containsOnlyKeys("session", "account", "mode", "date", "status", "lastEvent", "signalSource",
+                        "killSwitches", "positions")
+                .containsEntry("positions", List.of(position)).containsEntry("signalSource", false);
+        // the exit desk's book choice (25 Nov 2026): SIGNAL-1's exits reach every follower, LIVE and paper
+        assertThat(out.get(1)).containsEntry("signalSource", true);
         assertThat(new TradingController(mock(SessionRunner.class), NONE).openPositions()).isEmpty();
     }
 }

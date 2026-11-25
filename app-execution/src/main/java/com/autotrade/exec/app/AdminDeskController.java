@@ -73,11 +73,45 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
      * {@link com.autotrade.execution.ExecutionLoop#exitPositionOutcome}; tests give their own).
      */
     interface BatchRunner {
-        com.autotrade.execution.ExitOutcome run(long accountId, long positionId, String actor, LocalDate day,
+        com.autotrade.execution.ExitOutcome run(long accountId, long positionId, Long quantity, String actor, LocalDate day,
                                                 boolean byAdmin, Map<String, Object> audit) throws Exception;
     }
 
-    record BatchPosition(Long accountId, Long positionId) {
+    /**
+     * @param quantity how many of it to sell (whole lots), the rest staying open: the per-position Exit's partial (user 25
+     *                 Nov 2026: "partial exits like the Overview page's open positions"); null, or at least what is open:
+     *                 all of it
+     */
+    record BatchPosition(Long accountId, Long positionId, Long quantity) {
+
+        BatchPosition(Long accountId, Long positionId) {
+            this(accountId, positionId, null);
+        }
+    }
+
+    /**
+     * The book a batch acts on (user 25 Nov 2026: choose LIVE or PAPER on the exit desk): a position whose entry was LIVE
+     * is the LIVE book's, every other the PAPER book's. A batch with LIVE or PAPER is refused as a whole (nothing sent, no
+     * kill switch) when a position of the other book is in it, and PAPER never engages GLOBAL_LIVE.
+     */
+    enum Scope {
+        LIVE, PAPER, BOTH;
+
+        static Scope of(String s) {
+            if (s == null || s.isBlank()) {
+                return BOTH;                                      // as before the choice: older pages
+            }
+            try {
+                return valueOf(s.trim().toUpperCase(java.util.Locale.ROOT));
+            } catch (IllegalArgumentException e) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "scope: LIVE, PAPER or BOTH");
+            }
+        }
+
+        /** Whether a position of this entry mode is in this book. */
+        boolean holds(String mode) {
+            return this == BOTH || (this == LIVE) == "LIVE".equals(mode);
+        }
     }
 
     /**
@@ -89,9 +123,15 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
      *                   killAfter true without it stops paper accounts too, as before)
      * @param globalLive engage GLOBAL_LIVE first (no LIVE entry anywhere until it is released; "Exit everything", plan
      *                   2026-11-23 decision 3; null: false)
+     * @param scope      the book it acts on, LIVE, PAPER or BOTH ({@link Scope}; null: BOTH)
      */
     record Batch(List<BatchPosition> positions, String reason, Boolean killAfter, String key, String confirm,
-                 Boolean killPaper, Boolean globalLive) {
+                 Boolean killPaper, Boolean globalLive, String scope) {
+
+        Batch(List<BatchPosition> positions, String reason, Boolean killAfter, String key, String confirm,
+              Boolean killPaper, Boolean globalLive) {
+            this(positions, reason, killAfter, key, confirm, killPaper, globalLive, null);
+        }
     }
 
     record Consent(Boolean on) {
@@ -108,6 +148,8 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
         volatile Instant finished;
         final int count;
         final boolean killAfter;
+        /** The book it acts on (LIVE, PAPER or BOTH). */
+        volatile Scope scope = Scope.BOTH;
         final List<String> killed = new java.util.concurrent.CopyOnWriteArrayList<>();
         /** The accounts whose kill switch this batch engaged (their members' message says entries are stopped). */
         final Set<Long> killedIds = ConcurrentHashMap.newKeySet();
@@ -131,6 +173,7 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
             out.put("status", finished == null ? "RUNNING" : "DONE");
             out.put("count", count);
             out.put("killAfter", killAfter);
+            out.put("scope", scope.name());
             out.put("killed", List.copyOf(killed));
             out.put("killFailed", Map.copyOf(killFailed));
             out.put("globalLive", globalLive);
@@ -322,22 +365,31 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
         if (b.key() == null || b.key().isBlank() || b.key().length() > 100) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "key: 1 to 100 characters (one per confirmation)");
         }
+        Scope scope = Scope.of(b.scope());
+        if (scope == Scope.PAPER && Boolean.TRUE.equals(b.globalLive())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "GLOBAL_LIVE stops the LIVE book: not with scope PAPER");
+        }
         Set<String> seen = new LinkedHashSet<>();
         for (BatchPosition p : asked) {
             if (p == null || p.accountId() == null || p.positionId() == null) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "each position needs accountId and positionId");
+            }
+            if (p.quantity() != null && p.quantity() <= 0) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "position " + p.positionId() + ": quantity must "
+                        + "be above 0 (none: all of it)");
             }
             if (!seen.add(p.accountId() + ":" + p.positionId())) {
                 throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "position " + p.positionId() + " is listed twice");
             }
         }
         synchronized (starting) {
-            return start(user, b, asked, reason);
+            return start(user, b, scope, asked, reason);
         }
     }
 
     /** The key's check, the plan, the kill switches and the batch's start (under {@link #starting}). */
-    private ResponseEntity<Map<String, Object>> start(Access.User user, Batch b, List<BatchPosition> asked, String reason) {
+    private ResponseEntity<Map<String, Object>> start(Access.User user, Batch b, Scope scope, List<BatchPosition> asked,
+                                                      String reason) {
         forgetOld();
         String k = user.subject() + ":" + b.key();
         String id = java.util.UUID.randomUUID().toString();
@@ -357,12 +409,22 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
             for (int i = 0; i < asked.size(); i++) {
                 plans.add(plan(i, asked.get(i)));
             }
+            // user 25 Nov 2026: a batch never touches the book that is not chosen; refused as a whole, before any kill
+            // switch or exit (a page showing one book sends only that book's rows: anything else is stale or wrong)
+            List<String> outside = plans.stream().filter(p -> p.mode() != null && !scope.holds(p.mode()))
+                    .map(p -> (p.account() == null ? "" : p.account().displayName() + " ") + p.symbol() + " (" + p.mode()
+                            + ")").toList();
+            if (!outside.isEmpty()) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "not in the " + scope + " book chosen: "
+                        + String.join(", ", outside) + "; nothing was sent");
+            }
             List<Planned> runnable = plans.stream().filter(p -> p.answer() == null)
                     .sorted(Comparator.comparing((Planned p) -> !p.live()).thenComparing(Comparator.comparingDouble(
                             Planned::atRisk).reversed())).toList();
             boolean anyLive = plans.stream().anyMatch(Planned::live);   // any LIVE row sent, open or already closed
             run = new BatchRun(id, b.key(), asked.size(), b.killAfter() != null ? b.killAfter() : anyLive,
                     runnable.stream().map(Planned::positionId).toList());
+            run.scope = scope;
             plans.forEach(p -> run.rows.put(p.index(), p.answer() != null ? p.answer() : answer(p, "PENDING", List.of())));
             runs.put(id, run);
             // 23 Nov 2026 (plan decision 3): GLOBAL_LIVE first, when asked: no LIVE entry anywhere while the batch runs
@@ -384,7 +446,8 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
             // 23 Nov 2026 (plan decision 3): by default (killAfter not sent) the accounts with a LIVE position only; the
             // paper ones too when killPaper says so, or when killAfter was asked for explicitly without killPaper (as before)
             if (run.killAfter) {
-                boolean paperToo = b.killPaper() != null ? b.killPaper() : Boolean.TRUE.equals(b.killAfter());
+                boolean paperToo = scope != Scope.LIVE
+                        && (b.killPaper() != null ? b.killPaper() : Boolean.TRUE.equals(b.killAfter()));
                 Set<Long> liveAccounts = new java.util.HashSet<>();
                 plans.stream().filter(Planned::live).forEach(p -> liveAccounts.add(p.accountId()));
                 for (BrokerAccount a : involved(plans).values()) {
@@ -481,8 +544,15 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
     }
 
     /** One position of a batch as found before it is run. */
+    /** {@code quantity}: part of it to sell (whole lots), null: all of it. */
     private record Planned(int index, long accountId, long positionId, BrokerAccount account, String mode, String symbol,
-                           long open, double atRisk, String paceKey, Map<String, Object> answer) {
+                           long open, double atRisk, String paceKey, Map<String, Object> answer, Long quantity) {
+
+        Planned(int index, long accountId, long positionId, BrokerAccount account, String mode, String symbol, long open,
+                double atRisk, String paceKey, Map<String, Object> answer) {
+            this(index, accountId, positionId, account, mode, symbol, open, atRisk, paceKey, answer, null);
+        }
+
         boolean live() {
             return "LIVE".equals(mode);
         }
@@ -566,8 +636,9 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
                     if (!Long.valueOf(a.id()).equals(r.get("accountId"))) {
                         continue;
                     }
-                    String line = r.get("symbol") + ": " + r.get("outcome") + (r.get("detail") == null ? ""
-                            : " (" + r.get("detail") + ")");
+                    String line = r.get("symbol") + ": " + r.get("outcome") + (r.get("asked") == null ? ""
+                            : " [" + r.get("asked") + " asked]") + (r.get("detail") == null ? "" : " (" + r.get("detail")
+                            + ")");
                     all.add(line);
                     if (List.of("SOLD", "PARTLY", "UNKNOWN").contains(r.get("outcome"))) {
                         // the exit's own lines when it has them ("NIFTY 25450 CE: 130 sold at 131.20"): the member sees
@@ -586,6 +657,7 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
                 detail.put("batch", run.id);
                 detail.put("positions", all);
                 detail.put("kill_after", run.killAfter);
+                detail.put("scope", run.scope.name());
                 kills.audit(a, user.subject(), "ADMIN_EXIT_BATCH", detail);
                 if (run.killedIds.contains(a.id())) {
                     told.add(AdminExits.STOPPED);                     // its kill's alert went to the admin chat only
@@ -639,9 +711,11 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
             return new Planned(index, accountId, positionId, account, null, null, 0, 0, null, a);
         }
         Map<String, Object> p = jdbc.queryForList("select p.status, p.quantity_open, p.average_entry, p.symbol, "
-                + "p.instrument_key, p.underlying, p.instrument_token, i.execution_mode from exec.position p join "
-                + "exec.trade_intent i on i.id = p.entry_trade_intent_id where p.id = ? and p.broker_account_id = ?",
-                positionId, accountId).stream().findFirst().orElse(null);
+                + "p.instrument_key, p.underlying, p.instrument_token, i.execution_mode, d0.lot_size from exec.position p "
+                + "join exec.trade_intent i on i.id = p.entry_trade_intent_id "
+                + "left join exec.trade_batch b0 on b0.id = i.trade_batch_id "
+                + "left join exec.signal_decision d0 on d0.id = b0.signal_decision_id "
+                + "where p.id = ? and p.broker_account_id = ?", positionId, accountId).stream().findFirst().orElse(null);
         if (p == null) {
             return new Planned(index, accountId, positionId, account, null, null, 0, 0, null, answer(accountId,
                     account.displayName(), positionId, null, null, "REFUSED", "no position " + positionId + " in "
@@ -654,6 +728,20 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
             return new Planned(index, accountId, positionId, account, mode, symbol, 0, 0, null, answer(accountId,
                     account.displayName(), positionId, symbol, mode, "ALREADY_CLOSED", null, List.of()));
         }
+        // a part of it (25 Nov 2026): whole lots, checked here so a wrong count sends nothing (at a broker the worker's
+        // own check would come after the lane started, an UNKNOWN); at least what is open is all of it
+        Long part = asked.quantity() == null || asked.quantity() >= open ? null : asked.quantity();
+        if (part != null) {
+            int lot = p.get("lot_size") == null ? 0 : ((Number) p.get("lot_size")).intValue();
+            String why = lot <= 0 ? "its lot size is not known: only all of it can be exited"
+                    : part % lot != 0 ? part + " is not a whole number of lots of " + lot : null;
+            if (why != null) {
+                Map<String, Object> a = answer(accountId, account.displayName(), positionId, symbol, mode, "REFUSED", why,
+                        List.of());
+                a.put("asked", part);
+                return new Planned(index, accountId, positionId, account, mode, symbol, open, 0, null, a);
+            }
+        }
         Map<String, Object> q = quotes.latest((String) p.get("instrument_key"), (String) p.get("underlying"),
                 ((Number) p.get("instrument_token")).longValue(), LiveBookController.QUOTE_MAX_AGE_MIN);
         double price = q == null ? num(p.get("average_entry")) : num(q.get("bid"));
@@ -661,7 +749,8 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
         String pace = !"LIVE".equals(mode) ? null : jdbc.queryForList("select credential_profile_id from "
                 + "acct.broker_account where id = ?", Long.class, accountId).stream().filter(java.util.Objects::nonNull)
                 .findFirst().map(id -> "app:" + id).orElse("account:" + accountId);
-        return new Planned(index, accountId, positionId, account, mode, symbol, open, price * open, pace, null);
+        return new Planned(index, accountId, positionId, account, mode, symbol, open, price * (part == null ? open : part),
+                pace, null, part);
     }
 
     /**
@@ -681,9 +770,9 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
         }
         com.autotrade.execution.ExitOutcome o;
         try {
-            BatchRunner run = runner != null ? runner : (account, position, actor, d, admin, detail) ->
-                    service.exitPositionOutcome(account, position, actor, d, admin, detail);
-            o = run.run(p.accountId(), p.positionId(), user.subject(), day, byAdmin, audit);
+            BatchRunner run = runner != null ? runner : (account, position, quantity, actor, d, admin, detail) ->
+                    service.exitPositionOutcome(account, position, actor, d, quantity, admin, detail);
+            o = run.run(p.accountId(), p.positionId(), p.quantity(), user.subject(), day, byAdmin, audit);
         } catch (IllegalArgumentException e) {
             return withDetail(answer(p, "REFUSED", List.of()), String.valueOf(e.getMessage()));
         } catch (InterruptedException e) {
@@ -728,8 +817,12 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
     }
 
     private static Map<String, Object> answer(Planned p, String outcome, List<String> lines) {
-        return answer(p.accountId(), p.account() == null ? null : p.account().displayName(), p.positionId(), p.symbol(),
-                p.mode(), outcome, null, lines);
+        Map<String, Object> a = answer(p.accountId(), p.account() == null ? null : p.account().displayName(), p.positionId(),
+                p.symbol(), p.mode(), outcome, null, lines);
+        if (p.quantity() != null) {
+            a.put("asked", p.quantity());                         // a part of it: how many were asked for
+        }
+        return a;
     }
 
     private static Map<String, Object> answer(long accountId, String account, long positionId, String symbol, String mode,

@@ -127,10 +127,29 @@ function OpenCard({ accountId, p, mode, canAct, canTarget, reasonRequired }: { a
  * server's warnings; a big or risky sale, or one without a preview, needs EXIT typed. One key per opened sheet: a double
  * tap or a retry after a timeout returns the first result and sells nothing more.
  */
-export function ExitSheet({ accountId, p, mode, onClose, reasonRequired, title, onDone }: { accountId: number;
+/**
+ * The shares of a position offered for a partial exit (25 Nov 2026, the exit desk: "a quantity in lots, or a share of the
+ * position", as the Overview's All / Half / lots): ¾, ½ and ¼ of the lots held, rounded down to whole lots, each at least
+ * one lot and less than all; a count two shares round to is named once, by ½ first (2 lots: "½ (1)", not "¾ (1)").
+ */
+export function shareChoices(allLots: number): { label: string; lots: number }[] {
+  const out: { label: string; lots: number }[] = [];
+  for (const [label, f] of [["½", 0.5], ["¼", 0.25], ["¾", 0.75]] as const) {
+    const lots = Math.floor(allLots * f);
+    if (lots >= 1 && lots < allLots && !out.some((o) => o.lots === lots)) out.push({ label, lots });
+  }
+  return out.sort((a, b) => b.lots - a.lots);
+}
+
+export function ExitSheet({ accountId, p, mode, onClose, reasonRequired, title, onDone, account }: { accountId: number;
   p: Pick<LiveOpenPosition, "id" | "symbol" | "quantity" | "lotSize">; mode: string; onClose: () => void;
   /** admin exit desk (20 Nov 2026): the caller is not the account's owner, so the exit says why (server-enforced) */
-  reasonRequired?: boolean; title?: string; onDone?: () => void }) {
+  reasonRequired?: boolean; title?: string; onDone?: () => void;
+  /**
+   * the account's name (the exit desk, 25 Nov 2026): a LIVE exit then always asks for the typed EXIT under a line that
+   * names the account, the quantity and LIVE
+   */
+  account?: string }) {
   const client = useQueryClient();
   const [reason, setReason] = useState("");
   const allLots = p.lotSize ? Math.max(1, Math.round(p.quantity / p.lotSize)) : 1;
@@ -165,8 +184,15 @@ export function ExitSheet({ accountId, p, mode, onClose, reasonRequired, title, 
   const needsReason = reasonRequired === true || pv?.reasonRequired === true;
   // a paper exit the server would refuse (no fresh quote) is not sent; a LIVE one with its broker down cannot reach it
   const blocked = pv?.refusal != null && !unknown;
-  const ready = !exit.isPending && !blocked && (previewed || unknown) && (!mustType || typed.trim().toUpperCase() === "EXIT")
+  const shownMode = pv?.mode ?? mode;
+  // the desk (25 Nov 2026): real money is confirmed in words naming the account, the quantity and LIVE; a position
+  // entered LIVE asks for it too, whatever its account's exit route is now
+  const liveConfirm = account != null && (shownMode === "LIVE" || mode === "LIVE");
+  const typeIt = mustType || liveConfirm;
+  const ready = !exit.isPending && !blocked && (previewed || unknown) && (!typeIt || typed.trim().toUpperCase() === "EXIT")
     && (!needsReason || reason.trim().length > 0);
+  const sellQty = pv?.quantity ?? (all ? p.quantity : lots * (p.lotSize ?? 1));
+  const sellLots = pv?.lots ?? (all ? allLots : lots);
   const choose = (n: number) => {
     if (unknown) return;                                           // the first sale may have gone through
     setLots(Math.max(1, Math.min(allLots, n))); setTyped(""); exit.reset(); setKey(newKey());
@@ -177,19 +203,26 @@ export function ExitSheet({ accountId, p, mode, onClose, reasonRequired, title, 
         <div className="flex flex-col gap-3"><p className="text-sm">{done}</p><Big onClick={onClose}>Done</Big></div>
       ) : (
         <div className="flex flex-col gap-3">
-          <p className="text-sm"><ModeBadge mode={pv?.mode ?? mode} />{" "}
-            {(pv?.mode ?? mode) === "LIVE" ? "Real money: sells at the broker now." : "Paper: sold in the simulation."}</p>
+          <p className="text-sm"><ModeBadge mode={shownMode} />{" "}
+            {shownMode === "LIVE" ? "Real money: sells at the broker now." : "Paper: sold in the simulation."}</p>
           {p.lotSize && allLots > 1 && (
             <div className="flex flex-col gap-2">
-              <div className="grid grid-cols-3 gap-2">
+              <div className="flex flex-wrap gap-2" role="group" aria-label="How much to exit">
                 <Big kind={all ? "primary" : "plain"} onClick={() => choose(allLots)}>All {allLots}</Big>
-                <Big kind={!all && lots === Math.max(1, Math.floor(allLots / 2)) ? "primary" : "plain"}
-                  onClick={() => choose(Math.floor(allLots / 2))}>Half</Big>
+                {shareChoices(allLots).map((c) => (
+                  <Big key={c.label} kind={!all && lots === c.lots ? "primary" : "plain"} onClick={() => choose(c.lots)}>
+                    {c.label} ({c.lots})</Big>
+                ))}
+              </div>
+              <div className="flex items-center gap-2">
                 <div className="flex items-center justify-between rounded-lg border border-line">
                   <button type="button" aria-label="One lot fewer" className="min-h-11 w-10 text-lg" onClick={() => choose(lots - 1)}>−</button>
-                  <span className="num text-sm font-semibold">{lots}</span>
+                  <input type="number" inputMode="numeric" min={1} max={allLots} step={1} value={lots} aria-label="Lots to exit"
+                    disabled={unknown} onChange={(e) => choose(Math.floor(Number(e.target.value) || 1))}
+                    className="num w-14 bg-transparent text-center text-sm font-semibold" />
                   <button type="button" aria-label="One lot more" className="min-h-11 w-10 text-lg" onClick={() => choose(lots + 1)}>+</button>
                 </div>
+                <span className="text-xs text-muted">lots</span>
               </div>
               <p className="text-xs text-muted">{lots} of {allLots} lots; {allLots - lots} stay open{allLots - lots > 0 ? " with their stop" : ""}.</p>
             </div>
@@ -211,7 +244,13 @@ export function ExitSheet({ accountId, p, mode, onClose, reasonRequired, title, 
               value={reason} maxLength={300} onChange={(e) => setReason(e.target.value)} aria-label="Reason for this exit" />
           )}
           {preview.error && <p className="text-xs text-down">No preview ({(preview.error as Error).message}). You can still exit: type EXIT.</p>}
-          {mustType && (
+          {liveConfirm && (
+            <p className="rounded-lg border border-down bg-down/10 p-2 text-sm font-semibold text-down">
+              LIVE · real money: sells {sellLots} lot{sellLots === 1 ? "" : "s"} ({sellQty} qty) of {p.symbol} in {account}
+              {shownMode === "LIVE" ? " at the broker now" : ` (entered LIVE; this account's exit route is ${shownMode} now)`}
+              {all ? "" : `; ${allLots - lots === 1 ? "1 lot stays" : `${allLots - lots} lots stay`} open`}. Type EXIT to confirm.</p>
+          )}
+          {typeIt && (
             <input className="min-h-11 rounded-lg border border-line bg-bg px-3 text-base uppercase" placeholder="Type EXIT to confirm"
               autoCapitalize="characters" autoCorrect="off" value={typed} onChange={(e) => setTyped(e.target.value)} aria-label="Type EXIT to confirm" />
           )}

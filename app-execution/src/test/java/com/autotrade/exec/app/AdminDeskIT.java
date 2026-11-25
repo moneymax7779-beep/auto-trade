@@ -60,7 +60,11 @@ class AdminDeskIT {
     private static final List<String> told = Collections.synchronizedList(new ArrayList<>());
 
     /** One exit the runner was asked for. */
-    private record Ran(long account, long position, boolean byAdmin, Map<String, Object> audit) {
+    private record Ran(long account, long position, boolean byAdmin, Map<String, Object> audit, Long quantity) {
+
+        Ran(long account, long position, boolean byAdmin, Map<String, Object> audit) {
+            this(account, position, byAdmin, audit, null);
+        }
     }
 
     private static final List<Ran> ran = Collections.synchronizedList(new ArrayList<>());
@@ -183,8 +187,8 @@ class AdminDeskIT {
      * reads the position as the lane would, and sells all, half or nothing in the database.
      */
     private static AdminDeskController.BatchRunner runner() {
-        return (account, position, actor, day, byAdmin, audit) -> {
-            ran.add(new Ran(account, position, byAdmin, audit));
+        return (account, position, quantity, actor, day, byAdmin, audit) -> {
+            ran.add(new Ran(account, position, byAdmin, audit, quantity));
             killedWhenRun.put(position, jdbc.queryForObject("select exists (select 1 from exec.kill_switch where scope = "
                     + "'ACCOUNT' and broker_account_id = ? and released_at is null)", Boolean.class, account));
             if (closedFirst.contains(position)) {
@@ -208,6 +212,13 @@ class AdminDeskIT {
             if (refuse.contains(position)) {
                 return ExitOutcome.classify(before, before, false, List.of("NIFTY: NOT exited, no bid today and no signal since the entry"),
                         List.of(), null);
+            }
+            if (quantity != null) {
+                // a part of it, as the lane sells one (ExecutionLoop#exitPositionOutcome): exactly what was asked is SOLD
+                jdbc.update("update exec.position set quantity_open = quantity_open - ? where id = ?", quantity, position);
+                return new ExitOutcome(ExitOutcome.SOLD, before, before - quantity, List.of("NIFTY: " + quantity + " of "
+                        + before + " sold at 101.00; " + (before - quantity) + " stay open"), quantity + " of " + before
+                        + " sold as asked, " + (before - quantity) + " stay open");
             }
             if (partly.contains(position)) {
                 jdbc.update("update exec.position set quantity_open = 65 where id = ?", position);
@@ -844,5 +855,94 @@ class AdminDeskIT {
                 .filter(n -> "ALICE-KITE-2".equals(n.get("account"))).toList();
         assertThat(shown).singleElement().satisfies(n -> assertThat(n).containsEntry("action", "FLATTEN")
                 .containsEntry("reason", "storm"));
+    }
+
+    private static AdminDeskController.Batch scoped(String key, String scope, Boolean globalLive,
+                                                    AdminDeskController.BatchPosition... positions) {
+        return new AdminDeskController.Batch(List.of(positions), "risk check", null, key, "EXIT " + positions.length
+                + " POSITIONS", null, globalLive, scope);
+    }
+
+    /**
+     * User 25 Nov 2026 ("partial exits like the Overview page's open positions"): a batch sells a part of a position, whole
+     * lots, through the same lane exit as the per-position Exit; the rest stays open. A count that is not whole lots is
+     * refused there and then (nothing sent); asking for all of it or more is a whole exit. The asked part is in the results
+     * and the audit.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void aBatchSellsAPartOfEachPositionInWholeLotsAndTheRestStaysOpen() throws Exception {
+        long half = position(bobTenant, bobPaper, bobGroup, "PAPER", 80);
+        long odd = position(aliceTenant, alicePaper, aliceGroup, "PAPER", 70);
+        long whole = position(platform, adminPaper, adminGroup, "PAPER", 60);
+        Map<String, Object> out = runBatch(desk(), scoped("part-1", "PAPER", null,
+                new AdminDeskController.BatchPosition(bobPaper, half, 65L),
+                new AdminDeskController.BatchPosition(alicePaper, odd, 100L),
+                new AdminDeskController.BatchPosition(adminPaper, whole, 130L)));
+        List<Map<String, Object>> results = (List<Map<String, Object>>) out.get("results");
+        assertThat(results.get(0)).containsEntry("outcome", "SOLD").containsEntry("asked", 65L)
+                .containsEntry("detail", "65 of 130 sold as asked, 65 stay open");
+        assertThat(results.get(1)).containsEntry("outcome", "REFUSED").containsEntry("asked", 100L)
+                .extractingByKey("detail").asString().contains("not a whole number of lots of 65");
+        assertThat(results.get(2)).containsEntry("outcome", "SOLD").doesNotContainKey("asked");
+        // the lane got the part, all of it as null (whole exit), and nothing for the refused count
+        assertThat(ran).extracting(Ran::position, Ran::quantity).containsExactlyInAnyOrder(
+                org.assertj.core.groups.Tuple.tuple(half, 65L), org.assertj.core.groups.Tuple.tuple(whole, null));
+        assertThat(jdbc.queryForObject("select status || ':' || quantity_open from exec.position where id = ?",
+                String.class, half)).isEqualTo("OPEN:65");
+        assertThat(jdbc.queryForObject("select status || ':' || quantity_open from exec.position where id = ?",
+                String.class, odd)).isEqualTo("OPEN:130");
+        // audited per account with the asked part and the book
+        Map<String, Object> audit = jdbc.queryForMap("select detail ->> 'positions' positions, detail ->> 'scope' scope "
+                + "from exec.audit_log where action = 'ADMIN_EXIT_BATCH' and broker_account_id = ? and detail ->> 'key' = "
+                + "'part-1'", bobPaper);
+        assertThat(audit).containsEntry("scope", "PAPER");
+        assertThat((String) audit.get("positions")).contains("SOLD [65 asked]");
+        assertThat(told).filteredOn(t -> t.startsWith("BOB-PAPER|")).singleElement().asString()
+                .contains("65 of 130 sold at 101.00; 65 stay open");
+        // a quantity of 0 or below: refused as a whole
+        assertThat(code(() -> desk().exitBatch("kc-admin", scoped("part-2", "PAPER", null,
+                new AdminDeskController.BatchPosition(bobPaper, half, 0L))))).isEqualTo(400);
+    }
+
+    /**
+     * User 25 Nov 2026 (choose LIVE or PAPER): a batch for one book never touches the other: a position of the other book
+     * in it refuses the whole batch before any kill switch or exit; PAPER never engages GLOBAL_LIVE; the view and the audit
+     * say the book. No scope is both books, as before.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void aBatchForOneBookNeverTouchesTheOther() throws Exception {
+        long live = position(aliceTenant, kite1, aliceGroup, "LIVE", 120);
+        long paper = position(bobTenant, bobPaper, bobGroup, "PAPER", 80);
+        AdminDeskController desk = desk();
+        AdminDeskController.BatchPosition l = new AdminDeskController.BatchPosition(kite1, live);
+        AdminDeskController.BatchPosition p = new AdminDeskController.BatchPosition(bobPaper, paper);
+        assertThat(code(() -> desk.exitBatch("kc-admin", scoped("s-1", "PAPER", null, p, l)))).isEqualTo(409);
+        assertThat(code(() -> desk.exitBatch("kc-admin", scoped("s-2", "LIVE", null, l, p)))).isEqualTo(409);
+        assertThat(code(() -> desk.exitBatch("kc-admin", scoped("s-3", "PAPER", true, p)))).as("GLOBAL_LIVE").isEqualTo(400);
+        assertThat(code(() -> desk.exitBatch("kc-admin", scoped("s-4", "SOME", null, p)))).isEqualTo(400);
+        assertThat(ran).as("nothing ran").isEmpty();
+        assertThat(jdbc.queryForObject("select count(*) from exec.kill_switch where released_at is null", Integer.class))
+                .as("no kill switch").isZero();
+
+        // the refused key is free again: the same confirmation with the right rows runs
+        Map<String, Object> paperOnly = runBatch(desk, scoped("s-1", "PAPER", null, p));
+        assertThat(paperOnly).containsEntry("scope", "PAPER").containsEntry("killAfter", false)
+                .containsEntry("globalLive", null);
+        assertThat(ran).extracting(Ran::position).containsExactly(paper);
+        assertThat(jdbc.queryForObject("select status from exec.position where id = ?", String.class, live))
+                .isEqualTo("OPEN");
+        // LIVE with GLOBAL_LIVE: only the LIVE book, its account stopped first
+        Map<String, Object> liveOnly = runBatch(desk, scoped("s-5", "LIVE", true, l));
+        assertThat(liveOnly).containsEntry("scope", "LIVE").containsEntry("globalLive", "ENGAGED")
+                .containsEntry("killed", List.of("ALICE-KITE"));
+        assertThat(jdbc.queryForObject("select detail ->> 'scope' from exec.audit_log where action = 'ADMIN_EXIT_BATCH' "
+                + "and detail ->> 'key' = 's-5'", String.class)).isEqualTo("LIVE");
+        // no scope: both books, as before
+        long live2 = position(aliceTenant, kite2, aliceGroup, "LIVE", 50);
+        long paper2 = position(bobTenant, bobPaper, bobGroup, "PAPER", 40);
+        assertThat(runBatch(desk, batch("s-6", "EXIT 2 POSITIONS", false, new long[] {kite2, live2},
+                new long[] {bobPaper, paper2}))).containsEntry("scope", "BOTH");
     }
 }
