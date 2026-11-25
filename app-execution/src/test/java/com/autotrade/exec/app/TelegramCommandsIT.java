@@ -761,6 +761,11 @@ class TelegramCommandsIT {
                 + "placed yet (retried; the account takes no new entries until it is)"))).isTrue();
         assertThat(TelegramCommands.incomplete(List.of("X: 65 of 130 sold at 31.10; 65 stay open with a new broker stop")))
                 .isFalse();
+        // 25 Nov 2026 wording: a stop placed but not yet in the broker's book is a complete exit; one not confirmed is not
+        assertThat(TelegramCommands.incomplete(List.of("X: 65 of 130 sold at 31.10; 65 stay open with a new broker stop "
+                + "(placed; confirmed in the broker's book on the next check)"))).isFalse();
+        assertThat(TelegramCommands.incomplete(List.of("X: 65 of 130 sold at 31.10; 65 stay open, their broker stop not "
+                + "confirmed yet (checked again next turn)"))).isTrue();
     }
 
     // ---------------------------------------------------------------------------------------------------- helpers

@@ -102,9 +102,11 @@ public interface FollowerVenue {
          * of unknown outcome). BACK_OFF: a place that failed (not sent, unknown, refused by our guard): tried again after
          * a pause, so no order row is written every turn. BROKER_HOLDS_LESS: the broker's order book holds less of the
          * contract than our book (a hand sale): no stop row is written; reconciliation books or kills it, so it does not
-         * count towards STOP_NOT_ARMED.
+         * count towards STOP_NOT_ARMED. PLACED_UNSEEN (user 25 Nov 2026): the stop was placed and accepted, only the
+         * read-back right after did not show it yet; handled as NEXT_TURN, and a partial exit says the rest has its new
+         * stop instead of "NOT placed".
          */
-        enum Later { NO, NEXT_TURN, BACK_OFF, BROKER_HOLDS_LESS }
+        enum Later { NO, NEXT_TURN, BACK_OFF, BROKER_HOLDS_LESS, PLACED_UNSEEN }
 
         static Protection failed(String failure) {
             return new Protection(failure, List.of(), null, Later.NO);

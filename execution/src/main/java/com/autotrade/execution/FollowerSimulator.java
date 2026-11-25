@@ -1352,22 +1352,7 @@ public final class FollowerSimulator {
      */
     private boolean protect(Day day, Pending p, long positionId, String symbol) {
         if (p == null) {
-            FollowerVenue.Protection r = venue.protect(day.account, positionId, leaseEpoch);
-            if (r.soldQuantity() > 0) {
-                book(day, positionId, r.sold(), r.at(), "BROKER_STOP");
-                protectionChecked.remove(day.account.id() + ":" + day.date);   // the rest is protected next turn
-                return false;
-            }
-            if (r.isLater()) {
-                return unarmed(day, positionId, symbol, r);
-            }
-            if (r.failure() != null) {
-                protectRetryAt.put(positionId, Instant.now().plus(PROTECT_RETRY_AFTER));
-                kills.engageAccount(day.account, "flatten left " + symbol + " without a broker stop: " + r.failure(),
-                        "flatten");
-                return false;
-            }
-            return armed(positionId);
+            return protectRest(day, positionId, symbol) == RestStop.ARMED;
         }
         for (int round = 0; round < 3; round++) {
             FollowerVenue.Protection r = venue.protect(day.account, positionId, leaseEpoch);
@@ -1416,6 +1401,51 @@ public final class FollowerSimulator {
         return false;
     }
 
+    /**
+     * What a flatten or recovery left the position's stop as (user 25 Nov 2026: a partial exit said "NOT placed yet" for
+     * a stop that was placed and only not yet in Kite's order book on the read right after placing it).
+     */
+    enum RestStop { ARMED, PLACED_UNSEEN, NOT_CONFIRMED, FAILED }
+
+    /** {@link #protect} for a flatten or recovery ({@code p} null), saying what the stop was left as. */
+    private RestStop protectRest(Day day, long positionId, String symbol) {
+        FollowerVenue.Protection r = venue.protect(day.account, positionId, leaseEpoch);
+        if (r.soldQuantity() > 0) {
+            book(day, positionId, r.sold(), r.at(), "BROKER_STOP");
+            protectionChecked.remove(day.account.id() + ":" + day.date);   // the rest is protected next turn
+            return RestStop.NOT_CONFIRMED;
+        }
+        if (r.isLater()) {
+            unarmed(day, positionId, symbol, r);
+            return r.later() == FollowerVenue.Protection.Later.PLACED_UNSEEN ? RestStop.PLACED_UNSEEN
+                    : RestStop.NOT_CONFIRMED;
+        }
+        if (r.failure() != null) {
+            protectRetryAt.put(positionId, Instant.now().plus(PROTECT_RETRY_AFTER));
+            kills.engageAccount(day.account, "flatten left " + symbol + " without a broker stop: " + r.failure(),
+                    "flatten");
+            return RestStop.FAILED;
+        }
+        armed(positionId);
+        return RestStop.ARMED;
+    }
+
+    /**
+     * How a partial exit's line describes the rest's stop: nothing on a simulated venue; FAILED engages the kill switch,
+     * so only that one says entries wait (user 25 Nov 2026).
+     */
+    static String restStopNote(boolean broker, RestStop stop) {
+        if (!broker) {
+            return "";
+        }
+        return switch (stop) {
+            case ARMED -> " with a new broker stop";
+            case PLACED_UNSEEN -> " with a new broker stop (placed; confirmed in the broker's book on the next check)";
+            case NOT_CONFIRMED -> ", their broker stop not confirmed yet (checked again next turn)";
+            case FAILED -> ", their broker stop NOT placed yet (retried; the account takes no new entries until it is)";
+        };
+    }
+
     /** The position's stop is confirmed: its not-armed count is cleared. */
     private boolean armed(long positionId) {
         unarmedTries.remove(positionId);
@@ -1431,7 +1461,8 @@ public final class FollowerSimulator {
      */
     private boolean unarmed(Day day, long positionId, String symbol, FollowerVenue.Protection r) {
         protectionChecked.remove(day.account.id() + ":" + day.date);
-        if (r.later() != FollowerVenue.Protection.Later.NEXT_TURN) {
+        if (r.later() != FollowerVenue.Protection.Later.NEXT_TURN
+                && r.later() != FollowerVenue.Protection.Later.PLACED_UNSEEN) {
             protectRetryAt.put(positionId, Instant.now().plus(protectBackOff));
         }
         if (r.later() == FollowerVenue.Protection.Later.BROKER_HOLDS_LESS) {
@@ -1674,11 +1705,10 @@ public final class FollowerSimulator {
                 book(day, positionId, fill.parts(), fill.at(), reason);
             }
             if (fill.quantity() < open) {
-                boolean stopped = protect(day, null, positionId, symbol);
                 // review 17 Nov 2026: say whether the rest really has its stop again (protect may fail: the account is
-                // then stopped with "flatten left ... without a broker stop" and the stop is retried)
-                String rest = !venue.broker() ? "" : stopped ? " with a new broker stop"
-                        : ", their broker stop NOT placed yet (retried; the account takes no new entries until it is)";
+                // then stopped with "flatten left ... without a broker stop" and the stop is retried); user 25 Nov 2026:
+                // a stop placed but not yet in the broker's book on the read right after is said as placed
+                String rest = restStopNote(venue.broker(), protectRest(day, positionId, symbol));
                 lines.add(fill.quantity() == sell && sell < open
                         ? symbol + ": " + sell + " of " + open + " sold at " + String.format(java.util.Locale.ROOT, "%.2f",
                                 fill.price()) + priceNote + "; " + (open - sell) + " stay open" + rest

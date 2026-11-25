@@ -588,7 +588,8 @@ public final class BrokerVenue implements FollowerVenue {
                     unseen = tag;           // review 8 Nov 2026: accepted, not yet seen working: confirmed next turn
                 }
             }
-            return unseen == null ? Protection.ARMED : Protection.later("stop " + unseen + " placed, not yet in the book");
+            return unseen == null ? Protection.ARMED
+                    : Protection.later(Protection.Later.PLACED_UNSEEN, "stop " + unseen + " placed, not yet in the book");
         } catch (BrokerException e) {
             if (e.kind() == Kind.SESSION) {
                 throw e;
