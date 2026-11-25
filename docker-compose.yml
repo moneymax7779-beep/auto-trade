@@ -99,6 +99,9 @@ services:
       AUTOTRADE_EXECUTION_COPY_GROUP: ${AUTOTRADE_EXECUTION_COPY_GROUP:-LIVE-SET}
       AUTOTRADE_EXECUTION_DAY: ${AUTOTRADE_EXECUTION_DAY:-}      # drills only: a replayed session date instead of today
       SERVER_ADDRESS: 0.0.0.0        # inside the container; the published port below is loopback-only
+      # user 25 Nov 2026 ("raise the execution memory limit"): heap 512m -> 1g, container 768m -> 1536m, room for more
+      # accounts (the worker used 563 MiB of 768 MiB with 5 LIVE/twin followers)
+      JAVA_TOOL_OPTIONS: "-Xmx1g -XX:+ExitOnOutOfMemoryError"
     ports:
       - "127.0.0.1:8096:8096"
     volumes:
@@ -107,7 +110,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    mem_limit: 768m
+    mem_limit: 1536m
     restart: unless-stopped
 
   # A branch-built UI next to the main one (user, 19 Oct: "build it on 8097"): trading-core in serve mode (display only,
