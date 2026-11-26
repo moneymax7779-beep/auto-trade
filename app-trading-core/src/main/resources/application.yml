@@ -79,7 +79,11 @@ autotrade:
       # A-067). v34 = v1 + an early-fail exit (15 min after entry, option bid > 7.5 % under the premium; A-334: 28 tick days
       # +12.36 L vs +10.90 L, both halves better, the 10 early exits all v1 losers; in-sample). Followers copy ma-cross by id,
       # so ZERODHA-1 takes v34's exits too. mac-v1 stays as a shadow control (below). Last, so the others take the capital first.
-      - config/strategy/ma-cross.v34.yaml
+      # 2026-11-26 (A-655, user ~07:35: "I want to keep the v53 in live in PAPER/LIVE from today"): mac-v53 replaces mac-v34.
+      # v53 = v34 + setup.min_target_atr 4.0 (index target at least 4 ATR(3m) from the entry). A-653: +2.84 L vs the live set
+      # on 38 tick days (direct ma-cross +1.05 L, the rest one 1 Oct capital knock-on), CANDIDATE thin, in-sample; v54 (3 ATR)
+      # FAIL. Live on the user's decision ahead of the A-654 forward shadow. Followers copy ma-cross by id (LIVE money too).
+      - config/strategy/ma-cross.v53.yaml
       # odm-v4 removed 2026-11-01 (A-297 REMOVE, user: "do it"): on the 23 own-capture tick days the live set without it made
       # +Rs 51.09 L vs +Rs 49.17 L with it (+Rs 14.87 L vs +12.93 L from 14 Oct; odm-v9 in its place +46.32 L); thin, but
       # with A-231 (2 years of bars PF 0.99) and live PAPER-1 -Rs 5.23 L to 27 Oct. Live 14 Oct - 2 Nov (A-093); it now runs
