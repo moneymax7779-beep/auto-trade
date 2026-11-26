@@ -60,6 +60,16 @@ class EquitySizingTest {
         assertThat(v9.equityFrom()).isNull();
     }
 
+    /** A-662: risk v69 is v64 with FE's id in place of F1's, for the low priority and the own 5 % cap. */
+    @Test
+    void v69NamesFeWhereV64NamedF1() {
+        RiskLimits v64 = limits("paper-risk.v64.yaml"), v69 = limits("paper-risk.v69.yaml");
+        assertThat(v69.strategyGroupLoss().strategies()).containsExactly("oi-burst-cross@obc-v31lvoirhe");
+        assertThat(v69.strategyGroupLoss().pct()).isEqualTo(v64.strategyGroupLoss().pct());
+        assertThat(v69.withEquity(500_000).capital()).isEqualTo(v64.withEquity(500_000).capital());
+        assertThat(v69.dailyLossLimit()).isEqualTo(v64.dailyLossLimit());
+    }
+
     /** Code review 24 Nov 2026: the live engine sizes from withEquity(), which must keep F1's own 5 % cap (risk v64). */
     @Test
     void v64KeepsTheStrategyGroupLossThroughTheEquity() {
