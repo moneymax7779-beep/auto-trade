@@ -32,6 +32,9 @@ final class MaCross extends SetupStrategy {
     private final java.util.ArrayDeque<java.time.Instant> crosses = new java.util.ArrayDeque<>();
     private final double maxStopAtr;
     private final double rewardToRisk;
+    // A-653 (setup.min_target_atr, off when absent): the index target is at least this many ATR(3m) of the entry from the
+    // entry, so a swing stop close to the cross no longer makes the 2R target a small one
+    private final double minTargetAtr;
     private final boolean requireVwapSide;
     // A-332 (all off when absent = v1): skip a spike cross; time stop only for a trade that never reached unlessR;
     // runner: no exit at the target, the index stop trails trailR behind the best after the target (never below lockR)
@@ -141,12 +144,22 @@ final class MaCross extends SetupStrategy {
                     "exits.structure_hold needs scope.time_stop_min: 0, exits.use_target: false and no exits.level_hold");
         }
         rewardToRisk = c.getDouble("setup.reward_to_risk");
+        minTargetAtr = c.has("setup.min_target_atr") ? c.getDouble("setup.min_target_atr") : Double.NaN;
+        if (c.has("setup.min_target_atr") && !(Double.isFinite(minTargetAtr) && minTargetAtr > 0)) {
+            throw new IllegalArgumentException("setup.min_target_atr must be a finite number above 0");
+        }
         requireVwapSide = c.has("setup.require_vwap_side") && c.getBoolean("setup.require_vwap_side");
         maxChg1mAtr1m = c.has("setup.max_chg1m_atr1m") ? c.getDouble("setup.max_chg1m_atr1m") : Double.NaN;
         timeStopMin = c.has("exits.cross_time_stop_min") ? c.getInt("exits.cross_time_stop_min") : 0;
         timeStopUnlessR = c.has("exits.cross_time_stop_unless_r") ? c.getDouble("exits.cross_time_stop_unless_r") : Double.NaN;
         runnerTrailR = c.has("exits.runner_trail_r") ? c.getDouble("exits.runner_trail_r") : Double.NaN;
         runnerLockR = c.has("exits.runner_lock_r") ? c.getDouble("exits.runner_lock_r") : Double.NaN;
+        // review 26 Nov 2026: the floor moves only the frame's index target; the runner, level hold and structure hold judge
+        // "the target" as reward_to_risk R and would silently ignore it, so the combination is refused, not half applied
+        if (c.has("setup.min_target_atr") && (Double.isFinite(runnerTrailR) || levelHold || structureHold)) {
+            throw new IllegalArgumentException("setup.min_target_atr cannot be combined with exits.runner_trail_r, "
+                    + "exits.level_hold or exits.structure_hold (they judge the target as reward_to_risk R)");
+        }
         onOppositeCross = c.has("setup.on_opposite_cross") ? c.getString("setup.on_opposite_cross") : "ignore";
         if (!java.util.Set.of("ignore", "close", "reverse").contains(onOppositeCross)) {
             throw new IllegalArgumentException("setup.on_opposite_cross must be ignore, close or reverse: " + onOppositeCross);
@@ -448,7 +461,8 @@ final class MaCross extends SetupStrategy {
             double risk = next.side() == OptionSide.CE ? s.spot() - next.stop() : next.stop() - s.spot();
             if (s.time().isBefore(pendingAt.plusSeconds(180)) && risk > 0) {
                 startTrade(s, risk, next.side() == OptionSide.CE);
-                double target = next.side() == OptionSide.CE ? entrySpot + rewardToRisk * risk : entrySpot - rewardToRisk * risk;
+                double reach = targetDistance(risk, carried ? s.structure().carriedAtr3m() : s.structure().atr3m());
+                double target = next.side() == OptionSide.CE ? entrySpot + reach : entrySpot - reach;
                 return new Entry(next.side(), next.stop(), target, next.reason() + "_REVERSE");
             }
         }
@@ -499,6 +513,12 @@ final class MaCross extends SetupStrategy {
         return e;
     }
 
+    /** The index distance from the entry to the target: reward_to_risk x risk, at least min_target_atr x ATR (A-653). */
+    private double targetDistance(double risk, double atr) {
+        double reach = rewardToRisk * risk;
+        return Double.isFinite(minTargetAtr) && atr > 0 ? Math.max(reach, minTargetAtr * atr) : reach;
+    }
+
     /** A-546: the nearest level strictly beyond the index in the cross's direction, NaN when there is none. */
     static double nearestLevel(StructureFeatures st, double spot, boolean up) {
         double[] lv = {st.orComplete() ? st.orHigh() : Double.NaN, st.orComplete() ? st.orLow() : Double.NaN, st.prevClose(),
@@ -544,7 +564,8 @@ final class MaCross extends SetupStrategy {
         if (!stopOk) {
             return null;
         }
-        double target = crossUp ? spot + rewardToRisk * risk : spot - rewardToRisk * risk;
+        double reach = targetDistance(risk, atr);
+        double target = crossUp ? spot + reach : spot - reach;
         return new Entry(crossUp ? OptionSide.CE : OptionSide.PE, stop, target, crossUp ? "EMA_CROSS_UP" : "EMA_CROSS_DOWN");
     }
 }
