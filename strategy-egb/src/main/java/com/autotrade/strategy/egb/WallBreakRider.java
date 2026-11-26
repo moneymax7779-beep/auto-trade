@@ -73,6 +73,7 @@ final class WallBreakRider implements Strategy {
     private boolean belowEntryExited;                 // A-470: no re-entry today after a below-entry exit
     private int tradesToday;    // the last 3-minute close when the wall was crossed (bar from before it)
     private boolean wonToday;
+    private final java.util.Set<OptionSide> lostSides = java.util.EnumSet.noneOf(OptionSide.class);   // A-674
 
     WallBreakRider(WallBreakRiderConfig config) {
         this.config = config;
@@ -114,6 +115,10 @@ final class WallBreakRider implements Strategy {
                 blockedSide = heldSide == OptionSide.CE ? OptionSide.PE : OptionSide.CE;
                 blockedUntil = now.plus(Duration.ofMinutes(config.noFlipAfterLossMin()));
                 conditions.put(blockedSide, conditions(blockedSide, snapshot, expiryDay, window, priorMove, now));
+            }
+            if (config.noSameSideAfterLoss() && heldSide != null && lastBid < lastAverage) {   // A-674; NaN compares false
+                lostSides.add(heldSide);
+                conditions.put(heldSide, conditions(heldSide, snapshot, expiryDay, window, priorMove, now));
             }
             if (config.reentryAfterWinUntil() != null && heldSide != null && lastBid > lastAverage) {
                 wonToday = true;
@@ -288,6 +293,11 @@ final class WallBreakRider implements Strategy {
         if (config.belowEntryNoReentry()) {
             c.put("no_reentry_after_below_entry", !belowEntryExited);
             v3 = v3 && !belowEntryExited;
+        }
+        if (config.noSameSideAfterLoss()) {
+            boolean ok = !lostSides.contains(call ? OptionSide.CE : OptionSide.PE);
+            c.put("no_same_side_after_loss", ok);
+            v3 = v3 && ok;
         }
         if (config.maxTradesPerDay() > 0) {
             boolean ok = tradesToday < config.maxTradesPerDay();
