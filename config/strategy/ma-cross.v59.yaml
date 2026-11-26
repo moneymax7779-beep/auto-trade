@@ -1,0 +1,44 @@
+# mac-v59 (A-679, 26 Nov 2026, research): mac-v53 + mco-v8's structure hold, reassess only at the 4-ATR target. Nothing else changes.
+# mac-v53 (A-653, user 25 Nov 2026: "yes, register and run the minimum-target test now") = mac-v34 + setup.min_target_atr 4.0:
+# the index target is max(2R, 4 x ATR(3m) at entry). Everything else is mac-v34 (below). Not live.
+# mac-v34 = mac-v1 + an early-fail exit (A-334): once, 15 minutes after entry, exit when the option bid is more than
+# 7.5 % below the average premium. 28 tick days: +12.36 L vs v1 +10.90 L, better in both halves; its 10 early exits were
+# all v1 losers (+1.56 L direct). Threshold chosen after seeing all 28 days (in-sample). LIVE from 2026-11-09 (A-335, user).
+# The lines below describe the v1 rules this file builds on.
+# EMA9 / EMA20 cross with a swing stop, v1 (user's request 2026-10-09: "register and test it", after a YouTube EMA9/SMA21
+# strategy). Rules registered before any replay in docs/studies/2026-10-09-ma-cross.md (ledger A-066). A 5-day screen on
+# option mids (28 Sep-5 Oct) showed PF 2.41 with the swing stop and 0.89 with an ATR stop: those days are in the test set,
+# so the held-out days decide. Never trades an index on the day it expires. Every value is a round number, not fitted.
+version: mac-v59
+strategy: ma-cross
+status: UNCALIBRATED
+source: "A-653 minimum target 4 ATR(3m); registered before its replay"
+
+scope:
+  entry_from: "09:30"
+  last_new_entry: "14:30"              # exclusive
+  flat_by: "15:15"
+  time_stop_min: 0                     # A-679: the time stop is the structure hold's (exits.structure_hold_time_min)
+  skip_expiring_index: true
+
+setup:
+  max_stop_atr: 3.0                    # skip a cross whose swing stop is more than 3 ATR(3m) away (or unknown / wrong side)
+  reward_to_risk: 2.0                  # target = entry + 2 x (entry - stop)
+  min_target_atr: 4.0                 # A-653: target at least 4 x ATR(3m) from the entry
+  # the averages are the features' EMA9 and EMA20 of 3-minute bars (structure.ema9 / ema20)
+
+position:
+  premium_budget: 250000
+  intended_lots: 1
+  strike_offset: 0                     # ATM
+
+exits:
+  use_target: false                    # A-679: the target is the structure hold's (exits.structure_hold)
+  structure_hold: true                 # A-679 (= mco-v8's A-559..A-562 rule): at the target / 60 min, hold while the
+  structure_hold_time_min: 60          # index is beyond VWAP, EMA9(3m) beyond EMA20(3m) and beyond the last 3-min swing
+  structure_hold_floor_atr: 0.5        # out 0.5 ATR back through where the hold began
+  structure_hold_on: bar3m             # judged on completed 3-min bars
+  structure_hold_at_time_stop: false  # A-679: reassess only at the target; the 60-min time stop stays
+  premium_stop_pct: 25                 # emergency only; the index-level stop comes first
+  early_fail_min: 15                   # A-334
+  early_fail_pct: -7.5

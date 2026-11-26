@@ -235,6 +235,69 @@ class SetupFamiliesTest {
                 .singleElement().extracting(OrderIntent::reason).isEqualTo("TARGET");
     }
 
+    /** A-679 mac-v59: at the 4-ATR target it holds while the 3-min structure supports the call, and leaves when it fails. */
+    @Test
+    void maCrossV59ReassessesAtTheFourAtrTarget() {
+        Map<String, Object> swings = Map.of("structure.lastSwingLow", 22580.0, "structure.lastSwingHigh", 22700.0);
+        PositionView holding = new PositionView(true, OptionSide.CE, 1, 50, null, 52);
+        Day held = new Day("ma-cross.v59.yaml", swings);
+        held.at("10:00", 22600, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22602.0);
+        assertThat(held.at("10:01", 22610, PositionView.FLAT, "structure.ema9", 22605.0, "structure.ema20", 22601.0).orders())
+                .singleElement().extracting(OrderIntent::side).isEqualTo(OptionSide.CE);
+        assertThat(held.at("10:06", 22671, holding, "structure.ema9", 22630.0, "structure.ema20", 22608.0,
+                "structure.lastBarClose", 22671.0).orders()).as("2R but not yet 4 ATR").isEmpty();
+        assertThat(held.at("10:09", 22695, holding, "structure.ema9", 22640.0, "structure.ema20", 22612.0,
+                "structure.lastBarClose", 22695.0).orders()).as("4 ATR reached, above VWAP / EMA20 / swing: held").isEmpty();
+        assertThat(held.at("10:12", 22660, holding, "structure.ema9", 22650.0, "structure.ema20", 22630.0,
+                "structure.lastBarClose", 22660.0, "structure.vwapSpotProxy", 22665.0).orders())
+                .as("the 3-min close fell under VWAP: out").singleElement().extracting(OrderIntent::reason).isEqualTo("HOLD_STRUCTURE");
+
+        Day weak = new Day("ma-cross.v59.yaml", swings);
+        weak.at("10:00", 22600, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22602.0);
+        weak.at("10:01", 22610, PositionView.FLAT, "structure.ema9", 22605.0, "structure.ema20", 22601.0);
+        assertThat(weak.at("10:09", 22695, holding, "structure.ema9", 22640.0, "structure.ema20", 22612.0,
+                "structure.lastBarClose", 22695.0, "structure.vwapSpotProxy", 22700.0).orders())
+                .as("at the target without support: the target").singleElement().extracting(OrderIntent::reason).isEqualTo("TARGET");
+    }
+
+    /** A-670 mac-v56: after +2 ATR, a 40 % give-back exits only with the spot on the wrong side of VWAP; v53 holds. */
+    @Test
+    void maCrossV56GivesBackOnlyBelowVwap() {
+        Map<String, Object> swings = Map.of("structure.lastSwingLow", 22580.0, "structure.lastSwingHigh", 22700.0);
+        PositionView holding = new PositionView(true, OptionSide.CE, 1, 50, null, 52);
+        for (String file : new String[] {"ma-cross.v56.yaml", "ma-cross.v53.yaml"}) {
+            Day day = new Day(file, swings);
+            day.at("10:00", 22600, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22602.0);
+            assertThat(day.at("10:01", 22610, PositionView.FLAT, "structure.ema9", 22605.0, "structure.ema20", 22601.0).orders())
+                    .singleElement().extracting(OrderIntent::side).isEqualTo(OptionSide.CE);
+            assertThat(day.at("10:03", 22660, holding, "structure.ema9", 22630.0, "structure.ema20", 22608.0).orders())
+                    .as("+2.5 ATR, below the 4 ATR target").isEmpty();
+            assertThat(day.at("10:04", 22635, holding, "structure.ema9", 22632.0, "structure.ema20", 22609.0).orders())
+                    .as("gave back 50 %% but still above VWAP (22,600): held").isEmpty();
+            var below = day.at("10:05", 22630, holding, "structure.ema9", 22633.0, "structure.ema20", 22610.0,
+                    "structure.vwapSpotProxy", 22640.0).orders();
+            if (file.equals("ma-cross.v56.yaml")) {
+                assertThat(below).singleElement().extracting(OrderIntent::reason).isEqualTo("GIVEBACK");
+            } else {
+                assertThat(below).as("v53 has no give-back exit").isEmpty();
+            }
+        }
+    }
+
+    @Test
+    void maCrossGiveBackKeysAreCheckedTogether(@org.junit.jupiter.api.io.TempDir Path dir) throws Exception {
+        String v53 = java.nio.file.Files.readString(Path.of("..", "config", "strategy", "ma-cross.v53.yaml"));
+        Path bad = dir.resolve("ma-cross.v53.yaml");
+        for (String[] c : new String[][] {
+                {"  giveback_frac: 0.4\n", "giveback_after_atr and exits.giveback_frac go together"},
+                {"  giveback_after_atr: 2.0\n  giveback_frac: 1.0\n", "giveback_frac between 0 and 1"},
+                {"  giveback_vwap_gate: true\n", "giveback_vwap_gate needs exits.giveback_after_atr"}}) {
+            java.nio.file.Files.writeString(bad, v53.replace("\nexits:\n", "\nexits:\n" + c[0]));
+            org.assertj.core.api.Assertions.assertThatThrownBy(() -> Strategies.load(bad).create("NIFTY", Snapshots.SESSION))
+                    .hasStackTraceContaining(c[1]);
+        }
+    }
+
     /**
      * A-334 mac-v34: the v1 entry, then one look at the option 15 minutes in: more than 7.5 % under the premium = out; a
      * trade that passes that look is never early-failed later, whatever its bid.
@@ -389,6 +452,31 @@ class SetupFamiliesTest {
         mcoCall(nan, holding);
         assertThat(nan.at("10:33", 22650, holding, with(CALL_SUPPORT, "structure.ema20", Double.NaN)).orders())
                 .as("a missing value is no support").singleElement().extracting(OrderIntent::reason).isEqualTo("TIME_60");
+    }
+
+    /**
+     * A-684 / A-685 mco-v8t4: the target is at least 4 carried ATR (80) from the entry. With a 20-point swing stop mco-v8's 2R
+     * (40) target fires at 22,650 when the bar has no support; v8t4 waits for 22,690.
+     */
+    @Test
+    void maCrossOpenV8t4MovesTheTargetToFourCarriedAtr() {
+        PositionView holding = new PositionView(true, OptionSide.CE, 1, 50, null, 52);
+        for (String file : new String[] {"ma-cross-open.v8.yaml", "ma-cross-open.v8t4.yaml"}) {
+            Day d = new Day(file, Map.of("structure.carriedSwingLow", 22590.0, "structure.carriedSwingHigh", 22700.0,
+                    "structure.carriedAtr3m", 20.0, "structure.dayOpen", 22600.0, "structure.prevClose", 22600.0));
+            mcoCall(d, holding);
+            var at2r = d.at("10:00", 22655, holding, with(CALL_SUPPORT, "structure.lastBarClose", 22655.0,
+                    "structure.vwapSpotProxy", 22660.0)).orders();
+            if (file.equals("ma-cross-open.v8.yaml")) {
+                assertThat(at2r).as("v8: 2R reached on an unsupported bar").singleElement()
+                        .extracting(OrderIntent::reason).isEqualTo("TARGET");
+                continue;
+            }
+            assertThat(at2r).as("v8t4: 2R is not its target").isEmpty();
+            assertThat(d.at("10:03", 22692, holding, with(CALL_SUPPORT, "structure.lastBarClose", 22692.0,
+                    "structure.vwapSpotProxy", 22700.0)).orders()).as("v8t4: 4 carried ATR on an unsupported bar")
+                    .singleElement().extracting(OrderIntent::reason).isEqualTo("TARGET");
+        }
     }
 
     /** ma-cross-open v8 test day: as v7. */
@@ -546,6 +634,12 @@ class SetupFamiliesTest {
                 "  early_fail_pct: -7.5\n  runner_trail_r: 1.0\n  runner_lock_r: 1.0\n  use_target: false"));
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> Strategies.load(zero).create("NIFTY", Snapshots.SESSION))
                 .hasStackTraceContaining("setup.min_target_atr cannot be combined with exits.runner_trail_r");
+        // review 26 Nov 2026 (A-685): loosening the guard for the structure hold must keep the level hold refused
+        java.nio.file.Files.writeString(zero, v53.replace("  time_stop_min: 60", "  time_stop_min: 0")
+                .replace("  early_fail_pct: -7.5", "  early_fail_pct: -7.5\n  use_target: false\n  level_hold: true\n"
+                        + "  level_hold_time_min: 60\n  level_hold_near_atr: 0.5\n  level_hold_fail_atr: 0.5\n  level_hold_reject_atr: 0.5"));
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> Strategies.load(zero).create("NIFTY", Snapshots.SESSION))
+                .hasStackTraceContaining("setup.min_target_atr cannot be combined with exits.runner_trail_r or exits.level_hold");
     }
 
     /**
