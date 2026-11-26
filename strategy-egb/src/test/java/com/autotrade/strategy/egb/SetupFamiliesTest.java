@@ -202,6 +202,39 @@ class SetupFamiliesTest {
                 .singleElement().extracting(OrderIntent::side).isEqualTo(OptionSide.PE);
     }
 
+    /** A-653 mac-v53 / v54: the index target is at least 4 (3) ATR(3m) from the entry; ATR 20, swing risk 30 here. */
+    @Test
+    void maCrossV53TargetIsAtLeastFourAtrFromTheEntry() {
+        Map<String, Object> swings = Map.of("structure.lastSwingLow", 22580.0, "structure.lastSwingHigh", 22700.0);
+        PositionView holding = new PositionView(true, OptionSide.CE, 1, 50, null, 52);
+        Day v53 = new Day("ma-cross.v53.yaml", swings);
+        v53.at("10:00", 22600, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22602.0);
+        assertThat(v53.at("10:01", 22610, PositionView.FLAT, "structure.ema9", 22605.0, "structure.ema20", 22601.0).orders())
+                .singleElement().extracting(OrderIntent::side).isEqualTo(OptionSide.CE);
+        assertThat(v53.at("10:06", 22671, holding, "structure.ema9", 22630.0, "structure.ema20", 22608.0).orders())
+                .as("2R (22,670) is only 3 ATR: v53 waits for 4 ATR = 22,690").isEmpty();
+        assertThat(v53.at("10:07", 22689, holding, "structure.ema9", 22632.0, "structure.ema20", 22609.0).orders()).isEmpty();
+        assertThat(v53.at("10:08", 22690, holding, "structure.ema9", 22634.0, "structure.ema20", 22610.0).orders())
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("TARGET");
+
+        Day v54 = new Day("ma-cross.v54.yaml", swings);
+        v54.at("10:00", 22600, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22602.0);
+        v54.at("10:01", 22610, PositionView.FLAT, "structure.ema9", 22605.0, "structure.ema20", 22601.0);
+        assertThat(v54.at("10:06", 22670, holding, "structure.ema9", 22630.0, "structure.ema20", 22608.0).orders())
+                .as("3 ATR = 60 = 2R: the floor does not move this target").singleElement()
+                .extracting(OrderIntent::reason).isEqualTo("TARGET");
+
+        Day down = new Day("ma-cross.v53.yaml", Map.of("structure.lastSwingLow", 22500.0, "structure.lastSwingHigh", 22610.0));
+        down.at("11:00", 22600, PositionView.FLAT, "structure.ema9", 22603.0, "structure.ema20", 22601.0);
+        assertThat(down.at("11:01", 22590, PositionView.FLAT, "structure.ema9", 22598.0, "structure.ema20", 22601.0).orders())
+                .singleElement().extracting(OrderIntent::side).isEqualTo(OptionSide.PE);
+        PositionView put = new PositionView(true, OptionSide.PE, 1, 50, null, 60);
+        assertThat(down.at("11:05", 22550, put, "structure.ema9", 22580.0, "structure.ema20", 22595.0).orders())
+                .as("put, risk 20: 2R = 22,550 but the target is 4 ATR = 22,510").isEmpty();
+        assertThat(down.at("11:06", 22510, put, "structure.ema9", 22570.0, "structure.ema20", 22590.0).orders())
+                .singleElement().extracting(OrderIntent::reason).isEqualTo("TARGET");
+    }
+
     /**
      * A-334 mac-v34: the v1 entry, then one look at the option 15 minutes in: more than 7.5 % under the premium = out; a
      * trade that passes that look is never early-failed later, whatever its bid.
@@ -502,6 +535,17 @@ class SetupFamiliesTest {
         java.nio.file.Files.writeString(half, v34.replaceAll("(?m)^\\s*early_fail_pct:.*\\n", ""));
         org.assertj.core.api.Assertions.assertThatThrownBy(() -> Strategies.load(half).create("NIFTY", Snapshots.SESSION))
                 .hasStackTraceContaining("early_fail_min and exits.early_fail_pct go together");
+
+        String v53 = java.nio.file.Files.readString(Path.of("..", "config", "strategy", "ma-cross.v53.yaml"));
+        Path zero = dir.resolve("ma-cross.v53.yaml");
+        java.nio.file.Files.writeString(zero, v53.replace("min_target_atr: 4.0", "min_target_atr: 0"));
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> Strategies.load(zero).create("NIFTY", Snapshots.SESSION))
+                .hasStackTraceContaining("setup.min_target_atr must be a finite number above 0");
+        // review 26 Nov 2026: the runner judges the target as reward_to_risk R, so the floor and the runner are refused together
+        java.nio.file.Files.writeString(zero, v53.replace("  early_fail_pct: -7.5",
+                "  early_fail_pct: -7.5\n  runner_trail_r: 1.0\n  runner_lock_r: 1.0\n  use_target: false"));
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> Strategies.load(zero).create("NIFTY", Snapshots.SESSION))
+                .hasStackTraceContaining("setup.min_target_atr cannot be combined with exits.runner_trail_r");
     }
 
     /**
