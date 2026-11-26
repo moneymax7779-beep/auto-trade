@@ -60,6 +60,12 @@ final class MaCross extends SetupStrategy {
     private final double stretchAtr;
     private boolean earlyChecked;
     private static final int EARLY_FAIL_GRACE_MIN = 5;
+    // A-670 (off when absent): once the index has gone giveBackAfterAtr ATR(3m at entry) the trade's way, exit when it has
+    // given back giveBackFrac of that best move; with giveBackVwapGate only while the spot is on the wrong side of VWAP
+    private final double giveBackAfterAtr;
+    private final double giveBackFrac;
+    private final boolean giveBackVwapGate;
+    private double entryAtr = Double.NaN, bestAtr = Double.NaN;
     private double previousDiff = Double.NaN;
     // A-537 (ma-cross-open): cross, swing stop and ATR from the indicators carried over from the previous session
     private final boolean carried;
@@ -96,6 +102,8 @@ final class MaCross extends SetupStrategy {
     private final double dataHoldRvolMin;
     private boolean dataHolding;
     private final int structureHoldTimeMin;
+    // A-679 (default true): false = the hold is judged only at the target; the time stop exits regardless
+    private final boolean structureHoldAtTimeStop;
     private boolean structureHolding;
     // A-560 (exits.structure_hold_floor_atr, off when absent): the index at the minute close where the hold started is a
     // floor; a later minute close back beyond it by floor_atr x the carried ATR(3m) noted then exits (HOLD_FLOOR)
@@ -129,6 +137,10 @@ final class MaCross extends SetupStrategy {
         dataHold = c.has("exits.data_hold") && c.getBoolean("exits.data_hold");
         dataHoldRvolMin = c.has("exits.data_hold_rvol_min") ? c.getDouble("exits.data_hold_rvol_min") : Double.NaN;
         structureHoldTimeMin = structureHold ? c.getInt("exits.structure_hold_time_min") : 0;
+        structureHoldAtTimeStop = !c.has("exits.structure_hold_at_time_stop") || c.getBoolean("exits.structure_hold_at_time_stop");
+        if (c.has("exits.structure_hold_at_time_stop") && !structureHold) {
+            throw new IllegalArgumentException("exits.structure_hold_at_time_stop needs exits.structure_hold");
+        }
         holdFloorAtr = c.has("exits.structure_hold_floor_atr") ? c.getDouble("exits.structure_hold_floor_atr") : Double.NaN;
         String holdOn = c.has("exits.structure_hold_on") ? c.getString("exits.structure_hold_on") : "minute";
         if (!java.util.Set.of("minute", "bar3m").contains(holdOn) || (!"minute".equals(holdOn) && !structureHold)) {
@@ -154,15 +166,26 @@ final class MaCross extends SetupStrategy {
         timeStopUnlessR = c.has("exits.cross_time_stop_unless_r") ? c.getDouble("exits.cross_time_stop_unless_r") : Double.NaN;
         runnerTrailR = c.has("exits.runner_trail_r") ? c.getDouble("exits.runner_trail_r") : Double.NaN;
         runnerLockR = c.has("exits.runner_lock_r") ? c.getDouble("exits.runner_lock_r") : Double.NaN;
-        // review 26 Nov 2026: the floor moves only the frame's index target; the runner, level hold and structure hold judge
-        // "the target" as reward_to_risk R and would silently ignore it, so the combination is refused, not half applied
-        if (c.has("setup.min_target_atr") && (Double.isFinite(runnerTrailR) || levelHold || structureHold)) {
-            throw new IllegalArgumentException("setup.min_target_atr cannot be combined with exits.runner_trail_r, "
-                    + "exits.level_hold or exits.structure_hold (they judge the target as reward_to_risk R)");
+        // review 26 Nov 2026: the floor moves the frame's index target; the runner and the level hold judge "the target" as
+        // reward_to_risk R and would silently ignore it, so those combinations are refused, not half applied. The structure
+        // hold judges the floored distance itself (structureHoldExit, A-679), so it may combine with the floor.
+        if (c.has("setup.min_target_atr") && (Double.isFinite(runnerTrailR) || levelHold)) {
+            throw new IllegalArgumentException("setup.min_target_atr cannot be combined with exits.runner_trail_r or "
+                    + "exits.level_hold (they judge the target as reward_to_risk R)");
         }
         onOppositeCross = c.has("setup.on_opposite_cross") ? c.getString("setup.on_opposite_cross") : "ignore";
         if (!java.util.Set.of("ignore", "close", "reverse").contains(onOppositeCross)) {
             throw new IllegalArgumentException("setup.on_opposite_cross must be ignore, close or reverse: " + onOppositeCross);
+        }
+        giveBackAfterAtr = c.has("exits.giveback_after_atr") ? c.getDouble("exits.giveback_after_atr") : Double.NaN;
+        giveBackFrac = c.has("exits.giveback_frac") ? c.getDouble("exits.giveback_frac") : Double.NaN;
+        giveBackVwapGate = c.has("exits.giveback_vwap_gate") && c.getBoolean("exits.giveback_vwap_gate");
+        requirePair(c, "exits.giveback_after_atr", "exits.giveback_frac");
+        if (c.has("exits.giveback_after_atr") && !(giveBackAfterAtr > 0 && giveBackFrac > 0 && giveBackFrac < 1)) {
+            throw new IllegalArgumentException("exits.giveback_after_atr must be > 0 and exits.giveback_frac between 0 and 1");
+        }
+        if (c.has("exits.giveback_vwap_gate") && !c.has("exits.giveback_after_atr")) {
+            throw new IllegalArgumentException("exits.giveback_vwap_gate needs exits.giveback_after_atr and exits.giveback_frac");
         }
         earlyFailMin = c.has("exits.early_fail_min") ? c.getInt("exits.early_fail_min") : 0;
         earlyFailPct = c.has("exits.early_fail_pct") ? c.getDouble("exits.early_fail_pct") : Double.NaN;
@@ -225,6 +248,17 @@ final class MaCross extends SetupStrategy {
         bestR = Double.isNaN(bestR) ? r : Math.max(bestR, r);
         if (oppositeExit) {
             return "REVERSE";
+        }
+        if (Double.isFinite(giveBackAfterAtr) && entryAtr > 0) {         // A-670
+            double f = (side == OptionSide.CE ? spot - entrySpot : entrySpot - spot) / entryAtr;
+            bestAtr = Double.isNaN(bestAtr) ? f : Math.max(bestAtr, f);
+            if (bestAtr >= giveBackAfterAtr && f <= (1 - giveBackFrac) * bestAtr) {
+                double vwap = s.structure().vwapSpotProxy();
+                boolean wrongSide = Double.isFinite(vwap) && (side == OptionSide.CE ? spot < vwap : spot > vwap);
+                if (!giveBackVwapGate || wrongSide) {
+                    return "GIVEBACK";
+                }
+            }
         }
         if (dataHolding && !dataSupports(s, side)) {
             return "DATA_TURN";                               // A-649: held past the time stop, the data turned
@@ -316,9 +350,10 @@ final class MaCross extends SetupStrategy {
         }
         boolean timeUp = entryTime != null
                 && java.time.Duration.between(entryTime, s.time()).toMinutes() >= structureHoldTimeMin;
-        boolean target = r >= rewardToRisk;
+        boolean target = Double.isFinite(minTargetAtr)                  // A-679: mac-v53's floored target distance
+                ? r * entryRisk >= targetDistance(entryRisk, entryAtr) : r >= rewardToRisk;
         if (target || timeUp) {
-            if (support) {
+            if (support && (target || structureHoldAtTimeStop)) {
                 structureHolding = true;
                 if (Double.isFinite(holdFloorAtr)) {
                     StructureFeatures st = s.structure();
@@ -338,6 +373,8 @@ final class MaCross extends SetupStrategy {
         entryRisk = risk;
         entryTime = s.time();
         bestR = Double.NaN;
+        entryAtr = carried ? s.structure().carriedAtr3m() : s.structure().atr3m();   // A-670; A-684: mco sizes on the carried ATR
+        bestAtr = Double.NaN;
         earlyChecked = false;
         dataHolding = false;                                  // A-649
         holdLevel = levelHold ? nearestLevel(s.structure(), entrySpot, up) : Double.NaN;

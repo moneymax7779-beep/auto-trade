@@ -129,7 +129,9 @@ autotrade:
       # mco-v2 alone lost on the Oct 2024-May 2025 bar days (A-548, stopped); v8 not run on bars. Listed last, Rs 2.5 L budget,
       # not low priority. LIVE only where the owner chooses it (follower-risk v16+ live.strategies; in no default list) and the
       # account subscribes to it.
-      - config/strategy/ma-cross-open.v8.yaml
+      # mco-v8t4 replaced mco-v8 from 2026-11-27 (A-685, user 26 Nov: "lets make the best live from tomorrow + ma-cross-open
+      # floor"): the target at least 4 carried ATR(3m) (mac-v53's floor). A-684: no change on the 39 tick days, +67,991 on 26 Nov.
+      - config/strategy/ma-cross-open.v8t4.yaml
       # F1 (obc-v31lvoirhh) added 2026-11-24 (A-646 LFH, user: "add LFH to the live PAPER/LIVE set on GCP directly"): the
       # MT2 pair's only part not copied from obc-v31 (early 09:16-09:21 OI bursts, buying against a fading gap), at half
       # budget (Rs 1.25 L), low priority by full id and capped at -5 % a day on its own (risk v64). 38 tick days +98.25 L vs
