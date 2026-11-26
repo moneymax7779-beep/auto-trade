@@ -103,7 +103,9 @@ autotrade:
       # index's expiry day, 10:30-14:30). Last, so the other four take the capital first (A-338: wbr crowds when it goes first).
       # 2026-11-17 (A-470, same instruction): wbr-v29 = wbr-v13 + the same minute-close below-entry exit and no re-entry
       # (wbr trades only the expiring index). Before: wbr-v13 from 8 Nov.
-      - config/strategy/wall-break-rider.v29.yaml
+      # wbr-v29re replaced wbr-v29 from 2026-11-27 (A-681, user 26 Nov: "lets keep it live - WRE"): after a losing exit, no
+      # entry on that side for the rest of the day. A-674 on 39 tick days +0.47 L (only 12 Nov), no day worse; 26 Nov +1.47 L.
+      - config/strategy/wall-break-rider.v29re.yaml
       # 2026-11-09 (user: "ok add to live", after A-355): brtr-v1 = break-retest runner (ORH/ORL/PDH/PDL break, retest within
       # 20 min, stop at the retest's extreme close, 3-min VWAP trail, flat 15:15; Rs 1,25,000 premium budget, user 9 Nov).
       # Best brtr version on every completed test: 28 tick days +6.94 L PF 2.25, 2025 bars +13.82 L PF 1.35, 2026 bars +8.34 L

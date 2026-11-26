@@ -58,7 +58,9 @@ record WallBreakRiderConfig(
         /** A-470: judge the bid at each minute's close, not every tick. */
         boolean belowEntryMinuteClose,
         /** A-470: after a below-entry exit, no new entry for the rest of the session. */
-        boolean belowEntryNoReentry) {
+        boolean belowEntryNoReentry,
+        /** A-674: after a losing exit, no new entry on that side for the rest of the session. */
+        boolean noSameSideAfterLoss) {
 
     static WallBreakRiderConfig from(ThresholdConfig c) {
         return new WallBreakRiderConfig(c.contentHash(), c.version(), c.getInt("scope.dte"),
@@ -85,7 +87,8 @@ record WallBreakRiderConfig(
                 c.has("signal.max_straddle_atr") ? c.getDouble("signal.max_straddle_atr") : Double.NaN,
                 c.has("exits.below_entry_exit_min") ? c.getInt("exits.below_entry_exit_min") : 0,
                 c.has("exits.below_entry_minute_close") && Boolean.TRUE.equals(c.get("exits.below_entry_minute_close")),
-                c.has("exits.below_entry_no_reentry") && Boolean.TRUE.equals(c.get("exits.below_entry_no_reentry")));
+                c.has("exits.below_entry_no_reentry") && Boolean.TRUE.equals(c.get("exits.below_entry_no_reentry")),
+                c.has("signal.no_same_side_after_loss") && Boolean.TRUE.equals(c.get("signal.no_same_side_after_loss")));
     }
 
     @SuppressWarnings("unchecked")

@@ -141,6 +141,29 @@ class WallBreakRiderTest {
         assertThat(won.decide(putSignal().at("12:53"), PositionView.FLAT).orders()).as("after a win: no block").hasSize(1);
     }
 
+    /** A-674: after a losing call, no call for the rest of the day (v3 + no_same_side_after_loss); without the key it re-enters. */
+    @Test
+    void noSameSideAfterALossBlocksThatSideForTheDay(@org.junit.jupiter.api.io.TempDir Path dir) throws java.io.IOException {
+        String v3 = java.nio.file.Files.readString(Path.of("..", "config", "strategy", "wall-break-rider.v3.yaml"));
+        for (boolean key : new boolean[] {true, false}) {
+            Path file = dir.resolve("wall-break-rider.v3.yaml");
+            java.nio.file.Files.writeString(file, key ? v3.replace("\nsignal:\n", "\nsignal:\n  no_same_side_after_loss: true\n") : v3);
+            Strategy s = Strategies.load(file).create("NIFTY", Snapshots.SESSION);
+            s.decide(callSignal(23115).at("12:40"), PositionView.FLAT);
+            assertThat(s.decide(callSignal(23115).at("12:41"), PositionView.FLAT).orders()).hasSize(1);
+            s.decide(covering(false).at("12:50"), new PositionView(true, OptionSide.CE, 1, 100, at(12, 41), 70));
+            s.decide(callSignal(23115).at("12:51"), PositionView.FLAT);                  // closed below its cost: a loss
+            s.decide(callSignal(23115).at("14:00"), PositionView.FLAT);
+            var again = s.decide(callSignal(23115).at("14:01"), PositionView.FLAT).orders();
+            if (key) {
+                assertThat(again).as("calls blocked for the day after the losing call").isEmpty();
+            } else {
+                assertThat(again).as("v3 alone re-enters the same side").singleElement()
+                        .satisfies(o -> assertThat(o.side()).isEqualTo(OptionSide.CE));
+            }
+        }
+    }
+
     @Test
     void v3ExitsWhenTheIndexFallsBackThroughTheWallItCrossedAndHasNoNoProgressExit() {
         Strategy s = v3();
