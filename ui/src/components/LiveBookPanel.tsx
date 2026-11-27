@@ -2,6 +2,7 @@ import { type ReactNode, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { get, postJson, type ExecutionAccount, type ExitPreview, type LiveBook, type LiveOpenPosition, type PositionRow, type Status } from "../api";
 import { PositionTarget, targetActive } from "./PositionTarget";
+import { SpotTarget } from "./SpotTarget";
 import { ErrorNote } from "./ui";
 
 /**
@@ -173,7 +174,8 @@ export function LiveBookPanel({ accountId, hideEmpty }: { accountId: number; hid
       : <span className="text-down">stop {p.stopStatus?.toLowerCase() ?? "not working"} at the broker</span>,
     actions: b.canAct || b.canStop ? <PositionActions accountId={accountId} p={p} paper={paper}
       reasonRequired={b.reasonRequired} canTarget={b.canAct && !b.mirrorOf && !b.reasonRequired} />
-      : p.manualTarget ? <div className="md:col-span-4"><PositionTarget accountId={accountId} p={p} readOnly /></div> : undefined,
+      : p.manualTarget || p.spotTarget ? <div className="md:col-span-4"><PositionTarget accountId={accountId} p={p} readOnly />
+        <SpotTarget accountId={accountId} p={p} readOnly /></div> : undefined,
     flags: p.strategyExitedAt || p.lateJoin ? (
       <div className="space-y-0.5 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 md:col-span-4">
         {p.strategyExitedAt && <div><b>Not managed by its strategy:</b> {p.strategy} exited this contract at {p.strategyExitedAt.slice(11, 19)}.
@@ -316,6 +318,8 @@ function PositionActions({ accountId, p, paper, reasonRequired, canTarget }: { a
       )}
       {mode === "idle" && (canTarget && !hint ? <PositionTarget accountId={accountId} p={p} live={!paper} />
         : <PositionTarget accountId={accountId} p={p} readOnly />)}
+      {mode === "idle" && (canTarget && !hint ? <SpotTarget accountId={accountId} p={p} live={!paper} />
+        : <SpotTarget accountId={accountId} p={p} readOnly />)}
       {mode === "exit" && (
         <div className="space-y-2 rounded-md border border-rose-300 bg-rose-50 px-3 py-2 text-sm">
           <div className="flex flex-wrap items-center gap-2">
@@ -615,7 +619,7 @@ function Tag({ children, strategy }: { children: ReactNode; strategy?: boolean }
 }
 
 const REASONS: Record<string, string> = { STOP: "stop", MANUAL: "sold by hand", TARGET: "target", FLAT_BY: "end of day",
-  TRAIL: "trail", EOD_SQUARE_OFF: "square-off", FLATTEN: "flattened", TIME_60: "60-min time stop", TRADER_EXIT: "exited by you", MANUAL_TARGET: "first target",
+  TRAIL: "trail", EOD_SQUARE_OFF: "square-off", FLATTEN: "flattened", TIME_60: "60-min time stop", TRADER_EXIT: "exited by you", MANUAL_TARGET: "first target", SPOT_TARGET: "spot exit",
   ADMIN_EXIT: "exited by the admin",
   EARLY_FAIL_15: "15-min early exit" };
 

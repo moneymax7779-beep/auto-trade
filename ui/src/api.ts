@@ -730,6 +730,34 @@ export interface LiveOpenPosition extends LiveBookRow {
   perPoint?: number;
   /** the trader's manual first target on this position (24 Nov 2026), when one is set */
   manualTarget?: ManualTarget;
+  /** the trader's spot exit on this position (27 Nov 2026), when one is set */
+  spotTarget?: SpotTarget;
+  /** the newest captured price of this position's index, and its age in seconds (old: the feed is not recording it) */
+  spot?: number;
+  spotAge?: number;
+}
+
+/**
+ * The trader's spot exit (POST .../positions/{id}/spot-target {level}; .../spot-target/clear, 27 Nov 2026): the whole
+ * position is sold when the index reaches the level, a CE at or above it (UP), a PE at or below it (DOWN). WAITING until
+ * then; FIRING: selling; SELLING: triggered, the rest sold again at nextTryAt whatever the index; DONE; ENDED: closed by
+ * something else first; FAILED after its tries (the Exit button still works).
+ */
+export interface SpotTarget {
+  underlying: string;
+  direction: "UP" | "DOWN";
+  level: number;
+  status: "WAITING" | "FIRING" | "SELLING" | "DONE" | "ENDED" | "FAILED";
+  setBy?: string;
+  setAt?: string | null;
+  spotAtSet?: number | null;
+  firedAt?: string | null;
+  firedSpot?: number | null;
+  tries?: number;
+  lastResult?: string | null;
+  nextTryAt?: string | null;
+  byAdmin?: boolean;
+  adminReason?: string | null;
 }
 
 /**

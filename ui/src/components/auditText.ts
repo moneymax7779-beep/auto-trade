@@ -19,6 +19,9 @@ const TITLES: Record<string, string> = {
   MODE_PAPER_NEW_SESSION: "Moved to PAPER", MODE_PAPER_MEMBER_DISABLED: "Moved to PAPER", BROKER_SESSION_LOST: "Broker login lost",
   MEMBER_ADDED: "Member added", STRATEGIES_OFF: "Strategies switched off", LIVE_STRATEGIES_GLOBAL: "LIVE strategies (all accounts)",
   TENANT_LOSS_LIMIT: "Workspace loss limit",
+  TARGET_SET: "First target set", TARGET_CLEARED: "First target removed", TARGET_ARMED: "First target reached",
+  TARGET_SELL: "First target sale", SPOT_TARGET_SET: "Spot exit set", SPOT_TARGET_CLEARED: "Spot exit removed",
+  SPOT_TARGET_SELL: "Spot exit sale",
 };
 const TONES: Record<string, AuditLine["tone"]> = {
   KILL_ACCOUNT: "down", KILL_ACCOUNT_ALREADY_ENGAGED: "down", FLATTEN: "down", LIVE_ON: "down", LIVE_ELIGIBLE_ON: "down",
