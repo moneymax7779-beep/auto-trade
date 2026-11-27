@@ -538,6 +538,55 @@ class ExecutionService implements DisposableBean {
         });
     }
 
+    /** The spot exits on open positions (V56, user 27 Nov 2026); one watch at a time, off the scheduler's threads. */
+    private volatile com.autotrade.execution.SpotTargets spotTargets;
+    private final java.util.concurrent.atomic.AtomicBoolean spotWatching = new java.util.concurrent.atomic.AtomicBoolean();
+
+    com.autotrade.execution.SpotTargets spotTargets() {
+        com.autotrade.execution.SpotTargets t = spotTargets;
+        if (t == null) {
+            synchronized (this) {
+                if (spotTargets == null) {
+                    spotTargets = new com.autotrade.execution.SpotTargets(dataSource);
+                }
+                t = spotTargets;
+            }
+        }
+        return t;
+    }
+
+    /**
+     * Every second: the trader's spot exits ({@link com.autotrade.execution.SpotTargets}): sell those whose index reached
+     * the level (the per-position Exit path, SPOT_TARGET). As {@link #targetWatch}: its own thread, never two at once, each
+     * sale on a thread of its own, accounts another worker holds left to that worker.
+     */
+    @Scheduled(fixedDelayString = "${autotrade.execution.target-watch-ms:1000}", initialDelay = 15000)
+    void spotWatch() {
+        ExecutionLoop current = loop;
+        if (current == null || !spotWatching.compareAndSet(false, true)) {
+            return;
+        }
+        Thread.ofVirtual().name("exec-spot-watch").start(() -> {
+            try {
+                spotTargets().watch(new com.autotrade.execution.PositionTargets.Exiter() {
+                    @Override
+                    public List<String> exit(long account, long position, java.util.Map<String, ?> audit) throws Exception {
+                        return current.exitAtSpot(account, position, day(), audit);
+                    }
+
+                    @Override
+                    public boolean mine(long account) {
+                        return !current.leasedElsewhere(account);
+                    }
+                }).forEach(line -> log.info("spot exit: {}", line));
+            } catch (RuntimeException e) {
+                log.warn("spot exit watch: {}", e.getMessage());
+            } finally {
+                spotWatching.set(false);
+            }
+        });
+    }
+
     private ExecutionLoop started() {
         ExecutionLoop current = loop;
         if (current == null) {

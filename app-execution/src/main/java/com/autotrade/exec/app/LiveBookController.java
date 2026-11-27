@@ -111,7 +111,11 @@ class LiveBookController {
         this.freezes = new com.autotrade.execution.FreezeQuantities(dataSource);
         this.quotes = new ContractQuotes(this.jdbc);
         this.targets = new com.autotrade.execution.PositionTargets(dataSource);
+        this.spotTargets = new com.autotrade.execution.SpotTargets(dataSource);
     }
+
+    /** The trader's spot exits (V56, user 27 Nov 2026), shown on each open position with the index's newest price. */
+    private final com.autotrade.execution.SpotTargets spotTargets;
 
     /** The trader's manual first targets (V54, user 24 Nov 2026), shown on each open position. */
     private final com.autotrade.execution.PositionTargets targets;
@@ -162,6 +166,8 @@ class LiveBookController {
 
         LocalDate today = LocalDate.now(IST);
         Map<Long, com.autotrade.execution.PositionTargets.View> manualTargets = targets.forAccount(id);
+        Map<Long, com.autotrade.execution.SpotTargets.View> spotExits = spotTargets.forAccount(id);
+        Map<String, com.autotrade.execution.SpotTargets.Spot> spotNow = new java.util.HashMap<>();
         List<Map<String, Object>> open = new ArrayList<>();
         List<Map<String, Object>> closed = new ArrayList<>();
         double openPnl = 0, atRisk = 0, realisedToday = 0, bookedOnOpen = 0;
@@ -227,6 +233,21 @@ class LiveBookController {
                 com.autotrade.execution.PositionTargets.View target = manualTargets.get(((Number) r.get("id")).longValue());
                 if (target != null) {
                     out.put("manualTarget", target.toMap());
+                }
+                com.autotrade.execution.SpotTargets.View spotExit = spotExits.get(((Number) r.get("id")).longValue());
+                if (spotExit != null) {
+                    out.put("spotTarget", spotExit.toMap());
+                }
+                String und = (String) r.get("underlying");
+                if (und != null) {                             // the index now: the spot exit's form checks against it
+                    if (!spotNow.containsKey(und)) {           // once per index per look, a missing price included
+                        spotNow.put(und, spotTargets.latest(und));
+                    }
+                    com.autotrade.execution.SpotTargets.Spot s = spotNow.get(und);
+                    if (s != null) {
+                        out.put("spot", s.price());
+                        out.put("spotAge", Math.round(s.ageSeconds()));   // seconds: the form says when it is not live
+                    }
                 }
                 Map<String, Object> hint = handSaleHint(r, killRows);
                 if (hint != null) {

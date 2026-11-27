@@ -48,7 +48,8 @@ export function AdminExitBanner() {
           <div key={n.id} className="rounded border border-warn/60 bg-warn/10 px-3 py-2 text-sm">
             <div className="flex flex-wrap items-start justify-between gap-2">
               <span><b>The admin {n.action === "FLATTEN" ? "flattened" : n.action === "TARGET_SET" ? "set a first target on"
-                : n.action === "TARGET_CLEARED" ? "removed a first target on" : "exited a position on"} {n.account}</b> at {when(n.at)}
+                : n.action === "TARGET_CLEARED" ? "removed a first target on" : n.action === "SPOT_TARGET_SET" ? "set a spot exit on"
+                : n.action === "SPOT_TARGET_CLEARED" ? "removed a spot exit on" : "exited a position on"} {n.account}</b> at {when(n.at)}
                 {n.reason ? <> · reason: {n.reason}</> : null}</span>
               <button type="button" className="text-xs text-muted hover:text-text" onClick={() => dismiss(n.id)}>dismiss</button>
             </div>

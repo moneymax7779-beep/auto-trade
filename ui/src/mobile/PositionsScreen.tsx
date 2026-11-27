@@ -3,6 +3,7 @@ import { useRef, useState } from "react";
 import { get, postJson, type ExecutionAccount, type ExitCheck, type ExitPreview, type LiveBook,
   type LiveOpenPosition } from "../api";
 import { PositionTarget } from "../components/PositionTarget";
+import { SpotTarget } from "../components/SpotTarget";
 import { activeAccounts, Big, Card, ErrorLine, Freshness, istTime, ModeBadge, Sheet, signed, tone, useAccess,
   useAccounts } from "./common";
 
@@ -113,6 +114,8 @@ function OpenCard({ accountId, p, mode, canAct, canTarget, reasonRequired }: { a
       {p.notAtBroker && <p className="mt-1 text-xs font-semibold text-warn">The broker no longer holds this: book the hand exit on the desktop Accounts page.</p>}
       {canTarget && !p.notAtBroker ? <PositionTarget accountId={accountId} p={p} live={mode === "LIVE"} phone />
         : <PositionTarget accountId={accountId} p={p} readOnly phone />}
+      {canTarget && !p.notAtBroker ? <SpotTarget accountId={accountId} p={p} live={mode === "LIVE"} phone />
+        : <SpotTarget accountId={accountId} p={p} readOnly phone />}
       {canAct && !p.notAtBroker && (
         <div className="mt-2 flex justify-end"><Big kind="danger" onClick={() => setExiting(true)}>Exit…</Big></div>
       )}

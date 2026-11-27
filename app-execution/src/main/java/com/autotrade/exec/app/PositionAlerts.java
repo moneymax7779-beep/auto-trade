@@ -273,6 +273,7 @@ class PositionAlerts {
             case "TRADER_EXIT" -> "exited by you";
             case "ADMIN_EXIT" -> "exited by the admin";                // admin exit desk, 20 Nov 2026
             case "MANUAL_TARGET" -> "sold at the first target";        // the manual / admin first target (24-25 Nov 2026)
+            case "SPOT_TARGET" -> "sold at the spot exit";             // the index reached the trader's level (27 Nov 2026)
             case "MANUAL" -> "sold by hand";
             case "EOD_SQUARE_OFF" -> "square-off";
             case "BROKER_STOP", "STOP" -> "stop";

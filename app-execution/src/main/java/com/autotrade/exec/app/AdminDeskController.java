@@ -1118,16 +1118,20 @@ class AdminDeskController implements org.springframework.beans.factory.Disposabl
         Access.User user = access.user(subject);
         Long[] tenants = user.tenants().toArray(new Long[0]);
         List<Map<String, Object>> out = new ArrayList<>();
-        // 25 Nov 2026: the admin's first target set or removed on the member's position (its symbol and % as the line)
+        // 25 Nov 2026: the admin's first target set or removed on the member's position (its symbol and % as the line);
+        // 27 Nov 2026: the same for the admin's spot exit (its symbol and level)
         for (Map<String, Object> r : jdbc.queryForList("select l.id, " + Iso.of("l.at") + " at, l.action, "
                 + "a.display_name account, l.detail ->> 'admin_reason' reason, coalesce((l.detail -> 'positions')::text, "
                 + "case when l.action = 'TARGET_SET' then json_build_array((l.detail ->> 'symbol') || ': first target +' || "
                 + "trim_scale((l.detail ->> 'pct')::numeric) || ' %' || coalesce(' = ' || to_char((l.detail ->> 'price')"
-                + "::numeric, 'FM999999990.00'), ''))::text end) positions "
+                + "::numeric, 'FM999999990.00'), ''))::text when l.action = 'SPOT_TARGET_SET' then json_build_array(("
+                + "l.detail ->> 'symbol') || ': spot exit when ' || (l.detail ->> 'underlying') || case l.detail ->> "
+                + "'direction' when 'UP' then ' >= ' else ' <= ' end || to_char((l.detail ->> 'level')::numeric, "
+                + "'FM999999990.00'))::text end) positions "
                 + "from exec.audit_log l join acct.broker_account a on a.id = l.broker_account_id "
                 + "where l.broker_account_id = any(array(select b.id from acct.broker_account b where b.tenant_id = any(?))) "
                 + "and l.at > now() - interval '24 hours' and l.action in ('POSITION_EXIT', 'FLATTEN', 'TARGET_SET', "
-                + "'TARGET_CLEARED') "
+                + "'TARGET_CLEARED', 'SPOT_TARGET_SET', 'SPOT_TARGET_CLEARED') "
                 + "and l.detail ->> 'by_admin' = 'true' and coalesce(l.detail ->> 'actor', l.actor, '') not in (?, ?) "
                 + "order by l.at desc, l.id desc limit 100", tenants, user.subject(), "telegram:" + user.subject())) {
             Map<String, Object> m = new LinkedHashMap<>(r);

@@ -18,6 +18,7 @@ import org.springframework.web.server.ResponseStatusException;
 import com.autotrade.account.AccountStore;
 import com.autotrade.account.BrokerAccount;
 import com.autotrade.execution.PositionTargets;
+import com.autotrade.execution.SpotTargets;
 
 /**
  * The trader's manual first target on an open position (user 24 Nov 2026; {@link PositionTargets}): a % above the average
@@ -47,6 +48,17 @@ class PositionTargetController {
         this.accounts = new AccountStore(dataSource);
         this.jdbc = new JdbcTemplate(dataSource);
         this.targets = new PositionTargets(dataSource);
+        this.spots = new SpotTargets(dataSource);
+    }
+
+    /**
+     * The spot exit (V56, user 27 Nov 2026: "I should exit from LIVE open position when it reaches the spot not just on the
+     * percentage target"): {@code POST .../positions/{positionId}/spot-target} with {@code {"level": 26150}} sets or
+     * replaces it, {@code POST .../spot-target/clear} removes it; the same people and rules as the % target.
+     */
+    private final SpotTargets spots;
+
+    record SpotBody(Double level, String reason) {
     }
 
     /** {@code reason}: required when the caller is not of the workspace (SUPPORT, the platform admin). */
@@ -120,6 +132,60 @@ class PositionTargetController {
         } catch (IllegalArgumentException e) {
             throw new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage());
         }
+    }
+
+    @PostMapping("/api/execution/accounts/{id}/positions/{positionId}/spot-target")
+    Map<String, Object> setSpot(@RequestHeader(value = Access.HEADER, required = false) String subject, @PathVariable long id,
+                                @PathVariable long positionId, @RequestBody SpotBody body) {
+        Access.User user = access.user(subject);
+        BrokerAccount a = actable(user, id);
+        Map<String, Object> admin = admin(user, a, body == null ? null : body.reason());
+        if (body == null || body.level() == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "level is required");
+        }
+        if (SpotTargets.level(body.level()) == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "level: an index price above 0");
+        }
+        try {
+            java.util.Optional<SpotTargets.View> before = spots.view(positionId);
+            SpotTargets.View v = spots.set(a, positionId, body.level(), user.subject(), admin);
+            if (admin != null && adminExits != null && SpotTargets.changed(before, java.util.Optional.of(v))) {
+                adminExits.targetSet(a, user.subject(), (String) admin.get("admin_reason"), List.of(spotLine(v)));
+            }
+            Map<String, Object> out = new LinkedHashMap<>();
+            out.put("account", a.displayName());
+            out.put("positionId", positionId);
+            out.put("spotTarget", v.toMap());
+            return out;
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage());
+        }
+    }
+
+    @PostMapping("/api/execution/accounts/{id}/positions/{positionId}/spot-target/clear")
+    Map<String, Object> clearSpot(@RequestHeader(value = Access.HEADER, required = false) String subject,
+                                  @PathVariable long id, @PathVariable long positionId,
+                                  @RequestBody(required = false) ClearBody body) {
+        Access.User user = access.user(subject);
+        BrokerAccount a = actable(user, id);
+        Map<String, Object> admin = admin(user, a, body == null ? null : body.reason());
+        try {
+            boolean cleared = spots.clear(a, positionId, user.subject(), admin);
+            if (cleared && admin != null && adminExits != null) {
+                adminExits.targetSet(a, user.subject(), (String) admin.get("admin_reason"), List.of(symbol(positionId)
+                        + ": spot exit removed"));
+            }
+            return Map.of("account", a.displayName(), "positionId", positionId, "cleared", cleared);
+        } catch (IllegalArgumentException e) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, e.getMessage());
+        }
+    }
+
+    /** "NIFTY 26100 CE: spot exit when NIFTY reaches 26150.00 or above (the whole position is sold)". */
+    String spotLine(SpotTargets.View v) {
+        return String.format(java.util.Locale.ROOT, "%s: spot exit when %s reaches %.2f or %s (the whole position is sold)",
+                symbol(v.positionId()), v.underlying(), v.level(),
+                v.direction() == SpotTargets.Direction.UP ? "above" : "below");
     }
 
     private BrokerAccount actable(Access.User user, long id) {

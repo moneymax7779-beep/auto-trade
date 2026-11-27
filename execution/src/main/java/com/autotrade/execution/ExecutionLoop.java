@@ -514,7 +514,7 @@ public final class ExecutionLoop implements AutoCloseable {
      * keep the old fallback; every exit records where its price came from in the audit detail.
      */
     static final java.util.Set<String> PERSON_EXITS = java.util.Set.of("TRADER_EXIT", "ADMIN_EXIT", "FLATTEN",
-            PositionTargets.EXIT_REASON);
+            PositionTargets.EXIT_REASON, SpotTargets.EXIT_REASON);
 
     /**
      * The square-off of every broker whose time ({@link BrokerRules#squareOff}) has come at {@code now} (IST) and that was
@@ -702,13 +702,25 @@ public final class ExecutionLoop implements AutoCloseable {
      * {@link PositionTargets#EXIT_REASON}; no kill switch, the account keeps trading.
      */
     public List<String> exitAtTarget(long accountId, long positionId, LocalDate day, Map<String, ?> audit) throws Exception {
+        return exitAt(accountId, positionId, day, audit, PositionTargets.EXIT_REASON, PositionTargets.ACTOR);
+    }
+
+    /**
+     * The trader's spot exit sells one whole position ({@link SpotTargets}, user 27 Nov 2026): the same per-position Exit
+     * path as the % target, exit reason {@link SpotTargets#EXIT_REASON}; no kill switch, the account keeps trading.
+     */
+    public List<String> exitAtSpot(long accountId, long positionId, LocalDate day, Map<String, ?> audit) throws Exception {
+        return exitAt(accountId, positionId, day, audit, SpotTargets.EXIT_REASON, SpotTargets.ACTOR);
+    }
+
+    private List<String> exitAt(long accountId, long positionId, LocalDate day, Map<String, ?> audit, String reason,
+                                String actor) throws Exception {
         BrokerAccount account = accounts.byId(accountId).orElseThrow(() -> new IllegalArgumentException("no account "
                 + accountId));
         if (account.role() == com.autotrade.account.AccountRole.SIGNAL_SOURCE) {
             throw new IllegalArgumentException(account.displayName() + " is a signal source: its positions are not orders");
         }
-        List<String> lines = flattenOnLane(account, day, PositionTargets.EXIT_REASON, positionId, null,
-                withActor(PositionTargets.ACTOR, audit));
+        List<String> lines = flattenOnLane(account, day, reason, positionId, null, withActor(actor, audit));
         return lines.isEmpty() ? List.of("position " + positionId + " is not open") : lines;
     }
 
